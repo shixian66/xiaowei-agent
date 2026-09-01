@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xiaowei-agent"
+version = "0.1.0"
+description = "Policy-governed workflow agent for operations"
+requires-python = ">=3.11,<3.12"
+dependencies = ["pydantic>=2.13,<3"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.0,<2",
+    "pytest-socket>=0.8,<0.9",
+    "ruff>=0.16,<0.17",
+    "mypy>=1.20,<2",
+    "pip-audit>=2.7,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xiaowei_agent"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config --disable-socket --allow-unix-socket"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["security: 安全边界测试，独立 CI gate（ADR-008 D3）"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S", "ANN", "RUF"]
+# RUF001/002/003 检测"歧义 Unicode 字符"，用于防同形字攻击。
+# 本项目 docstring 与注释使用中文，全角标点会被持续误报，故关闭这三条。
+# 这不放宽任何安全边界：真实的 secret/注入检查由 tests/security/ 与 secret-scan 承担。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true

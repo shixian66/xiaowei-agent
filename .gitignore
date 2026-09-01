@@ -17,6 +17,20 @@ env/
 .env.*
 !.env.example
 
+# Build and packaging artifacts
+dist/
+build/
+*.egg-info/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor and IDE
+.idea/
+.vscode/
+
 # Runtime artifacts
 reports/
 logs/
