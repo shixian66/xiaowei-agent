@@ -1,0 +1,22 @@
+# Operating-system files
+.DS_Store
+
+# Python caches and test/tool caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts
+reports/
+logs/
