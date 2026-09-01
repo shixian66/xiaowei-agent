@@ -222,3 +222,26 @@ def test_filter_is_idempotent_across_logger_and_handler() -> None:
     configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
     logging.getLogger(LOGGER_NAME).info("a=%s b=%s", "x", "y")
     assert json.loads(buf.getvalue().strip())["message"] == "a=x b=y"
+
+
+def test_fullwidth_separators_are_handled() -> None:
+    """中文项目里 `password：value` 使用全角冒号，必须同样脱敏。"""
+    for sep in ("：", "＝", ":", "="):
+        assert _PW not in _emit(f"password{sep}{_PW}"), f"分隔符 {sep!r} 未覆盖"
+
+
+def test_object_whose_str_raises_does_not_crash_logging() -> None:
+    """`__str__` 抛异常曾使整个日志调用崩溃；必须 fail-closed 为 REDACTED。"""
+
+    class _Hostile:
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+        __repr__ = __str__
+
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(LOGGER_NAME).info("ctx", extra={"hostile": _Hostile()})
+    out = buf.getvalue()
+    assert out.strip(), "记录不得因对象异常而丢失"
+    assert json.loads(out.strip())["extras"]["hostile"] == REDACTED

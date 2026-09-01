@@ -43,7 +43,7 @@ _KEY_RE: Final[re.Pattern[str]] = re.compile(_KEY_WORDS, re.IGNORECASE)
 
 # 键可带引号；值可为带引号串、认证方案+凭证、或未加引号的一段（到分隔符/行尾）。
 _TEXT_PAIR_RE: Final[re.Pattern[str]] = re.compile(
-    rf"(?i)(?P<q>[\"']?)(?P<key>{_KEY_WORDS})(?P=q)(?P<sep>\s*[:=]\s*)"
+    rf"(?i)(?P<q>[\"']?)(?P<key>{_KEY_WORDS})(?P=q)(?P<sep>\s*[:=：＝]\s*)"
     r"(?P<val>\"[^\"]*\"|'[^']*'|[^,;}\]\n]+)"
 )
 _AUTH_SCHEME_RE: Final[re.Pattern[str]] = re.compile(
@@ -91,7 +91,12 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
         return out
     if isinstance(value, Sequence | set | frozenset):
         return [redact(v, _depth=_depth + 1) for v in value]
-    return scrub_text(str(value))
+    # 未知类型先字符串化再脱敏；`__str__`/`__repr__` 可能抛异常，
+    # 日志调用绝不能因此崩溃，一律降级为 REDACTED。
+    try:
+        return scrub_text(str(value))
+    except Exception:  # 任何异常都必须 fail-closed
+        return REDACTED
 
 
 class RedactingFilter(logging.Filter):
