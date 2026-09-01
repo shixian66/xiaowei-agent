@@ -103,7 +103,7 @@
 | M6b StarRocks 测试环境真实只读 | Phase 5 | 在明确授权的非生产环境完成 StarRocks 真实 adapter 与只读运行验证 |
 | M7 Web / 飞书渠道 | Phase 5 | 多渠道只做协议与渲染，复用同一 Runtime 结果 |
 | M8 受控写闭环 | Phase 5 | 测试环境中一条低风险写能力完成审批、恢复、readback 和故障注入验收 |
-| M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter |
+| M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter；**不授予 Multi-Agent 权限** |
 
 只读 V1 的候选发布点要求 M6a、M6b 和 M7 各自通过退出门；受控写 V1 的候选发布点是 M8。代码测试通过不等于发布，仍需按 `declared → configured → deployed SHA → tests → canary → user-accepted` 记录最强证据。
 
@@ -141,7 +141,7 @@
 
 - 基于 M0 的本地 `main` 基线创建 M1 分支；绑定经确认的远程和 CI。
 - `pyproject.toml`：Python 3.11、构建配置、运行依赖与 dev 依赖分组。
-- 最小 `src/xiaowei_agent/` 包；只创建 M1 实际使用的配置、日志/trace 和版本模块。
+- 最小 `src/xiaowei_agent/` 包；只创建 M1 实际使用的配置、日志/trace 和版本模块。**M1 只建立通用的结构化日志、`trace_id` 传递和脱敏基础，不定义任何业务 trace/audit 事件契约，也不提前实现业务 DTO**——这些属于 M2。
 - pytest 目录与 `security` marker；Ruff、mypy 和 CI 命令保持单一真源。
 - 至少一条真实承重的 security 测试验证配置/日志脱敏，确保安全 gate 不是空集合。
 - `.env.example` 只列非敏感变量名和安全默认值；启动时对缺失/非法配置 fail-fast。
@@ -169,6 +169,8 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 **交付物**：
 
 - `contracts/`：`RequestEnvelope`、`RequestContext`、`IntentDraft`、`CapabilitySpec`、`CandidateSet`、`ExecutionPlan`、`PolicyDecision`、`ApprovalRequest`、`ToolCall`、`ToolResult`、`ExternalContent`、`EvidenceEnvelope`、`TaskOutcome`、`RenderPayload` 和结构化 error model。
+- `contracts/` 另含 **Reflection 结论 DTO**：只承载证据充分性、限制、缺失项、是否降级为 `indeterminate`、是否需用户补充信息；**不含步骤、工具、目标、权限或 SQL 字段**（边界见 `ARCHITECTURE.md` §4.2）。
+- **最小步骤级 trace / audit 事件契约**：能把一次失败定位到 Intent、Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 中的具体阶段；只定义事件形状与阶段枚举，不实现采集后端。
 - `planning/`：canonical JSON、`plan_hash`、`target_fingerprint` 的确定性实现和固定测试向量。
 - `tools/`：`ToolGateway` Protocol、内部 `AdapterResponse`、私有 `ToolResult` 工厂和 fake/recording adapter。
 - `capabilities/`：最小 Registry snapshot 与 Resolver Protocol；`CapabilitySpec` 承载 `effect_class` 与 operation 级 `side_effect` 声明，作为 E1 分类的唯一确定性来源。`effect_class` 是否进入 `plan_hash` canonicalization 由 M2 详细计划审定；若进入，须同步递增 plan schema version 并更新 `ARCHITECTURE.md` §7.1。此时不建立关键词总表或 DSL 框架。
@@ -184,6 +186,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - fake TaskStore 契约测试覆盖 CAS 成功、CAS 失败后采用 winner、过期 lease/旧 fencing token 拒绝和终态后到事件拒绝。
 - 对 hash/目标指纹承重规则做 TDD 反证，确认撤掉规范化或敏感字段排除时测试变红。
 - **E1 分类承重测试**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 确定性派生；模型输出、用户输入或 adapter 尝试设置、覆盖或降级这两个字段时必须拒绝；`effect_class` 未知、未声明或与 CapabilitySpec 冲突时 fail-closed，不得按只读放行。
+- **Reflection 越权拒绝契约测试**：Reflection 结论中出现步骤、工具、目标、权限或 SQL 字段时必须被拒绝；契约层面不存在让 Reflection 修改 `ExecutionPlan` 或写 TaskStore 的入口。
 
 **退出标准**：核心契约可被首个闭环消费；类型名和字段在所有边界一致；没有真实客户端、数据库或模型 SDK。
 
@@ -198,7 +201,9 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - 计划：由确定性 compiler 生成白名单 SQL AST；禁止接收用户或模型原始 SQL。
 - 输出：慢查询事实、采样时间、数据来源、限制和可复现参数；不自动 kill query、不改参数、不给出伪确定性根因。
 
-**交付物**：CapabilitySpec、Resolver item、PlanCompiler、只读 ToolPolicy、SQLGuard、最小 ApprovalGate Protocol/fake、DeterministicStepRunner、fake TaskStore、fake Gateway、EvidenceBuilder、Answerability、RenderPayload、消费 `RequestContext + IntentDraft` 的 `XiaoweiRuntime` application facade 和 L0-L2 eval corpus。另提供一个只存在于 contract/security test 的 `side_effect=True` 合成步骤；它不注册为真实 capability，也不能调用任何可触达被管运维目标的真实 adapter。
+**交付物**：CapabilitySpec、Resolver item、PlanCompiler、只读 ToolPolicy、SQLGuard、最小 ApprovalGate Protocol/fake、DeterministicStepRunner、fake TaskStore、fake Gateway、EvidenceBuilder、只读消费 Evidence 的 Answerability（不改计划）、RenderPayload、消费 `RequestContext + IntentDraft` 的 `XiaoweiRuntime` application facade 和 L0-L2 eval corpus。另提供一个只存在于 contract/security test 的 `side_effect=True` 合成步骤；它不注册为真实 capability，也不能调用任何可触达被管运维目标的真实 adapter。
+
+**另需交付首个完整的错误分析闭环**：运行/eval → 阅读 trace → 错误归因到具体阶段 → 选择单一根因 → 修复 → 脱敏失败样本晋升为 regression/eval case → 复测。组件级 eval 与端到端 eval 分开记录；安全、权限、SQL、审批和终态由确定性断言验收，不使用 LLM-as-judge；离线 eval 结果不表述为部署、canary 或用户验收（见 `ARCHITECTURE.md` §13.1、§13.2）。
 
 **测试门**：
 
@@ -207,6 +212,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - Runtime 契约测试证明 `XiaoweiRuntime` 的调用不能跳过 Resolver、Planner、Admission 或 Gateway。
 - 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant_id/environment_id/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 的 E1 能力已实现。
 - **伪标拒绝测试**：把一个已注册为写的 operation 伪标为 `side_effect=False` 时，`StepAdmission` 必须拒绝，且 **`ToolGateway` 调用次数与 adapter 调用次数均为 0**；同时断言 M0-M7 的任何路径上对被管运维目标的 E1 调用次数为 0。
+- **Reflection 越权拒绝测试**：Reflection 提出新增步骤、更换工具、扩大目标或把只读升级为写的建议时，该建议必须被丢弃，计划与终态不变，且 **`ToolGateway` 与 adapter 调用次数均为 0**；仅当 `ExecutionPlan` 中存在预编译的预算内只读分支时，才由 Runner 按确定性条件执行并照常经过 `StepAdmission`。
 - Runner/TaskStore 契约测试证明每次 CAS 状态变更携带 `expected_version`，每次 lease 内变更携带有效 fencing token，并始终采用存储层返回的 winner。
 - `python -m pytest -q` 与 `python -m pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
 
@@ -322,6 +328,8 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - 没有量化收益：继续使用 `DeterministicStepRunner`，不新增依赖。
 - 有量化收益：只新增 Runner/checkpoint adapter；复用 TaskStore、StepAdmission、ApprovalGate、ToolGateway、Evidence 和 channel 契约。
 - 任一 POC 需要复制候选解析、policy、审批、目标解析或终态语义：判定不准入。
+
+**M9 不授予 Multi-Agent 权限**：本里程碑只评估 `WorkflowRunner` 的实现方式，**采用 LangGraph 不等于采用 Multi-Agent**。Multi-Agent 必须在 M9 之后另设独立里程碑和独立 ADR，进入条件至少包括真实可举证的职责拆分需求、独立的上下文/工具/记忆边界、真实生命周期样本和相对单 Runner 的量化收益；没有量化收益，或任一 POC 需要复制 `CapabilityResolver`、Policy、Approval、TaskStore、`ToolGateway` 真源时判定不准入。无论将来是否采用，Multi-Agent 都不得绕过既有安全链，也不得产生第二个状态、计划、审批或工具路由真源（见 `ARCHITECTURE.md` §12.1）。
 
 **退出标准**：ADR-003 记录数据、结论和回滚方式；框架选择不依赖“更 Agentic”的主观判断。
 

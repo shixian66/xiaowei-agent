@@ -33,7 +33,7 @@
 
 - 任意自然语言生成任意生产 SQL 或任意运维命令。
 - 模型自主选择工具、目标或审批人。
-- 多 Agent 协作、自由 ReAct 循环或模型驱动的无限规划。
+- 多 Agent 协作、自由 ReAct 循环或模型驱动的无限规划。Multi-Agent 的延期与准入条件见 §12.1。
 - 一开始就拆成微服务、引入 Redis/Kafka/向量数据库或复杂工作流平台。
 - 通过能力总表或关键词堆积来代替能力声明与确定性解析。
 - 在没有真实生命周期证据时宣称“达到 Codex/Claude 的智能度”。
@@ -129,12 +129,47 @@ RequestEnvelope
 
 ### 4.2 Reflection 的位置
 
-Reflection 不是第二条执行链，也不是模型拥有的“自我授权”。它有两个确定边界：
+Reflection 不是第二条执行链，也不是模型拥有的“自我授权”。**它只消费已生成的结构化 Evidence，不拥有任何执行权。**
 
-- **取数前 Reflection**：根据已知缺槽、证据需求和预算，决定是否追加一个已注册的只读计划步骤；不能提高权限、扩大目标或把读操作升级为写操作。
-- **取数后 Reflection**：判断证据是否足以回答、是否需要说明限制、是否应降级为 `indeterminate` 或请求补充信息；不能修改已经执行的事实。
+**Reflection 允许**产生一个结构化结论，内容限于：
+
+- 现有证据是否足以回答；
+- 存在哪些限制、样本性和时效性说明；
+- 缺失了哪些信息项；
+- 是否应降级为 `indeterminate`；
+- 是否需要请求用户补充信息。
+
+**Reflection 不允许**：
+
+- 新增、删除或修改 `ExecutionPlan` 的任何步骤；
+- 选择工具、切换 adapter 或决定调用顺序；
+- 扩大目标、放宽选择器或提高权限；
+- 生成或改写 SQL；
+- 触发 `ToolGateway` 或任何 adapter；
+- 修改 TaskStore 中已成为事实的状态、证据或审批记录。
+
+缺槽识别与初始证据需求由 `CapabilityResolver` 和 `PlanCompiler` 处理，**不由 Reflection 事后补救**。
+
+如果一个场景确实需要按条件追加取数，唯一合法形式是：`PlanCompiler` 在编译期就把该步骤作为**预编译、预算内的可选只读分支**写入 `ExecutionPlan`，由 `WorkflowRunner` 依据确定性条件决定是否执行，并照常经过 `StepAdmission`。**Reflection 不得动态扩计划**，也不得把可选分支的执行条件变成模型判断。
 
 每次请求同时受三重预算限制：最大工作流步骤数、最大工具调用数、最大模型/token 预算。超出预算必须产生结构化结果，不得靠循环继续尝试。
+
+### 4.3 决策权责矩阵（Degrees of autonomy）
+
+本表只把已有边界显式化，便于速查；**它不授予任何新权限，也不放宽 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)**。本项目**不引入泛化的 `autonomy_level` 运行字段**——自治程度由下列固定分工表达，不由一个可调参数表达。
+
+| 决策对象 | 由谁决定 | LLM 的角色 |
+| --- | --- | --- |
+| 意图提取、证据解释、澄清问题措辞 | 确定性组件决定是否采纳；不采纳即丢弃 | **可建议** |
+| capability、目标、参数、步骤、SQL、工具调用顺序 | `CapabilityResolver` + `PlanCompiler` 确定性决定 | 无 |
+| Policy 判定、effect 分类、审批有效性 | `ToolPolicy`、`CapabilitySpec` 派生、`ApprovalGate` 等确定性治理组件 | 无 |
+| 证据可答性结论 | Reflection，仅基于结构化 Evidence；**不改变计划** | 可参与结论措辞 |
+| 工具执行 | `WorkflowRunner` 经 `StepAdmission` 与 `ToolGateway` 驱动 | 无 |
+| 测试环境真实连接授权、E1 审批 | **项目负责人 / 人工授权** | 无 |
+| 生产连接与生产写 | **当前不授权** | 无 |
+| `route_shadow` | **record-only**，只记录对比，不影响 active 路由 | 无 |
+
+**自治程度的提升不是自动发生的**：任何一格从「无」变为「可建议」，或从「可建议」变为「可决定」，都必须同时具备离线 eval 证据、真实失败样本、明确的人工授权和一份 ADR。**模型能力升级、框架升级或供应商更换都不构成提升自治程度的理由。**
 
 ## 5. 稳定模块与职责
 
@@ -209,7 +244,8 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 - `EvidenceEnvelope` 记录来源、来源类型、capability、时间、是否样本、是否只读、限制和脱敏引用。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
 - working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。
-- Reflection 只消费结构化 evidence；`Advisory` 只能填展示槽，失败时回退确定性文案。
+- Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
+- `Advisory` 只能填展示槽，失败时回退确定性文案。
 - `RenderPayload` 是跨渠道的统一回答投影，Web、飞书和 CLI 只选择展示方式，不重算业务结果。
 
 ## 6. 核心契约
@@ -367,6 +403,21 @@ LangGraph 不是领域架构，也不是安全边界。它可以实现 `Workflow
 
 这使“先不用”不会锁死未来；后续实现 LangGraph 只需新增 Runner adapter 和 checkpoint adapter，不改 capability、policy、TaskStore、ToolGateway 或 channel 契约。
 
+### 12.1 Multi-Agent 与 Runner 准入是两件事
+
+**采用 LangGraph 不等于采用 Multi-Agent。** Runner 准入评估（Phase 6 / M9）只评估 `WorkflowRunner` 的实现方式，**不授予任何 Multi-Agent 权限**。
+
+Multi-Agent 必须在 Runner 准入结论之后**另设独立里程碑和独立 ADR**，进入条件至少包括：
+
+1. 真实存在、可举证的职责拆分需求，而不是“看起来更 Agentic”；
+2. 各 Agent 有清晰独立的上下文、工具和记忆边界；
+3. 具备多步暂停恢复、崩溃重试、并发抢占等真实生命周期样本；
+4. 相对单 Runner 有量化收益。
+
+**不准入的判定**：没有量化收益，或任一 POC 需要复制 `CapabilityResolver`、Policy、Approval、TaskStore、`ToolGateway` 的真源。
+
+**永久约束**：无论将来是否采用，Multi-Agent 都不能绕过本文第 4 节的安全链，也不能产生第二个状态真源、第二份计划、第二套审批或第二条工具路由。
+
 ## 13. Eval 与上线门槛
 
 评测按能力层级分档，不能用一把准确率衡量所有能力：
@@ -381,6 +432,29 @@ LangGraph 不是领域架构，也不是安全边界。它可以实现 `Workflow
 每个 capability 至少维护 golden cases、near-miss cases、missing-context cases、adversarial cases 和故障注入 cases。只有代码测试通过不代表可上线；需要依次记录 `declared → configured → deployed SHA → tests → canary → user-accepted` 的最强证据。
 
 `test-env verified` 是非生产环境运行证据的旁注标签，不属于上述 readiness ladder，也不替代 `canary`；`canary` 只用于已确认部署 SHA 的受控生产灰度。
+
+### 13.1 错误分析闭环
+
+有 eval 不等于有改进能力。每一轮问题都必须走完这条闭环，否则视为未处理：
+
+```text
+运行 / eval
+  → 阅读 trace
+  → 错误归因（定位到具体阶段）
+  → 选择单一根因
+  → 修复
+  → 脱敏失败样本晋升为 regression / eval case
+  → 复测
+```
+
+支撑该闭环的 trace 必须能把一次失败定位到具体阶段：Intent、Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3。
+
+### 13.2 eval 的边界
+
+- **组件级 eval 与端到端 eval 分开记录**；端到端通过不能掩盖单个组件的退化，组件通过也不能替代端到端验收。
+- **安全、权限、SQL 形状、审批绑定和终态语义一律由确定性断言验收。** LLM-as-judge 最多用于经过校准的主观回答质量评分，**不得用于裁决安全正确性**。
+- eval 结论与人工判断不一致时，**先校准 evaluator**；不得只调整业务逻辑去迎合一个错误的指标。
+- **离线 eval 结果不得表述为部署、canary 或用户验收。** 三者各自需要独立证据。
 
 测试目录和 CI gate 固定如下：
 
@@ -423,7 +497,7 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 
 ### Phase 6：Runner 评估
 
-用真实的多步计划、审批中断、恢复、超时、并发和 indeterminate 样本评估 LangGraph adapter。达不到收益门槛就继续使用 DeterministicRunner；达到门槛也只替换 Runner 实现。
+用真实的多步计划、审批中断、恢复、超时、并发和 indeterminate 样本评估 LangGraph adapter。达不到收益门槛就继续使用 DeterministicRunner；达到门槛也只替换 Runner 实现。**本阶段不授予 Multi-Agent 权限**，其独立准入条件见 §12.1。
 
 ## 15. 变更与版本规则
 
