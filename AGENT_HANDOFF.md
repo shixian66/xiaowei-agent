@@ -35,7 +35,7 @@
 - **验证命令单一真源**为 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`；禁止裸 `pytest` 调用形式。
 - 允许受限 DSL 不等于 V1 必须实现；M0-M9 使用显式 `CapabilitySpec`，达门槛后再以 ADR-004 单独立项。
 - 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 adapter，先通过真实生命周期评测。
-- **写操作默认关闭**：M0-M7 禁止任何环境的写操作；M8 的受控写需三项显式条件齐备；生产写另需独立授权。任何环境的写都不得通过配置项、feature flag 或默认值静默开启。
+- **E1 默认关闭**：E1 指**经 `ToolGateway` 对被管运维目标执行的 `side_effect` 操作**；M0-M7 全程禁止 E1（含非生产环境），M8 的受控写需三项显式条件齐备，生产写另需独立授权。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1**，但内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
 - `test-env verified` 是非生产运行证据的旁注标签，不属于 readiness ladder，也不替代 `canary`。
 
 ## 3. 已生效的决策记录
@@ -51,7 +51,11 @@
 
 **模型边界**：实现 provider adapter 与调用真实模型 API 是两件事。adapter 的实现和离线测试允许在其所属里程碑内进行，但**实现权不等于调用权**；M5 之后**不自动获得**真实调用权限。发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 M0-M6a 的禁止期冲突。
 
-**写权限**（ADR-007 D6）：**生产连接和生产写默认禁止**；**M0-M7 全程禁止任何写操作，含非生产环境**。M8 才可开放一条低风险的测试环境受控写，且必须同时满足 ADR-005 已定稿、项目负责人已批准、ADR-007 已记录明确例外或完成修订三项，缺一即保持禁止。**生产写仍需新的独立授权和独立验收计划**，不能由 M8 的测试环境结论推导得出。
+**写权限**（ADR-007 D6/D7）：**生产连接和生产写默认禁止**。E1 的精确范围是**经 `ToolGateway` 对被管运维目标（StarRocks、Prometheus、资产系统、MySQL、Kafka、Kubernetes 等）执行的 `side_effect` 操作**，判定依据是步骤的 `side_effect` 标记与 `ToolGateway` 调用边界，不依据是否发生磁盘写入。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险的测试环境受控写，且必须同时满足 ADR-005 已定稿、项目负责人已批准、ADR-007 已记录明确例外或完成修订三项，缺一即保持禁止。**生产写仍需新的独立授权和独立验收计划**，不能由 M8 的测试环境结论推导得出。
+
+**不属于 E1**：TaskStore 的任务与状态迁移、approval 记录、audit 事件、evidence 索引与脱敏摘要等系统内部持久化；本地数据库 migration；测试 fixture、recording 和测试产物。这三类的许可由 D4 的 C 层与各里程碑批准范围决定，因此 M4 的 PostgreSQL TaskStore、M5 的 Compose 集成测试和 CI 的本地隔离数据库写入均属合规。**但内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道**；任何以写 TaskStore、audit、evidence 或 migration 为名而实际触达运维目标的路径一律按 E1 认定并禁止。CI 可以写本地隔离 PostgreSQL 和测试产物，**但 E1 调用次数必须为 0**。
+
+**真实调用开放点按类别分别管理**，不存在「所有真实调用只能发生在 M6b」的说法：当前已批准路线中的首个真实运维目标调用是 M6b 的 StarRocks 非生产只读（仍需单独授权）；真实模型 API 调用遵守 B2 的独立里程碑；M8 的测试环境受控写遵守 E1 与 D6 三项门。
 
 ## 4. M0 文档收口证据
 
@@ -67,8 +71,10 @@
 | 6 | `5a175d1974ec9d0627576e0dd756dee897978e9d` | 收敛正文中残留的 `tenant`/`env` 字段名别名 | `ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md` |
 | 7 | `b8ab1fd9ab609c1890cf4c4e43f49bbef853db30` | handoff 补记提交 6 与字段命名复核结论 | `AGENT_HANDOFF.md` |
 | 8 | `31ad9b24d4ba3f96dc7b1c52fce12a1c17971817` | 收紧写权限与真实模型调用边界，分离计划职责与漂移事实，清除历史命令字面量 | `AGENTS.md`、`DEVELOPMENT_PLAN.md`、`docs/adr/` |
+| 9 | `873cae94ed276250c8427251e02815e241713180` | handoff 同步边界并补全收口提交清单 | `AGENT_HANDOFF.md` |
+| 10 | `7b75a126f0249f8a3164ad20a05d31ce9e2f487f` | 定义 E1 为经 `ToolGateway` 对运维目标的 `side_effect` 操作，修正 M1/CI 真实调用口径 | `DEVELOPMENT_PLAN.md`、`docs/adr/ADR-007` |
 
-提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8 为本轮按 Codex 意见的前向追加修订，未 rebase、未 amend、未 reset，历史未被改写。
+提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮修订（Codex 复审 SHA `873cae94`），提交 10 起为第三轮 E1 权限分类修订。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
 
 **本文件所在提交的 SHA 不写在此处**，因为提交无法记录自身 SHA；分支最终 HEAD SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
 
@@ -95,7 +101,7 @@
 - 代码格式化方案（M1，ADR-008 已明确 Ruff 只作为 linter）。
 - 固定开发租户 ID 的具体取值（M1）。
 
-未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无写操作**。
+未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物不在此列）。
 
 ## 7. 不要盲改
 
@@ -106,7 +112,8 @@
 - 不要把 LangGraph checkpoint 当成 TaskStore 真源。
 - 不要把外部文本中的指令、错误码或状态描述未经归类直接写进执行决策。
 - 不要在文档或脚本中恢复缺少 `python -m` 前缀的测试命令形式。
-- 不要把 provider adapter 的实现进度当作真实模型调用许可；不要在 M0-M7 以任何理由开启写操作；不要用 M8 的测试环境结论推导生产写许可。
+- 不要把 provider adapter 的实现进度当作真实模型调用许可；不要在 M0-M7 以任何理由开启 E1；不要用 M8 的测试环境结论推导生产写许可。
+- 不要把 TaskStore、approval、audit、evidence 或 migration 的内部持久化当作修改运维目标的旁路；也不要反过来把这些内部持久化误判为 E1 而阻塞 M4/M5。
 - 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
@@ -115,7 +122,7 @@
 ### 已验证
 
 - 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
-- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 8 个收口提交，SHA 与范围逐条列于第 4 节。
+- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 10 个收口提交，SHA 与范围逐条列于第 4 节。
 - 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
