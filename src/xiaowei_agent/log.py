@@ -92,7 +92,8 @@ class RedactingJsonFormatter(logging.Formatter):
             payload["exc"] = _scrub_text(self.formatException(record.exc_info))
         if record.stack_info:
             payload["stack"] = _scrub_text(self.formatStack(record.stack_info))
-        extras = {k: v for k, v in record.__dict__.items() if k not in _RESERVED and k != "trace_id"}
+        skip = _RESERVED | {"trace_id"}
+        extras = {k: v for k, v in record.__dict__.items() if k not in skip}
         if extras:
             payload["extras"] = redact(extras)
         return json.dumps(payload, ensure_ascii=False, default=str)
