@@ -149,7 +149,7 @@ mypy src
 - `AGENTS.md`：稳定开发规则；不写每日进展和具体 PR 流水。
 - `README.md`：人类开发者的定位、启动、目录和快速路径；不复制完整架构。
 - `ARCHITECTURE.md`：稳定目标架构、接口契约、状态/安全语义和演进门槛；不写未经验证的线上事实。
-- `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物和退出标准；不写当前已发生的事实。
+- `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物、退出标准和规划所依赖的稳定前提；不写易漂移的 commit SHA、分支名、里程碑进度和验证证据，这些只放 `AGENT_HANDOFF.md`。
 - `AGENT_HANDOFF.md`：当前状态、精确 SHA/分支/部署证据、风险、下一步和禁止盲改点；只保留当前有效口径。
 - `docs/adr/`：架构决策记录；每个 ADR 写明背景、决策、后果、备选方案和变更门，不把争议留在代码默认值里。
 - `docs/CAPABILITIES.md`：当前能力地图；由 Registry/代码生成并由 CI 检查，不手工维护关键词总表。

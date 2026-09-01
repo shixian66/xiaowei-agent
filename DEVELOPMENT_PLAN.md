@@ -13,16 +13,16 @@
 
 若计划与 `AGENTS.md` 或 `ARCHITECTURE.md` 冲突，先停止实现并修改计划，不能用计划降低安全边界。每个里程碑开始前再编写该里程碑的函数级实施计划；不为尚未进入的阶段提前创建空目录、占位接口或框架代码。
 
-## 2. 当前事实基线
+## 2. 规划前提
 
-截至 2026-09-01：
+本节只记录规划所依赖的稳定前提。**易漂移的 commit SHA、分支名、里程碑进度和验证证据一律只放 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)，本文不复制。**
 
-- 当前目录只有五份 Markdown、`.gitignore` 和 `docs/adr/` 下的 ADR；没有业务代码、测试、依赖或容器配置。
-- 已初始化本地 Git 仓库与 `main` 基线，并在 `claude/m0-plan-closure` 分支上收口文档；尚无远程、PR 或 CI 证据。精确 SHA 见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
-- API、Worker、PostgreSQL、真实工具调用、部署、canary 和用户验收均不存在。
-- 本计划已获项目负责人批准；首批能力、初始执行上下文和真实调用许可由 ADR-007 固化，工程与测试基线由 ADR-008 固化。Git 远程与 CI 仍待 M1 拍板。
+- 项目从 0 开始建设，没有可复用的既有业务代码、测试、依赖或容器配置。
+- 首批能力、初始执行上下文和真实调用许可由 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) 固化；工程与测试基线由 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) 固化。
+- API、Worker、PostgreSQL、真实工具调用、部署、canary 和用户验收在本计划的规划范围内均不得被声称存在，除非 handoff 已记录对应证据。
+- Git 远程与 CI 待 M1 单独拍板；在此之前不绑定远程、不创建 PR、不配置 CI。
 
-因此第一个动作不是接入模型或基础设施，而是先完成设计收口和工程基线。
+因此 M0 验收通过后的第一个动作不是接入模型或基础设施，而是先编写并审批 M1 详细实施计划。
 
 ## 3. 路线选择
 
@@ -77,12 +77,13 @@
 | 首个能力 | `starrocks.slow_query.diagnose`，只读、限定时间窗和字段白名单 | M0 已拍板（ADR-007） | 不进入 M3 |
 | 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M0 已拍板（ADR-007） | 不创建 capability |
 | 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M0 已拍板（ADR-007） | 不创建 capability |
-| 外部调用许可 | 分五层：真实运维目标系统与真实模型 API 在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权；生产连接与任何写操作全程禁止 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
+| 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
+| 写操作许可 | **M0-M7 全程禁止任何写操作（含非生产环境）**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导 | M0 已拍板（ADR-007 D6）／M8 逐条复核 | 不开放任何环境的写操作 |
 | Git 与 CI | M0 已初始化本地 `main` 基线；远程与 CI 由 M1 单独拍板后绑定 | M1 | 不伪造远程、PR 或 CI |
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放写操作 |
-| 模型供应商 | 核心测试使用 fake interpreter；真实模型 adapter 在 M5 后单独决策 | M5 | 不增加外部模型依赖 |
+| 模型供应商 | 核心测试使用 fake interpreter；M5 后可单独决策是否**实现** provider adapter，但**实现权不等于调用权**；发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 ADR-007 的 M0-M6a 禁止期冲突 | M5 仅限 adapter 实现决策；真实调用另设独立里程碑 | 不增加外部模型依赖，不发起任何真实模型调用 |
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
 
@@ -299,7 +300,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 **目标**：只在 TaskStore、身份、渠道和 readback 已稳定后，开放一条低风险测试环境写能力。
 
-**进入条件**：审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005。
+**进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。M0-M7 期间写操作全程关闭，不得通过配置项、feature flag 或默认值静默开启。
 
 **交付物**：precheck、ApprovalGate pause、持久化审批、恢复重解析、`plan_hash`/`target_fingerprint` 复核、one write admission、幂等键、fencing、readback 和 `indeterminate`。
 
@@ -347,7 +348,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 能力状态只能使用已取得的最强证据：`declared`、`configured`、`deployed SHA`、`tests`、`canary`、`user-accepted`。禁止把计划、声明、离线测试或 PR 合并描述成线上可用。
 
-`test-env verified` 是非生产环境运行证据标签，不等于也不替代 `canary`。`canary` 仅用于已经确认部署 SHA 的受控生产灰度；如果项目后续要把 `test-env verified` 纳入正式 readiness ladder，必须先在 M0 同步修改 `ARCHITECTURE.md` 和 handoff，不能由单个能力自行改名。
+`test-env verified` 是非生产环境运行证据标签，不等于也不替代 `canary`。`canary` 仅用于已经确认部署 SHA 的受控生产灰度；如果项目后续要把 `test-env verified` 纳入正式 readiness ladder，必须另行批准一次架构/ADR 变更，并同步更新 `ARCHITECTURE.md` 与 handoff，不能由单个能力自行改名。
 
 ## 10. 复核清单（Review Draft V2 审核时使用）
 
