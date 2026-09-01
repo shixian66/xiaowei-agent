@@ -309,3 +309,58 @@ def test_redacting_filter_is_first_in_handler_chain() -> None:
         assert _PW not in foreign.getvalue()
     finally:
         logger.removeHandler(handler)
+
+
+def test_secret_in_dynamic_logger_name_is_redacted() -> None:
+    """logger 名可被调用方动态拼接；`logger` 字段与占位消息都不得回显密钥。"""
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(f"{LOGGER_NAME}.password={_PW}").info("ctx")
+    out = buf.getvalue()
+    assert _PW not in out
+    assert REDACTED in json.loads(out.strip())["logger"]
+
+
+def test_secret_in_logger_name_absent_from_unrenderable_placeholder() -> None:
+    out = _emit_raw(lambda lg: lg.info(_Hostile()))
+    assert _PW not in out
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(f"{LOGGER_NAME}.token={_TOKEN}").info(_Hostile())
+    assert _TOKEN not in buf.getvalue()
+
+
+def test_mapping_whose_items_raises_does_not_crash_or_drop() -> None:
+    class _BadMap(dict[str, str]):
+        def items(self):  # type: ignore[override]
+            raise RuntimeError("items boom")
+
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(LOGGER_NAME).info("ctx", extra={"m": _BadMap()})
+    out = buf.getvalue()
+    assert out.strip(), "记录不得丢失"
+    assert json.loads(out.strip())["extras"]["m"] == REDACTED
+
+
+def test_sequence_whose_iteration_raises_does_not_crash() -> None:
+    class _BadSeq(list[str]):
+        def __iter__(self):  # type: ignore[override]
+            raise RuntimeError("iter boom")
+
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(LOGGER_NAME).info("ctx", extra={"s": _BadSeq()})
+    assert buf.getvalue().strip(), "记录不得丢失"
+
+
+def test_pathological_input_does_not_cause_catastrophic_backtracking() -> None:
+    """脱敏正则作用于不可信文本，必须对病态输入保持线性开销。"""
+    import time
+
+    payloads = ["password" + "=" * 5000 + "x", 'password="' + "a" * 20000,
+                "password=" + "a" * 200000, "Authorization: Bearer " + "a" * 50000]
+    for payload in payloads:
+        start = time.perf_counter()
+        redact(payload)
+        assert time.perf_counter() - start < 1.0, f"疑似灾难性回溯: {payload[:24]!r}"

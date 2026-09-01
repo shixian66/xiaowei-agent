@@ -96,12 +96,21 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
         return REDACTED
     if isinstance(value, Mapping):
         out: dict[str, JsonValue] = {}
-        for key, item in value.items():
+        try:
+            items = list(value.items())
+        except Exception:
+            # `items()` 本身可能抛异常（自定义或故障映射），一律 fail-closed。
+            return REDACTED
+        for key, item in items:
             skey = scrub_text(key if isinstance(key, str) else _safe_str(key))
             out[skey] = REDACTED if _KEY_RE.search(skey) else redact(item, _depth=_depth + 1)
         return out
     if isinstance(value, Sequence | set | frozenset):
-        return [redact(v, _depth=_depth + 1) for v in value]
+        try:
+            return [redact(v, _depth=_depth + 1) for v in value]
+        except Exception:
+            # 迭代自定义序列/集合时同样可能抛异常。
+            return REDACTED
     return scrub_text(_safe_str(value))
 
 
@@ -110,6 +119,10 @@ class RedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.trace_id = get_trace_id() or "-"
+        # logger 名可能被调用方动态拼接（如按资源建 logger）而带入密钥。
+        # 在此处就地脱敏，可同时保护自有与外部 handler；此时分发已完成，
+        # 改写 name 不影响 handler 路由。
+        record.name = scrub_text(record.name)
         # 顺序很重要：先用已脱敏的 args 完成 % 格式化，再对成品文本脱敏，最后清空 args。
         # 若先脱敏 msg，会把 "%s" 之类占位符本身当作敏感值替换掉，
         # 导致后续 `msg % args` 抛 TypeError 并丢失记录。
