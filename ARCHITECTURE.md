@@ -218,8 +218,8 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key | 入口统一上下文，禁止入口自造业务字段 |
-| `RequestContext` | tenant、actor、env、trace_id、policy_revision | 每一步都显式传递，不从全局变量读取 |
+| `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段 |
+| `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
 | `CapabilitySpec` | id、version、domain、operation、schemas、policy_profile、evidence_contract | 声明能力，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
@@ -231,6 +231,8 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 | `EvidenceEnvelope` | facts、source、captured_at、readonly、limitations | 事实与解释分开 |
 | `TaskOutcome` | status、terminal_reason、evidence_refs、render_ref | 终态语义封闭，indeterminate 一等公民 |
 | `RenderPayload` | answer、sections、next_steps、status、refs | 只负责展示投影，不承载执行决策 |
+
+执行上下文的字段名在全项目统一为 `tenant_id`、`actor` 和 `environment_id`，不使用 `tenant`、`env` 等别名。`RequestEnvelope.environment_id` 可选，表示渠道显式指定；`RequestContext` 的三项均必填，由 Gateway 解析后产生，环境无法解析出唯一值时 fail-closed。模块边界显式传递 `RequestContext`；其他 DTO 不机械复制这三项，各契约的精确字段归属由其自身语义决定。详见 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)。
 
 ## 7. Hash、审批和任务一致性
 
@@ -378,6 +380,8 @@ LangGraph 不是领域架构，也不是安全边界。它可以实现 `Workflow
 
 每个 capability 至少维护 golden cases、near-miss cases、missing-context cases、adversarial cases 和故障注入 cases。只有代码测试通过不代表可上线；需要依次记录 `declared → configured → deployed SHA → tests → canary → user-accepted` 的最强证据。
 
+`test-env verified` 是非生产环境运行证据的旁注标签，不属于上述 readiness ladder，也不替代 `canary`；`canary` 只用于已确认部署 SHA 的受控生产灰度。
+
 测试目录和 CI gate 固定如下：
 
 ```text
@@ -393,13 +397,13 @@ tests/
 
 ## 14. 从 0 到可用的演进顺序
 
-### Phase 0：文档与契约
+### Phase 0：仓库与工程基线
 
-初始化 Git、Python 包结构、配置规范、日志/trace 规范、DTO、Protocol 和测试骨架。本阶段不接真实写操作。
+初始化 Git 基线、Python 包结构与工具链、配置规范、日志/trace 规范和测试骨架（测试目录与 `security` marker gate）。本阶段不实现任何业务契约类型，也不接真实写操作。
 
 ### Phase 1：Foundation
 
-实现 `RequestContext`、`CapabilitySpec`、`CandidateSet`、`ExecutionPlan`、`ToolResult`、`EvidenceEnvelope`、`RenderPayload` 和基础 error model；建立 fake Gateway 和安全契约测试。
+实现 `RequestContext`、`CapabilitySpec`、`CandidateSet`、`ExecutionPlan`、`ToolResult`、`EvidenceEnvelope`、`RenderPayload`，以及 `ExternalContent`、内部 `AdapterResponse`、结构化 error model 和支撑 TaskStore CAS/lease/fencing 的类型；建立 fake Gateway 和安全契约测试。
 
 ### Phase 2：第一条只读闭环
 
@@ -439,7 +443,7 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-004：Capability DSL 的最小契约与量化推广标准。
 - ADR-005：审批绑定、hash canonicalization 和目标漂移处理。
 - ADR-006：PostgreSQL 全文检索到 pgvector 的升级门槛。
-- ADR-007：首批三类垂直闭环能力及真实调用许可。
-- ADR-008：pytest、security marker 和测试目录分层。
+- ADR-007：首批能力、初始执行上下文与真实调用许可（已记录：[docs/adr/ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)）。
+- ADR-008：工程与测试基线，含 Python 3.11、pytest、security marker gate、Ruff 和 mypy（已记录：[docs/adr/ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。
