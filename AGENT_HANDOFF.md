@@ -45,7 +45,8 @@
 - 外部日志、错误、知识、网页和用户粘贴文本全部按 `ExternalContent` 处理。
 - **执行上下文统一命名为 `tenant_id`、`actor`、`environment_id`**；`RequestContext` 三项必填，`RequestEnvelope.environment_id` 可选；模块边界显式传递 `RequestContext`，其他 DTO 不机械复制这三项，精确字段归属由 M2 审定。
 - **Phase 0 只做仓库、工具链、配置、日志/trace 和测试骨架**；业务契约（含 `ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 支持类型）全部属于 Phase 1。
-- **验证命令单一真源**为 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`；禁止裸 `pytest` 调用形式。
+- **验证命令单一真源**为 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`；禁止裸 `pytest` 调用形式。CI 通过 `setup-uv` 的 `activate-environment` 激活同一 `.venv` 后**原样执行**这四条命令。
+- **CI workflow 的安全契约以整文件 SHA-256 固定**：任何 `ci.yml` 改动都会使 `tests/security/test_workflow_policy.py` 转红，必须显式更新摘要常量并接受人工审查。集合式白名单只能挡「多出的东西」，挡不住删除必需步骤、重复摘要顶替、配置移位或 `continue-on-error` 导致的 gate 失效。
 - 允许受限 DSL 不等于 V1 必须实现；M0-M9 使用显式 `CapabilitySpec`，达门槛后再以 ADR-004 单独立项。
 - 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 adapter，先通过真实生命周期评测。
 - **E1 默认关闭**：E1 指**任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True` 并通过 `StepAdmission`。M0-M7 全程禁止 E1（含非生产环境），M8 的受控 E1 需三项显式条件齐备，生产写另需独立授权。

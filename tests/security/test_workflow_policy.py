@@ -10,6 +10,7 @@
 
 import hashlib
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,13 @@ _TEXT = _WF.read_text(encoding="utf-8")
 _LINES = _TEXT.splitlines()
 
 _EXPECTED_JOBS = ("tests", "security-gate", "lint", "types", "deps-audit", "secret-scan")
+
+# ---- 承重锚：整个 ci.yml 的 SHA-256 --------------------------------------
+# 契约是「任何 ci.yml 改动都必须转红并接受人工审查」。集合式白名单只能挡住
+# 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
+# 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
+# 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
+_WORKFLOW_SHA256 = "a0d4af76f7f31633a40a431df1efa50776cc1bed13a0c20d5ac6d74585fbd5e3"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -110,18 +118,64 @@ def test_uses_occurrence_counts_are_exact() -> None:
     assert _TEXT.count("uses: astral-sh/setup-uv@") == len(_EXPECTED_JOBS) - 1
 
 
-def test_single_line_run_commands_are_a_closed_set() -> None:
-    """任何新增 run（例如 `curl` 调用外部 API）都必须先进白名单。"""
+def test_workflow_file_digest_is_pinned() -> None:
+    """整文件摘要：覆盖新增、删除、重复顶替、移位和控制属性等全部改动形态。
+
+    合法修改 `ci.yml` 时必须同步更新 `_WORKFLOW_SHA256`，从而强制人工审查。
+    下面的语义测试只用于给出可读的失败原因，不能替代本断言。
+    """
+    actual = hashlib.sha256(_WF.read_bytes()).hexdigest()
+    assert actual == _WORKFLOW_SHA256, (
+        f"ci.yml 已改动：实际摘要 {actual}，白名单为 {_WORKFLOW_SHA256}。"
+        "确认改动经过审查后再更新常量。"
+    )
+
+
+def test_single_line_run_commands_match_exactly() -> None:
+    """精确多重集：既拒绝多余命令，也拒绝删除必需命令。"""
     single, _ = _run_commands_and_block_digests()
-    unknown = sorted(set(single) - _ALLOWED_RUN_COMMANDS)
-    assert not unknown, f"出现未批准的 run 命令: {unknown}"
+    expected = Counter({
+        "uv sync --extra dev --frozen": 5,
+        "python -m pytest -q": 1,
+        "python -m pytest -m security -q": 1,
+        "ruff check .": 1,
+        "mypy src": 1,
+        "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
+        "pip-audit --strict -r requirements-audit.txt": 1,
+        './gitleaks git --log-opts="--all" --redact --no-banner .': 1,
+    })
+    assert Counter(single) == expected, f"run 命令多重集不符: {Counter(single)}"
 
 
-def test_multiline_run_blocks_are_a_closed_set() -> None:
+def test_multiline_run_blocks_match_exactly() -> None:
+    """精确多重集：防止用一个合法 block 重复顶替另一个必需 block。"""
     _, digests = _run_commands_and_block_digests()
-    unknown = sorted(set(digests) - _ALLOWED_RUN_BLOCK_DIGESTS)
-    assert not unknown, f"多行 run block 内容已变更，摘要未在白名单: {unknown}"
-    assert len(digests) == len(_ALLOWED_RUN_BLOCK_DIGESTS)
+    assert Counter(digests) == Counter(dict.fromkeys(_ALLOWED_RUN_BLOCK_DIGESTS, 1)), (
+        f"多行 run block 多重集不符: {Counter(digests)}"
+    )
+
+
+def test_no_step_level_control_attributes() -> None:
+    """`continue-on-error` 会让失败的 gate 仍然显示成功；`if` 可让 gate 被跳过。"""
+    for attr in ("continue-on-error", "if:"):
+        assert attr not in _TEXT, f"禁止使用 {attr}，会使 gate 形同虚设"
+
+
+def test_each_checkout_step_binds_persist_credentials() -> None:
+    """必须绑定到 checkout 自身，而非全局计数——否则可挪到无关 action 输入下凑数。"""
+    steps = 0
+    for index, line in enumerate(_LINES):
+        if "uses: actions/checkout@" not in line:
+            continue
+        steps += 1
+        indent = len(line) - len(line.lstrip())
+        body: list[str] = []
+        for follow in _LINES[index + 1 :]:
+            if follow.strip() and (len(follow) - len(follow.lstrip())) <= indent:
+                break
+            body.append(follow.strip())
+        assert "persist-credentials: false" in body, f"第 {steps} 个 checkout 未绑定该配置"
+    assert steps == len(_EXPECTED_JOBS)
 
 
 def test_job_set_is_exactly_the_approved_six() -> None:
@@ -164,10 +218,6 @@ def test_no_env_block_outside_declared_allowlist() -> None:
     allowed = {"GITLEAKS_VERSION", "GITLEAKS_SHA256"}
     names = set(re.findall(r"(?m)^\s+([A-Z][A-Z0-9_]*):\s", _TEXT))
     assert names <= allowed, f"出现未声明的 env 变量: {sorted(names - allowed)}"
-
-
-def test_every_checkout_disables_credential_persistence() -> None:
-    assert _TEXT.count("persist-credentials: false") == _TEXT.count("uses: actions/checkout@")
 
 
 def test_runner_is_pinned_not_latest() -> None:

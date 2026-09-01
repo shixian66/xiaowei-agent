@@ -94,8 +94,8 @@ agent/
 │   ├── CAPABILITIES.md        # 能力地图；由 Registry/代码生成并由 CI 检查
 │   ├── adr/                   # 架构决策记录（ADR-007、ADR-008 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
-├── pyproject.toml              # Foundation 阶段建立
-├── docker-compose.yml          # Compose 阶段建立
+├── pyproject.toml              # 已建立（M1）
+├── docker-compose.yml          # Compose 阶段建立（尚未创建）
 ├── src/xiaowei_agent/          # 业务包
 │   ├── contracts/              # 跨模块 DTO / Protocol
 │   ├── application/            # Runtime / 用例编排
@@ -117,7 +117,7 @@ agent/
     └── evals/
 ```
 
-目录会在 Foundation 阶段按实际代码落地；不要为了匹配树状图提前创建空模块。
+上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 已在 M1 建立；其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
 
 ## 从 0 开始的开发顺序
 
