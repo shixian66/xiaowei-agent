@@ -136,8 +136,10 @@ Reflection 不是第二条执行链，也不是模型拥有的“自我授权”
 - 现有证据是否足以回答；
 - 存在哪些限制、样本性和时效性说明；
 - 缺失了哪些信息项；
-- 是否应降级为 `indeterminate`；
-- 是否需要请求用户补充信息。
+- **建议**是否应降级为 `indeterminate`；
+- **建议**是否需要请求用户补充信息。
+
+上述结论是**建议性输入**：是否真的进入 `indeterminate`、是否真的向用户提问，由 Runtime 与 Runner 依据该结构化结论确定性决定并写入 TaskStore。**Reflection 本身不设置终态，也不写 TaskStore。**
 
 **Reflection 不允许**：
 
@@ -163,7 +165,8 @@ Reflection 不是第二条执行链，也不是模型拥有的“自我授权”
 | 意图提取、证据解释、澄清问题措辞 | 确定性组件决定是否采纳；不采纳即丢弃 | **可建议** |
 | capability、目标、参数、步骤、SQL、工具调用顺序 | `CapabilityResolver` + `PlanCompiler` 确定性决定 | 无 |
 | Policy 判定、effect 分类、审批有效性 | `ToolPolicy`、`CapabilitySpec` 派生、`ApprovalGate` 等确定性治理组件 | 无 |
-| 证据可答性结论 | Reflection，仅基于结构化 Evidence；**不改变计划** | 可参与结论措辞 |
+| 证据可答性结论（建议） | Reflection 基于结构化 Evidence 产出；**不改变计划、不设置终态** | 可参与结论措辞 |
+| 终态与 `indeterminate` 判定 | Runtime / Runner 依据 Reflection 的结构化结论确定性决定，并由 TaskStore 保护 | 无 |
 | 工具执行 | `WorkflowRunner` 经 `StepAdmission` 与 `ToolGateway` 驱动 | 无 |
 | 测试环境真实连接授权、E1 审批 | **项目负责人 / 人工授权** | 无 |
 | 生产连接与生产写 | **当前不授权** | 无 |
