@@ -12,12 +12,12 @@
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
-| `main` 当前 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
+| M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
 | 历史起点 SHA | `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`（仅五份 Markdown 与 `.gitignore`） |
 | 工作分支 | `claude/m0-plan-closure` 已合入 `main`，保留备查 |
 | M1 是否可开始 | **否**——M1 详细实施计划待项目负责人批准；批准后从 `main` 建 `claude/m1-engineering-baseline` |
 | 远程 / PR / CI | **未配置，未验证**；由 M1 单独拍板后绑定 |
-| 本机工具链 | Python **3.11.16**（uv 独立安装）、pytest 8.4.2、ruff 0.16.5、mypy 1.20.2；仅冒烟验证，项目尚无代码 |
+| 本机工具链 | Python **3.11.16 已安装**（uv 独立分发，`~/.local/bin/python3.11`）。**pytest / Ruff / mypy 未安装**——仅曾在一次性 uv venv 中冒烟验证四条命令可跑通，该 venv 已删除，版本未锁定。项目仍无代码、无 `pyproject.toml`、无依赖 |
 | 运行状态 | 尚未声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 首个闭环 | `starrocks.slow_query.diagnose`（已拍板，M3 实现，当前未实现） |
@@ -28,7 +28,7 @@
 
 已固化到 [ARCHITECTURE.md](ARCHITECTURE.md) 与 `docs/adr/`。
 
-> **本节是快照摘要，不是规范真源。** 授权边界（真实调用、E1、写权限、租户上下文）的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)；架构契约与安全语义的真源是 `ARCHITECTURE.md`；里程碑与验收门的真源是 `DEVELOPMENT_PLAN.md`。三者冲突时以真源为准，并回头修正本节。
+> **本节是快照摘要，不是规范真源。** 授权边界（真实调用、E1、写权限、租户上下文）的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)；架构契约与安全语义的真源是 `ARCHITECTURE.md`；里程碑与验收门的真源是 `DEVELOPMENT_PLAN.md`。上述真源与本节冲突时，一律以真源为准，并回头修正本节。
 
 
 - 采用模块化单体 + Docker Compose 的目标部署形态；控制面与数据面分离；PostgreSQL 作为 TaskStore、审批和审计事实真源。
@@ -83,13 +83,13 @@
 M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 [docs/handoff/archive/2026-09-01-M0-closure.md](docs/handoff/archive/2026-09-01-M0-closure.md)。
 
-**归档规则**：里程碑验收通过后，其逐条提交历史移入 `docs/handoff/archive/`，本文件只保留当前 SHA、当前阶段、已验证事实、阻塞项、下一步和禁止盲改点，不随里程碑增长。
+**归档规则**：里程碑验收通过后，其逐条提交历史移入 `docs/handoff/archive/`，本文件只保留里程碑基线 SHA、当前阶段、已验证事实、阻塞项、下一步和禁止盲改点，**不记录随合并漂移的 HEAD**，也不随里程碑增长。
 
 ## 5. 下一步顺序
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. **当前阻塞项**：M1 详细实施计划待项目负责人批准；未批准前不创建 M1 分支、不写业务代码。
-3. M1 建立 Python 工程基线（M1-A，无外部依赖，可立即开工）与远程/CI 绑定（M1-B，阻塞于远程与 CI 未拍板）；CI 不持凭证、不执行真实外部调用。
+3. **M1 详细实施计划获批后方可开工**：M1-A（本地工程基线）不依赖远程与 CI，但同样受该批准门约束；M1-B（远程与 CI 绑定）在此之外另行阻塞于远程与 CI 未拍板。CI 不持凭证、不执行真实外部调用。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
