@@ -93,7 +93,8 @@ def _job_ids() -> list[str]:
 def test_actions_expressions_are_a_closed_set() -> None:
     """只允许 `github.ref`。`toJSON(github)` 会间接带出 `github.token`。"""
     used = set(re.findall(r"\$\{\{\s*(.+?)\s*\}\}", _TEXT))
-    assert used <= _ALLOWED_EXPRESSIONS, f"出现未批准的表达式: {sorted(used - _ALLOWED_EXPRESSIONS)}"
+    unknown = sorted(used - _ALLOWED_EXPRESSIONS)
+    assert not unknown, f"出现未批准的表达式: {unknown}"
 
 
 def test_uses_references_are_a_closed_set_with_exact_shas() -> None:
