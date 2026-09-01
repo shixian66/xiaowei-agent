@@ -92,9 +92,10 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      # 审计对象是 `uv sync --frozen` 之后本 runner / Python 3.11 环境中的已安装依赖，
-      # 不等于直接审计 uv.lock 文件本身。
-      - run: pip-audit --strict
+      # 审计对象是从 uv.lock 导出的第三方依赖集（--no-emit-project 排除本项目自身，
+      # 因为本项目不在 PyPI 上，--strict 下会因无法审计而恒失败）。
+      - run: uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt
+      - run: pip-audit --strict -r requirements-audit.txt
 
   secret-scan:
     name: secret-scan

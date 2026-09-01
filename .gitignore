@@ -34,3 +34,4 @@ htmlcov/
 # Runtime artifacts
 reports/
 logs/
+requirements-audit.txt
