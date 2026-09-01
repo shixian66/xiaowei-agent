@@ -56,7 +56,7 @@
 
 ## 4. 全程不可破坏的约束
 
-所有里程碑共同遵守：
+所有里程碑共同遵守。**授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工具链与验证命令的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，架构契约的真源是 [ARCHITECTURE.md](ARCHITECTURE.md)；本文只承载里程碑顺序、决策门与验收标准。**
 
 1. 模型只产生 `IntentDraft`、解释或建议，不决定 capability、目标、SQL、审批或工具调用。
 2. 执行链固定为 `IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner(step) → StepAdmission → ToolGateway → Readback（需要时）→ Evidence → Outcome`。
@@ -169,7 +169,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 **交付物**：
 
 - `contracts/`：`RequestEnvelope`、`RequestContext`、`IntentDraft`、`CapabilitySpec`、`CandidateSet`、`ExecutionPlan`、`PolicyDecision`、`ApprovalRequest`、`ToolCall`、`ToolResult`、`ExternalContent`、`EvidenceEnvelope`、`TaskOutcome`、`RenderPayload` 和结构化 error model。
-- `contracts/` 另含 **Reflection 结论 DTO**：只承载证据充分性、限制、缺失项、是否降级为 `indeterminate`、是否需用户补充信息；**不含步骤、工具、目标、权限或 SQL 字段**（边界见 `ARCHITECTURE.md` §4.2）。
+- `contracts/` 另含 **`AnswerabilityVerdict`**（Reflection 的唯一输出契约）：只承载证据充分性、限制、缺失项、是否降级为 `indeterminate`、是否需用户补充信息；**不含步骤、工具、目标、权限或 SQL 字段**（边界见 `ARCHITECTURE.md` §4.2 与 §6 契约表）。
 - **最小步骤级 trace / audit 事件契约**：能把一次失败定位到 Intent、Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 中的具体阶段；只定义事件形状与阶段枚举，不实现采集后端。
 - `planning/`：canonical JSON、`plan_hash`、`target_fingerprint` 的确定性实现和固定测试向量。
 - `tools/`：`ToolGateway` Protocol、内部 `AdapterResponse`、私有 `ToolResult` 工厂和 fake/recording adapter。

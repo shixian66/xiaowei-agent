@@ -35,7 +35,7 @@
 
 ## 不可破坏的运行边界
 
-下面的边界优先于便利性、模型能力和框架默认行为：
+下面的边界优先于便利性、模型能力和框架默认行为。**授权边界（真实调用许可、E1 写权限、租户与环境上下文）的规范真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；本节是必须随时可读的摘要，冲突时以 ADR-007 为准，并回头修正本节。**
 
 1. **LLM 不拥有执行权。** 模型最多产生结构化 `IntentDraft`、解释性 `Advisory` 或候选线索；它不能决定最终 capability、目标、可执行 SQL、审批结果、写操作或工具调用顺序。
 2. **真实执行走确定性链路。** 统一链路为：
@@ -133,7 +133,7 @@
 4. 集成测试：Compose 中 PostgreSQL、worker 和 fake/recording tool adapter 的真实连接，位于 `tests/integration/`。
 5. Eval：按 L0-L3 分层，位于 `tests/evals/`，分别测安全边界、意图/补槽、证据回答和完整生命周期；不以单一“回答像不像”分数替代安全验收。
 
-代码可运行后，默认验证入口固定为下列四条命令：
+代码可运行后，默认验证入口固定为下列四条命令（**规范真源为 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)**）：
 
 ```bash
 python -m pytest -q

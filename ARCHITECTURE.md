@@ -267,9 +267,15 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 | `ApprovalRequest` | task_id、step_id、plan_hash、target_fingerprint、subject、expires_at | 审批与具体步骤绑定 |
 | `ToolCall` | gateway、operation、typed_args、timeout、idempotency_key | 不含任意代码/任意 SQL escape hatch |
 | `ToolResult` | status、data_view、raw_ref、source、limitations、trace_id | 由 Gateway 构造，原始数据默认不进模型 |
+| `ExternalContent` | source、trust、content、digest、captured_at | 所有外部文本的统一包装；恒为 untrusted，不能改变 policy、目标、权限、审批状态或执行计划 |
+| `AdapterResponse` | status、payload、source、error、elapsed | adapter 的**内部**返回类型，只能由 `ToolGateway` 私有工厂转成 `ToolResult`；不得跨越 Gateway 边界外泄 |
+| `AnswerabilityVerdict` | sufficient、limitations、missing、downgrade_suggestion、needs_user_input | Reflection 的唯一输出契约；**不含步骤、工具、目标、权限或 SQL 字段**（§4.2）；终态由 Runtime/Runner 依据它确定性判定 |
+| `AgentError` | code、category、retryable、cause_ref、message_key | 结构化 error model；外部错误先包成 `ExternalContent` 再由确定性 mapper 归类，不把第三方错误文本当控制信号 |
 | `EvidenceEnvelope` | facts、source、captured_at、readonly、limitations | 事实与解释分开 |
 | `TaskOutcome` | status、terminal_reason、evidence_refs、render_ref | 终态语义封闭，indeterminate 一等公民 |
 | `RenderPayload` | answer、sections、next_steps、status、refs | 只负责展示投影，不承载执行决策 |
+
+上表的字段是**初始集合**，精确类型与最终字段在 M2 详细计划中审定；但契约的**名称与职责边界**在此冻结，各模块不得另造同义 DTO。
 
 执行上下文的字段名在全项目统一为 `tenant_id`、`actor` 和 `environment_id`，不使用 `tenant`、`env` 等别名。`RequestEnvelope.environment_id` 可选，表示渠道显式指定；`RequestContext` 的三项均必填，由 Gateway 解析后产生，环境无法解析出唯一值时 fail-closed。模块边界显式传递 `RequestContext`；其他 DTO 不机械复制这三项，各契约的精确字段归属由其自身语义决定。详见 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)。
 
@@ -469,6 +475,8 @@ tests/
 ├── integration/  # Compose / PostgreSQL / fake adapter
 └── evals/        # L0-L3 行为和安全评测
 ```
+
+> 本节的工具链与命令为摘要，**真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)**；冲突时以 ADR-008 为准。
 
 默认测试框架为 pytest，统一以 `python -m pytest` 形式调用。触及 `governance/`、`planning/` 或 `tools/` 的变更必须运行 `python -m pytest -m security -q`；该 gate 与全量 `python -m pytest -q` 独立存在。全项目验证命令的单一真源见 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)。
 
