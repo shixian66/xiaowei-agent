@@ -66,7 +66,7 @@
 6. SQL 只能由确定性 compiler 产生，并经 `sqlglot` AST 规则验证；解析失败时 fail-closed。
 7. 外部日志、错误、网页、知识和用户粘贴内容统一按 `ExternalContent` 处理。
 8. TaskStore 是生命周期事实真源；终态保护、CAS、lease 和 fencing 由存储层保证。
-9. 写操作必须经过 precheck、审批暂停、恢复重解析、hash/fingerprint 复核、单次写入、readback；不能承诺 exactly-once。
+9. 对被管运维目标的真实写操作（E1）必须经过 precheck、审批暂停、恢复重解析、hash/fingerprint 复核、单次写入、readback；不能承诺 exactly-once。E1 的定义与 fail-closed 规则见 [ADR-007 D7](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)。
 10. 每个非平凡行为变更必须留下测试、契约、eval、SOP 或配置护栏中的至少一项。
 
 ## 5. 待拍板事项与建议默认值
@@ -77,12 +77,12 @@
 | 首个能力 | `starrocks.slow_query.diagnose`，只读、限定时间窗和字段白名单 | M0 已拍板（ADR-007） | 不进入 M3 |
 | 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M0 已拍板（ADR-007） | 不创建 capability |
 | 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M0 已拍板（ADR-007） | 不创建 capability |
-| 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
-| 写操作许可（E1） | E1 = **经 `ToolGateway` 对被管运维目标执行的 `side_effect` 操作**（ADR-007 D7）。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1** | M0 已拍板（ADR-007 D6/D7）／M8 逐条复核 | 不开放任何环境的 E1 操作 |
+| 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许，CI 对应 job 同样在该时点之后才可使用（ADR-007 D8）；StarRocks 非生产只读需 M6b 单独授权 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
+| 写操作许可（E1） | E1 = **任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关（ADR-007 D7）；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True`，绕过 Gateway 的直接调用与内部持久化旁路同属违规。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1** | M0 已拍板（ADR-007 D6/D7）／M8 逐条复核 | 不开放任何环境的 E1 操作 |
 | Git 与 CI | M0 已初始化本地 `main` 基线；远程与 CI 由 M1 单独拍板后绑定 | M1 | 不伪造远程、PR 或 CI |
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
-| 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放写操作 |
+| 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放 E1 |
 | 模型供应商 | 核心测试使用 fake interpreter；M5 后可单独决策是否**实现** provider adapter，但**实现权不等于调用权**；发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 ADR-007 的 M0-M6a 禁止期冲突 | M5 仅限 adapter 实现决策；真实调用另设独立里程碑 | 不增加外部模型依赖，不发起任何真实模型调用 |
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
@@ -146,7 +146,7 @@
 - 至少一条真实承重的 security 测试验证配置/日志脱敏，确保安全 gate 不是空集合。
 - `.env.example` 只列非敏感变量名和安全默认值；启动时对缺失/非法配置 fail-fast。
 - README 补充实际可运行的安装、检查和测试命令。
-- CI 不注入测试环境或生产环境凭证；**M1 与 CI 不执行任何真实外部调用**，包括真实模型 API、StarRocks、Prometheus、资产系统和任何 E1 操作。CI 允许写本地隔离 PostgreSQL 与测试产物，但 E1 调用次数必须为 0。
+- CI 不注入测试环境或生产环境凭证；**M1 与 CI 不执行任何真实外部调用**，包括真实模型 API、StarRocks、Prometheus、资产系统和任何 E1 操作。**M1 阶段 CI 只允许写测试产物（fixture、recording、覆盖率、报告），不使用 PostgreSQL，也不使用 Compose**；本地隔离 PostgreSQL 与 Compose 要到 M4/M5 各自批准后，才允许对应 CI job 使用（ADR-007 D8）。所有阶段 CI 的 E1 调用次数恒为 0。
 - 真实调用的开放点按类别分别管理，**不得写成「所有真实调用只能发生在 M6b」**：当前已批准路线中的**首个真实运维目标调用**是 M6b 的 StarRocks 非生产只读（ADR-007 D 层，仍需单独授权）；真实模型 API 调用遵守 ADR-007 B2，需另设独立里程碑与独立 ADR/凭证/数据/保留策略授权；M8 的测试环境受控写遵守 ADR-007 E1 与 D6 三项门。
 
 **验证门**：
@@ -171,7 +171,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - `contracts/`：`RequestEnvelope`、`RequestContext`、`IntentDraft`、`CapabilitySpec`、`CandidateSet`、`ExecutionPlan`、`PolicyDecision`、`ApprovalRequest`、`ToolCall`、`ToolResult`、`ExternalContent`、`EvidenceEnvelope`、`TaskOutcome`、`RenderPayload` 和结构化 error model。
 - `planning/`：canonical JSON、`plan_hash`、`target_fingerprint` 的确定性实现和固定测试向量。
 - `tools/`：`ToolGateway` Protocol、内部 `AdapterResponse`、私有 `ToolResult` 工厂和 fake/recording adapter。
-- `capabilities/`：最小 Registry snapshot 与 Resolver Protocol；此时不建立关键词总表或 DSL 框架。
+- `capabilities/`：最小 Registry snapshot 与 Resolver Protocol；`CapabilitySpec` 承载 `effect_class` 与 operation 级 `side_effect` 声明，作为 E1 分类的唯一确定性来源。`effect_class` 是否进入 `plan_hash` canonicalization 由 M2 详细计划审定；若进入，须同步递增 plan schema version 并更新 `ARCHITECTURE.md` §7.1。此时不建立关键词总表或 DSL 框架。
 - `runners/`：只声明 `WorkflowRunner` 契约和最小同步 fake runner 测试替身，不提前实现 LangGraph。
 - `persistence/`：冻结 M3/M4 共用的 `TaskStore` 交互形状：每次状态变更携带 `expected_version`，结果明确返回 `applied` 与存储层 `winner`；lease 获取/续租返回 owner、到期时间和单调 fencing token，所有 lease 内写入都携带该 token。精确 DTO 和方法签名在 M2 详细计划中审定，不留到 M4 临时改 Runner。
 - 单进程 fake TaskStore 必须真实执行 expected-version 检查、stale winner 返回、lease/fencing token 传播和终态保护；只是不宣称跨进程原子性、故障恢复或 PostgreSQL 级保证。
@@ -183,6 +183,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - 安全测试覆盖模型字段污染、目标不稳定、未知 policy revision 和 `ExternalContent` 注入。
 - fake TaskStore 契约测试覆盖 CAS 成功、CAS 失败后采用 winner、过期 lease/旧 fencing token 拒绝和终态后到事件拒绝。
 - 对 hash/目标指纹承重规则做 TDD 反证，确认撤掉规范化或敏感字段排除时测试变红。
+- **E1 分类承重测试**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 确定性派生；模型输出、用户输入或 adapter 尝试设置、覆盖或降级这两个字段时必须拒绝；`effect_class` 未知、未声明或与 CapabilitySpec 冲突时 fail-closed，不得按只读放行。
 
 **退出标准**：核心契约可被首个闭环消费；类型名和字段在所有边界一致；没有真实客户端、数据库或模型 SDK。
 
@@ -197,18 +198,19 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - 计划：由确定性 compiler 生成白名单 SQL AST；禁止接收用户或模型原始 SQL。
 - 输出：慢查询事实、采样时间、数据来源、限制和可复现参数；不自动 kill query、不改参数、不给出伪确定性根因。
 
-**交付物**：CapabilitySpec、Resolver item、PlanCompiler、只读 ToolPolicy、SQLGuard、最小 ApprovalGate Protocol/fake、DeterministicStepRunner、fake TaskStore、fake Gateway、EvidenceBuilder、Answerability、RenderPayload、消费 `RequestContext + IntentDraft` 的 `XiaoweiRuntime` application facade 和 L0-L2 eval corpus。另提供一个只存在于 contract/security test 的 `side_effect=True` 合成步骤；它不注册为真实 capability，也不能调用真实写 adapter。
+**交付物**：CapabilitySpec、Resolver item、PlanCompiler、只读 ToolPolicy、SQLGuard、最小 ApprovalGate Protocol/fake、DeterministicStepRunner、fake TaskStore、fake Gateway、EvidenceBuilder、Answerability、RenderPayload、消费 `RequestContext + IntentDraft` 的 `XiaoweiRuntime` application facade 和 L0-L2 eval corpus。另提供一个只存在于 contract/security test 的 `side_effect=True` 合成步骤；它不注册为真实 capability，也不能调用任何可触达被管运维目标的真实 adapter。
 
 **测试门**：
 
 - golden、near-miss、missing-context、adversarial、timeout、malformed adapter response 和 empty evidence cases。
 - SQL 多语句、注释注入、写语句、未知方言、超范围时间窗和非白名单列必须 fail-closed。
 - Runtime 契约测试证明 `XiaoweiRuntime` 的调用不能跳过 Resolver、Planner、Admission 或 Gateway。
-- 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant_id/environment_id/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 写能力已实现。
+- 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant_id/environment_id/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 的 E1 能力已实现。
+- **伪标拒绝测试**：把一个已注册为写的 operation 伪标为 `side_effect=False` 时，`StepAdmission` 必须拒绝，且 **`ToolGateway` 调用次数与 adapter 调用次数均为 0**；同时断言 M0-M7 的任何路径上对被管运维目标的 E1 调用次数为 0。
 - Runner/TaskStore 契约测试证明每次 CAS 状态变更携带 `expected_version`，每次 lease 内变更携带有效 fencing token，并始终采用存储层返回的 winner。
 - `python -m pytest -q` 与 `python -m pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
 
-**退出标准**：对固定 `IntentDraft` 可稳定产生同一计划、同一 fake 工具调用、可追溯证据和确定性降级结果；ApprovalGate 分支已有合成步骤反证；尚不宣称自然语言、真实写能力或真实 StarRocks 已验证。
+**退出标准**：对固定 `IntentDraft` 可稳定产生同一计划、同一 fake 工具调用、可追溯证据和确定性降级结果；ApprovalGate 分支已有合成步骤反证；尚不宣称自然语言、真实 E1 能力或真实 StarRocks 已验证。
 
 **本阶段不做**：多证据源自适应诊断、跨 capability 自动扩张计划、通用 DSL 或无界 reflection。
 
@@ -220,7 +222,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 - SQLAlchemy model、Alembic migration 和 PostgreSQL `TaskStore` adapter。
 - 幂等创建、合法状态迁移、CAS winner、worker lease、heartbeat、fencing token、stale recovery、终态保护和审计事件。
-- 审批记录的数据契约和存储结构；本阶段不开放副作用步骤。
+- 审批记录的数据契约和存储结构；本阶段不开放任何 E1 步骤。
 - Runner 只使用 TaskStore 返回的 winner 和 fencing token，不用本地旧对象覆盖状态。
 - M4 只替换存储实现并补强并发/恢复保证；如果 PostgreSQL adapter 迫使 Runner 改变 M2 已批准的交互形状，先回到 M2/M3 修正契约和测试，不在 adapter 内加兼容补丁。
 
@@ -299,7 +301,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 ### M8：第一条受控写闭环
 
-**目标**：只在 TaskStore、身份、渠道和 readback 已稳定后，开放一条低风险测试环境写能力。
+**目标**：只在 TaskStore、身份、渠道和 readback 已稳定后，开放一条低风险的测试环境受控 E1 能力。
 
 **进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。M0-M7 期间 E1 全程关闭，不得通过配置项、feature flag 或默认值静默开启；内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
 
