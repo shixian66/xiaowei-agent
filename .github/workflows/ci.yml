@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: python -m pytest -q
+
+  security-gate:
+    name: security-gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: python -m pytest -m security -q
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: ruff check .
+
+  types:
+    name: types
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: mypy src
+
+  deps-audit:
+    name: deps-audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      # 审计对象是 `uv sync --frozen` 之后本 runner / Python 3.11 环境中的已安装依赖，
+      # 不等于直接审计 uv.lock 文件本身。
+      - run: pip-audit --strict
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: "8.30.0"
+      # linux_x64 资产的预期 SHA256，固化在本受审文件中；
+      # 不回取同一发布源的 checksums.txt，避免自证。
+      GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL "$url" -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+      - name: Self-test the scanner
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" > "$tmp/bait.tf"
+          if ./gitleaks dir --redact --no-banner "$tmp"; then
+            echo "scanner self-test FAILED: bait was not detected"; exit 1
+          fi
+          echo "scanner self-test passed: bait detected"
+          rm -rf "$tmp"
+      - name: Scan full git history
+        run: ./gitleaks git --log-opts="--all" --redact --no-banner .

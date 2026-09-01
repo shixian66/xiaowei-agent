@@ -69,7 +69,7 @@
 
 目标基线是模块化单体，统一 Docker Compose 开发环境：
 
-- Python 3.11（首个且当前唯一强制验证的版本；其他版本未测试，不宣称支持）、FastAPI、Pydantic、SQLAlchemy、Alembic。
+- Python 3.11（首个且当前唯一强制验证的版本；其他版本未测试，不宣称支持）、FastAPI、Pydantic、SQLAlchemy、Alembic；依赖由 uv 解析并锁定在 `uv.lock`。
 - pytest、pytest-asyncio；安全测试使用 `security` marker 作为显式 CI gate。
 - Ruff 作为唯一 linter，mypy 作为唯一类型检查器；格式化方案待 Foundation 阶段单独决定。
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
@@ -134,17 +134,40 @@ agent/
 
 ## 本地开发约定
 
-Foundation 尚未完成，因此下面是目标命令，不是当前可执行事实：
+### 安装
+
+工具链由 [uv](https://docs.astral.sh/uv/) 管理，Python 版本固定 3.11（见 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）：
 
 ```bash
-docker compose up --build
+uv sync --extra dev --frozen
+source .venv/bin/activate
+```
+
+### 验证命令
+
+激活 `.venv` 后，**原样执行** ADR-008 定义的四条命令：
+
+```bash
 python -m pytest -q
 python -m pytest -m security -q
 ruff check .
 mypy src
 ```
 
-完成 Foundation 后，必须把实际启动命令、环境变量、迁移命令和最小请求示例补回本 README，并在 `AGENT_HANDOFF.md` 记录真实验证结果。
+CI 在无交互 shell 中通过 `astral-sh/setup-uv` 的 `activate-environment: true` 激活同一个 `.venv`，因此执行的是**同样的四条命令**，不做 `uv run` 包装。
+
+### 配置
+
+`load_settings()` **只读进程环境变量，不读 `.env`**；`.env.example` 仅作变量名文档。未在其中列出的 `XIAOWEI_*` 变量会被 fail-fast 拒绝；固定开发租户是代码常量，没有对应环境变量。
+
+```bash
+export XIAOWEI_ENVIRONMENT_ID=dev-local
+export XIAOWEI_LOG_LEVEL=INFO
+```
+
+### 尚未完成
+
+Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。
 
 ## 旧项目关系
 
