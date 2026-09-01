@@ -8,17 +8,21 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-01（Asia/Shanghai） |
-| 阶段 | **M0 已完成并验收；M1 尚未开始** |
+| 阶段 | **M0 已验收；M1 实现完成，等待验收（分支保护项阻塞）** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
 | 历史起点 SHA | `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`（仅五份 Markdown 与 `.gitignore`） |
 | 工作分支 | `claude/m0-plan-closure` 已合入 `main`，保留备查 |
-| M1 是否可开始 | **否**——M1 详细实施计划待项目负责人批准；批准后从 `main` 建 `claude/m1-engineering-baseline` |
-| 远程 / PR / CI | **未配置，未验证**；由 M1 单独拍板后绑定 |
-| 本机工具链 | Python **3.11.16 已安装**（uv 独立分发，`~/.local/bin/python3.11`）。**pytest / Ruff / mypy 未安装**——仅曾在一次性 uv venv 中冒烟验证四条命令可跑通，该 venv 已删除，版本未锁定。项目仍无代码、无 `pyproject.toml`、无依赖 |
-| 运行状态 | 尚未声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
+| M1 状态 | **实现完成，待 Codex 精确 SHA 审查与负责人验收**；**不得宣称 M1 已通过** |
+| M1 阻塞项 | **分支保护无法启用**——private + GitHub Free。API 实证：`POST /rulesets` 返回 `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` |
+| 远程 | `git@github.com:shixian66/xiaowei-agent.git`（**private**），默认分支 `main` |
+| PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1)，未合并 |
+| CI | 六个 gate 首次全绿：`tests` `security-gate` `lint` `types` `deps-audit` `secret-scan`（run 33480790006） |
+
+| 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
+| 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 首个闭环 | `starrocks.slow_query.diagnose`（已拍板，M3 实现，当前未实现） |
 
@@ -29,7 +33,6 @@
 已固化到 [ARCHITECTURE.md](ARCHITECTURE.md) 与 `docs/adr/`。
 
 > **本节是快照摘要，不是规范真源。** 授权边界（真实调用、E1、写权限、租户上下文）的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)；架构契约与安全语义的真源是 `ARCHITECTURE.md`；里程碑与验收门的真源是 `DEVELOPMENT_PLAN.md`。上述真源与本节冲突时，一律以真源为准，并回头修正本节。
-
 
 - 采用模块化单体 + Docker Compose 的目标部署形态；控制面与数据面分离；PostgreSQL 作为 TaskStore、审批和审计事实真源。
 - `XiaoweiRuntime` 是新的应用编排入口；不复用旧项目 `XiaoweiEngine` 的代码。
@@ -88,8 +91,8 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 ## 5. 下一步顺序
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
-2. **当前阻塞项**：M1 详细实施计划待项目负责人批准；未批准前不创建 M1 分支、不写业务代码。
-3. **M1 详细实施计划获批后方可开工**：M1-A（本地工程基线）不依赖远程与 CI，但同样受该批准门约束；M1-B（远程与 CI 绑定）在此之外另行阻塞于远程与 CI 未拍板。CI 不持有测试/生产/运维目标凭证，不执行真实外部调用。
+2. ~~M1 实现~~ **已完成**，PR #1 六个 CI gate 全绿；**待 Codex 按精确 SHA 审查与负责人验收**。
+3. **当前阻塞项**：分支保护无法启用（private + Free）。需负责人在三者中选择：升级 GitHub Pro／改为 public／**明确批准修改 M1 退出标准**为「CI 已建立，分支保护延后」。未选择前 **M1 不得判定通过**，PR #1 不合并。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
@@ -104,7 +107,8 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 证据、报告和大产物的存储位置及保留周期（M6b 前）。
 - M4/M5 本地隔离 PostgreSQL 与 Compose 的里程碑批准。
 - M6b 连接测试环境 StarRocks 真实只读的单独授权（环境、账号 secret reference、范围、时窗、脱敏、recording 删除方式）。
-- Git 远程、默认分支保护、CI runner 和发布环境（M1）。
+- **分支保护的启用路径**：升级 GitHub Pro／改为 public／批准修改 M1 退出标准（三选一）。
+- 发布环境（M5 后）。
 - 代码格式化方案（M1，ADR-008 已明确 Ruff 只作为 linter）。
 - 固定开发租户 ID 的具体取值（M1）。
 
