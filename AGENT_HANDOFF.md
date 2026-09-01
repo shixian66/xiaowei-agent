@@ -60,7 +60,7 @@
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
-**外部调用许可**（ADR-007 D4）：真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权。CI 全程不持凭证，不执行真实运维目标、真实模型、非生产只读或任何 E1 调用；CI 对基础设施的写权限按 ADR-007 D8 的里程碑时点逐级开放。
+**外部调用许可**（ADR-007 D4）：真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权。CI 不持有任何测试、生产或运维目标系统凭证；仅允许 GitHub 自动签发、仓库范围、短生命周期的临时 `GITHUB_TOKEN`（`contents: read` + `persist-credentials: false`）。CI 不执行真实运维目标、真实模型、非生产只读或任何 E1 调用；对基础设施的写权限按 ADR-007 D8 的里程碑时点逐级开放。
 
 **模型边界**：实现 provider adapter 与调用真实模型 API 是两件事。adapter 的实现和离线测试允许在其所属里程碑内进行，但**实现权不等于调用权**；M5 之后**不自动获得**真实调用权限。发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 M0-M6a 的禁止期冲突。
 
@@ -74,7 +74,7 @@
 
 **本身不构成 E1**：TaskStore 的任务与状态迁移、approval 记录、audit 事件、evidence 索引与脱敏摘要等系统内部持久化；本地数据库 migration；测试 fixture、recording 和测试产物。但这三类**不因此自动获得基础设施许可**——使用本地隔离 PostgreSQL 或 Compose 仍须按 D4 的 C 层取得对应里程碑批准。
 
-**CI 基础设施时点**（ADR-007 D8）：**M1-M3 的 CI 只允许写测试产物，不使用 PostgreSQL，也不使用 Compose**；M4 批准后才允许对应 CI job 使用本地隔离 PostgreSQL；M5 批准后才允许使用本地隔离 Compose。**所有阶段 CI 的 E1 调用次数恒为 0**，且 CI 不持有任何凭证。
+**CI 基础设施时点**（ADR-007 D8）：**M1-M3 的 CI 只允许写测试产物，不使用 PostgreSQL，也不使用 Compose**；M4 批准后才允许对应 CI job 使用本地隔离 PostgreSQL；M5 批准后才允许使用本地隔离 Compose。**所有阶段 CI 的 E1 调用次数恒为 0**，且 CI 不持有任何测试、生产或运维目标系统凭证（仅 GitHub 自动签发的仓库范围只读临时 token）。
 
 **真实调用开放点按类别分别管理**，不存在「所有真实调用只能发生在 M6b」的说法：当前已批准路线中的首个真实运维目标调用是 M6b 的 StarRocks 非生产只读（仍需单独授权）；真实模型 API 调用遵守 B2 的独立里程碑；M8 的测试环境受控写遵守 E1 与 D6 三项门。
 
@@ -89,7 +89,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. **当前阻塞项**：M1 详细实施计划待项目负责人批准；未批准前不创建 M1 分支、不写业务代码。
-3. **M1 详细实施计划获批后方可开工**：M1-A（本地工程基线）不依赖远程与 CI，但同样受该批准门约束；M1-B（远程与 CI 绑定）在此之外另行阻塞于远程与 CI 未拍板。CI 不持凭证、不执行真实外部调用。
+3. **M1 详细实施计划获批后方可开工**：M1-A（本地工程基线）不依赖远程与 CI，但同样受该批准门约束；M1-B（远程与 CI 绑定）在此之外另行阻塞于远程与 CI 未拍板。CI 不持有测试/生产/运维目标凭证，不执行真实外部调用。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
