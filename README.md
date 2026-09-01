@@ -64,8 +64,9 @@
 
 目标基线是模块化单体，统一 Docker Compose 开发环境：
 
-- Python 3.11+、FastAPI、Pydantic、SQLAlchemy、Alembic。
+- Python 3.11（首个且当前唯一强制验证的版本；其他版本未测试，不宣称支持）、FastAPI、Pydantic、SQLAlchemy、Alembic。
 - pytest、pytest-asyncio；安全测试使用 `security` marker 作为显式 CI gate。
+- Ruff 作为唯一 linter，mypy 作为唯一类型检查器；格式化方案待 Foundation 阶段单独决定。
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
 - 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
@@ -127,12 +128,14 @@ agent/
 
 ## 本地开发约定
 
-仓库初始化和 Foundation 尚未完成，因此下面是目标命令，不是当前可执行事实：
+Foundation 尚未完成，因此下面是目标命令，不是当前可执行事实：
 
 ```bash
 docker compose up --build
-pytest -q
-pytest -m security -q
+python -m pytest -q
+python -m pytest -m security -q
+ruff check .
+mypy src
 ```
 
 完成 Foundation 后，必须把实际启动命令、环境变量、迁移命令和最小请求示例补回本 README，并在 `AGENT_HANDOFF.md` 记录真实验证结果。

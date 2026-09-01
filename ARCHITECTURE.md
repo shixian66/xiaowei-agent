@@ -393,7 +393,7 @@ tests/
 └── evals/        # L0-L3 行为和安全评测
 ```
 
-默认测试框架为 pytest。触及 `governance/`、`planning/` 或 `tools/` 的变更必须运行 `pytest -m security -q`；该 gate 与全量 `pytest -q` 独立存在。
+默认测试框架为 pytest，统一以 `python -m pytest` 形式调用。触及 `governance/`、`planning/` 或 `tools/` 的变更必须运行 `python -m pytest -m security -q`；该 gate 与全量 `python -m pytest -q` 独立存在。全项目验证命令的单一真源见 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)。
 
 ## 14. 从 0 到可用的演进顺序
 

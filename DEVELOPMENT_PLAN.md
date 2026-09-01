@@ -79,7 +79,7 @@
 | 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M6a | 不创建 capability |
 | Phase 1 外部调用 | 全部 fake/recording；M5 可开始申请许可，M6b 才允许测试环境真实只读 | M0 | 禁止任何真实连接 |
 | Git 与 CI | M0 初始化本地 `main` 基线；M1 再绑定项目负责人指定的远程和 CI | M0/M1 | 不伪造远程、PR 或 CI |
-| Python 工具链 | Python 3.11；pytest；Ruff；mypy | M1 | 不同时引入第二套 runner/linter/type checker |
+| Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放写操作 |
 | 模型供应商 | 核心测试使用 fake interpreter；真实模型 adapter 在 M5 后单独决策 | M5 | 不增加外部模型依赖 |
@@ -204,7 +204,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - Runtime 契约测试证明 `XiaoweiRuntime` 的调用不能跳过 Resolver、Planner、Admission 或 Gateway。
 - 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant/env/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 写能力已实现。
 - Runner/TaskStore 契约测试证明每次 CAS 状态变更携带 `expected_version`，每次 lease 内变更携带有效 fencing token，并始终采用存储层返回的 winner。
-- `pytest -q` 与 `pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
+- `python -m pytest -q` 与 `python -m pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
 
 **退出标准**：对固定 `IntentDraft` 可稳定产生同一计划、同一 fake 工具调用、可追溯证据和确定性降级结果；ApprovalGate 分支已有合成步骤反证；尚不宣称自然语言、真实写能力或真实 StarRocks 已验证。
 

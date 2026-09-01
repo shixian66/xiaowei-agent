@@ -111,7 +111,7 @@
 - 中档：相关测试 + 契约/eval + 真实 diff；收尾时再跑全量。
 - 深档：全量测试 + 安全契约 + offline eval + TDD 反证 + 精确 SHA 逐行 diff。
 
-触及 `governance/`、`planning/` 或 `tools/` 的任何变更，必须全量运行安全测试（`pytest -m security -q`），不得以轻档或中档为由豁免。所有安全测试放在 `tests/security/`，并标记为 `security`；该门是全量测试之外的显式 CI gate。
+触及 `governance/`、`planning/` 或 `tools/` 的任何变更，必须全量运行安全测试（`python -m pytest -m security -q`），不得以轻档或中档为由豁免。所有安全测试放在 `tests/security/`，并标记为 `security`；该门是全量测试之外的显式 CI gate。
 
 验收结论必须附真实命令及尾部输出，并分开写：
 
@@ -132,14 +132,16 @@
 4. 集成测试：Compose 中 PostgreSQL、worker 和 fake/recording tool adapter 的真实连接，位于 `tests/integration/`。
 5. Eval：按 L0-L3 分层，位于 `tests/evals/`，分别测安全边界、意图/补槽、证据回答和完整生命周期；不以单一“回答像不像”分数替代安全验收。
 
-代码可运行后，默认测试入口为：
+代码可运行后，默认验证入口固定为下列四条命令：
 
 ```bash
-pytest -q
-pytest -m security -q
+python -m pytest -q
+python -m pytest -m security -q
+ruff check .
+mypy src
 ```
 
-测试框架基线明确选择 pytest，原因是参数化恶意输入矩阵、组合 fixture、异步测试和 marker gate 都是本项目的核心测试需求。后续若要更换 runner，必须先写 ADR，并同步更新 `README.md`、本文件和 CI，不允许出现多个未说明的测试入口。
+这四条命令是全项目单一真源，README 与 CI 共用同一份定义；禁止在文档、脚本或 CI 中使用裸 `pytest` 调用形式。测试框架基线明确选择 pytest，原因是参数化恶意输入矩阵、组合 fixture、异步测试和 marker gate 都是本项目的核心测试需求；Ruff 是唯一 linter，mypy 是唯一类型检查器。后续若要更换 runner、linter 或类型检查器，必须先修订 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，并同步更新 `README.md`、`ARCHITECTURE.md`、本文件和 CI，不允许出现多个未说明的入口。
 
 ## 文档与交接纪律
 
