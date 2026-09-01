@@ -364,3 +364,26 @@ def test_pathological_input_does_not_cause_catastrophic_backtracking() -> None:
         start = time.perf_counter()
         redact(payload)
         assert time.perf_counter() - start < 1.0, f"疑似灾难性回溯: {payload[:24]!r}"
+
+
+def test_mapping_with_unpackable_items_does_not_crash_redact() -> None:
+    """`items()` 正常返回但元素无法解包为二元组时，异常发生在 for 解包处。"""
+
+    class _BadItems(dict[str, str]):
+        def items(self):  # type: ignore[override]
+            return ["not-a-pair"]
+
+    assert redact({"m": _BadItems()}) == {"m": REDACTED}
+
+
+def test_mapping_with_unpackable_items_does_not_crash_logging() -> None:
+    class _BadItems(dict[str, str]):
+        def items(self):  # type: ignore[override]
+            return ["not-a-pair"]
+
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    logging.getLogger(LOGGER_NAME).info("ctx", extra={"m": _BadItems()})
+    out = buf.getvalue()
+    assert out.strip(), "记录不得丢失"
+    assert json.loads(out.strip())["extras"]["m"] == REDACTED

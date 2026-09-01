@@ -95,16 +95,16 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
     if isinstance(value, bytes | bytearray):
         return REDACTED
     if isinstance(value, Mapping):
-        out: dict[str, JsonValue] = {}
+        # 获取、迭代、解包、转换必须全部在同一个 fail-closed 边界内：
+        # `items()` 可能抛异常，也可能返回无法解包为二元组的元素。
         try:
-            items = list(value.items())
+            out: dict[str, JsonValue] = {}
+            for key, item in value.items():
+                skey = scrub_text(key if isinstance(key, str) else _safe_str(key))
+                out[skey] = REDACTED if _KEY_RE.search(skey) else redact(item, _depth=_depth + 1)
+            return out
         except Exception:
-            # `items()` 本身可能抛异常（自定义或故障映射），一律 fail-closed。
             return REDACTED
-        for key, item in items:
-            skey = scrub_text(key if isinstance(key, str) else _safe_str(key))
-            out[skey] = REDACTED if _KEY_RE.search(skey) else redact(item, _depth=_depth + 1)
-        return out
     if isinstance(value, Sequence | set | frozenset):
         try:
             return [redact(v, _depth=_depth + 1) for v in value]

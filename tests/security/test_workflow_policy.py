@@ -1,9 +1,14 @@
 """CI workflow 的安全策略约束。
 
-用标准库读文本 + 精确断言，不引入 YAML parser。
-gitleaks 只能发现凭证字面量，无法证明这些配置约束，故单独承重。
+**设计取向：闭集白名单，而非 denylist。** denylist 只能挡住已知的具体写法，
+`toJSON(github)`、`github['token']`、`curl <外部 API>` 等等价形式会不断绕过。
+本文件因此对 Actions 表达式、`uses:` 引用和全部 `run` 命令做**精确闭集校验**：
+任何新增或改动都会使测试变红，必须显式更新白名单，从而强制人工审查。
+
+用标准库读文本 + 精确匹配，不引入 YAML parser。
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -13,8 +18,116 @@ pytestmark = pytest.mark.security
 
 _WF = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
 _TEXT = _WF.read_text(encoding="utf-8")
+_LINES = _TEXT.splitlines()
 
 _EXPECTED_JOBS = ("tests", "security-gate", "lint", "types", "deps-audit", "secret-scan")
+
+# ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
+_ALLOWED_EXPRESSIONS = {"github.ref"}
+
+_ALLOWED_USES = {
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9",
+}
+
+_ALLOWED_RUN_COMMANDS = {
+    "uv sync --extra dev --frozen",
+    "python -m pytest -q",
+    "python -m pytest -m security -q",
+    "ruff check .",
+    "mypy src",
+    "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt",
+    "pip-audit --strict -r requirements-audit.txt",
+    './gitleaks git --log-opts="--all" --redact --no-banner .',
+}
+
+# 多行 run block 的规范化 SHA-256；改一个字符即变红。
+_ALLOWED_RUN_BLOCK_DIGESTS = {
+    "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
+    "1542f514fb26fe1fec603de711f032493d5f46f74c7edfb1f7ef4340209f2ca5",  # scanner self-test
+}
+
+
+def _run_commands_and_block_digests() -> tuple[list[str], list[str]]:
+    """提取全部 run 步骤：单行命令原文，多行 block 归一化后取摘要。"""
+    single: list[str] = []
+    digests: list[str] = []
+    index = 0
+    while index < len(_LINES):
+        match = re.match(r"^(\s*)(?:- )?run:\s*(.*)$", _LINES[index])
+        if not match:
+            index += 1
+            continue
+        indent, rest = match.group(1), match.group(2).strip()
+        if rest == "|":
+            body: list[str] = []
+            index += 1
+            while index < len(_LINES) and (
+                not _LINES[index].strip() or _LINES[index].startswith(indent + "  ")
+            ):
+                body.append(_LINES[index].strip())
+                index += 1
+            normalized = "\n".join(line for line in body if line)
+            digests.append(hashlib.sha256(normalized.encode()).hexdigest())
+            continue
+        single.append(rest)
+        index += 1
+    return single, digests
+
+
+def _job_ids() -> list[str]:
+    start = next(i for i, line in enumerate(_LINES) if line.rstrip() == "jobs:")
+    ids: list[str] = []
+    for line in _LINES[start + 1 :]:
+        if line.strip() and not line.startswith(" "):
+            break
+        match = re.fullmatch(r"  ([A-Za-z_][\w-]*):", line.rstrip())
+        if match:
+            ids.append(match.group(1))
+    return ids
+
+
+# ---- 闭集断言 --------------------------------------------------------------
+
+
+def test_actions_expressions_are_a_closed_set() -> None:
+    """只允许 `github.ref`。`toJSON(github)` 会间接带出 `github.token`。"""
+    used = set(re.findall(r"\$\{\{\s*(.+?)\s*\}\}", _TEXT))
+    assert used <= _ALLOWED_EXPRESSIONS, f"出现未批准的表达式: {sorted(used - _ALLOWED_EXPRESSIONS)}"
+
+
+def test_uses_references_are_a_closed_set_with_exact_shas() -> None:
+    used = set(re.findall(r"uses:\s*(\S+)", _TEXT))
+    assert used == _ALLOWED_USES, f"uses 集合不符: {sorted(used ^ _ALLOWED_USES)}"
+    for ref in used:
+        assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref), f"未钉到 40 位 commit SHA: {ref}"
+
+
+def test_uses_occurrence_counts_are_exact() -> None:
+    """每个 job 恰好一次 checkout；仅非 secret-scan 的五个 job 使用 setup-uv。"""
+    assert _TEXT.count("uses: actions/checkout@") == len(_EXPECTED_JOBS)
+    assert _TEXT.count("uses: astral-sh/setup-uv@") == len(_EXPECTED_JOBS) - 1
+
+
+def test_single_line_run_commands_are_a_closed_set() -> None:
+    """任何新增 run（例如 `curl` 调用外部 API）都必须先进白名单。"""
+    single, _ = _run_commands_and_block_digests()
+    unknown = sorted(set(single) - _ALLOWED_RUN_COMMANDS)
+    assert not unknown, f"出现未批准的 run 命令: {unknown}"
+
+
+def test_multiline_run_blocks_are_a_closed_set() -> None:
+    _, digests = _run_commands_and_block_digests()
+    unknown = sorted(set(digests) - _ALLOWED_RUN_BLOCK_DIGESTS)
+    assert not unknown, f"多行 run block 内容已变更，摘要未在白名单: {unknown}"
+    assert len(digests) == len(_ALLOWED_RUN_BLOCK_DIGESTS)
+
+
+def test_job_set_is_exactly_the_approved_six() -> None:
+    assert sorted(_job_ids()) == sorted(_EXPECTED_JOBS), f"实际 job 集合 = {_job_ids()}"
+
+
+# ---- 结构与权限约束 --------------------------------------------------------
 
 
 def test_workflow_exists() -> None:
@@ -25,45 +138,12 @@ def test_no_pull_request_target() -> None:
     assert "pull_request_target" not in _TEXT
 
 
-def test_no_secrets_context_in_any_syntax() -> None:
-    """点号与方括号两种引用形式都必须拒绝。"""
-    assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]", _TEXT), "禁止引用 secrets context"
-
-
-def test_no_github_token_reference_in_any_syntax() -> None:
-    """GitHub 的属性访问同时支持点号与方括号索引，两种都必须拒绝。"""
-    assert not re.search(r"\$\{\{[^}]*\bgithub\s*\.\s*token\b", _TEXT)
-    assert not re.search(r"\$\{\{[^}]*\bgithub\s*\[\s*['\"]token", _TEXT)
-    assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]\s*['\"]?GITHUB_TOKEN", _TEXT)
-
-
 def test_no_secrets_key_anywhere_including_inherit() -> None:
-    """`secrets: inherit` 会把全部 secrets 传给被复用 workflow，必须整体禁止。"""
     hits = re.findall(r"(?m)^[ \t]*secrets\s*:", _TEXT)
     assert hits == [], f"禁止 workflow/job 级 secrets 键，实际命中 {hits}"
 
 
-def _job_ids() -> list[str]:
-    """不引入 YAML parser：从 `jobs:` 块中按缩进提取 job id。"""
-    lines = _TEXT.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.rstrip() == "jobs:")
-    ids: list[str] = []
-    for line in lines[start + 1 :]:
-        if line.strip() and not line.startswith(" "):
-            break
-        match = re.fullmatch(r"  ([A-Za-z_][\w-]*):", line.rstrip())
-        if match:
-            ids.append(match.group(1))
-    return ids
-
-
-def test_job_set_is_exactly_the_approved_six() -> None:
-    """只检查 6 个 gate『存在』不够——多出的 job 同样会引入未审查的执行面。"""
-    assert sorted(_job_ids()) == sorted(_EXPECTED_JOBS), f"实际 job 集合 = {_job_ids()}"
-
-
 def test_exactly_one_permissions_block_and_it_is_workflow_level() -> None:
-    """job 级 permissions 覆盖会绕过顶层最小权限，必须整体禁止。"""
     blocks = re.findall(r"(?m)^([ \t]*)permissions:", _TEXT)
     assert blocks == [""], f"只允许一个顶层 permissions 块，实际缩进集合={blocks}"
 
@@ -76,29 +156,17 @@ def test_workflow_permissions_are_read_only() -> None:
 
 def test_no_write_or_write_all_permission_anywhere() -> None:
     assert "write-all" not in _TEXT
-    assert not re.search(r"(?m)^\s*permissions:\s*write-all\s*$", _TEXT)
     assert not re.search(r"(?m)^\s+\w[\w-]*:\s*write\s*$", _TEXT)
 
 
 def test_no_env_block_outside_declared_allowlist() -> None:
-    """workflow/job 级 env 只允许 secret-scan 的 gitleaks 钉版变量。"""
     allowed = {"GITLEAKS_VERSION", "GITLEAKS_SHA256"}
     names = set(re.findall(r"(?m)^\s+([A-Z][A-Z0-9_]*):\s", _TEXT))
     assert names <= allowed, f"出现未声明的 env 变量: {sorted(names - allowed)}"
 
 
 def test_every_checkout_disables_credential_persistence() -> None:
-    checkouts = _TEXT.count("uses: actions/checkout@")
-    persist = _TEXT.count("persist-credentials: false")
-    assert checkouts == len(_EXPECTED_JOBS)
-    assert persist == checkouts
-
-
-def test_all_actions_pinned_to_full_commit_sha() -> None:
-    refs = re.findall(r"uses:\s*([^\s@]+)@(\S+)", _TEXT)
-    assert refs
-    for name, ref in refs:
-        assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{name} 未钉到 40 位 commit SHA: {ref}"
+    assert _TEXT.count("persist-credentials: false") == _TEXT.count("uses: actions/checkout@")
 
 
 def test_runner_is_pinned_not_latest() -> None:
@@ -124,6 +192,7 @@ def test_secret_scan_uses_full_history_and_pinned_checksum() -> None:
 
 
 def test_gates_are_not_piped() -> None:
-    for line in _TEXT.splitlines():
+    for line in _LINES:
         if line.strip().startswith("- run:"):
-            assert "|" not in line, f"gate 命令不得接管道，退出码会被吞: {line.strip()}"
+            assert "|" not in line or line.strip().endswith("run: |"), \
+                f"gate 命令不得接管道，退出码会被吞: {line.strip()}"
