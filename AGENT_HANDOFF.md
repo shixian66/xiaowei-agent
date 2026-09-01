@@ -8,11 +8,16 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-01（Asia/Shanghai） |
-| 阶段 | M0：设计、计划与本地 Git 基线（Phase 0） |
+| 阶段 | **M0 已完成并验收；M1 尚未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
-| Git 基线 | 本地 `main` 基线 SHA `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`，仅含五份 Markdown 与 `.gitignore` |
-| 工作分支 | `claude/m0-plan-closure`（从上述基线创建，未合并） |
+| M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
+| 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
+| `main` 当前 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
+| 历史起点 SHA | `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`（仅五份 Markdown 与 `.gitignore`） |
+| 工作分支 | `claude/m0-plan-closure` 已合入 `main`，保留备查 |
+| M1 是否可开始 | **否**——M1 详细实施计划待项目负责人批准；批准后从 `main` 建 `claude/m1-engineering-baseline` |
 | 远程 / PR / CI | **未配置，未验证**；由 M1 单独拍板后绑定 |
+| 本机工具链 | Python **3.11.16**（uv 独立安装）、pytest 8.4.2、ruff 0.16.5、mypy 1.20.2；仅冒烟验证，项目尚无代码 |
 | 运行状态 | 尚未声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 首个闭环 | `starrocks.slow_query.diagnose`（已拍板，M3 实现，当前未实现） |
@@ -21,7 +26,10 @@
 
 ## 2. 已确认的设计口径
 
-已固化到 [ARCHITECTURE.md](ARCHITECTURE.md) 与 `docs/adr/`：
+已固化到 [ARCHITECTURE.md](ARCHITECTURE.md) 与 `docs/adr/`。
+
+> **本节是快照摘要，不是规范真源。** 授权边界（真实调用、E1、写权限、租户上下文）的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)；架构契约与安全语义的真源是 `ARCHITECTURE.md`；里程碑与验收门的真源是 `DEVELOPMENT_PLAN.md`。三者冲突时以真源为准，并回头修正本节。
+
 
 - 采用模块化单体 + Docker Compose 的目标部署形态；控制面与数据面分离；PostgreSQL 作为 TaskStore、审批和审计事实真源。
 - `XiaoweiRuntime` 是新的应用编排入口；不复用旧项目 `XiaoweiEngine` 的代码。
@@ -70,40 +78,18 @@
 
 **真实调用开放点按类别分别管理**，不存在「所有真实调用只能发生在 M6b」的说法：当前已批准路线中的首个真实运维目标调用是 M6b 的 StarRocks 非生产只读（仍需单独授权）；真实模型 API 调用遵守 B2 的独立里程碑；M8 的测试环境受控写遵守 E1 与 D6 三项门。
 
-## 4. M0 文档收口证据
+## 4. M0 收口证据
 
-在 `claude/m0-plan-closure` 分支上，基于基线 `7ca391da` 的收口提交：
+M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
+[docs/handoff/archive/2026-09-01-M0-closure.md](docs/handoff/archive/2026-09-01-M0-closure.md)。
 
-| # | commit SHA | 主题 | 范围 |
-| --- | --- | --- | --- |
-| 1 | `7928d326b5d22fadc38f62ae4609a47fb3571027` | 新增 ADR-007 与 ADR-008 | `docs/adr/` |
-| 2 | `0bb9ae2419465e333828d4b84010bedb220e8cde` | 统一执行上下文字段名，收敛 Phase 0/1 边界，补 test-env 标签说明与 ADR 索引 | `ARCHITECTURE.md` |
-| 3 | `37c2b981fe02697b6ff1ededa4d903057a98c101` | 统一验证命令为 `python -m` 形式并收敛 Python 版本口径 | `AGENTS.md`、`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
-| 4 | `7c07ff5fb97fbf297881182063c3d25305c2e274` | 纳入计划文档与 `docs/adr` 落点，更新计划批准状态与事实基线 | `AGENTS.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
-| 5 | `f9e5ba9c7c08ec10c5cfb4f30913195bc6115c01` | handoff 首次记录计划已批准、基线 SHA 与收口 SHA | `AGENT_HANDOFF.md` |
-| 6 | `5a175d1974ec9d0627576e0dd756dee897978e9d` | 收敛正文中残留的 `tenant`/`env` 字段名别名 | `ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md` |
-| 7 | `b8ab1fd9ab609c1890cf4c4e43f49bbef853db30` | handoff 补记提交 6 与字段命名复核结论 | `AGENT_HANDOFF.md` |
-| 8 | `31ad9b24d4ba3f96dc7b1c52fce12a1c17971817` | 收紧写权限与真实模型调用边界，分离计划职责与漂移事实，清除历史命令字面量 | `AGENTS.md`、`DEVELOPMENT_PLAN.md`、`docs/adr/` |
-| 9 | `873cae94ed276250c8427251e02815e241713180` | handoff 同步边界并补全收口提交清单 | `AGENT_HANDOFF.md` |
-| 10 | `7b75a126f0249f8a3164ad20a05d31ce9e2f487f` | 首次引入 E1 分类并修正 M1/CI 真实调用口径（该版 E1 定义已被提交 12 取代） | `DEVELOPMENT_PLAN.md`、`docs/adr/ADR-007` |
-| 11 | `71b69673ce55f7137c814d68eb44921bc82b0273` | handoff 同步 E1 范围与真实调用开放点 | `AGENT_HANDOFF.md` |
-| 12 | `13b39216dc733ebd2cb1ff7b354eae59b72e1a07` | E1 改为按后果定义，要求分类确定性派生与 fail-closed，新增 D8 CI 基础设施时点 | `docs/adr/ADR-007` |
-| 13 | `7af21f514dbb1bb8a527e2830c16543603a5cbcf` | 计划侧同步 E1 定义、CI 时点与 M2/M3 伪标拒绝测试门 | `DEVELOPMENT_PLAN.md` |
-| 14 | `b06fbb66398fdf554c423971a295b96a01bf4fd7` | handoff 同步 E1 后果式定义、分类派生规则与 CI 基础设施时点 | `AGENT_HANDOFF.md` |
-| 15 | `def37075933558c077aae1b1d8619a51505e8773` | 收紧 Reflection 为只读可答性判断，新增决策权责矩阵、错误分析闭环与 Multi-Agent 独立延期 | `ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
-| 16 | `4fb4eebe0d8f42bedf89a1d0910e76452bcbf73f` | handoff 同步第五轮四项边界 | `AGENT_HANDOFF.md` |
-| 17 | `4332ca0add4fce2bdf8d94539ec75af7bdc0d277` | 自查修正：移除旧 Reflection 权限表述的字面量残留与自我证伪的扫描结论 | `AGENT_HANDOFF.md` |
-| 18 | `07da49c53c14d2d84c8ec2a21378989b3694493e` | 自查修正：Reflection 只产出建议性结论，终态与 `indeterminate` 由 Runtime/Runner 确定性判定 | `ARCHITECTURE.md` |
-
-提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮，10-11 为第三轮，12-14 为第四轮 E1 权限分类根因修订（复审基点 `71b69673`），提交 15 起为第五轮 Agentic AI 适配收口（复审基点 `b06fbb66`）。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
-
-**本文件所在提交的 SHA 不写在此处**，因为提交无法记录自身 SHA；分支最终 HEAD SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
+**归档规则**：里程碑验收通过后，其逐条提交历史移入 `docs/handoff/archive/`，本文件只保留当前 SHA、当前阶段、已验证事实、阻塞项、下一步和禁止盲改点，不随里程碑增长。
 
 ## 5. 下一步顺序
 
-1. Codex 按上述精确 commit SHA 审查 M0 的真实 diff、文档一致性和安全边界是否被削弱。
-2. M0 验收通过后，才编写 M1 详细实施计划；**M0 未验收前不进入 M1**。
-3. M1 建立 Python 工程与 CI 基线，并单独拍板 Git 远程与 CI runner；CI 不持凭证、不执行真实外部调用。
+1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
+2. **当前阻塞项**：M1 详细实施计划待项目负责人批准；未批准前不创建 M1 分支、不写业务代码。
+3. M1 建立 Python 工程基线（M1-A，无外部依赖，可立即开工）与远程/CI 绑定（M1-B，阻塞于远程与 CI 未拍板）；CI 不持凭证、不执行真实外部调用。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
@@ -148,7 +134,7 @@
 ### 已验证
 
 - 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
-- 分支 `claude/m0-plan-closure` 已从该基线创建；收口提交的 SHA 与范围逐条列于第 4 节。**本文件所在提交本身不列于该表**（提交无法记录自身 SHA），分支最终 HEAD 由验收报告给出——因此此处不写会随每次提交漂移的绝对提交计数。
+- 分支 `claude/m0-plan-closure` 已从历史起点创建、完成 19 个前向追加提交并通过验收，随后以 `--ff-only` 合入 `main`；逐条提交证据见第 4 节指向的归档文件。本文件不记录会随提交漂移的绝对计数。
 - 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
