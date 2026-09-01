@@ -8,7 +8,7 @@
 
 - [AGENTS.md](AGENTS.md)：Codex、Claude 和开发者必须遵守的开发纪律与安全边界。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：目标架构、模块边界、核心数据契约和演进门槛。
-- [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：Claude 审查意见已纳入、等待项目负责人批准的实施路线、决策门与退出标准。
+- [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 - [AGENT_HANDOFF.md](AGENT_HANDOFF.md)：当前阶段、已验证事实、风险与下一步。
 
 ## 目标能力
@@ -83,10 +83,11 @@ agent/
 ├── README.md
 ├── ARCHITECTURE.md
 ├── AGENT_HANDOFF.md
+├── DEVELOPMENT_PLAN.md
 ├── .gitignore
 ├── docs/
 │   ├── CAPABILITIES.md        # 能力地图；由 Registry/代码生成并由 CI 检查
-│   ├── adr/                   # 架构决策记录
+│   ├── adr/                   # 架构决策记录（ADR-007、ADR-008 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # Foundation 阶段建立
 ├── docker-compose.yml          # Compose 阶段建立

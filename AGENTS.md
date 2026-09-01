@@ -14,6 +14,7 @@
 2. `ARCHITECTURE.md`：目标架构、模块边界和不可破坏的契约。
 3. `AGENT_HANDOFF.md`：当前阶段、已验证事实、风险和下一步。
 4. `README.md`：人类开发者的启动和导航信息。
+5. `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物和退出标准。
 
 编辑前必须先检查目标文件和相关调用链，不基于文件名或旧项目经验猜测实现。发现文档与代码冲突时，报告冲突及证据，不要静默选择一方。
 
@@ -39,7 +40,7 @@
 1. **LLM 不拥有执行权。** 模型最多产生结构化 `IntentDraft`、解释性 `Advisory` 或候选线索；它不能决定最终 capability、目标、可执行 SQL、审批结果、写操作或工具调用顺序。
 2. **真实执行走确定性链路。** 统一链路为：
 
-   `IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner(step) → StepAdmission(ToolPolicy → SQLGuard → ApprovalGate*) → ToolGateway → Readback → Evidence → Outcome`
+   `IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner(step) → StepAdmission(ToolPolicy → SQLGuard → ApprovalGate*) → ToolGateway → Readback（需要时）→ Evidence → Outcome`
 
    `ApprovalGate` 由 Runner 在具体副作用步骤前调用；具体领域可以有额外的确定性 precheck，但不得跳过这条安全链。
 3. **入口层必须薄。** Web、飞书、CLI 和 API handler 只负责协议解析、鉴权上下文传递和 `RenderPayload` 渲染；不放业务路由、SQL 合成、巡检评分、审批判断或工具执行。
@@ -89,7 +90,7 @@
 
 ### 开工前
 
-1. 读取本文件、`ARCHITECTURE.md` 和 `AGENT_HANDOFF.md`。
+1. 按本文件「优先阅读」一节的顺序读取五份文档。
 2. 执行 `git status --short --branch`，确认分支、未提交变更和未跟踪文件。
 3. 从最新 `main` 创建 `claude/<topic>` 分支；若仓库尚未初始化，先在 handoff 中记录，不假装已经具备分支/PR证据。
 4. 写清目标、范围、架构落点、风险、验证命令和不做什么；复杂任务先写计划，等确认后实现。
@@ -148,7 +149,9 @@ mypy src
 - `AGENTS.md`：稳定开发规则；不写每日进展和具体 PR 流水。
 - `README.md`：人类开发者的定位、启动、目录和快速路径；不复制完整架构。
 - `ARCHITECTURE.md`：稳定目标架构、接口契约、状态/安全语义和演进门槛；不写未经验证的线上事实。
+- `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物和退出标准；不写当前已发生的事实。
 - `AGENT_HANDOFF.md`：当前状态、精确 SHA/分支/部署证据、风险、下一步和禁止盲改点；只保留当前有效口径。
+- `docs/adr/`：架构决策记录；每个 ADR 写明背景、决策、后果、备选方案和变更门，不把争议留在代码默认值里。
 - `docs/CAPABILITIES.md`：当前能力地图；由 Registry/代码生成并由 CI 检查，不手工维护关键词总表。
 - 历史 handoff 和详细复盘放到 `docs/handoff/archive/`，由 Git 历史承载时间线。
 - 行为、配置、默认值、测试契约或已知风险变化时更新 handoff；纯拼写或无行为机械变更可不更新。

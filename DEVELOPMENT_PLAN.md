@@ -1,6 +1,6 @@
 # 小维 Agent 2.0 总体开发计划
 
-> 状态：Review Draft V2。Claude 反向审查意见已核对并纳入，等待项目负责人批准。本文是实施路线，不是完成证明，也不授权直接开始业务实现。
+> 状态：Approved V2，2026-09-01 由项目负责人批准。本文是实施路线，不是完成证明，也不授权直接开始业务实现；每个里程碑仍需单独编写详细计划并获批后才能实现。
 
 ## 1. 文档定位
 
@@ -17,10 +17,10 @@
 
 截至 2026-09-01：
 
-- 当前目录只有四份既有 Markdown、`.gitignore`、`.DS_Store` 和本计划；没有业务代码、测试、依赖或容器配置。
-- 当前目录不是 Git 仓库，没有分支、commit SHA、远程、PR 或 CI 证据。
+- 当前目录只有五份 Markdown、`.gitignore` 和 `docs/adr/` 下的 ADR；没有业务代码、测试、依赖或容器配置。
+- 已初始化本地 Git 仓库与 `main` 基线，并在 `claude/m0-plan-closure` 分支上收口文档；尚无远程、PR 或 CI 证据。精确 SHA 见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 - API、Worker、PostgreSQL、真实工具调用、部署、canary 和用户验收均不存在。
-- Claude 已完成第一轮反向审查，计划已按核对结果修订；首批能力、真实调用边界、Git 远程和 CI 仍未由项目负责人拍板。
+- 本计划已获项目负责人批准；首批能力、初始执行上下文和真实调用许可由 ADR-007 固化，工程与测试基线由 ADR-008 固化。Git 远程与 CI 仍待 M1 拍板。
 
 因此第一个动作不是接入模型或基础设施，而是先完成设计收口和工程基线。
 
@@ -73,12 +73,12 @@
 
 | 决策 | 建议默认值 | 最迟拍板点 | 未拍板时行为 |
 | --- | --- | --- | --- |
-| 初始租户模式 | 单租户开发，但所有核心契约显式携带 `tenant_id`、`actor`、`environment_id` | M0 | 使用固定开发租户；禁止生产连接 |
-| 首个能力 | `starrocks.slow_query.diagnose`，只读、限定时间窗和字段白名单 | M0 | 不进入 M3 |
-| 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M6a | 不创建 capability |
-| 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M6a | 不创建 capability |
-| Phase 1 外部调用 | 全部 fake/recording；M5 可开始申请许可，M6b 才允许测试环境真实只读 | M0 | 禁止任何真实连接 |
-| Git 与 CI | M0 初始化本地 `main` 基线；M1 再绑定项目负责人指定的远程和 CI | M0/M1 | 不伪造远程、PR 或 CI |
+| 初始执行上下文 | 单租户开发；`RequestContext` 的 `tenant_id`、`actor`、`environment_id` 必填，`RequestEnvelope.environment_id` 可选；模块边界显式传递 `RequestContext` | M0 已拍板（ADR-007） | 使用固定开发租户；禁止生产连接 |
+| 首个能力 | `starrocks.slow_query.diagnose`，只读、限定时间窗和字段白名单 | M0 已拍板（ADR-007） | 不进入 M3 |
+| 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M0 已拍板（ADR-007） | 不创建 capability |
+| 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M0 已拍板（ADR-007） | 不创建 capability |
+| 外部调用许可 | 分五层：真实运维目标系统与真实模型 API 在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权；生产连接与任何写操作全程禁止 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
+| Git 与 CI | M0 已初始化本地 `main` 基线；远程与 CI 由 M1 单独拍板后绑定 | M1 | 不伪造远程、PR 或 CI |
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放写操作 |
@@ -86,7 +86,7 @@
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
 
-项目负责人可以在 M0 审核时替换上述三个能力，但替换项仍必须满足：只读、可 fake、可确定性规划、可形成证据契约、可构造 adversarial cases。
+首批三个能力已由 ADR-007 固化。后续替换必须先修订 ADR-007，且替换项仍必须满足：只读、可 fake、可确定性规划、可形成证据契约、可构造 adversarial cases。
 
 ## 6. 里程碑总览
 
@@ -119,8 +119,8 @@
 - 逐条处理 Claude 已给出的 P1-P3 意见；新增意见继续按严重级别记录。
 - 收敛 `ARCHITECTURE.md` 中 Phase 0/Phase 1 对契约和脚手架的重叠：Phase 0 只负责仓库/工具/测试骨架，Phase 1 才实现业务契约。
 - 复核 README 架构图与稳定执行链一致，明确 `StepAdmission` 在 Runner 的步骤边界内执行。
-- 由项目负责人拍板首个能力、初始租户默认值、真实调用许可、Git 远程和 CI 环境。
-- 形成 ADR-007（首批能力与调用许可）和 ADR-008（测试/CI 基线）；其他 ADR 到其首次承重前再写。
+- 由项目负责人拍板首批能力、初始执行上下文和真实调用许可；Git 远程与 CI 推迟到 M1 单独拍板。
+- 形成 ADR-007（首批能力、初始执行上下文与真实调用许可）和 ADR-008（工程与测试基线）；其他 ADR 到其首次承重前再写。
 
 **退出标准**：
 
@@ -349,9 +349,9 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 `test-env verified` 是非生产环境运行证据标签，不等于也不替代 `canary`。`canary` 仅用于已经确认部署 SHA 的受控生产灰度；如果项目后续要把 `test-env verified` 纳入正式 readiness ladder，必须先在 M0 同步修改 `ARCHITECTURE.md` 和 handoff，不能由单个能力自行改名。
 
-## 10. Review Draft V2 复核清单
+## 10. 复核清单（Review Draft V2 审核时使用）
 
-请项目负责人和 Claude 复核：
+以下清单用于 V2 审核，结论已并入本文第 2、5 节与 ADR-007、ADR-008；保留原文以便追溯审核范围。
 
 1. M0-M9（含 M6a/M6b）是否存在错误依赖顺序或无法独立验收的里程碑。
 2. `StepAdmission`、ApprovalGate、ToolGateway、TaskStore 是否仍只有一套真源。
