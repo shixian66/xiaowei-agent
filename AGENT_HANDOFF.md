@@ -1,6 +1,6 @@
 # 小维 Agent 2.0 当前交接
 
-> 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；当仓库初始化后，详细复盘放到 `docs/handoff/archive/`。
+> 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
 ## 1. 当前基线
 
@@ -8,72 +8,82 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-01（Asia/Shanghai） |
-| 阶段 | Phase 0：文档与契约初始化 |
-| Git | 当前目录尚未初始化为 Git 仓库；暂无分支、commit SHA、PR 或 CI 证据 |
-| 运行状态 | 尚未声明 API、Worker、PostgreSQL、Docker Compose 或真实工具调用可运行 |
+| 阶段 | M0：设计、计划与本地 Git 基线（Phase 0） |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
+| Git 基线 | 本地 `main` 基线 SHA `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`，仅含五份 Markdown 与 `.gitignore` |
+| 工作分支 | `claude/m0-plan-closure`（从上述基线创建，未合并） |
+| 远程 / PR / CI | **未配置，未验证**；由 M1 单独拍板后绑定 |
+| 运行状态 | 尚未声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
-| 首个闭环 | 尚未拍板；建议从一个只读 StarRocks 诊断场景开始 |
+| 首个闭环 | `starrocks.slow_query.diagnose`（已拍板，M3 实现，当前未实现） |
 
-旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目当前分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
+旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目的分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
 
 ## 2. 已确认的设计口径
 
-本轮已固化到 `ARCHITECTURE.md`：
+已固化到 [ARCHITECTURE.md](ARCHITECTURE.md) 与 `docs/adr/`：
 
-- 采用模块化单体 + Docker Compose 的目标部署形态。
-- 控制面与数据面分离；PostgreSQL 作为 TaskStore、审批和审计事实真源。
-- `XiaoweiRuntime` 是新的应用编排入口；不直接复用旧项目 `XiaoweiEngine` 的代码。
+- 采用模块化单体 + Docker Compose 的目标部署形态；控制面与数据面分离；PostgreSQL 作为 TaskStore、审批和审计事实真源。
+- `XiaoweiRuntime` 是新的应用编排入口；不复用旧项目 `XiaoweiEngine` 的代码。
 - LLM 只产结构化理解、解释和建议；不能直接选工具、目标、SQL、审批或执行。
-- `CapabilityResolver` 是唯一候选生成真源；`route_shadow` 只消费 Resolver 输出，record-only，不参与 active 路由。
-- `ApprovalGate` 是 Runtime/governance 的共享组件，由 `WorkflowRunner` 在具体副作用步骤前调用；多步计划在执行中暂停，恢复时重解析并重算 hash。
-- `plan_hash` 与 `target_fingerprint` 的 canonicalization、审批绑定和 stale approval 语义已经明确。
-- DB/资产域允许受限 DSL；每个 DSL 实例必须满足八项最小契约，不携带任意代码、SQL、prompt、executor 或 formatter。
-- 允许 DSL 不等于 V1 必须实现；M0-M9 使用显式 `CapabilitySpec`，M6a 先采集复用和维护数据，达到门槛后再以 ADR-004 单独立项。
-- 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 `WorkflowRunner` adapter，先通过真实生命周期评测再决定是否启用。
-- SQL 由确定性 compiler 生成并经 `sqlglot` AST Guard；ToolGateway 是外部系统唯一入口。
-- 外部日志、错误、知识、网页和用户粘贴文本全部视为 `ExternalContent`，不能改变安全策略或执行目标。
+- `CapabilityResolver` 是唯一候选生成真源；`route_shadow` 只消费 Resolver 输出，record-only。
+- `ApprovalGate` 是共享组件，由 `WorkflowRunner` 在具体副作用步骤前调用；恢复时重解析并重算 `plan_hash` 与 `target_fingerprint`。
+- SQL 由确定性 compiler 生成并经 `sqlglot` AST Guard；`ToolGateway` 是外部系统唯一入口。
+- 外部日志、错误、知识、网页和用户粘贴文本全部按 `ExternalContent` 处理。
+- **执行上下文统一命名为 `tenant_id`、`actor`、`environment_id`**；`RequestContext` 三项必填，`RequestEnvelope.environment_id` 可选；模块边界显式传递 `RequestContext`，其他 DTO 不机械复制这三项，精确字段归属由 M2 审定。
+- **Phase 0 只做仓库、工具链、配置、日志/trace 和测试骨架**；业务契约（含 `ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 支持类型）全部属于 Phase 1。
+- **验证命令单一真源**为 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`；禁止裸 `pytest` 调用形式。
+- 允许受限 DSL 不等于 V1 必须实现；M0-M9 使用显式 `CapabilitySpec`，达门槛后再以 ADR-004 单独立项。
+- 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 adapter，先通过真实生命周期评测。
+- `test-env verified` 是非生产运行证据的旁注标签，不属于 readiness ladder，也不替代 `canary`。
 
-## 3. 本轮已完成
+## 3. 已生效的决策记录
 
-- [x] 创建项目规则：[AGENTS.md](AGENTS.md)
-- [x] 创建人类开发入口：[README.md](README.md)
-- [x] 创建目标架构：[ARCHITECTURE.md](ARCHITECTURE.md)
-- [x] 创建当前交接：[AGENT_HANDOFF.md](AGENT_HANDOFF.md)
-- [x] 创建 Git 初始化前的忽略规则：[.gitignore](.gitignore)
-- [x] 根据 Claude 复审统一 `runners/`、`reflection/`、`tools/`、`tests/security/`、`tests/evals/` 和 pytest 约定。
-- [x] 将 `StepAdmission` 写入第一层安全链，并把安全测试设为治理/规划/工具变更的独立 CI gate。
-- [x] 明确新项目继承 `ivor_aiops` 的开发纪律，但不复制旧项目实现和历史状态。
-- [x] 创建总体开发计划草案：[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
-- [x] 逐条核对 Claude 第一轮计划审查：纳入 TaskStore CAS/fencing 交互形状、`ExternalContent`、ApprovalGate 合成分支、M6a/M6b 拆分、CI 无真实凭证、M0 Git 基线和证据术语修正；DSL 改为 V1 明确延期而非在 M6 强制试点。
-- [x] 总体计划已更新为 Review Draft V2；Claude 意见已处理，但尚未获得项目负责人批准。
+| ADR | 主题 | 状态 |
+| --- | --- | --- |
+| [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) | 首批能力、初始执行上下文与真实调用许可 | Accepted 2026-09-01 |
+| [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) | 工程与测试基线：Python 3.11、pytest、security marker gate、Ruff、mypy | Accepted 2026-09-01 |
 
-## 4. 下一步顺序
+首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
-在写业务代码前，按以下顺序推进：
+外部调用许可分五层：真实运维目标系统与真实模型 API 在 M0-M6a 全程禁止；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权；生产连接与任何写操作全程禁止。CI 全程不持凭证。
 
-1. 由项目负责人审核 Review Draft V2，并拍板首批三类闭环能力、单租户默认值、真实调用许可、Git 远程和 CI 环境；计划建议的三个能力均先从只读 fake/recording 开始。
-2. 计划批准后进入 M0：检查 `.gitignore`、敏感信息和纳入范围，以当时的五份 Markdown 与 `.gitignore` 初始化本地 `main`，记录基线 SHA。
-3. 从本地基线创建 `claude/m0-plan-closure`，收敛 Phase 0/Phase 1 边界和必要 ADR；所有后续文档变更按精确 SHA 审查。
-4. M0 通过后单独编写 M1 详细计划，建立 Python 工程与 CI 基线；CI 不持有测试/生产凭证，不执行真实外部调用。
-5. M1 通过后为 M2 单独规划并实现 contracts、`ExternalContent`、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
-6. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的副作用步骤反证 ApprovalGate 不能被绕过。
-7. 再实现 M4 PostgreSQL TaskStore 的真实并发、恢复和终态保护，随后进入 M5 Compose。
-8. M5 后将内部扩展与外部依赖分开：M6a 完成两个 fake 能力，M6b 在单独授权下做 StarRocks 测试环境真实只读验证。
+## 4. M0 文档收口证据
 
-## 5. 仍需拍板的事项
+在 `claude/m0-plan-closure` 分支上，基于基线 `7ca391da` 的收口提交：
 
-这些决定会影响第一阶段实现，不能通过隐含默认值绕过：
+| 主题 | commit SHA | 范围 |
+| --- | --- | --- |
+| 新增 ADR-007 与 ADR-008 | `7928d326b5d22fadc38f62ae4609a47fb3571027` | `docs/adr/` |
+| 统一执行上下文字段名，收敛 Phase 0/1 边界，补 test-env 标签说明与 ADR 索引 | `0bb9ae2419465e333828d4b84010bedb220e8cde` | `ARCHITECTURE.md` |
+| 统一验证命令为 `python -m` 形式并收敛 Python 版本口径 | `37c2b981fe02697b6ff1ededa4d903057a98c101` | `AGENTS.md`、`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
+| 纳入计划文档与 `docs/adr` 落点，更新计划批准状态与事实基线 | `7c07ff5fb97fbf297881182063c3d25305c2e274` | `AGENTS.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
 
-- 首批三个闭环能力及每个能力允许的真实调用范围。
-- 初始是否单租户；如果多租户，租户/actor/环境的隔离边界。
-- 审批主体、审批渠道、审批有效期和拒绝后的恢复语义。
-- 证据、报告和大产物的存储位置及保留周期。
-- 是否授权 M6b 连接测试环境的 StarRocks 真实只读服务，以及允许的环境、账号、范围、时窗和证据保留方式。
-- Git 远程、默认分支、CI runner 和发布环境。
+**包含本文件在内的分支最终 HEAD SHA 不写在此处**，因为提交无法记录自身 SHA；该 SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
+
+## 5. 下一步顺序
+
+1. Codex 按上述精确 commit SHA 审查 M0 的真实 diff、文档一致性和安全边界是否被削弱。
+2. M0 验收通过后，才编写 M1 详细实施计划；**M0 未验收前不进入 M1**。
+3. M1 建立 Python 工程与 CI 基线，并单独拍板 Git 远程与 CI runner；CI 不持凭证、不执行真实外部调用。
+4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
+5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
+6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
+7. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
+
+## 6. 仍需拍板的事项
+
+- 审批主体、审批渠道、审批有效期和拒绝/过期/冲突后的恢复语义（M8 前，ADR-005）。
+- 证据、报告和大产物的存储位置及保留周期（M6b 前）。
+- M4/M5 本地隔离 PostgreSQL 与 Compose 的里程碑批准。
+- M6b 连接测试环境 StarRocks 真实只读的单独授权（环境、账号 secret reference、范围、时窗、脱敏、recording 删除方式）。
+- Git 远程、默认分支保护、CI runner 和发布环境（M1）。
+- 代码格式化方案（M1，ADR-008 已明确 Ruff 只作为 linter）。
+- 固定开发租户 ID 的具体取值（M1）。
 
 未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无 LangGraph、无向量数据库、无写操作。
 
-## 6. 不要盲改
+## 7. 不要盲改
 
 - 不要把 API、飞书或 CLI 变成第二个 Runtime。
 - 不要新增关键词总表或独立候选生成器；先检查 Resolver 和 capability snapshot。
@@ -81,22 +91,37 @@
 - 不要为了“智能”开放模型 function calling、自由 ReAct 或模型直出 SQL/命令。
 - 不要把 LangGraph checkpoint 当成 TaskStore 真源。
 - 不要把外部文本中的指令、错误码或状态描述未经归类直接写进执行决策。
-- 不要宣称代码已部署、线上可用或能力已被用户接受，除非 handoff 中有对应 SHA、命令、环境和验收证据。
-- 不要删除或覆盖用户未提交文件；不要运行破坏性命令。
+- 不要在文档或脚本中恢复裸 `pytest` 调用形式。
+- 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
+- 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
-## 7. 验证记录
+## 8. 验证记录
 
-已验证：
+### 已验证
 
-- 读取了旧项目 `ivor_aiops/AGENTS.md`，确认本项目需要继承其中文沟通、证据优先、确定性执行链、TDD/回归、精确 SHA 评审、handoff 和 secret 管理纪律。
-- 检查了新目录；当前原有内容仅发现 `.DS_Store`，没有覆盖已有的四份目标文档。
-- 已补充 `.gitignore`，覆盖 `.DS_Store`、Python 缓存、虚拟环境、环境变量、reports 和 logs；尚未执行 Git 初始化。
-- 已完成四份文档的交叉引用检查：未发现旧 `unittest` 命令、并列 `tools/`/`integrations/` 落点或合并的 Reflection 目录约定。
-- 当前目录执行 `git status --short --branch` 返回 exit 128，原因是尚未初始化 Git；因此本轮没有伪造分支或 SHA 证据。
-- 2026-09-01 已逐份读取四份既有 Markdown，并基于当前文档事实编写总体开发计划草案；尚未执行代码、依赖、测试或外部服务验证。
-- 2026-09-01 已读取并逐项核对 Claude 计划审查；Review Draft V2 已吸收确认成立的意见，并对 DSL 试点建议作“V1 延期、以数据触发 ADR”的修正处理。此次发生在 Git 初始化前，因此没有 commit SHA 证据。
+- 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
+- 分支 `claude/m0-plan-closure` 已从该基线创建，四个文档收口提交 SHA 见第 4 节。
+- 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
+- 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
+- 四份文档中原有的 7 处裸 `pytest` 调用已全部改为 `python -m pytest` 形式；`docs/adr/ADR-008` 背景段保留一处旧写法作为历史引用。
 
-未验证：
+### 只读推理
 
-- 尚无业务代码、依赖、测试、数据库迁移、Compose 启动或真实工具调用。
-- Review Draft V2 尚未获得项目负责人批准；首批能力、真实调用许可、Git 远程和 CI 仍未拍板。
+- 五份文档的交叉冲突清单与定级（执行上下文字段名漂移、Phase 0/1 重叠、外部调用许可自相矛盾、命令口径分裂、`test-env verified` 术语缺口等）来自逐份阅读比对，无运行时证据。
+- README 架构图与 `AGENTS.md`、`ARCHITECTURE.md` 的执行链顺序、`StepAdmission` 从属关系和 `ApprovalGate` 触发条件已复核一致，因此**未修改该图**，本轮未对其产生 diff。
+
+### 未覆盖
+
+- 无远程、无 PR、无 CI；未绑定任何远程仓库。
+- 无 Python 代码、无 `pyproject.toml`、无依赖安装、无虚拟环境。
+- `python -m pytest`、`ruff`、`mypy` 从未在本项目执行过；四条验证命令目前是目标口径，不是可执行事实。
+- 未连接任何外部系统，包括 StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose 和任何模型 API。
+- ADR-001 至 ADR-006 尚未编写。
+
+### 残余风险
+
+- 包含本文件的分支最终 HEAD SHA 不在文件内，只能由验收报告提供，Codex 需据此核对。
+- Git 初始化之前发生的所有文档修订永久没有 commit SHA 证据。
+- 工具链版本号（pytest、Ruff、mypy）尚未锁定，M1 之前无法复现完全一致的检查结果。
+- 固定开发租户 ID 与代码格式化方案未定，M1 之前相关配置仍是空缺。
+- M0 只做了文档与决策收口，没有任何可执行代码验证架构约束是否真的可实现。
