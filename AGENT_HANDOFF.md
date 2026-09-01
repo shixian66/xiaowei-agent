@@ -134,7 +134,7 @@
 - 不要把 TaskStore、approval、audit、evidence 或 migration 的内部持久化当作修改运维目标的旁路；也不要反过来把这些内部持久化本身误判为 E1 而阻塞 M4/M5。
 - 不要让模型、用户输入或 adapter 参与决定 `side_effect` / `effect_class`；不要在分类未知或冲突时按只读放行。
 - 不要在 M1-M3 的 CI 中引入 PostgreSQL 或 Compose；这两项要到 M4/M5 各自批准后才可用于对应 CI job。
-- 不要恢复「取数前 Reflection」或任何让 Reflection 追加/修改计划步骤的设计；需要条件取数就在 `PlanCompiler` 里编译预算内的可选只读分支。
+- 不要恢复任何「取数之前先由 Reflection 决定补一个计划步骤」式的设计，也不要让 Reflection 追加或修改计划步骤；需要条件取数就在 `PlanCompiler` 里编译预算内的可选只读分支。
 - 不要用 LLM-as-judge 裁决安全、权限、SQL、审批或终态的正确性；也不要为迎合指标去改业务逻辑而不校准 evaluator。
 - 不要把采用 LangGraph 当作 Multi-Agent 许可；不要在 M9 内启动 Multi-Agent 工作。
 - 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
@@ -150,7 +150,7 @@
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
 - 执行上下文字段名已全项目统一为 `tenant_id`、`actor`、`environment_id`，正文中的字段名式枚举无旧别名残留；`ARCHITECTURE.md` 与 `README.md` 架构图内的 `tenant`/`env` 是概念轴标签，不是 DTO 字段，按既定范围未修改。
-- 「取数前 Reflection」「追加一个已注册的只读计划步骤」「必要时只追加预算内的只读步骤」等旧权限表述在全部跟踪文件中扫描结果为 0；`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` 与本文件的 Reflection 口径一致。
+- 授予 Reflection 扩计划权的旧表述已从全部跟踪文件清除，按其字面量扫描结果为 0（本文件亦不保留这些字面量）；`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` 与本文件的 Reflection 口径一致。
 - 第五轮 diff 中 `ToolGateway`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`TaskStore`、`PlanCompiler`、`StepAdmission` 的删除行经逐行核对，仅来自 M3 交付物同一行的改写，安全链组件与边界一个未删。
 
 ### 只读推理
