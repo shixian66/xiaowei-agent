@@ -78,7 +78,7 @@
 | 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M0 已拍板（ADR-007） | 不创建 capability |
 | 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M0 已拍板（ADR-007） | 不创建 capability |
 | 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
-| 写操作许可 | **M0-M7 全程禁止任何写操作（含非生产环境）**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导 | M0 已拍板（ADR-007 D6）／M8 逐条复核 | 不开放任何环境的写操作 |
+| 写操作许可（E1） | E1 = **经 `ToolGateway` 对被管运维目标执行的 `side_effect` 操作**（ADR-007 D7）。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1** | M0 已拍板（ADR-007 D6/D7）／M8 逐条复核 | 不开放任何环境的 E1 操作 |
 | Git 与 CI | M0 已初始化本地 `main` 基线；远程与 CI 由 M1 单独拍板后绑定 | M1 | 不伪造远程、PR 或 CI |
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
@@ -146,7 +146,8 @@
 - 至少一条真实承重的 security 测试验证配置/日志脱敏，确保安全 gate 不是空集合。
 - `.env.example` 只列非敏感变量名和安全默认值；启动时对缺失/非法配置 fail-fast。
 - README 补充实际可运行的安装、检查和测试命令。
-- CI 不注入测试环境或生产环境凭证，不执行真实模型、StarRocks、Prometheus、资产系统或写操作；真实调用只能在 M6b 的授权、受控、人工触发环境进行。
+- CI 不注入测试环境或生产环境凭证；**M1 与 CI 不执行任何真实外部调用**，包括真实模型 API、StarRocks、Prometheus、资产系统和任何 E1 操作。CI 允许写本地隔离 PostgreSQL 与测试产物，但 E1 调用次数必须为 0。
+- 真实调用的开放点按类别分别管理，**不得写成「所有真实调用只能发生在 M6b」**：当前已批准路线中的**首个真实运维目标调用**是 M6b 的 StarRocks 非生产只读（ADR-007 D 层，仍需单独授权）；真实模型 API 调用遵守 ADR-007 B2，需另设独立里程碑与独立 ADR/凭证/数据/保留策略授权；M8 的测试环境受控写遵守 ADR-007 E1 与 D6 三项门。
 
 **验证门**：
 
@@ -300,7 +301,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 **目标**：只在 TaskStore、身份、渠道和 readback 已稳定后，开放一条低风险测试环境写能力。
 
-**进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。M0-M7 期间写操作全程关闭，不得通过配置项、feature flag 或默认值静默开启。
+**进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。M0-M7 期间 E1 全程关闭，不得通过配置项、feature flag 或默认值静默开启；内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
 
 **交付物**：precheck、ApprovalGate pause、持久化审批、恢复重解析、`plan_hash`/`target_fingerprint` 复核、one write admission、幂等键、fencing、readback 和 `indeterminate`。
 
