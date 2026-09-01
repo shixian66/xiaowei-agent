@@ -37,6 +37,10 @@
 - 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 adapter，先通过真实生命周期评测。
 - **E1 默认关闭**：E1 指**任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True` 并通过 `StepAdmission`。M0-M7 全程禁止 E1（含非生产环境），M8 的受控 E1 需三项显式条件齐备，生产写另需独立授权。
 - **E1 分类必须确定性派生**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 派生；模型、用户输入和 adapter 都不得设置、覆盖或降级；未知分类、声明冲突、写操作误标只读一律 fail-closed。
+- **Reflection 只消费结构化 Evidence，不拥有执行权**：只输出证据充分性、限制、缺失项、是否降级为 `indeterminate`、是否需用户补充信息；不得新增/修改计划步骤、选工具、扩大目标、提高权限、生成 SQL、触发 adapter 或改写 TaskStore 事实。缺槽与初始证据需求由 `CapabilityResolver` / `PlanCompiler` 处理。确需按条件追加取数时，只能是 `ExecutionPlan` 中预编译、预算内的可选只读分支，由 Runner 依确定性条件执行并照常经过 `StepAdmission`。
+- **决策权责矩阵已显式化**（`ARCHITECTURE.md` §4.3）：LLM 只在意图提取、证据解释和澄清措辞上可建议；capability/目标/参数/步骤/SQL/工具顺序由 Resolver+PlanCompiler 决定；Policy、effect 分类、审批有效性由确定性治理组件决定；工具执行由 Runner 经 StepAdmission+ToolGateway 驱动；测试环境连接授权与 E1 审批属人工授权；生产连接与生产写当前不授权；`route_shadow` record-only。该表**不授予任何新权限、不放宽 ADR-007，也不引入 `autonomy_level` 运行字段**；自治程度提升必须有 eval、失败样本、明确授权和 ADR，**不因模型或框架升级自动提高**。
+- **错误分析闭环与 eval 边界**（`ARCHITECTURE.md` §13.1/§13.2）：闭环为「运行/eval → 阅读 trace → 错误归因 → 选择单一根因 → 修复 → 脱敏失败样本晋升为 regression/eval case → 复测」。职责时点：**M1 只建通用结构化日志、`trace_id` 传递与脱敏基础，不定义业务事件契约；M2 定义最小步骤级 trace/audit 事件契约；M3 建立首个完整闭环**。组件级与端到端 eval 分开记录；安全、权限、SQL、审批、终态由确定性断言验收，**LLM-as-judge 不得裁决安全正确性**；eval 与人工判断不一致时先校准 evaluator；离线 eval 不表述为部署、canary 或用户验收。
+- **Multi-Agent 独立延期**（`ARCHITECTURE.md` §12.1）：M9 只评估 `WorkflowRunner` 实现，**不授予 Multi-Agent 权限**；采用 LangGraph ≠ 采用 Multi-Agent；Multi-Agent 须在 M9 之后另设独立里程碑与独立 ADR，且永远不得绕过既有安全链或产生第二个状态、计划、审批、工具路由真源。
 - `test-env verified` 是非生产运行证据的旁注标签，不属于 readiness ladder，也不替代 `canary`。
 
 ## 3. 已生效的决策记录
@@ -85,8 +89,10 @@
 | 11 | `71b69673ce55f7137c814d68eb44921bc82b0273` | handoff 同步 E1 范围与真实调用开放点 | `AGENT_HANDOFF.md` |
 | 12 | `13b39216dc733ebd2cb1ff7b354eae59b72e1a07` | E1 改为按后果定义，要求分类确定性派生与 fail-closed，新增 D8 CI 基础设施时点 | `docs/adr/ADR-007` |
 | 13 | `7af21f514dbb1bb8a527e2830c16543603a5cbcf` | 计划侧同步 E1 定义、CI 时点与 M2/M3 伪标拒绝测试门 | `DEVELOPMENT_PLAN.md` |
+| 14 | `b06fbb66398fdf554c423971a295b96a01bf4fd7` | handoff 同步 E1 后果式定义、分类派生规则与 CI 基础设施时点 | `AGENT_HANDOFF.md` |
+| 15 | `def37075933558c077aae1b1d8619a51505e8773` | 收紧 Reflection 为只读可答性判断，新增决策权责矩阵、错误分析闭环与 Multi-Agent 独立延期 | `ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
 
-提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮修订（复审基点 `873cae94`），提交 10-11 为第三轮，提交 12 起为第四轮 E1 权限分类根因修订（复审基点 `71b69673`）。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
+提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮，10-11 为第三轮，12-14 为第四轮 E1 权限分类根因修订（复审基点 `71b69673`），提交 15 起为第五轮 Agentic AI 适配收口（复审基点 `b06fbb66`）。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
 
 **本文件所在提交的 SHA 不写在此处**，因为提交无法记录自身 SHA；分支最终 HEAD SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
 
@@ -128,6 +134,9 @@
 - 不要把 TaskStore、approval、audit、evidence 或 migration 的内部持久化当作修改运维目标的旁路；也不要反过来把这些内部持久化本身误判为 E1 而阻塞 M4/M5。
 - 不要让模型、用户输入或 adapter 参与决定 `side_effect` / `effect_class`；不要在分类未知或冲突时按只读放行。
 - 不要在 M1-M3 的 CI 中引入 PostgreSQL 或 Compose；这两项要到 M4/M5 各自批准后才可用于对应 CI job。
+- 不要恢复「取数前 Reflection」或任何让 Reflection 追加/修改计划步骤的设计；需要条件取数就在 `PlanCompiler` 里编译预算内的可选只读分支。
+- 不要用 LLM-as-judge 裁决安全、权限、SQL、审批或终态的正确性；也不要为迎合指标去改业务逻辑而不校准 evaluator。
+- 不要把采用 LangGraph 当作 Multi-Agent 许可；不要在 M9 内启动 Multi-Agent 工作。
 - 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
@@ -136,11 +145,13 @@
 ### 已验证
 
 - 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
-- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 13 个收口提交，SHA 与范围逐条列于第 4 节。
+- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 15 个收口提交，SHA 与范围逐条列于第 4 节。
 - 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
 - 执行上下文字段名已全项目统一为 `tenant_id`、`actor`、`environment_id`，正文中的字段名式枚举无旧别名残留；`ARCHITECTURE.md` 与 `README.md` 架构图内的 `tenant`/`env` 是概念轴标签，不是 DTO 字段，按既定范围未修改。
+- 「取数前 Reflection」「追加一个已注册的只读计划步骤」「必要时只追加预算内的只读步骤」等旧权限表述在全部跟踪文件中扫描结果为 0；`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` 与本文件的 Reflection 口径一致。
+- 第五轮 diff 中 `ToolGateway`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`TaskStore`、`PlanCompiler`、`StepAdmission` 的删除行经逐行核对，仅来自 M3 交付物同一行的改写，安全链组件与边界一个未删。
 
 ### 只读推理
 
@@ -154,6 +165,8 @@
 - `python -m pytest`、`ruff`、`mypy` 从未在本项目执行过；四条验证命令目前是目标口径，不是可执行事实。
 - 未连接任何外部系统，包括 StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose 和任何模型 API。
 - ADR-001 至 ADR-006 尚未编写。
+- 第五轮为纯文档收口，未运行 `python -m pytest`、`ruff check .` 或 `mypy src`——项目当前无代码、无 `pyproject.toml`、无依赖、无 Python 包，这三条命令没有作用对象。
+- 决策权责矩阵、错误分析闭环、Reflection 越权拒绝和 Multi-Agent 准入条件目前都只是文档要求，尚无任何测试或代码验证。
 
 ### 残余风险
 
@@ -162,3 +175,5 @@
 - 工具链版本号（pytest、Ruff、mypy）尚未锁定，M1 之前无法复现完全一致的检查结果。
 - 固定开发租户 ID 与代码格式化方案未定，M1 之前相关配置仍是空缺。
 - M0 只做了文档与决策收口，没有任何可执行代码验证架构约束是否真的可实现。
+- Reflection 的越权拒绝目前靠契约设计保证（结论 DTO 不含步骤/工具字段），真正的护栏要等 M2/M3 的契约与安全测试落地。
+- 「预编译的预算内可选只读分支」只给了边界，未给出具体形状；其 DTO 与执行条件表达留待 M2/M3 详细计划，存在被实现成变相动态扩计划的风险。
