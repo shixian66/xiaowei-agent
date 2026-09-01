@@ -245,3 +245,67 @@ def test_object_whose_str_raises_does_not_crash_logging() -> None:
     out = buf.getvalue()
     assert out.strip(), "记录不得因对象异常而丢失"
     assert json.loads(out.strip())["extras"]["hostile"] == REDACTED
+
+
+class _Hostile:
+    """``__str__``/``__repr__`` 均抛异常。"""
+
+    def __str__(self) -> str:
+        raise RuntimeError("hostile")
+
+    __repr__ = __str__
+
+
+def _emit_raw(call: object) -> str:
+    buf = io.StringIO()
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=buf)
+    call(logging.getLogger(LOGGER_NAME))  # type: ignore[operator]
+    return buf.getvalue()
+
+
+def test_hostile_mapping_key_does_not_crash_or_drop() -> None:
+    out = _emit_raw(lambda lg: lg.info("ctx", extra={"d": {_Hostile(): "v"}}))
+    assert out.strip(), "记录不得丢失"
+
+
+def test_hostile_message_object_does_not_crash_or_drop() -> None:
+    out = _emit_raw(lambda lg: lg.info(_Hostile()))
+    assert out.strip(), "记录不得丢失"
+    assert "unrenderable" in json.loads(out.strip())["message"]
+
+
+def test_format_mismatch_does_not_propagate_to_caller() -> None:
+    """`%d` 配字符串、参数个数不符都不得让业务调用方收到异常。"""
+    for call in (
+        lambda lg: lg.info("n=%d", "not-an-int"),
+        lambda lg: lg.info("only one %s", "a", "b"),
+    ):
+        out = _emit_raw(call)
+        assert out.strip(), "记录不得丢失"
+        assert "unrenderable" in json.loads(out.strip())["message"]
+
+
+def test_redacting_filter_is_first_in_handler_chain() -> None:
+    """外部 handler 已有的 filter 不得先于脱敏 filter 看到明文（子 logger 场景）。"""
+    observed: list[str] = []
+
+    class _Observer(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            observed.append(record.getMessage())
+            return True
+
+    foreign = io.StringIO()
+    handler = logging.StreamHandler(foreign)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(_Observer())
+    logger = logging.getLogger(LOGGER_NAME)
+    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=io.StringIO())
+    logger.addHandler(handler)
+    try:
+        configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}), stream=io.StringIO())
+        # 子 logger 的记录不经过父 logger 的 filter，handler 侧顺序是唯一防线。
+        logging.getLogger(f"{LOGGER_NAME}.child").info(f"password={_PW}")
+        assert not any(_PW in m for m in observed), "已有 filter 先看到了明文"
+        assert _PW not in foreign.getvalue()
+    finally:
+        logger.removeHandler(handler)

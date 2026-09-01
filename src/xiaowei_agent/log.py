@@ -60,6 +60,17 @@ _RESERVED: Final[frozenset[str]] = frozenset(
 ) | {"message", "asctime", "taskName"}
 
 
+def _safe_str(value: object) -> str:
+    """字符串化任意对象；``__str__``/``__repr__`` 抛异常时降级为 :data:`REDACTED`。
+
+    日志绝不能因为被记录对象自身出错而抛异常到调用方，或丢失整条记录。
+    """
+    try:
+        return str(value)
+    except Exception:
+        return REDACTED
+
+
 def scrub_text(text: str) -> str:
     """对自由文本做键值、认证方案与值形状三类脱敏。"""
     text = _TEXT_PAIR_RE.sub(
@@ -86,17 +97,12 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
     if isinstance(value, Mapping):
         out: dict[str, JsonValue] = {}
         for key, item in value.items():
-            skey = scrub_text(key) if isinstance(key, str) else scrub_text(str(key))
+            skey = scrub_text(key if isinstance(key, str) else _safe_str(key))
             out[skey] = REDACTED if _KEY_RE.search(skey) else redact(item, _depth=_depth + 1)
         return out
     if isinstance(value, Sequence | set | frozenset):
         return [redact(v, _depth=_depth + 1) for v in value]
-    # 未知类型先字符串化再脱敏；`__str__`/`__repr__` 可能抛异常，
-    # 日志调用绝不能因此崩溃，一律降级为 REDACTED。
-    try:
-        return scrub_text(str(value))
-    except Exception:  # 任何异常都必须 fail-closed
-        return REDACTED
+    return scrub_text(_safe_str(value))
 
 
 class RedactingFilter(logging.Filter):
@@ -113,7 +119,14 @@ class RedactingFilter(logging.Filter):
                 record.args = safe if isinstance(safe, dict) else ()
             else:
                 record.args = tuple(redact(a) for a in record.args)
-        record.msg = scrub_text(record.getMessage())
+        # `getMessage()` 可能因消息对象 __str__ 抛异常、或 %-格式与参数不匹配
+        # （如 "%d" 配字符串、参数个数不符）而抛异常。日志调用不得因此失败，
+        # 也不得丢失记录：降级为不含任何原始取值的安全占位消息。
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = f"<unrenderable log record from {record.name}:{record.lineno}>"
+        record.msg = scrub_text(rendered)
         record.args = None
         if record.exc_info and record.exc_info[0] is not None:
             record.exc_text = scrub_text("".join(traceback.format_exception(*record.exc_info)))
@@ -151,10 +164,19 @@ class JsonFormatter(logging.Formatter):
 
 
 def _install_filter(target: logging.Logger | logging.Handler) -> None:
-    if not any(getattr(f, _FILTER_TAG, False) for f in target.filters):
-        redacting = RedactingFilter()
-        setattr(redacting, _FILTER_TAG, True)
-        target.addFilter(redacting)
+    """安装脱敏 filter，并保证它位于 filter 链**首位**。
+
+    ``addFilter()`` 会追加到末尾，导致 handler 上已有的外部 filter 先看到明文；
+    子 logger 的记录又不会经过父 logger 的 filter，因此 handler 侧的顺序是唯一防线。
+    """
+    existing = [f for f in target.filters if getattr(f, _FILTER_TAG, False)]
+    if existing and target.filters[0] is existing[0]:
+        return
+    for stale in existing:
+        target.removeFilter(stale)
+    redacting = RedactingFilter()
+    setattr(redacting, _FILTER_TAG, True)
+    target.filters.insert(0, redacting)
 
 
 def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> None:

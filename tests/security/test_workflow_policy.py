@@ -30,9 +30,36 @@ def test_no_secrets_context_in_any_syntax() -> None:
     assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]", _TEXT), "禁止引用 secrets context"
 
 
-def test_no_github_token_reference() -> None:
-    assert not re.search(r"\$\{\{[^}]*\bgithub\.token\b", _TEXT)
+def test_no_github_token_reference_in_any_syntax() -> None:
+    """GitHub 的属性访问同时支持点号与方括号索引，两种都必须拒绝。"""
+    assert not re.search(r"\$\{\{[^}]*\bgithub\s*\.\s*token\b", _TEXT)
+    assert not re.search(r"\$\{\{[^}]*\bgithub\s*\[\s*['\"]token", _TEXT)
     assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]\s*['\"]?GITHUB_TOKEN", _TEXT)
+
+
+def test_no_secrets_key_anywhere_including_inherit() -> None:
+    """`secrets: inherit` 会把全部 secrets 传给被复用 workflow，必须整体禁止。"""
+    hits = re.findall(r"(?m)^[ \t]*secrets\s*:", _TEXT)
+    assert hits == [], f"禁止 workflow/job 级 secrets 键，实际命中 {hits}"
+
+
+def _job_ids() -> list[str]:
+    """不引入 YAML parser：从 `jobs:` 块中按缩进提取 job id。"""
+    lines = _TEXT.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.rstrip() == "jobs:")
+    ids: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.strip() and not line.startswith(" "):
+            break
+        match = re.fullmatch(r"  ([A-Za-z_][\w-]*):", line.rstrip())
+        if match:
+            ids.append(match.group(1))
+    return ids
+
+
+def test_job_set_is_exactly_the_approved_six() -> None:
+    """只检查 6 个 gate『存在』不够——多出的 job 同样会引入未审查的执行面。"""
+    assert sorted(_job_ids()) == sorted(_EXPECTED_JOBS), f"实际 job 集合 = {_job_ids()}"
 
 
 def test_exactly_one_permissions_block_and_it_is_workflow_level() -> None:
