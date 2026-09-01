@@ -202,7 +202,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - golden、near-miss、missing-context、adversarial、timeout、malformed adapter response 和 empty evidence cases。
 - SQL 多语句、注释注入、写语句、未知方言、超范围时间窗和非白名单列必须 fail-closed。
 - Runtime 契约测试证明 `XiaoweiRuntime` 的调用不能跳过 Resolver、Planner、Admission 或 Gateway。
-- 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant/env/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 写能力已实现。
+- 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant_id/environment_id/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 写能力已实现。
 - Runner/TaskStore 契约测试证明每次 CAS 状态变更携带 `expected_version`，每次 lease 内变更携带有效 fencing token，并始终采用存储层返回的 winner。
 - `python -m pytest -q` 与 `python -m pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
 
@@ -247,7 +247,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 - API/CLI 到 Runtime、Runtime 到 Runner、Gateway 到 adapter 的契约测试。
 - Compose 启动、迁移、健康检查、任务提交、Worker 执行、进程重启恢复和重复 idempotency key 集成测试。
-- 入口绕过、超大请求、伪造 tenant/actor、外部错误注入和日志脱敏安全测试。
+- 入口绕过、超大请求、伪造 tenant_id/actor、外部错误注入和日志脱敏安全测试。
 
 **退出标准**：从干净 checkout 能按 README 启动 Compose，通过 API/CLI 完成 fake 只读闭环并在 Worker 重启后恢复；没有真实生产连接。
 
@@ -303,7 +303,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 **交付物**：precheck、ApprovalGate pause、持久化审批、恢复重解析、`plan_hash`/`target_fingerprint` 复核、one write admission、幂等键、fencing、readback 和 `indeterminate`。
 
-**测试门**：审批重放、actor/tenant/env/target 漂移、policy 变化、过期/冲突审批、写超时、进程崩溃、readback 不一致和迟到响应全部做安全与故障注入测试；关键保护做 TDD 反证。
+**测试门**：审批重放、actor/tenant_id/environment_id/target 漂移、policy 变化、过期/冲突审批、写超时、进程崩溃、readback 不一致和迟到响应全部做安全与故障注入测试；关键保护做 TDD 反证。
 
 **退出标准**：测试环境验证能区分 approved、executed、readback-confirmed 和 indeterminate；没有证据时绝不返回 succeeded。生产写入需要新的单独授权和验收计划，且只有受控生产灰度才能称为 canary。
 

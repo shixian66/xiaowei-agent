@@ -189,7 +189,7 @@ precheck(read)
   → ApprovalGate.pause
   → 人工决定
   → resume
-  → 重新解析 actor / tenant / env / target / current state
+  → 重新解析 actor / tenant_id / environment_id / target / current state
   → 重新计算 plan_hash / target_fingerprint
   → 不匹配则 stale_approval，匹配才允许 one write
   → readback
@@ -320,7 +320,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 - 允许执行的 SQL 由确定性 compiler 生成；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
 - SQLGuard 使用 `sqlglot` AST 解析，按方言和 policy profile 检查语句类型、表/列范围、子查询、锁、写入、注释和多语句边界。
 - AST 无法解析、方言不确定、目标不完整或权限无法确认时 fail-closed。
-- 所有工具调用都通过 ToolPolicy 做 tenant、actor、env、resource、operation、risk 和预算校验。
+- 所有工具调用都通过 ToolPolicy 做 tenant_id、actor、environment_id、resource、operation、risk 和预算校验。
 - adapter 不把第三方错误文本当作可信控制信号；原始错误先包成 `ExternalContent`，再由确定性 error mapper 归类。
 - 每个真实写操作最多一次 write admission；审批、幂等键、fencing 和 readback 一起保障 at-most-once 尝试语义。不能无证据承诺 exactly-once。
 
