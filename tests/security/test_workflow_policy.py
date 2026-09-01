@@ -25,13 +25,39 @@ def test_no_pull_request_target() -> None:
     assert "pull_request_target" not in _TEXT
 
 
-def test_no_secrets_context() -> None:
-    assert not re.search(r"\$\{\{\s*secrets\.", _TEXT)
+def test_no_secrets_context_in_any_syntax() -> None:
+    """点号与方括号两种引用形式都必须拒绝。"""
+    assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]", _TEXT), "禁止引用 secrets context"
 
 
-def test_workflow_level_permissions_are_read_only() -> None:
-    assert re.search(r"(?m)^permissions:\n  contents: read\n", _TEXT)
-    assert "write" not in re.findall(r"(?m)^permissions:\n(?:  .*\n)+", _TEXT)[0]
+def test_no_github_token_reference() -> None:
+    assert not re.search(r"\$\{\{[^}]*\bgithub\.token\b", _TEXT)
+    assert not re.search(r"\$\{\{[^}]*\bsecrets\s*[.\[]\s*['\"]?GITHUB_TOKEN", _TEXT)
+
+
+def test_exactly_one_permissions_block_and_it_is_workflow_level() -> None:
+    """job 级 permissions 覆盖会绕过顶层最小权限，必须整体禁止。"""
+    blocks = re.findall(r"(?m)^([ \t]*)permissions:", _TEXT)
+    assert blocks == [""], f"只允许一个顶层 permissions 块，实际缩进集合={blocks}"
+
+
+def test_workflow_permissions_are_read_only() -> None:
+    block = re.search(r"(?m)^permissions:\n((?:  .*\n)+)", _TEXT)
+    assert block, "缺少顶层 permissions 块"
+    assert block.group(1).strip() == "contents: read"
+
+
+def test_no_write_or_write_all_permission_anywhere() -> None:
+    assert "write-all" not in _TEXT
+    assert not re.search(r"(?m)^\s*permissions:\s*write-all\s*$", _TEXT)
+    assert not re.search(r"(?m)^\s+\w[\w-]*:\s*write\s*$", _TEXT)
+
+
+def test_no_env_block_outside_declared_allowlist() -> None:
+    """workflow/job 级 env 只允许 secret-scan 的 gitleaks 钉版变量。"""
+    allowed = {"GITLEAKS_VERSION", "GITLEAKS_SHA256"}
+    names = set(re.findall(r"(?m)^\s+([A-Z][A-Z0-9_]*):\s", _TEXT))
+    assert names <= allowed, f"出现未声明的 env 变量: {sorted(names - allowed)}"
 
 
 def test_every_checkout_disables_credential_persistence() -> None:

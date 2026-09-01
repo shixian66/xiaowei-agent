@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：项目初始化阶段。当前目录只有设计与协作文档，尚未声明已有可运行服务、数据库迁移、容器镜像或线上能力。
+> 当前状态：已具备可安装、可测试、可静态检查的 Python 工程基线（配置、trace、日志三个模块）与 CI；**尚未**具备可运行的 API、Worker、数据库迁移、容器镜像或任何线上能力。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -71,7 +71,7 @@
 
 - Python 3.11（首个且当前唯一强制验证的版本；其他版本未测试，不宣称支持）、FastAPI、Pydantic、SQLAlchemy、Alembic；依赖由 uv 解析并锁定在 `uv.lock`。
 - pytest、pytest-asyncio；安全测试使用 `security` marker 作为显式 CI gate。
-- Ruff 作为唯一 linter，mypy 作为唯一类型检查器；格式化方案待 Foundation 阶段单独决定。
+- Ruff 作为唯一 linter，mypy 作为唯一类型检查器。**本阶段不启用任何自动 formatter**：PEP 8 + Ruff lint 是唯一格式 gate。
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
 - 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。

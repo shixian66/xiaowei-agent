@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25,<2"]
+requires = ["hatchling==1.28.0"]   # 精确钉版；同时列入 dev 以进入 uv.lock 与审计集
 build-backend = "hatchling.build"
 
 [project]
@@ -17,6 +17,8 @@ dev = [
     "ruff>=0.16,<0.17",
     "mypy>=1.20,<2",
     "pip-audit>=2.7,<3",
+    # 构建后端同时列为 dev 依赖，使其进入 uv.lock 与 pip-audit 的可复核集合。
+    "hatchling==1.28.0",
 ]
 
 [tool.hatch.build.targets.wheel]

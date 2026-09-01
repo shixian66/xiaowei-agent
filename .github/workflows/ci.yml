@@ -120,13 +120,19 @@ jobs:
           ./gitleaks version
       - name: Self-test the scanner
         run: |
-          set -euo pipefail
+          set -uo pipefail
           tmp="$(mktemp -d)"
           printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" > "$tmp/bait.tf"
-          if ./gitleaks dir --redact --no-banner "$tmp"; then
-            echo "scanner self-test FAILED: bait was not detected"; exit 1
+          set +e
+          ./gitleaks dir --redact --no-banner "$tmp"
+          rc=$?
+          set -e
+          # gitleaks 用 1 表示"发现泄漏"；其他非零值代表扫描器自身出错，
+          # 不能当作自测成功，否则命令写错也会静默"通过"。
+          if [ "$rc" -ne 1 ]; then
+            echo "scanner self-test FAILED: expected exit 1 (leak found), got $rc"; exit 1
           fi
-          echo "scanner self-test passed: bait detected"
+          echo "scanner self-test passed: bait detected (exit 1)"
           rm -rf "$tmp"
       - name: Scan full git history
         run: ./gitleaks git --log-opts="--all" --redact --no-banner .

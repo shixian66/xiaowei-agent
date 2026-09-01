@@ -19,7 +19,9 @@
 | M1 阻塞项 | **分支保护无法启用**——private + GitHub Free。API 实证：`POST /rulesets` 返回 `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` |
 | 远程 | `git@github.com:shixian66/xiaowei-agent.git`（**private**），默认分支 `main` |
 | PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1)，未合并 |
-| CI | 六个 gate 首次全绿：`tests` `security-gate` `lint` `types` `deps-audit` `secret-scan`（run 33480790006） |
+| M1 候选 SHA | 见本轮验收报告；handoff 不记录会随返修漂移的分支 HEAD，请用 `git rev-parse claude/m1-engineering-baseline` 查询 |
+| CI 首次全绿 | run `33480910242`，对应 SHA `c90cabb…`（**历史事件**，非当前受审 SHA 的证据） |
+| CI 当前证据 | 每个受审 SHA 的六个 gate 结果由该轮验收报告给出，与「首次全绿」分别记录 |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
@@ -109,8 +111,6 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - M6b 连接测试环境 StarRocks 真实只读的单独授权（环境、账号 secret reference、范围、时窗、脱敏、recording 删除方式）。
 - **分支保护的启用路径**：升级 GitHub Pro／改为 public／批准修改 M1 退出标准（三选一）。
 - 发布环境（M5 后）。
-- 代码格式化方案（M1，ADR-008 已明确 Ruff 只作为 linter）。
-- 固定开发租户 ID 的具体取值（M1）。
 
 未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物本身不构成 E1，但其基础设施许可仍受 ADR-007 D8 时点约束）。
 
@@ -137,14 +137,12 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 已验证
 
-- 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
-- 分支 `claude/m0-plan-closure` 已从历史起点创建、完成 19 个前向追加提交并通过验收，随后以 `--ff-only` 合入 `main`；逐条提交证据见第 4 节指向的归档文件。本文件不记录会随提交漂移的绝对计数。
-- 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
-- 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
-- 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
-- 执行上下文字段名已全项目统一为 `tenant_id`、`actor`、`environment_id`，正文中的字段名式枚举无旧别名残留；`ARCHITECTURE.md` 与 `README.md` 架构图内的 `tenant`/`env` 是概念轴标签，不是 DTO 字段，按既定范围未修改。
-- 授予 Reflection 扩计划权的旧表述已从全部跟踪文件清除，按其字面量扫描结果为 0（本文件亦不保留这些字面量）；`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` 与本文件的 Reflection 口径一致。
-- 第五轮 diff 中 `ToolGateway`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`TaskStore`、`PlanCompiler`、`StepAdmission` 的删除行经逐行核对，仅来自 M3 交付物同一行的改写，安全链组件与边界一个未删。
+- M0 验收对象 `a1a8c888…` 已以 `--ff-only` 合入 `main`，无合并提交，历史未改写。
+- 远程 `git@github.com:shixian66/xiaowei-agent.git`（private），默认分支 `main`；播种前已核验远程无任何历史。
+- M1 候选 SHA 见本节「M1 候选」条目；在该 SHA 上，激活 `.venv` 后原样执行 ADR-008 四条命令全部 exit 0。
+- 依赖由 `uv.lock` 锁定，构建后端 `hatchling` 精确钉版并纳入锁定与 `pip-audit` 审计集。
+- 日志脱敏的攻击矩阵（Basic 认证、带引号 JSON 键、mapping 作格式化参数、含空格未引号值、自定义对象 `__str__`、非 JSON 映射键、同名 logger 上的外部 handler、格式化占位符破坏）逐条复现后封堵，并固化为回归测试。
+- 变异反证：移除 `redact()` 键分支、配置异常改回 `except` 块内 `from exc`、workflow 注入 `secrets[...]` 与 job 级 `write-all`，三类变异均使对应安全测试转红。
 
 ### 只读推理
 
@@ -153,10 +151,11 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 未覆盖
 
-- 无远程、无 PR、无 CI；未绑定任何远程仓库。
-- 无 Python 代码、无 `pyproject.toml`、无依赖安装、无虚拟环境。
-- `python -m pytest`、`ruff`、`mypy` 从未在本项目执行过；四条验证命令目前是目标口径，不是可执行事实。
-- 未连接任何外部系统，包括 StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose 和任何模型 API。
+- **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
+- 未部署、未 canary、未用户验收。
+- 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
+- 无业务 DTO、Capability、Planner、TaskStore、Gateway 或 Compose；`tests/{contract,integration,evals}/` 尚未创建。
+- `main` 分支上尚无 CI（workflow 随本 PR 引入，合并后才对 `main` 的 push 生效）。
 - ADR-001 至 ADR-006 尚未编写。
 - 第五轮为纯文档收口，未运行 `python -m pytest`、`ruff check .` 或 `mypy src`——项目当前无代码、无 `pyproject.toml`、无依赖、无 Python 包，这三条命令没有作用对象。
 - 决策权责矩阵、错误分析闭环、Reflection 越权拒绝和 Multi-Agent 准入条件目前都只是文档要求，尚无任何测试或代码验证。
