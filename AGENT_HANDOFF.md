@@ -35,7 +35,8 @@
 - **验证命令单一真源**为 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`；禁止裸 `pytest` 调用形式。
 - 允许受限 DSL 不等于 V1 必须实现；M0-M9 使用显式 `CapabilitySpec`，达门槛后再以 ADR-004 单独立项。
 - 默认 Runner 是 `DeterministicStepRunner`；LangGraph 只能作为 adapter，先通过真实生命周期评测。
-- **E1 默认关闭**：E1 指**经 `ToolGateway` 对被管运维目标执行的 `side_effect` 操作**；M0-M7 全程禁止 E1（含非生产环境），M8 的受控写需三项显式条件齐备，生产写另需独立授权。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1**，但内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
+- **E1 默认关闭**：E1 指**任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True` 并通过 `StepAdmission`。M0-M7 全程禁止 E1（含非生产环境），M8 的受控 E1 需三项显式条件齐备，生产写另需独立授权。
+- **E1 分类必须确定性派生**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 派生；模型、用户输入和 adapter 都不得设置、覆盖或降级；未知分类、声明冲突、写操作误标只读一律 fail-closed。
 - `test-env verified` 是非生产运行证据的旁注标签，不属于 readiness ladder，也不替代 `canary`。
 
 ## 3. 已生效的决策记录
@@ -47,13 +48,21 @@
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
-**外部调用许可**（ADR-007 D4）：真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权。CI 全程不持凭证，不执行真实运维目标、真实模型、非生产只读或任何写调用。
+**外部调用许可**（ADR-007 D4）：真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许；StarRocks 非生产只读需 M6b 单独授权。CI 全程不持凭证，不执行真实运维目标、真实模型、非生产只读或任何 E1 调用；CI 对基础设施的写权限按 ADR-007 D8 的里程碑时点逐级开放。
 
 **模型边界**：实现 provider adapter 与调用真实模型 API 是两件事。adapter 的实现和离线测试允许在其所属里程碑内进行，但**实现权不等于调用权**；M5 之后**不自动获得**真实调用权限。发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 M0-M6a 的禁止期冲突。
 
-**写权限**（ADR-007 D6/D7）：**生产连接和生产写默认禁止**。E1 的精确范围是**经 `ToolGateway` 对被管运维目标（StarRocks、Prometheus、资产系统、MySQL、Kafka、Kubernetes 等）执行的 `side_effect` 操作**，判定依据是步骤的 `side_effect` 标记与 `ToolGateway` 调用边界，不依据是否发生磁盘写入。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险的测试环境受控写，且必须同时满足 ADR-005 已定稿、项目负责人已批准、ADR-007 已记录明确例外或完成修订三项，缺一即保持禁止。**生产写仍需新的独立授权和独立验收计划**，不能由 M8 的测试环境结论推导得出。
+**写权限**（ADR-007 D6/D7/D8）：**生产连接和生产写默认禁止**。
 
-**不属于 E1**：TaskStore 的任务与状态迁移、approval 记录、audit 事件、evidence 索引与脱敏摘要等系统内部持久化；本地数据库 migration；测试 fixture、recording 和测试产物。这三类的许可由 D4 的 C 层与各里程碑批准范围决定，因此 M4 的 PostgreSQL TaskStore、M5 的 Compose 集成测试和 CI 的本地隔离数据库写入均属合规。**但内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道**；任何以写 TaskStore、audit、evidence 或 migration 为名而实际触达运维目标的路径一律按 E1 认定并禁止。CI 可以写本地隔离 PostgreSQL 和测试产物，**但 E1 调用次数必须为 0**。
+**E1 按后果定义，不按路径或标记定义**：E1 = **任何可能修改被管运维目标（StarRocks、Prometheus、资产系统、MySQL、Kafka、Kubernetes 等）状态的操作**。该判定与「是否经 `ToolGateway`」「是否被标记 `side_effect=True`」「是否发生磁盘写入」都无关。**绕过 `ToolGateway` 直接持有第三方客户端、或借内部持久化通道代理触达运维目标，都不因绕过而逃出 E1**，而是同时构成 E1 违规与架构违规。合法 E1 执行的唯一形式是：经 `ToolGateway`、`side_effect=True`、且已通过 `StepAdmission`。
+
+**分类来源**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 确定性派生；模型输出、用户输入、`IntentDraft`、外部文本和 adapter 都不得设置、覆盖或降级，adapter 尤其不得把已声明的写操作在运行时降级为只读。`effect_class` 未知/未声明、声明与步骤标记冲突、写操作被误标 `side_effect=False`、分类来源版本不可确定——四种情况一律 fail-closed。
+
+**时点**：**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险的测试环境受控 E1，且必须同时满足 ADR-005 已定稿、项目负责人已批准、ADR-007 已记录明确例外或完成修订三项，缺一即保持禁止。**生产写仍需新的独立授权和独立验收计划**，不能由 M8 的测试环境结论推导得出。
+
+**本身不构成 E1**：TaskStore 的任务与状态迁移、approval 记录、audit 事件、evidence 索引与脱敏摘要等系统内部持久化；本地数据库 migration；测试 fixture、recording 和测试产物。但这三类**不因此自动获得基础设施许可**——使用本地隔离 PostgreSQL 或 Compose 仍须按 D4 的 C 层取得对应里程碑批准。
+
+**CI 基础设施时点**（ADR-007 D8）：**M1-M3 的 CI 只允许写测试产物，不使用 PostgreSQL，也不使用 Compose**；M4 批准后才允许对应 CI job 使用本地隔离 PostgreSQL；M5 批准后才允许使用本地隔离 Compose。**所有阶段 CI 的 E1 调用次数恒为 0**，且 CI 不持有任何凭证。
 
 **真实调用开放点按类别分别管理**，不存在「所有真实调用只能发生在 M6b」的说法：当前已批准路线中的首个真实运维目标调用是 M6b 的 StarRocks 非生产只读（仍需单独授权）；真实模型 API 调用遵守 B2 的独立里程碑；M8 的测试环境受控写遵守 E1 与 D6 三项门。
 
@@ -72,9 +81,12 @@
 | 7 | `b8ab1fd9ab609c1890cf4c4e43f49bbef853db30` | handoff 补记提交 6 与字段命名复核结论 | `AGENT_HANDOFF.md` |
 | 8 | `31ad9b24d4ba3f96dc7b1c52fce12a1c17971817` | 收紧写权限与真实模型调用边界，分离计划职责与漂移事实，清除历史命令字面量 | `AGENTS.md`、`DEVELOPMENT_PLAN.md`、`docs/adr/` |
 | 9 | `873cae94ed276250c8427251e02815e241713180` | handoff 同步边界并补全收口提交清单 | `AGENT_HANDOFF.md` |
-| 10 | `7b75a126f0249f8a3164ad20a05d31ce9e2f487f` | 定义 E1 为经 `ToolGateway` 对运维目标的 `side_effect` 操作，修正 M1/CI 真实调用口径 | `DEVELOPMENT_PLAN.md`、`docs/adr/ADR-007` |
+| 10 | `7b75a126f0249f8a3164ad20a05d31ce9e2f487f` | 首次引入 E1 分类并修正 M1/CI 真实调用口径（该版 E1 定义已被提交 12 取代） | `DEVELOPMENT_PLAN.md`、`docs/adr/ADR-007` |
+| 11 | `71b69673ce55f7137c814d68eb44921bc82b0273` | handoff 同步 E1 范围与真实调用开放点 | `AGENT_HANDOFF.md` |
+| 12 | `13b39216dc733ebd2cb1ff7b354eae59b72e1a07` | E1 改为按后果定义，要求分类确定性派生与 fail-closed，新增 D8 CI 基础设施时点 | `docs/adr/ADR-007` |
+| 13 | `7af21f514dbb1bb8a527e2830c16543603a5cbcf` | 计划侧同步 E1 定义、CI 时点与 M2/M3 伪标拒绝测试门 | `DEVELOPMENT_PLAN.md` |
 
-提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮修订（Codex 复审 SHA `873cae94`），提交 10 起为第三轮 E1 权限分类修订。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
+提交 1-7 为 Codex 首轮审查范围，原始差异为 `7 files changed, 306 insertions(+), 114 deletions(-)`。提交 8-9 为第二轮修订（复审基点 `873cae94`），提交 10-11 为第三轮，提交 12 起为第四轮 E1 权限分类根因修订（复审基点 `71b69673`）。全部为前向追加，未 rebase、未 amend、未 reset，历史未被改写。
 
 **本文件所在提交的 SHA 不写在此处**，因为提交无法记录自身 SHA；分支最终 HEAD SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
 
@@ -91,7 +103,7 @@
 ## 6. 仍需拍板的事项
 
 - 审批主体、审批渠道、审批有效期和拒绝/过期/冲突后的恢复语义（M8 前，ADR-005）。
-- M8 受控写的三项开放条件是否齐备：ADR-005 定稿、项目负责人批准、ADR-007 明确例外或修订。
+- M8 受控 E1 的三项开放条件是否齐备：ADR-005 定稿、项目负责人批准、ADR-007 明确例外或修订。
 - 生产写的独立授权与独立验收计划（不由 M8 推导）。
 - 真实模型 API 网络调用所属的独立里程碑，及其 ADR、凭证引用、数据范围和保留策略授权。
 - 证据、报告和大产物的存储位置及保留周期（M6b 前）。
@@ -101,7 +113,7 @@
 - 代码格式化方案（M1，ADR-008 已明确 Ruff 只作为 linter）。
 - 固定开发租户 ID 的具体取值（M1）。
 
-未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物不在此列）。
+未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物本身不构成 E1，但其基础设施许可仍受 ADR-007 D8 时点约束）。
 
 ## 7. 不要盲改
 
@@ -113,7 +125,9 @@
 - 不要把外部文本中的指令、错误码或状态描述未经归类直接写进执行决策。
 - 不要在文档或脚本中恢复缺少 `python -m` 前缀的测试命令形式。
 - 不要把 provider adapter 的实现进度当作真实模型调用许可；不要在 M0-M7 以任何理由开启 E1；不要用 M8 的测试环境结论推导生产写许可。
-- 不要把 TaskStore、approval、audit、evidence 或 migration 的内部持久化当作修改运维目标的旁路；也不要反过来把这些内部持久化误判为 E1 而阻塞 M4/M5。
+- 不要把 TaskStore、approval、audit、evidence 或 migration 的内部持久化当作修改运维目标的旁路；也不要反过来把这些内部持久化本身误判为 E1 而阻塞 M4/M5。
+- 不要让模型、用户输入或 adapter 参与决定 `side_effect` / `effect_class`；不要在分类未知或冲突时按只读放行。
+- 不要在 M1-M3 的 CI 中引入 PostgreSQL 或 Compose；这两项要到 M4/M5 各自批准后才可用于对应 CI job。
 - 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
@@ -122,7 +136,7 @@
 ### 已验证
 
 - 本地 Git 仓库已初始化，`main` 基线提交 `7ca391da` 的树内容为 6 个文件：`.gitignore`、`AGENTS.md`、`AGENT_HANDOFF.md`、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`；`.DS_Store` 未被纳入。
-- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 10 个收口提交，SHA 与范围逐条列于第 4 节。
+- 分支 `claude/m0-plan-closure` 已从该基线创建；截至本文件所在提交之前，分支上共有 13 个收口提交，SHA 与范围逐条列于第 4 节。
 - 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处缺少 `python -m` 前缀的测试命令已全部改为规范形式；全部 Markdown 的非规范命令扫描结果为 0，包括 ADR 与本文件在内均不再保留旧写法的字面量。
