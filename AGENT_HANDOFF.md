@@ -58,6 +58,7 @@
 | 统一执行上下文字段名，收敛 Phase 0/1 边界，补 test-env 标签说明与 ADR 索引 | `0bb9ae2419465e333828d4b84010bedb220e8cde` | `ARCHITECTURE.md` |
 | 统一验证命令为 `python -m` 形式并收敛 Python 版本口径 | `37c2b981fe02697b6ff1ededa4d903057a98c101` | `AGENTS.md`、`ARCHITECTURE.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
 | 纳入计划文档与 `docs/adr` 落点，更新计划批准状态与事实基线 | `7c07ff5fb97fbf297881182063c3d25305c2e274` | `AGENTS.md`、`README.md`、`DEVELOPMENT_PLAN.md` |
+| 收敛正文中残留的 `tenant`/`env` 字段名别名 | `5a175d1974ec9d0627576e0dd756dee897978e9d` | `ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md` |
 
 **包含本文件在内的分支最终 HEAD SHA 不写在此处**，因为提交无法记录自身 SHA；该 SHA 由 M0 验收报告给出，供 Codex 按精确 SHA 审查。
 
@@ -104,6 +105,7 @@
 - 初始化前对六个基线文件做过 SHA-256 快照比对，全部一致，未发生计划外漂移。
 - 对纳入 Git 的全部文件做过敏感信息扫描（私钥、云凭证、token、连接串、IP、邮箱），真实命中数为 0。
 - 四份文档中原有的 7 处裸 `pytest` 调用已全部改为 `python -m pytest` 形式；`docs/adr/ADR-008` 背景段保留一处旧写法作为历史引用。
+- 执行上下文字段名已全项目统一为 `tenant_id`、`actor`、`environment_id`，正文中的字段名式枚举无旧别名残留；`ARCHITECTURE.md` 与 `README.md` 架构图内的 `tenant`/`env` 是概念轴标签，不是 DTO 字段，按既定范围未修改。
 
 ### 只读推理
 
