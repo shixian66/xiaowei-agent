@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-02（Asia/Shanghai） |
-| 阶段 | **M0、M1 已验收；M2 已合入 `main` 但尚未验收** |
+| 阶段 | **M0、M1、M2 已验收；下一步 M3 详细计划** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -18,12 +18,12 @@
 | M1 状态 | **已验收通过**（技术审查通过 + 六个 CI gate 全绿 + 负责人批准退出标准修订） |
 | 分支保护 | **未建立且当前不可建立**——private + GitHub Free，API 实证 `403`。项目负责人已于 2026-09-01 明确批准将其延后，M1 退出标准据此修订；见残余风险 |
 | 远程 | `git@github.com:shixian66/xiaowei-agent.git`（**private**），默认分支 `main` |
-| PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1) **已合并**（2026-09-02T01:38:57Z） |
+| PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1)、[#3](https://github.com/shixian66/xiaowei-agent/pull/3)、[#4](https://github.com/shixian66/xiaowei-agent/pull/4) **均已合并** |
 | M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
 | M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
-| M2 状态 | **已合入 `main`（PR #3，fast-forward，合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`，无合并提交，历史未改写），但尚未验收。** 合并后补审又发现三类拒绝路径泄漏，正在 `claude/m2-reject-path-followup` 上修复。**合并 ≠ 验收**：验收需项目负责人在 Codex 对新 SHA 复审通过后明确声明。逐提交 SHA 用 `git log --oneline d0971666..main` 查询 |
-| M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工（本分支已带入该文件） |
+| M2 状态 | **已验收通过并归档**。PR #3 以 fast-forward 合入契约内核（合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`）；PR #4 以 fast-forward 合入拒绝路径泄漏补修（最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e`）。归档见 [docs/handoff/archive/2026-09-02-M2-contract-kernel.md](docs/handoff/archive/2026-09-02-M2-contract-kernel.md) |
+| M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经多轮 Codex 审核后获批开工（已带入 `main`） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
@@ -101,9 +101,9 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
-3. ~~M2 详细计划编写与审批~~ **已完成**：经三轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
-4. ~~M2 实现~~ **已合入 `main`，待验收**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地并通过四条门。
-5. **下一步**：M2 技术审查与验收；通过后为 M3 单独编写详细实施计划并获批，才能以 TDD 落地第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
+3. ~~M2 详细计划编写与审批~~ **已完成**：经多轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
+4. ~~M2 实现与验收~~ **已完成**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地；合并后拒绝路径泄漏补修已在 PR #4 合入并通过复审。
+5. **下一步**：为 M3 单独编写详细实施计划并获批，才能以 TDD 落地第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
 7. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
@@ -151,7 +151,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 已验证
 
-- **M2 合并对象 `527cd7f` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 633 passed；`python -m pytest -m security -q` 492 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..527cd7f` 无输出。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
+- **M2 最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 640 passed / 3 warnings；`python -m pytest -m security -q` 499 passed / 141 deselected / 3 warnings；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..319253a` 无输出。PR #4 的 merge commit 与 head 均为 `319253a`，`main` 独立 CI run `33629416660` 为 success。更早的逐 SHA 结果见各提交信息与归档。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
 - 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
@@ -184,8 +184,8 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - **分支保护缺失（已知并被显式接受）**：private + GitHub Free 无法启用（API 实证 403）。项目负责人已批准延后并据此修订 M1 退出标准。后果是**红灯 PR 仍可被人工合并、可强推 `main`、可绕过 PR 流程**，合并纪律完全依赖人工。具备条件后应优先补齐。
 - 日志脱敏是启发式规则：新出现的密钥形状或键名需要补规则；未加引号的敏感值脱敏到分隔符或行尾，属有意的过度脱敏。
 - `pip-audit` 只能发现已收录漏洞，不能证明依赖无恶意代码。
-- 架构约束（Reflection 边界、E1 分类、能力扩展成本）尚无代码验证，要到 M2/M3/M6a 才可证。
-- Reflection 的越权拒绝目前靠契约设计保证（结论 DTO 不含步骤/工具字段），真正的护栏要等 M2/M3 的契约与安全测试落地。
+- 部分架构约束（首条闭环是否正确消费 M2 契约、能力扩展成本）尚无运行验证，要到 M3/M6a 才可证。
+- Reflection 的越权拒绝已有 M2 契约层字段闭集与安全测试；真正被首条闭环消费后的护栏要等 M3 落地。
 - 「预编译的预算内可选只读分支」的形状已在 M2 给出（`StepCondition` 四成员闭集枚举，条件只能引用更早的步骤）。**残余部分**：该闭集是否覆盖 M3 实际需要的条件种类，要到 M3 才可证；不足时须改枚举并过评审，不得改成开放表达式。
 - `ToolResult` 的私有性只封堵了直接构造、`model_validate`、`model_construct`、`model_copy` 四条实用路径；`object.__setattr__` 与重定义模块无法在语言层封堵，属已知残余风险，只能由评审与源码扫描覆盖。
 - `InMemoryTaskStore` 的 CAS 语义只在单进程内成立（一把 `asyncio.Lock` 串行化写入）；跨进程原子性、崩溃恢复与隔离级别要到 M4 的 PostgreSQL 实现才可证。
