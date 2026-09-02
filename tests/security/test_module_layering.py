@@ -60,6 +60,9 @@ _ALLOWED_INTERNAL = {
         "xiaowei_agent.observability",
         "xiaowei_agent.runners",
     },
+    # evidence 是纯构造器：只依赖 contracts（+ 通用叶子 redaction）。这条窄依赖是
+    # runners → evidence 那条边的对价，由 test_evidence_layer_purity.py 承重。
+    "evidence": {"xiaowei_agent.contracts", "xiaowei_agent.evidence"},
     "observability": {"xiaowei_agent.contracts", "xiaowei_agent.observability"},
 }
 

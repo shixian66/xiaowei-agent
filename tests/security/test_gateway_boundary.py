@@ -389,6 +389,7 @@ _DOMAIN_PACKAGES = (
     "governance",
     "runners",
     "observability",
+    "evidence",
 )
 """只扫**领域层**。
 
