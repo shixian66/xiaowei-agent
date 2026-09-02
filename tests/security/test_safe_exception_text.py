@@ -93,13 +93,25 @@ def test_keeps_the_exception_type_for_diagnosis() -> None:
     assert "ValueError" in safe_exception_text(ValueError("boom"))
 
 
-def test_falls_back_when_even_the_type_name_fails() -> None:
-    """元类可以让属性访问抛异常——类型名同样不假定为安全。"""
+@pytest.mark.parametrize(
+    "thrown",
+    [RuntimeError("name failed"), KeyboardInterrupt("name failed")],
+    ids=["exception", "baseexception"],
+)
+def test_falls_back_when_even_the_type_name_fails(thrown: BaseException) -> None:
+    """元类可以让属性访问抛异常——类型名同样不假定为安全。
+
+    两个参数缺一不可。``_safe_str`` 已经吸收了 ``__str__`` 的失败，因此
+    ``safe_exception_text`` 自己那两个 try 实际守的是 ``type(exc).__name__`` 与
+    ``scrub_text``。只用 ``RuntimeError`` 时 ``except Exception`` 就够了，外层
+    加宽到 ``BaseException`` 不承重——变异测试确认过这一点，补上
+    ``KeyboardInterrupt`` 后它才真正承重。
+    """
 
     class _HostileMeta(type):
         @property
         def __name__(cls) -> str:
-            raise RuntimeError("name failed")
+            raise thrown
 
     class _HostileTypeError(RuntimeError, metaclass=_HostileMeta):
         pass
