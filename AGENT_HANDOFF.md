@@ -7,7 +7,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
-| 截止时间 | 2026-09-01（Asia/Shanghai） |
+| 截止时间 | 2026-09-02（Asia/Shanghai） |
 | 阶段 | **M0、M1 均已验收；M2 尚未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
@@ -18,10 +18,10 @@
 | M1 状态 | **已验收通过**（技术审查通过 + 六个 CI gate 全绿 + 负责人批准退出标准修订） |
 | 分支保护 | **未建立且当前不可建立**——private + GitHub Free，API 实证 `403`。项目负责人已于 2026-09-01 明确批准将其延后，M1 退出标准据此修订；见残余风险 |
 | 远程 | `git@github.com:shixian66/xiaowei-agent.git`（**private**），默认分支 `main` |
-| PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1)，未合并 |
-| M1 候选 SHA | 见本轮验收报告；handoff 不记录会随返修漂移的分支 HEAD，请用 `git rev-parse claude/m1-engineering-baseline` 查询 |
-| CI 首次全绿 | run `33480910242`，对应 SHA `c90cabb…`（**历史事件**，非当前受审 SHA 的证据） |
-| CI 当前证据 | 每个受审 SHA 的六个 gate 结果由该轮验收报告给出，与「首次全绿」分别记录 |
+| PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1) **已合并**（2026-09-02T01:38:57Z） |
+| M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
+| M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
+| M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
@@ -94,7 +94,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 ## 5. 下一步顺序
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
-2. ~~M1 实现~~ **已完成**，PR #1 六个 CI gate 全绿；**待 Codex 按精确 SHA 审查与负责人验收**。
+2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
 3. **下一步**：为 M2 单独编写详细实施计划并获批后才能开工；M2 落地 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
@@ -156,7 +156,6 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 未部署、未 canary、未用户验收。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
 - 无业务 DTO、Capability、Planner、TaskStore、Gateway 或 Compose；`tests/{contract,integration,evals}/` 尚未创建。
-- `main` 分支上尚无 CI（workflow 随本 PR 引入，合并后才对 `main` 的 push 生效）。
 - ADR-001 至 ADR-006 尚未编写。
 - 决策权责矩阵、错误分析闭环、Reflection 越权拒绝和 Multi-Agent 准入条件目前都只是文档要求，其代码护栏要到 M2/M3 才落地。
 
