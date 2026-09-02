@@ -35,6 +35,7 @@ M2 已落地后续模块共同使用的契约内核：
 | 合并后补修 PR | [#4](https://github.com/shixian66/xiaowei-agent/pull/4) |
 | PR #4 最终对象 | `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` |
 | M2 受审提交范围 | `git log --oneline --reverse d0971666..319253a` |
+| M2 计划修订史 | `origin/claude/m2-plan`（`eac46f4`，4 个提交：V2 → V2.1 → V2.2 → V2.3，对应 Codex 三轮计划审查）。该分支**不并入 `main`**：计划终稿已随实现分支进入 `docs/plans/M2-contracts-kernel.md`（内容逐字节一致），合并只会产生一个无内容变化的合并提交，破坏本项目「无合并提交」的性质。它作为归档 ref 长期保留，**清理分支时不得删除** |
 
 该范围共有 26 个提交：
 

@@ -63,7 +63,7 @@
 
 入口层不拥有业务判断；模型不拥有执行权；外部文本不拥有策略修改权。完整边界和状态语义见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-能力现状记录在 `docs/CAPABILITIES.md`，详细 handoff 历史记录在 `docs/handoff/archive/`。这两个路径属于项目治理骨架：`docs/handoff/archive/` 已收录 M0 收口归档；`docs/CAPABILITIES.md` 尚未创建，其条目由 Registry/代码生成，能力实现后才会出现。
+能力现状记录在 `docs/CAPABILITIES.md`，详细 handoff 历史记录在 `docs/handoff/archive/`。这两个路径属于项目治理骨架：**已归档的里程碑以 `docs/handoff/archive/` 目录内容为准**——本文件不维护会随每次验收增长的清单；`docs/CAPABILITIES.md` 尚未创建，其条目由 Registry/代码生成，能力实现后才会出现。
 
 ## 初始技术基线
 
