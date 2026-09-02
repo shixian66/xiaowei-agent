@@ -5,6 +5,7 @@
 ``tests/security/test_module_layering.py`` 承重。
 """
 
+from xiaowei_agent.contracts.approval import AdmissionCertificate, ApprovalRequest
 from xiaowei_agent.contracts.base import (
     Contract,
     FiniteFloat,
@@ -45,11 +46,23 @@ from xiaowei_agent.contracts.enums import (
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.intent import IntentDraft
+from xiaowei_agent.contracts.plan import (
+    PLAN_SCHEMA_VERSION,
+    ExecutionPlan,
+    PlanBudget,
+    PlanStep,
+    StepCondition,
+)
+from xiaowei_agent.contracts.policy import PolicyDecision, PolicySnapshot
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
+from xiaowei_agent.contracts.target import ResolvedTarget
 
 __all__ = [
+    "PLAN_SCHEMA_VERSION",
     "AdapterStatus",
+    "AdmissionCertificate",
     "AgentError",
+    "ApprovalRequest",
     "ApprovalState",
     "BindingRejection",
     "Candidate",
@@ -60,6 +73,7 @@ __all__ = [
     "Contract",
     "EffectClass",
     "ErrorCategory",
+    "ExecutionPlan",
     "ExternalContent",
     "ExternalInputKind",
     "ExternalSource",
@@ -71,11 +85,17 @@ __all__ = [
     "JsonScalar",
     "OperationSpec",
     "PipelineStage",
+    "PlanBudget",
+    "PlanStep",
+    "PolicyDecision",
+    "PolicySnapshot",
     "Rejection",
     "RequestContext",
     "RequestEnvelope",
+    "ResolvedTarget",
     "RiskLevel",
     "StageOutcome",
+    "StepCondition",
     "StepConditionKind",
     "StepResultStatus",
     "StrictInt",

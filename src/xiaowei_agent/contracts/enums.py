@@ -79,13 +79,17 @@ class StepConditionKind(StrEnum):
 class StepResultStatus(StrEnum):
     """**步骤**结果，与 :class:`TaskStatus`（**任务**状态）分属两个层级。
 
-    两者混用会让"某个步骤失败"与"整个任务失败"在条件里不可区分。
+    **取值刻意与 TaskStatus 不相交**（``step_`` 前缀）。只改名不改值是不够的：
+    StrEnum 成员就是字符串，若两边都用 ``"failed"``，在 pydantic 的 lax 模式下把
+    ``TaskStatus.FAILED`` 传给步骤条件会被静默接受——"某个步骤失败"与"整个任务
+    失败"于是在数据层就不可区分。用 strict 拒绝跨枚举传值则会打断 M4 从
+    TaskStore 反序列化时的 ``str -> StrEnum``，因此在**取值**上分开。
     """
 
-    OK = "ok"
-    FAILED = "failed"
-    TIMEOUT = "timeout"
-    SKIPPED = "skipped"
+    OK = "step_ok"
+    FAILED = "step_failed"
+    TIMEOUT = "step_timeout"
+    SKIPPED = "step_skipped"
 
 
 class TaskStatus(StrEnum):

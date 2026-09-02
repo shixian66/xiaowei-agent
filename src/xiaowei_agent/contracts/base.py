@@ -12,6 +12,12 @@
    覆盖它，带 ``update`` 时重新走 ``model_validate``。
 3. ``model_construct`` 跳过**全部**校验，比 ``model_copy`` 更彻底 → 一并封死。
 
+**本类不提供任何"未校验复制"的逃生口。** 需要在校验期规范化取值时，一律用
+**字段级** ``AfterValidator``——``model_validator(mode="after")`` 里返回非
+``self`` 的对象在 ``__init__`` 路径上会被丢弃（Pydantic 只发一条警告），规范化
+会静默失效。``tests/security/test_validation_bypass_surface.py`` 断言这条逃生口
+始终不存在。
+
 重新校验用 ``{**self.__dict__, **update}`` 而非 ``model_dump()``，以保留嵌套契约
 实例与 ``datetime`` 的原始类型，避免 JSON 往返丢失信息。
 
@@ -30,7 +36,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, Final, Never, Self, TypeAlias
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PlainSerializer
 
 TRACE_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"
 """trace_id 的字面格式，全项目**唯一**定义处。
@@ -88,8 +94,13 @@ def frozen_map(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(dict(value))
 
 
-FrozenMap = Annotated[Mapping[StrictStr, JsonScalar], AfterValidator(frozen_map)]
-FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map)]
+# ``PlainSerializer(dict)``：``MappingProxyType`` 不是 pydantic 认识的序列化目标，
+# 不显式转换时 ``model_dump()`` 会发 PydanticSerializationUnexpectedValue 警告。
+# M4 要把契约持久化进 TaskStore，序列化必须是干净的。
+_as_dict = PlainSerializer(dict, return_type=dict, when_used="always")
+
+FrozenMap = Annotated[Mapping[StrictStr, JsonScalar], AfterValidator(frozen_map), _as_dict]
+FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map), _as_dict]
 
 
 class Contract(BaseModel):
@@ -121,16 +132,3 @@ class Contract(BaseModel):
         raise NotImplementedError(
             "Contract 禁止 model_construct：它跳过全部校验，请用 model_validate"
         )
-
-    def _copy_within_validation(self, **update: object) -> Self:
-        """**仅供本类自身的 after-validator 使用**的未校验复制。
-
-        after-validator 正在校验途中，此时调用会重新校验的 ``model_copy`` 会重入
-        同一个校验器。使用本方法的 validator 必须满足**幂等**：第二次看到已规范化
-        的值时原样返回，否则仍会无限递归。
-
-        **这是一个被刻意保留的未校验通道**，因此由
-        ``tests/security/test_validation_bypass_surface.py`` 以源码扫描白名单限定
-        调用点；否则上面封死的绕过只是换了个名字继续存在。
-        """
-        return super().model_copy(update=update)

@@ -1,10 +1,14 @@
 """未校验通道的收口。
 
-``Contract.model_copy`` 的覆盖只挡住**绑定调用**。还有两条同类通道：
+``Contract.model_copy`` 的覆盖只挡住**绑定调用**。
 ``BaseModel.model_copy(obj, update=...)`` 这种未绑定调用会跳过子类覆盖（实证可
-写入违反 ``Field(gt=0)`` 的值），而 ``_copy_within_validation`` 是我们自己为
-after-validator 保留的未校验入口。两者都必须由源码扫描限定调用点，否则上面封死
-的绕过只是换了个名字继续存在。
+写入违反 ``Field(gt=0)`` 的值），因此必须由源码扫描禁止。
+
+计划原本要为 after-validator 保留一个未校验的 ``_copy_within_validation``。实现
+时发现 Pydantic v2 的 ``model_validator(mode="after")`` 经 ``__init__`` 构造时会
+**丢弃**返回的非 ``self`` 对象（只发一条警告），那条路本就不成立；规范化改用
+**字段级** ``AfterValidator`` 后该逃生口再无调用者，已从基类删除。本文件因此断言
+它**始终不存在**——保留一个没人用的未校验通道，等于把封死的绕过换个名字留着。
 """
 
 import ast
@@ -16,13 +20,6 @@ pytestmark = pytest.mark.security
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 _BASE = _SRC / "contracts" / "base.py"
-# 仅有的两个 after-validator 会在校验途中复制自身。新增调用点必须同时更新此处，
-# 并说明为何该 validator 是幂等的。
-_ALLOWED_ESCAPE_HATCH = {
-    _BASE,
-    _SRC / "contracts" / "target.py",
-    _SRC / "contracts" / "trace_events.py",
-}
 
 
 def _referenced_names(path: Path) -> set[str]:
@@ -36,14 +33,47 @@ def _referenced_names(path: Path) -> set[str]:
     return names
 
 
-def test_escape_hatch_is_confined_to_its_declared_call_sites() -> None:
+def test_no_unvalidated_copy_escape_hatch_exists_anywhere() -> None:
+    """未校验复制的逃生口必须完全不存在，而不是被白名单限制。
+
+    需要在校验期改写取值时，用**字段级** AfterValidator——model 级 after-validator
+    返回非 self 的对象在 __init__ 路径上会被丢弃，规范化会静默失效。
+    """
     offenders = [
         path.relative_to(_SRC)
         for path in _SRC.rglob("*.py")
-        if path not in _ALLOWED_ESCAPE_HATCH
-        and "_copy_within_validation" in _referenced_names(path)
+        if "_copy_within_validation" in _referenced_names(path)
     ]
-    assert not offenders, f"_copy_within_validation 只允许在 after-validator 中使用: {offenders}"
+    assert not offenders, f"不得引入未校验复制通道: {offenders}"
+
+
+def test_model_level_after_validators_always_return_self() -> None:
+    """model_validator(mode="after") 内不得出现返回其他对象的写法。
+
+    Pydantic 只发一条警告就丢弃返回值，规范化静默失效——这类缺陷无法由普通
+    断言发现，只能在源码层禁止。
+    """
+    import ast
+
+    offenders: list[str] = []
+    for path in _SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            decorated = any(
+                (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "model_validator")
+                or getattr(d, "id", "") == "model_validator"
+                for d in node.decorator_list
+            )
+            if not decorated:
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Return) and not (
+                    isinstance(inner.value, ast.Name) and inner.value.id == "self"
+                ):
+                    offenders.append(f"{path.relative_to(_SRC)}:{node.name}")
+    assert not offenders, f"model 级 after-validator 只能 return self: {offenders}"
 
 
 def _unbound_bypass_calls(path: Path) -> list[str]:
@@ -91,6 +121,7 @@ def test_the_detector_ignores_ordinary_bound_calls(tmp_path: Path) -> None:
 
 
 def test_escape_hatch_detector_catches_a_stray_call(tmp_path: Path) -> None:
+    """检测器自身必须先被证明有效。"""
     probe = tmp_path / "stray.py"
     probe.write_text("def f(o):\n    return o._copy_within_validation(a=1)\n", encoding="utf-8")
     assert "_copy_within_validation" in _referenced_names(probe)
