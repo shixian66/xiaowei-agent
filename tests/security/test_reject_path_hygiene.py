@@ -49,6 +49,11 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         # --- 已经过安全投影 ---
         # config.py 的 detail 来自 redaction.safe_error_details，只含 loc 与 type。
         "detail",
+        # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
+        # 被拒的环境标识来自调用方，不进消息；由
+        # test_rejection_message_never_echoes_the_environment_id 反向承重。
+        "TargetRejection.UNKNOWN_ENVIRONMENT",
+        "TargetRejection.EMPTY_ENVIRONMENT_DIRECTORY",
         # --- BindingRejection 枚举成员：取值域是代码里的闭集 ---
         "BindingRejection.POLICY_REVISION_DRIFT",
         "BindingRejection.APPROVAL_EXPIRED",

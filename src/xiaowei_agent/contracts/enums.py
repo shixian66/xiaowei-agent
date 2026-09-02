@@ -152,6 +152,17 @@ class ExternalInputKind(StrEnum):
     USER_SUPPLEMENT = "user_supplement"
 
 
+class TargetRejection(StrEnum):
+    """目标解析失败的闭集原因。
+
+    不设 ``UNKNOWN`` 兜底成员：解析不出唯一目标时必须给出具体原因，而不是用一个
+    可被当作"大概没事"的取值把 fail-closed 稀释掉。
+    """
+
+    UNKNOWN_ENVIRONMENT = "unknown_environment"
+    EMPTY_ENVIRONMENT_DIRECTORY = "empty_environment_directory"
+
+
 class BindingRejection(StrEnum):
     PLAN_DRIFT = "plan_drift"
     TARGET_DRIFT = "target_drift"
