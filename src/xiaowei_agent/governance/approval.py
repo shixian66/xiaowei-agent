@@ -82,4 +82,3 @@ class NeverGrantingApprovalGate:
             )
         verify_approval_binding(approval=approval, plan=plan, target=target, now=now)
         return f"{approval.task_id}{_APPROVAL_REF_SEPARATOR}{approval.step_id}"
-
