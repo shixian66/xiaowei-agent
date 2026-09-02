@@ -5,6 +5,7 @@
 ``tests/security/test_module_layering.py`` 承重。
 """
 
+from xiaowei_agent.contracts.answerability import AnswerabilityVerdict, MissingItem
 from xiaowei_agent.contracts.approval import AdmissionCertificate, ApprovalRequest
 from xiaowei_agent.contracts.base import (
     Contract,
@@ -44,6 +45,7 @@ from xiaowei_agent.contracts.enums import (
     TrustLevel,
 )
 from xiaowei_agent.contracts.errors import AgentError
+from xiaowei_agent.contracts.evidence import EvidenceEnvelope
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.intent import IntentDraft
 from xiaowei_agent.contracts.plan import (
@@ -63,6 +65,7 @@ __all__ = [
     "AdapterStatus",
     "AdmissionCertificate",
     "AgentError",
+    "AnswerabilityVerdict",
     "ApprovalRequest",
     "ApprovalState",
     "BindingRejection",
@@ -74,6 +77,7 @@ __all__ = [
     "Contract",
     "EffectClass",
     "ErrorCategory",
+    "EvidenceEnvelope",
     "ExecutionPlan",
     "ExternalContent",
     "ExternalInputKind",
@@ -84,6 +88,7 @@ __all__ = [
     "IntentDraft",
     "IntentSource",
     "JsonScalar",
+    "MissingItem",
     "OperationSpec",
     "PipelineStage",
     "PlanBudget",
