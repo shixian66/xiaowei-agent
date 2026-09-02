@@ -44,6 +44,8 @@ Python 3.11、Pydantic v2（已在 `uv.lock`）、标准库 `hashlib` / `json` /
 - 不为 M3 之后的场景提前创建空模块或占位接口。
 - 不修改 `.github/workflows/ci.yml`。若确需修改，必须同步更新 `tests/security/test_workflow_policy.py` 的整文件 SHA-256 常量并单独人工审查。
 - **`src/` 内不使用 `assert` 表达运行时不变量**（`python -O` 会移除）；一律显式 `raise`。
+- **标量边界字段一律用 `StrictInt` / `StrictStr` / `FiniteFloat`，不用裸 `int` / `str` / `float`。** 默认 lax 模式会把 `"2"` 和 `True` 收成 `int`、把 `bytes` 收成 `str`（均已实证）：预算、版本、fencing token、阈值、id、trace_id、槽位、`typed_args` 这些字段靠隐式转换变"合法"，等于边界校验被绕过。整模型 `strict=True` 不可行——会打断 `str→StrEnum`、ISO 字符串→`datetime`、`list→tuple`，M4 反序列化全面受阻，因此按字段开。
+- **测试中 NFC 敏感字面量写显式码点**（`"cafe\u0301"`），不直接敲重音字母：源码字形会被编辑器悄悄归一，使测试恒真或直接失败。
 
 ## 5. 对 V1 审核意见的处置
 
@@ -277,7 +279,7 @@ git commit -m "refactor(redaction): 脱敏规则下沉为叶子模块，log 反�
 - 测试：`tests/unit/test_contracts_base.py`、`tests/security/test_deep_immutability.py`、`tests/security/test_copy_validation.py`、`tests/security/test_validation_bypass_surface.py`、`tests/security/test_external_content.py`
 
 **接口**：
-- 产出：`Contract`、`JsonScalar`、`StrictStr`、`FrozenMap`、`FrozenStrMap`、`frozen_map()`、`AgentError`、`ExternalContent`、`content_digest()`，以及 **18 个共享枚举**：`ExternalSource` `TrustLevel` `EffectClass` `ErrorCategory` `Channel` `IntentSource` `RiskLevel` `ApprovalState` `StepConditionKind` `StepResultStatus` `TaskStatus` `TransitionRejection` `AdapterStatus` `ToolCallStatus` `PipelineStage` `StageOutcome` `ExternalInputKind` `BindingRejection`
+- 产出：`Contract`、`JsonScalar`、`StrictStr`、`StrictInt`、`FiniteFloat`、`FrozenMap`、`FrozenStrMap`、`frozen_map()`、`AgentError`、`ExternalContent`、`content_digest()`，以及 **18 个共享枚举**：`ExternalSource` `TrustLevel` `EffectClass` `ErrorCategory` `Channel` `IntentSource` `RiskLevel` `ApprovalState` `StepConditionKind` `StepResultStatus` `TaskStatus` `TransitionRejection` `AdapterStatus` `ToolCallStatus` `PipelineStage` `StageOutcome` `ExternalInputKind` `BindingRejection`
 
 - [ ] **步骤 1：写失败测试 —— 深不可变**
 
@@ -415,6 +417,35 @@ def test_copy_without_update_is_unchanged() -> None:
 
 def test_valid_copy_still_works() -> None:
     assert _ok().model_copy(update={"n": 5}).n == 5
+
+
+@pytest.mark.parametrize("sneaky", ["1", True, b"1"])
+def test_strict_int_rejects_implicit_coercion(sneaky: object) -> None:
+    """lax 模式下 max_tool_calls=True 会被读成 1 并通过 gt=0 —— 边界形同虚设。"""
+    with pytest.raises(ValidationError):
+        _Bounded(n=sneaky, ids=("a",), data={})
+
+
+@pytest.mark.parametrize("sneaky", [b"raw", 1, True])
+def test_strict_str_rejects_implicit_coercion(sneaky: object) -> None:
+    """lax 模式下 str 会接受并解码 bytes，使 id / trace_id 能被二进制填充。"""
+    with pytest.raises(ValidationError):
+        _Bounded(n=1, ids=(sneaky,), data={})
+
+
+def test_strictness_does_not_break_enum_datetime_or_sequence_inputs() -> None:
+    """按字段开 strict 的前提：不得连带打断这三类必需的转换。
+
+    这条是**反向断言**——它防的是"为了更严格而把 strict 提到 model_config"，
+    那样 M4 从 TaskStore 反序列化会全面失败。
+    """
+    from xiaowei_agent.contracts import Channel, RequestEnvelope
+
+    envelope = RequestEnvelope(
+        request_id="r1", tenant_id="t", actor="a", channel="cli",   # str -> StrEnum
+        text="q", idempotency_key="k", environment_id="dev",
+    )
+    assert envelope.channel is Channel.CLI
 
 
 def test_model_construct_is_blocked_on_every_contract() -> None:
@@ -623,7 +654,19 @@ from typing import Annotated, Any, Never, Self, TypeAlias
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-FiniteFloat: TypeAlias = Annotated[float, Field(allow_inf_nan=False)]
+StrictInt: TypeAlias = Annotated[int, Field(strict=True)]
+"""拒绝隐式转换的整数。
+
+Pydantic 默认 lax 模式下 ``int`` 会接受 ``"2"`` 与 ``True``（实证）。预算、版本、
+fencing token、行数阈值这类字段一旦靠隐式转换变"合法"，边界校验就形同虚设：
+``max_tool_calls=True`` 会被读成 1 并顺利通过 ``gt=0``。
+
+**不整体开 strict**：``model_config`` 上的 ``strict=True`` 会同时打断
+``str -> StrEnum``、ISO 字符串 -> ``datetime``、``list -> tuple``（均已实证），
+使 M4 从 TaskStore 反序列化全面受阻。因此按字段开，只开在标量边界上。
+"""
+
+FiniteFloat: TypeAlias = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 """禁止 NaN / ±Inf 的浮点。
 
 **必须在 DTO 构造阶段拒绝，而不是等到 canonical_json**：``AdapterResponse.payload``
@@ -642,7 +685,9 @@ def _strict_str(value: str) -> str:
     return value
 
 
-StrictStr = Annotated[str, AfterValidator(_strict_str)]
+# strict=True 的另一层作用：lax 模式下 ``str`` 会接受 ``bytes`` 并解码（实证），
+# 使 id、trace_id、槽位这类字段能被二进制内容填充。
+StrictStr = Annotated[str, Field(strict=True), AfterValidator(_strict_str)]
 
 
 def frozen_map(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -1456,9 +1501,15 @@ def test_exact_duplicate_resource_ids_are_rejected() -> None:
 
 
 def test_nfc_colliding_resource_ids_are_rejected() -> None:
-    """组合式与预组合式写法指向同一资源：这是未确认别名，拒绝而非合并。"""
-    decomposed = "café"      # cafe + 组合尖音符
-    precomposed = "café"      # café
+    """组合式与预组合式写法指向同一资源：这是未确认别名，拒绝而非合并。
+
+    **所有 NFC 敏感字面量一律写显式码点**（``"cafe\u0301"`` 而非直接敲 ``café``）：
+    编辑器、格式化工具与复制粘贴都可能把源码里的重音字母悄悄归一为预组合形式，
+    两个字面量就变成同一个串——``assert a != b`` 直接失败，或者更糟，dict 字面量
+    塌成一项让测试恒过。这不是风格问题，是测试是否真的在测。
+    """
+    decomposed = "cafe\u0301"      # cafe + 组合尖音符
+    precomposed = "caf\u00e9"    # café
     assert decomposed != precomposed
     with pytest.raises(ValidationError):
         ResolvedTarget(**_target(resource_ids=(decomposed, precomposed)))
@@ -1466,8 +1517,8 @@ def test_nfc_colliding_resource_ids_are_rejected() -> None:
 
 def test_resource_ids_are_normalised_on_construction() -> None:
     """构造后取值即为 NFC 形式，后续 hash 无需再关心输入写法。"""
-    target = ResolvedTarget(**_target(resource_ids=("café",)))
-    assert target.resource_ids == ("café",)
+    target = ResolvedTarget(**_target(resource_ids=("cafe\u0301",)))
+    assert target.resource_ids == ("caf\u00e9",)   # 已归一为预组合式
 
 
 def test_blank_resource_id_is_rejected() -> None:
@@ -1940,8 +1991,8 @@ def test_no_whitespace_and_utf8() -> None:
 
 
 def test_strings_are_nfc_normalised() -> None:
-    decomposed = "é"
-    precomposed = "é"
+    decomposed = "e\u0301"
+    precomposed = "\u00e9"         # é
     assert decomposed != precomposed
     assert canonical_json({"k": decomposed}) == canonical_json({"k": precomposed})
 
@@ -1953,7 +2004,7 @@ def test_canonical_json_rejects_key_collision_after_nfc() -> None:
     在 canonical_json 这一层也必须堵住。
     """
     with pytest.raises(ValueError, match="collision"):
-        canonical_json({"é": 1, "é": 2})
+        canonical_json({"e\u0301": 1, "\u00e9": 2})
 
 
 @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
@@ -2431,6 +2482,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/unit tests/security -q
 | 从 `_plan_payload` 移除 `budget` 键 | `test_payload_keys_equal_the_declared_hash_keys`、`test_changing_budget_changes_plan_hash` |
 | 给 `PlanStep` 加一个字段但不更新 `STEP_FIELD_TO_HASH_KEY` | `test_every_model_field_maps_to_a_hash_key` |
 | 给 `PlanBudget` 加一个字段但不更新 `PLAN_BUDGET_FIELD_TO_HASH_KEY` | 同上（嵌套 DTO 同样承重） |
+| 把 `StrictInt` 换回裸 `int` | `test_strict_int_rejects_implicit_coercion` |
 
 第四条是本任务最重要的反证：它证明**将来的字段遗漏会被自动发现**，而不是靠评审看出来。
 
@@ -5199,11 +5251,13 @@ def test_after_validator_copy_is_idempotent() -> None:
     第一次构造会把组合式规范化为预组合式；再 copy 一次时校验器看到的已是
     规范化值，必须走"原样返回"分支，否则无限递归。
     """
-    decomposed = "café"          # cafe + 组合尖音符
+    # 必须写显式码点：源码里直接敲重音字母会被编辑器存成 NFC
+    # 预组合形式，两个字面量变成同一个串，assert 直接失败/测试恒真。
+    decomposed = "cafe\u0301"     # c a f e + U+0301 组合尖音符
     target = FIXTURE_TARGET.model_copy(update={"resource_ids": (decomposed,)})
-    assert target.resource_ids == ("café",)
+    assert target.resource_ids == ("caf\u00e9",)   # 已归一为预组合式
     again = target.model_copy(update={"selector_version": "2"})
-    assert again.resource_ids == ("café",)
+    assert again.resource_ids == ("caf\u00e9",)
 ```
 
 - [ ] **步骤 5：同步文档（ADR-009 与 `ARCHITECTURE.md` 已在 T0 完成，本步只做其余三份）**
@@ -5323,12 +5377,13 @@ M2 结束时全部能力仍为 `declared`，**不得表述为 `tests` 之外的�
 1. 项目负责人与 Codex 复审本版，确认十项处置与第 10 节两点。
 2. 批准后从最新 `main` 创建**单一分支** `claude/m2-contract-kernel`，按 **T0 → T11 的顺序**逐任务 TDD 落地。**T0 只写 ADR-009 与 `ARCHITECTURE.md`，不含代码**，因此可作为独立的前置审批点（DEVELOPMENT_PLAN §8 步骤 2）。
 3. 每个任务结束四条命令必须全绿才进入下一个。
-4. 每个任务一个提交，同时是审查 checkpoint；全部完成后开**一个 PR**，附四条命令真实尾部输出与 21 组 TDD 反证记录。
+4. 每个任务一个提交，同时是审查 checkpoint；全部完成后开**一个 PR**，附四条命令真实尾部输出，以及**各任务「TDD 反证」表中每一条**的转红/转绿记录（不写会漂移的总数，见第 9 节）。
 5. 合入后按第 9 节输出 M2 验收报告，更新 `AGENT_HANDOFF.md`。
 
 ## 12. 版本记录
 
 - **V1**（2026-09-02）：初版，10 个任务。Codex 审核判定不可开工，列出 10 项阻断与 8 项裁定。
-- **V2.2**（2026-09-02，本版）：按 Codex 第三轮审核的 8 项做定向修订，不改架构。补 `ToolGateway` Protocol 本体与 Protocol 一致性契约测试；`ScriptedRunner` 补 `owner` 及可达性/owner 校验；**校验绕过面按根因扩面**——基类一并封死 `model_construct`，新增 `test_validation_bypass_surface.py` 白名单化 `_copy_within_validation` 并禁止未绑定的 `BaseModel.model_copy`（实证该调用可绕过覆盖）；`FiniteFloat` 把非有限 float 的拒绝前移到 DTO 构造阶段，`canonical_json` 归一 `-0.0`；`Candidate.score` 有界有限并补 `CandidateSet` 去歧义校验；Gateway 增 `AdapterResponse` 运行时 fail-closed 校验与空 adapter 拒绝；测试片段补全（`drive_to_terminal`、`two_step_plan`、T8 完整 import），并把 `clock/store/task/make_envelope` 移入 `tests/conftest.py`——此前定义在测试文件内、跨文件不可见；统一依赖口径最后一处旧表述；反证计数改为以各任务表为准（当前 26 条）。
+- **V2.3**（2026-09-02，本版）：开工前三处小修。① 执行说明漏改的"21 组"旧口径改为"各任务反证表中每一条"。② NFC 字面量：审核指出的 `test_after_validator_copy_is_idempotent` 确实误用了预组合式（我先前误判为"三处都坏"，实测另两处原本正确，已更正）；根因是**测试依赖源码字符形态**，故所有 NFC 敏感字面量统一改显式码点并写入全局约束。③ Pydantic coercion 做成**逐字段机制**而非审查提醒：新增 `StrictInt`，`StrictStr` / `FiniteFloat` 加 `strict=True`；实证整模型 `strict=True` 会打断 `str→StrEnum`、ISO→`datetime`、`list→tuple`，故按字段开，并补一条反向断言防止有人把 strict 提到 `model_config`。
+- **V2.2**（2026-09-02）：按 Codex 第三轮审核的 8 项做定向修订，不改架构。补 `ToolGateway` Protocol 本体与 Protocol 一致性契约测试；`ScriptedRunner` 补 `owner` 及可达性/owner 校验；**校验绕过面按根因扩面**——基类一并封死 `model_construct`，新增 `test_validation_bypass_surface.py` 白名单化 `_copy_within_validation` 并禁止未绑定的 `BaseModel.model_copy`（实证该调用可绕过覆盖）；`FiniteFloat` 把非有限 float 的拒绝前移到 DTO 构造阶段，`canonical_json` 归一 `-0.0`；`Candidate.score` 有界有限并补 `CandidateSet` 去歧义校验；Gateway 增 `AdapterResponse` 运行时 fail-closed 校验与空 adapter 拒绝；测试片段补全（`drive_to_terminal`、`two_step_plan`、T8 完整 import），并把 `clock/store/task/make_envelope` 移入 `tests/conftest.py`——此前定义在测试文件内、跨文件不可见；统一依赖口径最后一处旧表述；反证计数改为以各任务表为准（当前 26 条）。
 - **V2.1**（2026-09-02）：按 Codex 第二轮审核的 4 项 P0 + 5 项 P1 做定向修订，**不重写架构**。P0：① `Contract` 基类统一覆盖 `model_copy`，带 update 必重新校验（实证：原生实现同时绕过 `Field(gt=0)` 与 after-validator），after-validator 内改用幂等的 `_copy_within_validation`；② `PlanBudget` / `StepCondition` 补入 hash 覆盖映射表；③ ADR-009 提为 **T0**，先于任何代码；④ 幂等摘要改用 `request_dedup_digest()`，排除 `request_id` 等易变字段。P1：contracts 依赖口径统一为"只依赖 redaction 与标准库"；`create_task` 校验信封/上下文一致性；`PlanStep` 构造检测器支持别名与属性访问并自带检测器自测；`ToolGateway` 补确定性 error mapper（只出摘要引用，不出原文）；补全 `contracts/task.py`、`ScriptedRunner`、`TraceEvent` 三处占位。任务数 11 → **T0 + 11**，TDD 反证 20 → 21 组。
 - **V2**（2026-09-02）：按根因重写。任务重排为严格线性 11 个、单分支单 PR；新增 `redaction.py` 下沉、`governance/binding.py`、`FrozenMap` 深不可变、三张 hash 覆盖映射表、`tool_call_hash`、闭合 fencing 规则、`StepResultStatus`；fake 迁入业务包；移除 `PlanStep` 的 capability 字段与 `src/` 内的 `assert`；扫描口径收敛到领域层。
