@@ -12,14 +12,14 @@ from typing import Self
 
 from pydantic import model_validator
 
-from xiaowei_agent.contracts.base import Contract
+from xiaowei_agent.contracts.base import Contract, StrictStr
 from xiaowei_agent.contracts.enums import ExternalInputKind
 from xiaowei_agent.contracts.external import ExternalContent
 
 
 class ExternalInput(Contract):
     kind: ExternalInputKind
-    approval_ref: str | None = None
+    approval_ref: StrictStr | None = None
     user_text: ExternalContent | None = None
 
     @model_validator(mode="after")

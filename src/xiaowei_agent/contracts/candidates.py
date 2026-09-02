@@ -4,7 +4,7 @@ from typing import Self
 
 from pydantic import Field, model_validator
 
-from xiaowei_agent.contracts.base import Contract, StrictStr
+from xiaowei_agent.contracts.base import Contract, NonEmptyText, StrictStr
 
 
 class Candidate(Contract):
@@ -14,7 +14,7 @@ class Candidate(Contract):
     # 有界且有限：候选排序若允许 NaN，比较结果不满足全序，排序结果取决于实现
     # 细节而非数据；允许 Inf 则任一候选都能压过其余全部。
     score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-    match_evidence: tuple[str, ...]
+    match_evidence: tuple[NonEmptyText, ...]
     required_context: tuple[StrictStr, ...]
 
 

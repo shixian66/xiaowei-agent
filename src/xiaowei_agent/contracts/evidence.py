@@ -12,6 +12,7 @@ from xiaowei_agent.contracts.base import (
     AwareDatetime,
     Contract,
     FrozenMap,
+    NonEmptyText,
     StrictStr,
 )
 from xiaowei_agent.contracts.enums import ExternalSource
@@ -27,5 +28,5 @@ class EvidenceEnvelope(Contract):
     captured_at: AwareDatetime
     readonly: AlwaysTrue = True
     sampled: bool
-    limitations: tuple[str, ...]
-    redaction_ref: str | None = None
+    limitations: tuple[NonEmptyText, ...]
+    redaction_ref: StrictStr | None = None

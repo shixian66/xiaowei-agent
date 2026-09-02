@@ -86,7 +86,7 @@ class TransitionCommand(Contract):
     expected_version: StrictInt = Field(ge=0)
     to_status: TaskStatus
     fencing_token: StrictInt | None = Field(default=None, gt=0)
-    terminal_reason: str | None = None
+    terminal_reason: StrictStr | None = None
 
 
 class LeaseCommand(Contract):

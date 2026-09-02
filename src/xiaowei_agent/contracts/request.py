@@ -7,7 +7,7 @@
 
 from pydantic import Field
 
-from xiaowei_agent.contracts.base import Contract, StrictStr, TraceId
+from xiaowei_agent.contracts.base import Contract, NonEmptyText, StrictStr, TraceId
 from xiaowei_agent.contracts.enums import Channel
 
 
@@ -16,9 +16,9 @@ class RequestEnvelope(Contract):
     tenant_id: StrictStr
     actor: StrictStr
     channel: Channel
-    text: str = Field(max_length=8192)
+    text: NonEmptyText = Field(max_length=8192)
     idempotency_key: StrictStr
-    environment_id: str | None = None
+    environment_id: StrictStr | None = None
 
 
 class RequestContext(Contract):

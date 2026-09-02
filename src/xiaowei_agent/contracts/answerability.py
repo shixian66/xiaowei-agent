@@ -9,7 +9,7 @@
 ——这比"表达后再拒绝"更强，也更容易长期维持。
 """
 
-from xiaowei_agent.contracts.base import Contract, StrictStr
+from xiaowei_agent.contracts.base import Contract, NonEmptyText, StrictStr
 
 
 class MissingItem(Contract):
@@ -19,7 +19,7 @@ class MissingItem(Contract):
 
 class AnswerabilityVerdict(Contract):
     sufficient: bool
-    limitations: tuple[str, ...]
+    limitations: tuple[NonEmptyText, ...]
     missing: tuple[MissingItem, ...]
     downgrade_suggestion: bool
     needs_user_input: bool

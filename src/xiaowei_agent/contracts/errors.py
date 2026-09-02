@@ -14,4 +14,4 @@ class AgentError(Contract):
     category: ErrorCategory
     retryable: bool
     message_key: StrictStr
-    cause_ref: str | None = None
+    cause_ref: StrictStr | None = None

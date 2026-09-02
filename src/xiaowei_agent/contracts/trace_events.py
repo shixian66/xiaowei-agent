@@ -14,7 +14,13 @@ from typing import Annotated
 
 from pydantic import AfterValidator, Field, PlainSerializer
 
-from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictStr, TraceId, frozen_map
+from xiaowei_agent.contracts.base import (
+    AwareDatetime,
+    Contract,
+    StrictStr,
+    TraceId,
+    frozen_map,
+)
 from xiaowei_agent.contracts.enums import PipelineStage, StageOutcome
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.redaction import scrub_text
@@ -55,12 +61,12 @@ TraceDetail = Annotated[
 class TraceEvent(Contract):
     event_id: StrictStr
     trace_id: TraceId
-    task_id: str | None
+    task_id: StrictStr | None
     stage: PipelineStage
     outcome: StageOutcome
     occurred_at: AwareDatetime
-    capability_id: str | None
-    step_id: str | None
-    policy_revision: str | None
+    capability_id: StrictStr | None
+    step_id: StrictStr | None
+    policy_revision: StrictStr | None
     error: AgentError | None
     detail: TraceDetail

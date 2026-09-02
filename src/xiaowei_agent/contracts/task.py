@@ -11,7 +11,7 @@ from typing import Final, Self
 
 from pydantic import Field, model_validator
 
-from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictInt, StrictStr
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
 
 TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
@@ -65,13 +65,13 @@ class TaskRecord(Contract):
     environment_id: StrictStr
     actor: StrictStr
     idempotency_key: StrictStr
-    request_digest: StrictStr
+    request_digest: Sha256Hex
     status: TaskStatus
     version: StrictInt = Field(ge=0)
-    lease_owner: str | None = None
+    lease_owner: StrictStr | None = None
     lease_expires_at: AwareDatetime | None = None
     fencing_token: StrictInt | None = Field(default=None, gt=0)
-    terminal_reason: str | None = None
+    terminal_reason: StrictStr | None = None
 
     @model_validator(mode="after")
     def _lease_fields_are_consistent(self) -> Self:
@@ -112,9 +112,9 @@ class TransitionResult(Contract):
 class TaskOutcome(Contract):
     task_id: StrictStr
     status: TaskStatus
-    terminal_reason: str | None
+    terminal_reason: StrictStr | None
     evidence_refs: tuple[StrictStr, ...]
-    render_ref: str | None
+    render_ref: StrictStr | None
 
     @model_validator(mode="after")
     def _status_must_be_terminal(self) -> Self:

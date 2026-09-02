@@ -18,6 +18,7 @@ from xiaowei_agent.contracts.base import (
     Contract,
     FiniteFloat,
     FrozenMap,
+    NonEmptyText,
     StrictStr,
     TraceId,
 )
@@ -40,9 +41,9 @@ class ToolCall(Contract):
 class ToolResult(Contract):
     status: ToolCallStatus
     data_view: tuple[FrozenMap, ...]
-    raw_ref: str | None
+    raw_ref: StrictStr | None
     source: StrictStr
-    limitations: tuple[str, ...]
+    limitations: tuple[NonEmptyText, ...]
     trace_id: TraceId
     error: AgentError | None = None
 

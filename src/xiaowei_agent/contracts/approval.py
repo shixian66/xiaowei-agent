@@ -11,7 +11,7 @@ policy_revision；恢复时用重算值比对，不匹配即拒绝（ARCHITECTUR
 字段，Gateway 重算比对（ADR-009 D4）。
 """
 
-from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictStr
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictStr
 from xiaowei_agent.contracts.enums import ApprovalState, EffectClass
 from xiaowei_agent.contracts.policy import PolicyDecision
 
@@ -19,8 +19,8 @@ from xiaowei_agent.contracts.policy import PolicyDecision
 class ApprovalRequest(Contract):
     task_id: StrictStr
     step_id: StrictStr
-    plan_hash: StrictStr
-    target_fingerprint: StrictStr
+    plan_hash: Sha256Hex
+    target_fingerprint: Sha256Hex
     policy_revision: StrictStr
     subject: StrictStr
     expires_at: AwareDatetime
@@ -32,7 +32,7 @@ class AdmissionCertificate(Contract):
     operation: StrictStr
     effect_class: EffectClass
     policy_decision: PolicyDecision
-    approval_ref: str | None
-    plan_hash: StrictStr
-    target_fingerprint: StrictStr
-    tool_call_hash: StrictStr
+    approval_ref: StrictStr | None
+    plan_hash: Sha256Hex
+    target_fingerprint: Sha256Hex
+    tool_call_hash: Sha256Hex

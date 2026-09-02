@@ -125,7 +125,46 @@ def _strict_str(value: str) -> str:
 
 # ``strict=True`` 的另一层作用：lax 模式下 ``str`` 会接受 ``bytes`` 并解码，
 # 使 id、trace_id、槽位这类字段能被二进制内容填充。
+#
+# 三个字符串别名按**语义**分层，不能互相替代；``test_string_alias_coverage``
+# 强制每个 ``str`` 字段显式落在其中之一：
+#
+# * ``StrictStr``   —— 标识符与引用（id、ref、hash、reason code）。空串与带空白
+#   的值必须拒绝：``approval_ref=""`` 在结构上"存在"（不是 None）却在所有真值
+#   判断里"不存在"，这种二义性正是 fail-closed 要消灭的；``" r1 "`` 与 ``"r1"``
+#   则是同一个引用的两个别名，会让引用相等性失效。
+# * ``NonEmptyText`` —— 由本系统确定性生成的展示/说明文本。空串是缺陷，但**不做
+#   strip 校验**：文本的前后空白属于内容本身。
+# * ``FreeText``    —— 外部不可信文本逐字捕获。空串与空白都是合法内容，任何
+#   收紧都会篡改被捕获的原文，违背 ExternalContent 的逐字语义。
 StrictStr = Annotated[str, Field(strict=True), AfterValidator(_strict_str)]
+
+
+def _non_empty(value: str) -> str:
+    if not value:
+        raise ValueError("must not be empty")
+    return value
+
+
+NonEmptyText = Annotated[str, Field(strict=True), AfterValidator(_non_empty)]
+
+FreeText = Annotated[str, Field(strict=True)]
+
+SHA256_HEX_PATTERN: Final[str] = r"[0-9a-f]{64}"
+
+
+def _sha256_hex(value: str) -> str:
+    """摘要字段必须在**构造**时就是合法摘要形状。
+
+    ``plan_hash="different"`` 这类值在旧标注下能构造成功，只在后续比对时表现为
+    "不匹配"——与"计划确实变了"无法区分。形状在入口拒绝，两者才分得开。
+    """
+    if re.fullmatch(SHA256_HEX_PATTERN, value) is None:
+        raise ValueError("must be a lowercase 64-char sha256 hex digest")
+    return value
+
+
+Sha256Hex = Annotated[str, Field(strict=True), AfterValidator(_sha256_hex)]
 
 
 def frozen_map(value: Mapping[str, Any]) -> Mapping[str, Any]:
