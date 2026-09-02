@@ -26,9 +26,14 @@ SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 
 SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
     {
-        # --- 类型名：是类的身份，不是数据 ---
-        "type(value).__name__",
-        "type(response).__name__",
+        # 这里曾经放着 ``type(value).__name__`` 与 ``type(response).__name__``，
+        # 理由写的是"类型名是类的身份，不是数据"。**那个判断是错的**：
+        # ``type(name, bases, dict)`` 能在运行时造出任意类名，所以跨信任边界对象
+        # 的类名是调用方可控数据。canonical_json 的输入来自计划与外部载荷，
+        # adapter 的返回值来自 adapter——两处都已实测泄漏 canary。
+        #
+        # 两个条目已删除，对应站点改为不回显类型名。留下这段注释而不是静默删掉，
+        # 是因为"看起来像常量的东西其实是数据"这类判断错误会重复发生。
         # --- 序号与模块常量：不含任何调用方取值 ---
         "index",
         "label",

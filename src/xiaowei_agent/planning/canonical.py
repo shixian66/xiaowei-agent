@@ -124,7 +124,10 @@ def _normalise(value: object) -> object:
         return out
     if isinstance(value, Sequence):
         return [_normalise(item) for item in value]
-    raise TypeError(f"type is not canonicalisable: {type(value).__name__}")
+    # 不回显类型名：``type(name, bases, dict)`` 能在运行时造任意类名，因此跨信任
+    # 边界对象的类名是**调用方可控数据**，不是"类的身份"。canonical_json 的输入
+    # 恰恰来自计划与外部载荷。可规范化类型是闭集，调用方自己知道传了什么。
+    raise TypeError("value type is not canonicalisable")
 
 
 def canonical_json(value: object) -> bytes:

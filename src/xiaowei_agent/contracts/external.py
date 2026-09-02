@@ -7,12 +7,16 @@
 import hashlib
 from typing import Literal, Self
 
-from pydantic import TypeAdapter, model_validator
+from pydantic import ConfigDict, TypeAdapter, model_validator
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, FreeText, Sha256Hex
 from xiaowei_agent.contracts.enums import ExternalSource, TrustLevel
 
-_TEXT = TypeAdapter(FreeText)
+# ``hide_input_in_errors`` 是 **Contract 基类的 model_config**，TypeAdapter 不经过
+# 基类，因此必须在这里单独声明——否则 ``content_digest(b"...")`` 的 ValidationError
+# 会把原始输入回填进 str(exc) 与 errors()。这正是"安全属性挂在基类上、但某条校验
+# 路径根本不走基类"的漏法。
+_TEXT = TypeAdapter(FreeText, config=ConfigDict(hide_input_in_errors=True))
 
 
 def content_digest(content: str) -> str:

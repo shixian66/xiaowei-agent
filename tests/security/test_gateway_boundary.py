@@ -122,7 +122,7 @@ async def test_non_conforming_adapter_return_is_refused(ok_call, context, admiss
             return {"status": "ok", "payload": ({"injected": "row"},)}
 
     rogue = DeterministicToolGateway(adapters={"starrocks": _RogueAdapter()})
-    with pytest.raises(TypeError, match="expected AdapterResponse"):
+    with pytest.raises(TypeError, match="not an AdapterResponse"):
         await rogue.invoke(ok_call, context=context, admission=admission)
 
 

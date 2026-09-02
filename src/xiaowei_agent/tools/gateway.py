@@ -166,9 +166,9 @@ class DeterministicToolGateway:
                 error=_map_error(AdapterStatus.ERROR, cause),
             )
         if not isinstance(response, AdapterResponse):
-            raise TypeError(
-                f"adapter returned {type(response).__name__}, expected AdapterResponse"
-            )
+            # 不回显类型名：返回值来自 adapter，其类可以是运行时构造的，类名因此
+            # 是外部数据。理由同 canonical._normalise。
+            raise TypeError("adapter returned a value that is not an AdapterResponse")
         # adapter 出错时不得返回空成功：状态与结构化错误一起传出去，且不把半截
         # payload 当作证据。
         return self._issue(

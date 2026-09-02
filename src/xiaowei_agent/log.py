@@ -67,9 +67,17 @@ class RedactingFilter(logging.Filter):
         # `getMessage()` 可能因消息对象 __str__ 抛异常、或 %-格式与参数不匹配
         # （如 "%d" 配字符串、参数个数不符）而抛异常。日志调用不得因此失败，
         # 也不得丢失记录：降级为不含任何原始取值的安全占位消息。
+        #
+        # 捕 ``BaseException`` 而非 ``Exception``：``__str__`` 抛 ``KeyboardInterrupt``
+        # 的消息对象否则会连同它携带的文本一起逃出日志边界。与
+        # ``redaction._safe_str`` 同一条不变量、同一个取舍——那一轮只修了
+        # redaction，漏了本处，因为当时按"函数"而不是按"边界"去找同类问题。
+        #
+        # 注意 ``record.args`` 走的是 ``redact()``，早已在上面被吃掉；能到这里的
+        # 只有作为 ``record.msg`` 直接传入的消息对象。
         try:
             rendered = record.getMessage()
-        except Exception:
+        except BaseException:
             rendered = f"<unrenderable log record from {record.name}:{record.lineno}>"
         record.msg = scrub_text(rendered)
         record.args = None
