@@ -1,0 +1,115 @@
+"""全部跨模块契约的共同基座。
+
+本模块解决三条**独立**的绕过路径，缺一条则"违反安全边界的构造在契约层不可
+表达"就不成立：
+
+1. ``frozen=True`` 只挡属性重绑定，挡不住内部 ``dict`` 被原地改写 →
+   映射字段一律用 :data:`FrozenMap`：**先 ``dict()`` 复制**（切断与调用方原对象
+   的联系），**再用 ``MappingProxyType`` 包装**（挡住原地改写）。两步缺一不可
+   ——只包装不复制等于给外部 dict 套视图，外部一改内部就变。
+2. ``model_copy(update=...)`` **完全不触发校验**——``Field`` 约束、
+   ``model_validator`` 与 ``AfterValidator`` 全部被跳过 → :class:`Contract`
+   覆盖它，带 ``update`` 时重新走 ``model_validate``。
+3. ``model_construct`` 跳过**全部**校验，比 ``model_copy`` 更彻底 → 一并封死。
+
+重新校验用 ``{**self.__dict__, **update}`` 而非 ``model_dump()``，以保留嵌套契约
+实例与 ``datetime`` 的原始类型，避免 JSON 往返丢失信息。
+
+**Pydantic 默认 lax 模式的隐式转换同样是绕过**：``int`` 会接受 ``"2"`` 与
+``True``，``str`` 会接受 ``bytes``。因此标量边界使用 :data:`StrictInt` /
+:data:`StrictStr` / :data:`FiniteFloat`，而**不**在 ``model_config`` 上整体开
+``strict=True``——后者会同时打断 ``str -> StrEnum``、ISO 字符串 -> ``datetime``
+和 ``list -> tuple``，使 M4 从 TaskStore 反序列化全面受阻。
+
+**已知取舍**：``MappingProxyType`` 不可哈希，因此携带映射字段的契约实例不可作为
+dict 键或放入 set。本项目不依赖契约的可哈希性，比较一律用 ``==``。
+"""
+
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Annotated, Any, Never, Self, TypeAlias
+
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+StrictInt: TypeAlias = Annotated[int, Field(strict=True)]
+"""拒绝隐式转换的整数。
+
+lax 模式下 ``max_tool_calls=True`` 会被读成 ``1`` 并顺利通过 ``gt=0``，边界校验
+形同虚设。预算、版本、fencing token、行数阈值一律用本别名。
+"""
+
+FiniteFloat: TypeAlias = Annotated[float, Field(strict=True, allow_inf_nan=False)]
+"""禁止 NaN / ±Inf 的浮点。
+
+**必须在 DTO 构造阶段拒绝，而不是等到 ``canonical_json``**：
+``AdapterResponse.payload`` 与 ``EvidenceEnvelope.facts`` 根本不经过
+``canonical_json``，NaN 会一路流进证据与渲染；而 ``PlanStep.typed_arguments``
+里的 NaN 要到准入时刻算 ``plan_hash`` 才抛错，那时计划已经存进 TaskStore 了。
+``canonical_json`` 的同名检查保留，作为第二道防线。
+"""
+
+JsonScalar: TypeAlias = bool | int | FiniteFloat | str | None
+
+
+def _strict_str(value: str) -> str:
+    if not value or value != value.strip():
+        raise ValueError("must not be empty or padded with whitespace")
+    return value
+
+
+# ``strict=True`` 的另一层作用：lax 模式下 ``str`` 会接受 ``bytes`` 并解码，
+# 使 id、trace_id、槽位这类字段能被二进制内容填充。
+StrictStr = Annotated[str, Field(strict=True), AfterValidator(_strict_str)]
+
+
+def frozen_map(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """复制并包装为只读映射。"""
+    return MappingProxyType(dict(value))
+
+
+FrozenMap = Annotated[Mapping[StrictStr, JsonScalar], AfterValidator(frozen_map)]
+FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map)]
+
+
+class Contract(BaseModel):
+    """不可变、拒绝未声明字段、复制即重新校验的契约基类。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """带 ``update`` 的复制必须重新校验。
+
+        Pydantic 原生实现直接写字段、跳过全部校验，使任何"构造时不可表达"的
+        约束都能被一次 copy 绕过。
+
+        :raises ValidationError: update 后的取值违反任何字段或模型级约束。
+        """
+        if not update:
+            return super().model_copy(deep=deep)
+        return type(self).model_validate({**self.__dict__, **update})
+
+    @classmethod
+    def model_construct(cls, *args: object, **kwargs: object) -> Never:
+        """封死：它跳过全部校验，是与 ``model_copy`` 同类的绕过通道。
+
+        实证封死它不影响 ``model_validate``、``model_copy()``、``model_dump()``
+        等正常路径。
+        """
+        raise NotImplementedError(
+            "Contract 禁止 model_construct：它跳过全部校验，请用 model_validate"
+        )
+
+    def _copy_within_validation(self, **update: object) -> Self:
+        """**仅供本类自身的 after-validator 使用**的未校验复制。
+
+        after-validator 正在校验途中，此时调用会重新校验的 ``model_copy`` 会重入
+        同一个校验器。使用本方法的 validator 必须满足**幂等**：第二次看到已规范化
+        的值时原样返回，否则仍会无限递归。
+
+        **这是一个被刻意保留的未校验通道**，因此由
+        ``tests/security/test_validation_bypass_surface.py`` 以源码扫描白名单限定
+        调用点；否则上面封死的绕过只是换了个名字继续存在。
+        """
+        return super().model_copy(update=update)
