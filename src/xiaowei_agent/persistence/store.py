@@ -20,11 +20,16 @@ import datetime as _dt
 from collections.abc import Callable
 from typing import Protocol, TypeAlias
 
+from pydantic import Field
+
 from xiaowei_agent.contracts import (
     ApprovalRequest,
+    Contract,
     LeaseGrant,
     RequestContext,
     RequestEnvelope,
+    StrictInt,
+    StrictStr,
     TaskRecord,
     TaskStatus,
     TransitionResult,
@@ -67,6 +72,30 @@ def request_dedup_digest(envelope: RequestEnvelope, context: RequestContext) -> 
         "idempotency_key": envelope.idempotency_key,
     }
     return content_digest(canonical_json(payload).decode("utf-8"))
+
+
+class TransitionCommand(Contract):
+    """``transition`` 的入参 DTO。
+
+    Protocol 的类型标注在运行时不拦任何东西：``expected_version=False`` 会匹配
+    版本 ``0``、``fencing_token=True`` 会匹配 token ``1``、``to_status="planning"``
+    会被转成枚举。把入参构造成严格契约，这些隐式转换在入口就失败。
+    """
+
+    task_id: StrictStr
+    expected_version: StrictInt = Field(ge=0)
+    to_status: TaskStatus
+    fencing_token: StrictInt | None = Field(default=None, gt=0)
+    terminal_reason: str | None = None
+
+
+class LeaseCommand(Contract):
+    """``acquire_lease`` / ``renew_lease`` 的入参 DTO。"""
+
+    task_id: StrictStr
+    owner: StrictStr
+    ttl_seconds: StrictInt = Field(gt=0)
+    fencing_token: StrictInt | None = Field(default=None, gt=0)
 
 
 class TaskStore(Protocol):

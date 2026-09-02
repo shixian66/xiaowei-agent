@@ -9,12 +9,15 @@
 4. **E1 硬闸** —— 非 READ 分类一律拒绝。这把"M0-M7 对被管运维目标的 E1 调用次数
    恒为 0"从纪律变成代码事实（ADR-007 D7、ADR-009 D4）。
 5. **adapter 已注册** —— 未注册即 fail-closed，不做回退。
-6. **adapter 返回值是 AdapterResponse** —— Protocol 只在静态检查时生效，运行时不拦
+6. **adapter 的任意异常被结构化** —— 异常文本是外部内容，原样冒泡会绕过
+   ``ExternalContent``、``AgentError`` 与脱敏边界。
+7. **adapter 返回值是 AdapterResponse** —— Protocol 只在静态检查时生效，运行时不拦
    任何东西；一个返回 dict 或鸭子类型对象的 adapter 能把未经契约约束的数据一路带进
    ``ToolResult``，因此必须在此显式校验。
 """
 
 import asyncio
+import datetime as _dt
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final, Protocol
@@ -26,6 +29,7 @@ from xiaowei_agent.contracts import (
     EffectClass,
     ErrorCategory,
     ExternalContent,
+    ExternalSource,
     FrozenMap,
     RequestContext,
     ToolCall,
@@ -124,6 +128,29 @@ class DeterministicToolGateway:
                 source=call.gateway,
                 limitations=("adapter timed out",),
                 error=_map_error(AdapterStatus.TIMEOUT, None),
+            )
+        except Exception as exc:
+            # adapter 的任意异常都不得原样冒泡：异常文本是**外部内容**，直接抛出
+            # 会绕过 ExternalContent、AgentError 与脱敏边界，把上游的密码、连接串
+            # 带进调用方的 traceback。
+            #
+            # 只捕 ``Exception``：``asyncio.CancelledError`` 继承自 ``BaseException``，
+            # 因此协作式取消照常向上传播，不会被吞掉。
+            #
+            # M8 开放 E1 后需重新审视：写操作抛异常时目标状态不可知，应映射为
+            # ``INDETERMINATE`` 而非 ``ERROR``。M2 只读，故此处用 ERROR。
+            cause = ExternalContent.capture(
+                source=ExternalSource.TOOL,
+                content=f"{type(exc).__name__}: {exc}",
+                captured_at=_dt.datetime.now(tz=_dt.UTC),
+            )
+            return self._issue(
+                context,
+                status=ToolCallStatus.ERROR,
+                data_view=(),
+                source=call.gateway,
+                limitations=("adapter raised an unexpected exception",),
+                error=_map_error(AdapterStatus.ERROR, cause),
             )
         if not isinstance(response, AdapterResponse):
             raise TypeError(

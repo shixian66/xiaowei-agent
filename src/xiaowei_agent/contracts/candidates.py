@@ -19,8 +19,16 @@ class Candidate(Contract):
 
 
 class Rejection(Contract):
+    """被拒绝的候选。
+
+    粒度必须与 :class:`Candidate` 一致（三元组含 ``operation``）：若拒绝只到
+    capability/version 级，同一 capability 的一个 operation 被拒就会与另一个
+    operation 的候选冲突，"这个能力到底是候选还是被拒"没有确定答案。
+    """
+
     capability_id: StrictStr
     capability_version: StrictStr
+    operation: StrictStr
     reason_code: StrictStr
 
 
@@ -40,9 +48,11 @@ class CandidateSet(Contract):
         keys = [(c.capability_id, c.capability_version, c.operation) for c in self.items]
         if len(set(keys)) != len(keys):
             raise ValueError("duplicate candidate in CandidateSet")
-        rejected = [(r.capability_id, r.capability_version) for r in self.rejections]
+        rejected = [
+            (r.capability_id, r.capability_version, r.operation) for r in self.rejections
+        ]
         if len(set(rejected)) != len(rejected):
             raise ValueError("duplicate rejection in CandidateSet")
-        if set(rejected) & {(cid, ver) for cid, ver, _ in keys}:
-            raise ValueError("capability appears as both candidate and rejection")
+        if set(rejected) & set(keys):
+            raise ValueError("operation appears as both candidate and rejection")
         return self

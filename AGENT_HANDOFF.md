@@ -22,8 +22,8 @@
 | M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
 | M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
-| M2 状态 | **实现完成，未合入 `main`，待技术审查与验收**；分支 `claude/m2-contract-kernel`，11 个提交（T0–T11），四条命令全绿 |
-| M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工；计划本身在分支 `claude/m2-plan` |
+| M2 状态 | **实现完成，未合入 `main`，待技术审查与验收**；分支 `claude/m2-contract-kernel`；提交数与精确 SHA 用 `git log --oneline main..HEAD` 查询——本文件不维护会随修订漂移的计数 |
+| M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工（本分支已带入该文件） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
@@ -68,6 +68,7 @@
 | --- | --- | --- |
 | [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) | 首批能力、初始执行上下文与真实调用许可 | Accepted 2026-09-01 |
 | [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) | 工程与测试基线：Python 3.11、pytest、security marker gate、Ruff、mypy | Accepted 2026-09-01 |
+| [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) | `plan_hash` 规范形状、审批绑定与工具准入 | Accepted 2026-09-02 |
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
@@ -151,7 +152,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 ### 已验证
 
 - **M2 分支 `claude/m2-contract-kernel`（起点 `d0971666`，11 个提交 `ce8a9d3`…`dff7701` 之后另有 T11 提交）四条命令全绿**：`python -m pytest -q` 450 passed；`python -m pytest -m security -q` 314 passed / 136 deselected；`ruff check .` 与 `mypy src` 均通过。
-- **M2 累计 55 组 TDD 反证**逐条先转红后还原转绿（T2 三组、T3 三组、T4 五组、T5 五组、T6 四组、T7 四组、T8 七组、T9 三组、T10 九组、T11 六组，另加 T1 的迁移前后逐字相同回归基准）。
+- **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
 - 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
 - M0 验收对象 `a1a8c888…` 已以 `--ff-only` 合入 `main`，无合并提交，历史未改写。

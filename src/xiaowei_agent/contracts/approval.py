@@ -11,9 +11,7 @@ policy_revision；恢复时用重算值比对，不匹配即拒绝（ARCHITECTUR
 字段，Gateway 重算比对（ADR-009 D4）。
 """
 
-import datetime as _dt
-
-from xiaowei_agent.contracts.base import Contract, StrictStr
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictStr
 from xiaowei_agent.contracts.enums import ApprovalState, EffectClass
 from xiaowei_agent.contracts.policy import PolicyDecision
 
@@ -25,7 +23,7 @@ class ApprovalRequest(Contract):
     target_fingerprint: StrictStr
     policy_revision: StrictStr
     subject: StrictStr
-    expires_at: _dt.datetime
+    expires_at: AwareDatetime
     state: ApprovalState
 
 

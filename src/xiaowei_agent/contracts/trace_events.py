@@ -9,38 +9,56 @@ M3 建立首个错误分析闭环的前提。
 只依赖 redaction 与标准库。
 """
 
-import datetime as _dt
 from collections.abc import Mapping
 from typing import Annotated
 
-from pydantic import AfterValidator, Field
+from pydantic import AfterValidator, Field, PlainSerializer
 
-from xiaowei_agent.contracts.base import Contract, StrictStr, frozen_map
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictStr, TraceId, frozen_map
 from xiaowei_agent.contracts.enums import PipelineStage, StageOutcome
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.redaction import scrub_text
 
 
 def _scrub_details(value: Mapping[str, str]) -> Mapping[str, str]:
-    """逐值脱敏后冻结。
+    """**键与值都脱敏**后冻结。
+
+    只脱敏值会把 secret 留在键里：``{"token=abc123def456": "safe"}`` 原样出现在
+    审计事件中。键同样是调用方拼出来的自由文本。
+
+    脱敏后两个键可能塌成同一个（``token=a`` 与 ``token=b`` 都变成 ``token=***``）。
+    静默覆盖会丢失一条事件明细，因此**碰撞即拒绝**——与 ``canonical_json`` 的 NFC
+    键碰撞是同一类缺陷。
 
     写成**字段级** validator 而非 model 级 after-validator：后者返回非 ``self`` 的
     对象在 ``__init__`` 路径上会被 Pydantic 丢弃（只发一条警告），脱敏会静默失效。
     """
-    return frozen_map({key: scrub_text(item) for key, item in value.items()})
+    scrubbed: dict[str, str] = {}
+    for key, item in value.items():
+        safe_key = scrub_text(key)
+        if safe_key in scrubbed:
+            raise ValueError(f"detail keys collide after redaction: {safe_key!r}")
+        scrubbed[safe_key] = scrub_text(item)
+    return frozen_map(scrubbed)
 
 
 DetailValue = Annotated[str, Field(max_length=256)]
-TraceDetail = Annotated[Mapping[StrictStr, DetailValue], AfterValidator(_scrub_details)]
+TraceDetail = Annotated[
+    Mapping[StrictStr, DetailValue],
+    AfterValidator(_scrub_details),
+    # 与 FrozenMap 同理：MappingProxyType 不是 pydantic 认识的序列化目标，
+    # 不显式转换时 model_dump() 会发 PydanticSerializationUnexpectedValue 警告。
+    PlainSerializer(dict, return_type=dict, when_used="always"),
+]
 
 
 class TraceEvent(Contract):
     event_id: StrictStr
-    trace_id: StrictStr
+    trace_id: TraceId
     task_id: str | None
     stage: PipelineStage
     outcome: StageOutcome
-    occurred_at: _dt.datetime
+    occurred_at: AwareDatetime
     capability_id: str | None
     step_id: str | None
     policy_revision: str | None

@@ -8,6 +8,8 @@
 from xiaowei_agent.contracts.answerability import AnswerabilityVerdict, MissingItem
 from xiaowei_agent.contracts.approval import AdmissionCertificate, ApprovalRequest
 from xiaowei_agent.contracts.base import (
+    AlwaysTrue,
+    AwareDatetime,
     Contract,
     FiniteFloat,
     FrozenMap,
@@ -78,9 +80,11 @@ __all__ = [
     "AdapterStatus",
     "AdmissionCertificate",
     "AgentError",
+    "AlwaysTrue",
     "AnswerabilityVerdict",
     "ApprovalRequest",
     "ApprovalState",
+    "AwareDatetime",
     "BindingRejection",
     "Candidate",
     "CandidateSet",

@@ -6,9 +6,10 @@ from xiaowei_agent.capabilities.effect import (
     derive_effect,
     verify_plan_effects,
 )
-from xiaowei_agent.capabilities.resolver import CapabilityResolver
+from xiaowei_agent.capabilities.resolver import CapabilityRegistry, CapabilityResolver
 
 __all__ = [
+    "CapabilityRegistry",
     "CapabilityResolver",
     "SpecResolutionError",
     "build_plan_step",

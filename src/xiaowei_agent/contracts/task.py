@@ -5,14 +5,13 @@
 给出确定的拒绝。终态集合与迁移表由测试交叉校验，避免两处各写一份而悄悄漂移。
 """
 
-import datetime as _dt
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final, Self
 
 from pydantic import Field, model_validator
 
-from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
 
 TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
@@ -70,7 +69,7 @@ class TaskRecord(Contract):
     status: TaskStatus
     version: StrictInt = Field(ge=0)
     lease_owner: str | None = None
-    lease_expires_at: _dt.datetime | None = None
+    lease_expires_at: AwareDatetime | None = None
     fencing_token: StrictInt | None = Field(default=None, gt=0)
     terminal_reason: str | None = None
 
@@ -94,7 +93,7 @@ class TaskRecord(Contract):
 class LeaseGrant(Contract):
     task_id: StrictStr
     owner: StrictStr
-    expires_at: _dt.datetime
+    expires_at: AwareDatetime
     fencing_token: StrictInt = Field(gt=0)
 
 

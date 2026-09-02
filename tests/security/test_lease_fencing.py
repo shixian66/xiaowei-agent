@@ -4,6 +4,7 @@
 """
 
 import pytest
+from pydantic import ValidationError
 
 from xiaowei_agent.contracts import TaskStatus, TransitionRejection
 
@@ -135,3 +136,96 @@ async def test_stale_token_is_reported_before_version_mismatch(store, task, cloc
         fencing_token=old.fencing_token,
     )
     assert result.rejection is TransitionRejection.STALE_FENCING_TOKEN
+
+
+async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
+    store, task, clock
+) -> None:
+    """租约过期后，stale worker 不带 token 也不得写入。
+
+    把规则锚定在"租约此刻是否 live"会留下这个缺口：过期后 live 为假，"有租约缺
+    token"的分支就不再命中，省略 token 反而畅通。正确锚点是"任务是否曾被租出"。
+    """
+    await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    clock.advance(seconds=31)
+    current = await store.get(task.task_id)
+    result = await store.transition(
+        task_id=task.task_id,
+        expected_version=current.version,
+        to_status=TaskStatus.PLANNING,
+    )
+    assert result.applied is False
+    assert result.rejection is TransitionRejection.LEASE_NOT_HELD
+
+
+async def test_expired_lease_cannot_be_used_with_its_old_token_either(
+    store, task, clock
+) -> None:
+    """过期后必须重新 acquire，带着旧 token 同样不行。"""
+    granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    clock.advance(seconds=31)
+    current = await store.get(task.task_id)
+    result = await store.transition(
+        task_id=task.task_id,
+        expected_version=current.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=granted.fencing_token,
+    )
+    assert result.applied is False
+    assert result.rejection is TransitionRejection.LEASE_NOT_HELD
+
+
+# --- public 入参的隐式转换（Protocol 标注在运行时不拦任何东西） ---
+async def test_expected_version_rejects_bool(store, task) -> None:
+    """False 会匹配版本 0，True 会匹配版本 1。"""
+    with pytest.raises(ValidationError):
+        await store.transition(
+            task_id=task.task_id, expected_version=False, to_status=TaskStatus.PLANNING
+        )
+
+
+async def test_fencing_token_rejects_bool(store, task) -> None:
+    """True 会匹配 token 1。"""
+    with pytest.raises(ValidationError):
+        await store.transition(
+            task_id=task.task_id,
+            expected_version=task.version,
+            to_status=TaskStatus.PLANNING,
+            fencing_token=True,
+        )
+
+
+async def test_to_status_rejects_a_plain_string(store, task) -> None:
+    with pytest.raises(ValidationError):
+        await store.transition(
+            task_id=task.task_id, expected_version=task.version, to_status="planning"
+        )
+
+
+@pytest.mark.parametrize("bad_ttl", [0, -10])
+async def test_acquire_lease_rejects_non_positive_ttl(store, task, bad_ttl: int) -> None:
+    with pytest.raises(ValidationError):
+        await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=bad_ttl)
+
+
+async def test_acquire_lease_rejects_bytes_owner(store, task) -> None:
+    with pytest.raises(ValidationError):
+        await store.acquire_lease(task_id=task.task_id, owner=b"w1", ttl_seconds=30)
+
+
+@pytest.mark.parametrize(
+    ("owner", "ttl"), [(b"w1", 30), ("w1", -10), ("", 30)], ids=["bytes", "ttl", "blank"]
+)
+async def test_invalid_lease_arguments_do_not_mutate_the_store(
+    store, task, owner: object, ttl: int
+) -> None:
+    """非法入参必须在**写入之前**失败。
+
+    先污染 store 再抛 ValidationError 会留下一个带着无效租约字段的任务记录，
+    之后所有 fencing 判定都建立在这条脏记录上。
+    """
+    before = await store.get(task.task_id)
+    with pytest.raises(ValidationError):
+        await store.acquire_lease(task_id=task.task_id, owner=owner, ttl_seconds=ttl)
+    after = await store.get(task.task_id)
+    assert after == before

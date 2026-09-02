@@ -11,6 +11,20 @@
 使"违反终态保护"永远以 ``TERMINAL_PROTECTED`` 报出，不会被版本不匹配掩盖成一个
 看起来正常的并发结果；租约放在版本之前，是因为"拿着陈旧 token 的 worker"比"版本
 落后"更具体，审计需要看到前者。
+
+**fencing 规则锚定在"任务是否曾被租出"，而不是"租约此刻是否 live"**：后者留了一个
+致命缺口——租约过期后，stale worker 只要**不带 token** 就能写入。正确的闭合规则是：
+
+===================  ==================  ==========================
+任务曾被租出          传入 token          结果
+===================  ==================  ==========================
+否                    未传               放行（created → planning 发生在取租约前）
+否                    传了               ``LEASE_NOT_HELD``（持有不存在的租约）
+是，租约 live         与当前 token 相同   放行
+是，租约 live         与当前 token 不同   ``STALE_FENCING_TOKEN``
+是，租约 live         未传               ``LEASE_NOT_HELD``
+是，租约已过期        任意                ``LEASE_NOT_HELD``（必须重新 acquire）
+===================  ==================  ==========================
 """
 
 import asyncio
@@ -34,7 +48,9 @@ from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
     IdempotencyConflictError,
+    LeaseCommand,
     TaskNotFoundError,
+    TransitionCommand,
     request_dedup_digest,
 )
 
@@ -56,6 +72,26 @@ class InMemoryTaskStore:
             return self._records[task_id]
         except KeyError as exc:
             raise TaskNotFoundError(task_id) from exc
+
+    def _check_fencing(
+        self, record: TaskRecord, fencing_token: int | None
+    ) -> TransitionRejection | None:
+        """按"任务是否曾被租出"判定，而非"租约此刻是否 live"。
+
+        以 live 为锚点会留下缺口：租约过期后 stale worker 只要不带 token 就能写入。
+        """
+        ever_leased = record.fencing_token is not None
+        if not ever_leased:
+            # 从未租出：不带 token 放行（created → planning）；带 token 即违规。
+            return None if fencing_token is None else TransitionRejection.LEASE_NOT_HELD
+        if not self._lease_is_live(record):
+            # 曾被租出但租约已过期：必须重新 acquire，无论是否带 token。
+            return TransitionRejection.LEASE_NOT_HELD
+        if fencing_token is None:
+            return TransitionRejection.LEASE_NOT_HELD
+        if fencing_token != record.fencing_token:
+            return TransitionRejection.STALE_FENCING_TOKEN
+        return None
 
     def _lease_is_live(self, record: TaskRecord) -> bool:
         return (
@@ -114,6 +150,21 @@ class InMemoryTaskStore:
         fencing_token: int | None = None,
         terminal_reason: str | None = None,
     ) -> TransitionResult:
+        # 先把入参构造成严格 DTO：Protocol 的类型标注在运行时不拦任何东西，
+        # expected_version=False / fencing_token=True / to_status="planning"
+        # 都会被 lax 转换悄悄接受。
+        command = TransitionCommand(
+            task_id=task_id,
+            expected_version=expected_version,
+            to_status=to_status,
+            fencing_token=fencing_token,
+            terminal_reason=terminal_reason,
+        )
+        task_id = command.task_id
+        expected_version = command.expected_version
+        to_status = command.to_status
+        fencing_token = command.fencing_token
+        terminal_reason = command.terminal_reason
         async with self._lock:
             current = self._require(task_id)
             if current.status in TERMINAL_STATUSES:
@@ -123,25 +174,9 @@ class InMemoryTaskStore:
                     rejection=TransitionRejection.TERMINAL_PROTECTED,
                 )
 
-            live = self._lease_is_live(current)
-            if live and fencing_token is None:
-                return TransitionResult(
-                    applied=False,
-                    winner=current,
-                    rejection=TransitionRejection.LEASE_NOT_HELD,
-                )
-            if live and fencing_token != current.fencing_token:
-                return TransitionResult(
-                    applied=False,
-                    winner=current,
-                    rejection=TransitionRejection.STALE_FENCING_TOKEN,
-                )
-            if not live and fencing_token is not None:
-                return TransitionResult(
-                    applied=False,
-                    winner=current,
-                    rejection=TransitionRejection.LEASE_NOT_HELD,
-                )
+            rejection = self._check_fencing(current, fencing_token)
+            if rejection is not None:
+                return TransitionResult(applied=False, winner=current, rejection=rejection)
 
             if current.version != expected_version:
                 return TransitionResult(
@@ -169,6 +204,8 @@ class InMemoryTaskStore:
     async def acquire_lease(
         self, *, task_id: str, owner: str, ttl_seconds: int
     ) -> LeaseGrant | None:
+        command = LeaseCommand(task_id=task_id, owner=owner, ttl_seconds=ttl_seconds)
+        task_id, owner, ttl_seconds = command.task_id, command.owner, command.ttl_seconds
         async with self._lock:
             current = self._require(task_id)
             if current.status in TERMINAL_STATUSES:
@@ -176,22 +213,32 @@ class InMemoryTaskStore:
             if self._lease_is_live(current) and current.lease_owner != owner:
                 return None
             token = self._next_token
-            self._next_token += 1
             expires = self._clock() + _dt.timedelta(seconds=ttl_seconds)
-            self._records[task_id] = current.model_copy(
+            # **先构造并校验，再写入**：反过来会在参数非法时先污染 store，再抛
+            # ValidationError，留下一个带着无效租约字段的任务记录。
+            grant = LeaseGrant(
+                task_id=task_id, owner=owner, expires_at=expires, fencing_token=token
+            )
+            updated = current.model_copy(
                 update={
                     "lease_owner": owner,
                     "lease_expires_at": expires,
                     "fencing_token": token,
                 }
             )
-            return LeaseGrant(
-                task_id=task_id, owner=owner, expires_at=expires, fencing_token=token
-            )
+            self._next_token += 1
+            self._records[task_id] = updated
+            return grant
 
     async def renew_lease(
         self, *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
     ) -> LeaseGrant | None:
+        command = LeaseCommand(
+            task_id=task_id, owner=owner, ttl_seconds=ttl_seconds, fencing_token=fencing_token
+        )
+        task_id, owner = command.task_id, command.owner
+        ttl_seconds = command.ttl_seconds
+        fencing_token = command.fencing_token if command.fencing_token is not None else 0
         async with self._lock:
             current = self._require(task_id)
             if not self._lease_is_live(current):
@@ -199,13 +246,14 @@ class InMemoryTaskStore:
             if current.lease_owner != owner or current.fencing_token != fencing_token:
                 return None
             expires = self._clock() + _dt.timedelta(seconds=ttl_seconds)
-            self._records[task_id] = current.model_copy(update={"lease_expires_at": expires})
-            return LeaseGrant(
+            grant = LeaseGrant(
                 task_id=task_id,
                 owner=owner,
                 expires_at=expires,
                 fencing_token=fencing_token,
             )
+            self._records[task_id] = current.model_copy(update={"lease_expires_at": expires})
+            return grant
 
     async def record_approval(self, *, request: ApprovalRequest) -> None:
         async with self._lock:

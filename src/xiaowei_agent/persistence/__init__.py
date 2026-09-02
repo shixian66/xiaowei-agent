@@ -4,8 +4,10 @@ from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
     IdempotencyConflictError,
+    LeaseCommand,
     TaskNotFoundError,
     TaskStore,
+    TransitionCommand,
     request_dedup_digest,
 )
 
@@ -13,7 +15,9 @@ __all__ = [
     "Clock",
     "ContextMismatchError",
     "IdempotencyConflictError",
+    "LeaseCommand",
     "TaskNotFoundError",
     "TaskStore",
+    "TransitionCommand",
     "request_dedup_digest",
 ]

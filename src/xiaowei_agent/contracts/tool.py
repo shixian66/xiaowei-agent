@@ -14,7 +14,13 @@ from typing import Any, Final, Never
 
 from pydantic import Field, model_validator
 
-from xiaowei_agent.contracts.base import Contract, FiniteFloat, FrozenMap, StrictStr
+from xiaowei_agent.contracts.base import (
+    Contract,
+    FiniteFloat,
+    FrozenMap,
+    StrictStr,
+    TraceId,
+)
 from xiaowei_agent.contracts.enums import ToolCallStatus
 from xiaowei_agent.contracts.errors import AgentError
 
@@ -37,7 +43,7 @@ class ToolResult(Contract):
     raw_ref: str | None
     source: StrictStr
     limitations: tuple[str, ...]
-    trace_id: StrictStr
+    trace_id: TraceId
     error: AgentError | None = None
 
     @model_validator(mode="before")

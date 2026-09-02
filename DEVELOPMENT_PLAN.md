@@ -176,7 +176,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - **最小步骤级 trace / audit 事件契约**：能把一次失败定位到 Intent、Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 中的具体阶段；只定义事件形状与阶段枚举，不实现采集后端。
 - `planning/`：canonical JSON、`plan_hash`、`target_fingerprint` 的确定性实现和固定测试向量。
 - `tools/`：`ToolGateway` Protocol、内部 `AdapterResponse`、私有 `ToolResult` 工厂和 fake/recording adapter。
-- `capabilities/`：最小 Registry snapshot 与 Resolver Protocol；`CapabilitySpec` 承载 `effect_class` 与 operation 级 `side_effect` 声明，作为 E1 分类的唯一确定性来源。`effect_class` 是否进入 `plan_hash` canonicalization 由 M2 详细计划审定；若进入，须同步递增 plan schema version 并更新 `ARCHITECTURE.md` §7.1。此时不建立关键词总表或 DSL 框架。
+- `capabilities/`：最小 Registry snapshot 与 Resolver Protocol；`CapabilitySpec` 承载 `effect_class` 与 operation 级 `side_effect` 声明，作为 E1 分类的唯一确定性来源。`effect_class` 进入 `plan_hash` canonicalization——已由 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D1 裁定并在 M2 实现，`PLAN_SCHEMA_VERSION` 首个取值为 `1`。此时不建立关键词总表或 DSL 框架。
 - `runners/`：只声明 `WorkflowRunner` 契约和最小同步 fake runner 测试替身，不提前实现 LangGraph。
 - `persistence/`：冻结 M3/M4 共用的 `TaskStore` 交互形状：每次状态变更携带 `expected_version`，结果明确返回 `applied` 与存储层 `winner`；lease 获取/续租返回 owner、到期时间和单调 fencing token，所有 lease 内写入都携带该 token。精确 DTO 和方法签名在 M2 详细计划中审定，不留到 M4 临时改 Runner。
 - 单进程 fake TaskStore 必须真实执行 expected-version 检查、stale winner 返回、lease/fencing token 传播和终态保护；只是不宣称跨进程原子性、故障恢复或 PostgreSQL 级保证。

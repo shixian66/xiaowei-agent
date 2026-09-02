@@ -181,13 +181,42 @@ async def test_adapter_error_text_never_reaches_the_tool_result(
     assert upstream_text not in result.model_dump_json()
 
 
+def test_adapter_response_rejects_self_contradictory_combinations() -> None:
+    """矛盾组合在契约层拒绝，不让 Gateway 去猜。
+
+    status=OK 却带 error 会让 Gateway 返回成功并静默丢掉错误；status 非 OK 却带
+    payload 会让半截数据被当成证据。
+    """
+    from pydantic import ValidationError
+
+    cause = ExternalContent.capture(
+        source=ExternalSource.TOOL, content="boom", captured_at=_AT
+    )
+    with pytest.raises(ValidationError, match="must not carry an error"):
+        AdapterResponse(
+            status=AdapterStatus.OK,
+            payload=(),
+            source="s",
+            error=cause,
+            elapsed_ms=1,
+        )
+    with pytest.raises(ValidationError, match="must not carry a payload"):
+        AdapterResponse(
+            status=AdapterStatus.ERROR,
+            payload=({"partial": "row"},),
+            source="s",
+            error=cause,
+            elapsed_ms=1,
+        )
+
+
 async def test_failed_call_carries_no_data_view(ok_call, context, admission) -> None:
-    """失败时不得把半截 payload 当作证据传出去。"""
+    """失败时结果里不得出现任何数据视图。"""
     adapter = RecordingToolAdapter(
         responses=(
             AdapterResponse(
                 status=AdapterStatus.ERROR,
-                payload=({"partial": "row"},),
+                payload=(),
                 source="starrocks-fake",
                 error=None,
                 elapsed_ms=7,
@@ -198,6 +227,60 @@ async def test_failed_call_carries_no_data_view(ok_call, context, admission) -> 
     result = await failing.invoke(ok_call, context=context, admission=admission)
     assert result.data_view == ()
     assert result.error is not None
+    assert result.error.cause_ref is None  # 明确的"无原文"，不是丢失
+
+
+async def test_adapter_exception_is_structured_not_propagated(
+    ok_call, context, admission
+) -> None:
+    """adapter 的任意异常不得原样冒泡。
+
+    异常文本是外部内容；直接抛出会绕过 ExternalContent、AgentError 与脱敏边界，
+    把上游的密码或连接串带进调用方的 traceback。
+    """
+
+    class _ExplodingAdapter:
+        async def execute(self, call: object, *, context: object) -> object:
+            raise RuntimeError("connect failed: password=hunter2")
+
+    gw = DeterministicToolGateway(adapters={"starrocks": _ExplodingAdapter()})
+    result = await gw.invoke(ok_call, context=context, admission=admission)
+
+    assert result.status is ToolCallStatus.ERROR
+    assert result.error is not None
+    assert result.error.category is ErrorCategory.UPSTREAM
+    assert result.error.cause_ref is not None
+    assert result.data_view == ()
+
+
+async def test_adapter_exception_text_never_reaches_the_result(
+    ok_call, context, admission
+) -> None:
+    """异常原文只留摘要引用，不进入对外 JSON。"""
+
+    class _ExplodingAdapter:
+        async def execute(self, call: object, *, context: object) -> object:
+            raise RuntimeError("connect failed: password=hunter2")
+
+    gw = DeterministicToolGateway(adapters={"starrocks": _ExplodingAdapter()})
+    result = await gw.invoke(ok_call, context=context, admission=admission)
+    assert "hunter2" not in result.model_dump_json()
+
+
+async def test_cancellation_is_not_swallowed(ok_call, context, admission) -> None:
+    """协作式取消必须照常传播——CancelledError 继承自 BaseException。
+
+    吞掉取消会让 worker 在关停时挂住，是比泄漏更隐蔽的故障。
+    """
+    import asyncio
+
+    class _CancellingAdapter:
+        async def execute(self, call: object, *, context: object) -> object:
+            raise asyncio.CancelledError
+
+    gw = DeterministicToolGateway(adapters={"starrocks": _CancellingAdapter()})
+    with pytest.raises(asyncio.CancelledError):
+        await gw.invoke(ok_call, context=context, admission=admission)
 
 
 def _referenced(path: Path) -> set[str]:

@@ -21,22 +21,61 @@
 重新校验用 ``{**self.__dict__, **update}`` 而非 ``model_dump()``，以保留嵌套契约
 实例与 ``datetime`` 的原始类型，避免 JSON 往返丢失信息。
 
-**Pydantic 默认 lax 模式的隐式转换同样是绕过**：``int`` 会接受 ``"2"`` 与
-``True``，``str`` 会接受 ``bytes``。因此标量边界使用 :data:`StrictInt` /
-:data:`StrictStr` / :data:`FiniteFloat`，而**不**在 ``model_config`` 上整体开
-``strict=True``——后者会同时打断 ``str -> StrEnum``、ISO 字符串 -> ``datetime``
-和 ``list -> tuple``，使 M4 从 TaskStore 反序列化全面受阻。
+**Pydantic 默认 lax 模式的隐式转换同样是绕过**：``bool`` 接受 ``"yes"`` / ``1``，
+``int`` 接受 ``"2"`` / ``True``，``str`` 接受 ``bytes``。一个被构造成
+``allow="yes"`` 的 ``PolicyDecision`` 会在 Gateway 处真的放行。
+
+因此 **``strict=True`` 提到基类，严格性是默认而非逐字段选择加入**。逐字段开启的
+做法必然会漏——本项目已经漏过一轮：``StrictInt`` 定义了却没用到 ``PolicyDecision``、
+``AnswerabilityVerdict``、``EvidenceEnvelope`` 等处的 ``bool`` 上。
+
+**这不会打断 M4 的反序列化**：``str -> StrEnum``、ISO 字符串 -> ``datetime``、
+``list -> tuple`` 在 strict 下确实被 python 校验模式拒绝，但在 **JSON 校验模式**
+（``model_validate_json``）下依然允许，而 ``bool`` / ``int`` 的严格性在两种模式下
+都保持。TaskStore 往返走的正是 JSON 路径，因此两者可以兼得——已实证。
 
 **已知取舍**：``MappingProxyType`` 不可哈希，因此携带映射字段的契约实例不可作为
 dict 键或放入 set。本项目不依赖契约的可哈希性，比较一律用 ``==``。
 """
 
+import datetime as _dt
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, Final, Never, Self, TypeAlias
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PlainSerializer
+
+
+def _require_aware(value: _dt.datetime) -> _dt.datetime:
+    """拒绝 naive datetime。
+
+    naive 与 aware 相比较会抛 ``TypeError``——审批过期判定会因此变成一个非结构化
+    的崩溃，而不是 fail-closed 的拒绝。时间边界一律要求带时区。
+    """
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError("datetime must be timezone-aware")
+    return value
+
+
+AwareDatetime: TypeAlias = Annotated[_dt.datetime, AfterValidator(_require_aware)]
+"""带时区的时间戳。全部跨边界时间字段一律使用本别名。"""
+
+
+def _require_true(value: bool) -> bool:
+    if value is not True:
+        raise ValueError("must be exactly True")
+    return value
+
+
+AlwaysTrue: TypeAlias = Annotated[bool, AfterValidator(_require_true)]
+"""恒为 ``True`` 的标志位。
+
+**不要用 ``Literal[True]``**：``Literal`` 按 ``==`` 比较，而 ``1 == True`` 为真，
+即使在严格模式下 ``1`` 也会被接受——"只读证据"于是可以由一个整数冒充。
+``bool`` + ``is True`` 校验才同时挡住 ``1``（严格 bool）与 ``False``（校验器）。
+"""
+"""带时区的时间戳。全部跨边界时间字段一律使用本别名。"""
 
 TRACE_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"
 """trace_id 的字面格式，全项目**唯一**定义处。
@@ -56,16 +95,16 @@ def _trace_id(value: str) -> str:
     return value
 
 
-TraceId = Annotated[str, Field(strict=True), AfterValidator(_trace_id)]
+TraceId = Annotated[str, AfterValidator(_trace_id)]
 
-StrictInt: TypeAlias = Annotated[int, Field(strict=True)]
-"""拒绝隐式转换的整数。
+StrictInt: TypeAlias = int
+"""整数别名。
 
-lax 模式下 ``max_tool_calls=True`` 会被读成 ``1`` 并顺利通过 ``gt=0``，边界校验
-形同虚设。预算、版本、fencing token、行数阈值一律用本别名。
+严格性由 :class:`Contract` 的 ``model_config`` 统一提供，因此这里不再重复
+``Field(strict=True)``。保留别名是为了让"这是一个跨边界标量"在签名上仍然可读。
 """
 
-FiniteFloat: TypeAlias = Annotated[float, Field(strict=True, allow_inf_nan=False)]
+FiniteFloat: TypeAlias = Annotated[float, Field(allow_inf_nan=False)]
 """禁止 NaN / ±Inf 的浮点。
 
 **必须在 DTO 构造阶段拒绝，而不是等到 ``canonical_json``**：
@@ -106,7 +145,7 @@ FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map), _a
 class Contract(BaseModel):
     """不可变、拒绝未声明字段、复制即重新校验的契约基类。"""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False

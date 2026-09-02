@@ -4,13 +4,12 @@
 不可表达。``digest`` 在校验阶段重算并比对，伪造摘要即校验失败。
 """
 
-import datetime as _dt
 import hashlib
 from typing import Literal, Self
 
 from pydantic import model_validator
 
-from xiaowei_agent.contracts.base import Contract
+from xiaowei_agent.contracts.base import AwareDatetime, Contract
 from xiaowei_agent.contracts.enums import ExternalSource, TrustLevel
 
 
@@ -24,7 +23,7 @@ class ExternalContent(Contract):
     trust: Literal[TrustLevel.UNTRUSTED] = TrustLevel.UNTRUSTED
     content: str
     digest: str
-    captured_at: _dt.datetime
+    captured_at: AwareDatetime
 
     @model_validator(mode="after")
     def _digest_must_match(self) -> Self:
@@ -34,7 +33,7 @@ class ExternalContent(Contract):
 
     @classmethod
     def capture(
-        cls, *, source: ExternalSource, content: str, captured_at: _dt.datetime
+        cls, *, source: ExternalSource, content: str, captured_at: AwareDatetime
     ) -> Self:
         """唯一推荐构造入口：自动计算摘要，调用方无从伪造。"""
         return cls(

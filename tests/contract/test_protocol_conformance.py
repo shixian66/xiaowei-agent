@@ -1,31 +1,57 @@
-"""每个 Protocol 都必须有实现满足它，且签名不漂移。
+"""Protocol 一致性。
 
-``Protocol`` 只在有赋值/传参发生时才被静态检查；一个从未被赋值的 Protocol 可能与
-实现悄悄漂移而 mypy 毫无反应。赋值给带类型标注的变量让 mypy 真正检查结构兼容性；
-再用 inspect 比对关键字参数，覆盖只跑 pytest 的场景。
+**真正的 gate 在 ``src/xiaowei_agent/_conformance.py``**：验收命令是 ``mypy src``，
+放在 ``tests/`` 下的带类型标注赋值根本不会被检查。本文件只做两件运行时无法交给
+mypy 的事：确认锚点文件确实覆盖了所有已有实现的 Protocol；确认关键字参数没有漂移
+（结构兼容性检查不看关键字名，但调用点会因此炸掉）。
 """
 
+import ast
 import inspect
+from pathlib import Path
 
-from tests.fakes.clock import ManualClock  # noqa: F401  (M2 T10 起可用)
-
+from xiaowei_agent import _conformance
+from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.runners.runner import WorkflowRunner
 from xiaowei_agent.tools.adapter import ToolAdapter
-from xiaowei_agent.tools.fake import RecordingToolAdapter
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
 
-
-def test_deterministic_gateway_satisfies_the_tool_gateway_protocol(
-    recording_adapter: RecordingToolAdapter,
-) -> None:
-    instance: ToolGateway = DeterministicToolGateway(adapters={"starrocks": recording_adapter})
-    assert instance is not None
+# 有实现的 Protocol 必须在锚点文件中出现；无实现的（CapabilityRegistry /
+# CapabilityResolver / TraceSink）只冻结形状，M3 落地实现时再补锚点。
+_ANCHORED = {"ToolGateway", "ToolAdapter", "TaskStore", "WorkflowRunner"}
+_FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver", "TraceSink"}
 
 
-def test_recording_adapter_satisfies_the_tool_adapter_protocol(
-    recording_adapter: RecordingToolAdapter,
-) -> None:
-    adapter: ToolAdapter = recording_adapter
-    assert adapter is not None
+def _annotated_names(path: Path) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
+            names.add(node.annotation.id)
+    return names
+
+
+def test_every_implemented_protocol_has_a_typed_anchor() -> None:
+    """新增 Protocol 实现却忘了加锚点时，本条转红。
+
+    否则该 Protocol 与实现可以悄悄漂移而 mypy 毫无反应。
+    """
+    anchored = _annotated_names(Path(inspect.getfile(_conformance)))
+    assert _ANCHORED <= anchored, f"缺少类型锚点: {sorted(_ANCHORED - anchored)}"
+
+
+def test_anchor_module_has_no_runtime_import_side_effects() -> None:
+    """锚点全部位于 TYPE_CHECKING 块内：不得把 fake 拉进生产导入链。"""
+    tree = ast.parse(Path(inspect.getfile(_conformance)).read_text(encoding="utf-8"))
+    toplevel_imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    modules = {
+        (node.module if isinstance(node, ast.ImportFrom) else node.names[0].name) or ""
+        for node in toplevel_imports
+    }
+    assert modules == {"typing"}, f"锚点模块不得在运行时导入实现: {modules}"
 
 
 def _keyword_params(func: object) -> set[str]:
@@ -41,3 +67,33 @@ def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
     assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(
         ToolGateway.invoke
     )
+
+
+def test_store_and_runner_keep_their_protocol_keyword_arguments() -> None:
+    from xiaowei_agent.persistence.fake import InMemoryTaskStore
+    from xiaowei_agent.runners.fake import ScriptedRunner
+
+    for method in ("create_task", "transition", "acquire_lease", "renew_lease"):
+        assert _keyword_params(getattr(InMemoryTaskStore, method)) == _keyword_params(
+            getattr(TaskStore, method)
+        ), method
+    for method in ("start", "resume"):
+        assert _keyword_params(getattr(ScriptedRunner, method)) == _keyword_params(
+            getattr(WorkflowRunner, method)
+        ), method
+
+
+def test_protocols_without_implementations_are_documented_as_such() -> None:
+    """无实现锚点的 Protocol 必须是明确列举的，而不是被遗忘的。"""
+    from xiaowei_agent.capabilities import CapabilityRegistry, CapabilityResolver
+    from xiaowei_agent.observability import TraceSink
+
+    declared = {CapabilityRegistry.__name__, CapabilityResolver.__name__, TraceSink.__name__}
+    assert declared == _FROZEN_WITHOUT_IMPLEMENTATION
+
+
+def test_recording_adapter_satisfies_the_tool_adapter_protocol(
+    recording_adapter: object,
+) -> None:
+    adapter: ToolAdapter = recording_adapter  # type: ignore[assignment]
+    assert adapter is not None

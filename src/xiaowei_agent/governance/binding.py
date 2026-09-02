@@ -58,6 +58,12 @@ def verify_approval_binding(
 
     :raises BindingError: 审批过期/未授予，或计划、目标、policy revision 漂移。
     """
+    # ``approval.expires_at`` 由 AwareDatetime 保证带时区；``now`` 是普通参数，
+    # naive 值与 aware 值相比较会抛 TypeError——那是崩溃，不是 fail-closed 的拒绝。
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise BindingError(
+            BindingRejection.APPROVAL_EXPIRED, "now must be timezone-aware"
+        )
     if approval.expires_at <= now:
         raise BindingError(BindingRejection.APPROVAL_EXPIRED, "approval has expired")
     if approval.state is not ApprovalState.GRANTED:

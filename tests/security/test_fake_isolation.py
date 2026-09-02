@@ -22,14 +22,43 @@ def test_every_fake_module_declares_is_fake(name: str) -> None:
     assert getattr(module, "IS_FAKE", False) is True
 
 
+def _type_checking_line_ranges(tree: ast.Module) -> list[tuple[int, int]]:
+    """``if TYPE_CHECKING:`` 分支的行范围。
+
+    这类 import 在运行时**不发生**，因此不可能把 fake 接进真实执行路径——而这正是
+    本文件要防的事。把它们算作违规会逼人放弃类型锚点（``_conformance.py``），
+    反而削弱静态检查。
+
+    用行范围而不是改写 AST：``getattr(node, "body")`` 在 f-string 等节点上取到的
+    并不是语句列表，按 body 递归会 ``TypeError``。
+    """
+    ranges: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        is_tc = (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+            isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+        )
+        if is_tc and node.body:
+            ranges.append((node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno))
+    return ranges
+
+
 def _imports_a_fake(path: Path) -> list[str]:
-    """扫 AST 的 import，而不是原始文本。
+    """扫 AST 的**运行时** import，而不是原始文本。
 
     文本扫描会被 docstring 里"不从本入口导出 fake"这句话本身触发，断言的就不再
     是代码行为。
     """
     hits: list[str] = []
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    guarded = _type_checking_line_ranges(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom) and any(
+            lo <= node.lineno <= hi for lo, hi in guarded
+        ):
+            continue
         module = node.module if isinstance(node, ast.ImportFrom) else None
         if isinstance(node, ast.Import):
             module = node.names[0].name
@@ -67,6 +96,27 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert not _imports_a_fake(c)
+
+    # TYPE_CHECKING 块内的 import 运行时不发生，不构成"接进真实路径"。
+    d = tmp_path / "d.py"
+    d.write_text(
+        "from typing import TYPE_CHECKING" + chr(10)
+        + "if TYPE_CHECKING:" + chr(10)
+        + "    from xiaowei_agent.tools.fake import RecordingToolAdapter" + chr(10),
+        encoding="utf-8",
+    )
+    assert not _imports_a_fake(d)
+
+    # 但同一个文件在运行时 import 就必须被抓住。
+    e = tmp_path / "e.py"
+    e.write_text(
+        "from typing import TYPE_CHECKING" + chr(10)
+        + "from xiaowei_agent.tools.fake import RecordingToolAdapter" + chr(10)
+        + "if TYPE_CHECKING:" + chr(10)
+        + "    pass" + chr(10),
+        encoding="utf-8",
+    )
+    assert _imports_a_fake(e)
 
 
 def test_no_production_module_imports_a_fake() -> None:
