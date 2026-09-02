@@ -8,15 +8,15 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-01（Asia/Shanghai） |
-| 阶段 | **M0 已验收；M1 实现完成，等待验收（分支保护项阻塞）** |
+| 阶段 | **M0、M1 均已验收；M2 尚未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
 | 历史起点 SHA | `7ca391daffbfec65c8f0d1adbcd7e4180fa09178`（仅五份 Markdown 与 `.gitignore`） |
 | 工作分支 | `claude/m0-plan-closure` 已合入 `main`，保留备查 |
-| M1 状态 | **实现完成，待 Codex 精确 SHA 审查与负责人验收**；**不得宣称 M1 已通过** |
-| M1 阻塞项 | **分支保护无法启用**——private + GitHub Free。API 实证：`POST /rulesets` 返回 `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` |
+| M1 状态 | **已验收通过**（技术审查通过 + 六个 CI gate 全绿 + 负责人批准退出标准修订） |
+| 分支保护 | **未建立且当前不可建立**——private + GitHub Free，API 实证 `403`。项目负责人已于 2026-09-01 明确批准将其延后，M1 退出标准据此修订；见残余风险 |
 | 远程 | `git@github.com:shixian66/xiaowei-agent.git`（**private**），默认分支 `main` |
 | PR | [#1](https://github.com/shixian66/xiaowei-agent/pull/1)，未合并 |
 | M1 候选 SHA | 见本轮验收报告；handoff 不记录会随返修漂移的分支 HEAD，请用 `git rev-parse claude/m1-engineering-baseline` 查询 |
@@ -95,7 +95,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. ~~M1 实现~~ **已完成**，PR #1 六个 CI gate 全绿；**待 Codex 按精确 SHA 审查与负责人验收**。
-3. **当前阻塞项**：分支保护无法启用（private + Free）。需负责人在三者中选择：升级 GitHub Pro／改为 public／**明确批准修改 M1 退出标准**为「CI 已建立，分支保护延后」。未选择前 **M1 不得判定通过**，PR #1 不合并。
+3. **下一步**：为 M2 单独编写详细实施计划并获批后才能开工；M2 落地 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore。
 4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
 5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
@@ -110,7 +110,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 证据、报告和大产物的存储位置及保留周期（M6b 前）。
 - M4/M5 本地隔离 PostgreSQL 与 Compose 的里程碑批准。
 - M6b 连接测试环境 StarRocks 真实只读的单独授权（环境、账号 secret reference、范围、时窗、脱敏、recording 删除方式）。
-- **分支保护的启用路径**：升级 GitHub Pro／改为 public／批准修改 M1 退出标准（三选一）。
+- 具备条件（升级套餐或改为 public）时补齐分支保护。
 - 发布环境（M5 后）。
 
 未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物本身不构成 E1，但其基础设施许可仍受 ADR-007 D8 时点约束）。
@@ -164,7 +164,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 - 本文件所在提交的 SHA 不写在文件内，由每轮验收报告提供。
 - Git 初始化之前发生的所有文档修订永久没有 commit SHA 证据。
-- **分支保护缺失**：private + GitHub Free 无法启用（API 实证 403），红灯 PR 仍可被人工合并，合并纪律只能靠人。
+- **分支保护缺失（已知并被显式接受）**：private + GitHub Free 无法启用（API 实证 403）。项目负责人已批准延后并据此修订 M1 退出标准。后果是**红灯 PR 仍可被人工合并、可强推 `main`、可绕过 PR 流程**，合并纪律完全依赖人工。具备条件后应优先补齐。
 - 日志脱敏是启发式规则：新出现的密钥形状或键名需要补规则；未加引号的敏感值脱敏到分隔符或行尾，属有意的过度脱敏。
 - `pip-audit` 只能发现已收录漏洞，不能证明依赖无恶意代码。
 - 架构约束（Reflection 边界、E1 分类、能力扩展成本）尚无代码验证，要到 M2/M3/M6a 才可证。

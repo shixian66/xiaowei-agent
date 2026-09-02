@@ -163,6 +163,8 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 
 **退出标准**：从干净 checkout 按 README 能安装并运行上述命令；CI 绑定真实 commit SHA，且扫描配置可证明没有测试/生产凭证和真实外部调用；无 secret 和空业务脚手架。
 
+**退出标准修订（2026-09-01，经项目负责人明确批准）**：默认分支保护原为 M1 退出标准的一部分，但仓库为 private + GitHub Free，该能力不可用（API 实证 `403 Upgrade to GitHub Pro or make this repository public`）。退出标准调整为「**CI 已建立并六个 gate 全绿；分支保护延后至套餐具备或仓库改为 public 时**」。这是**显式接受的治理风险**，不是能力缺失被掩盖：在保护建立之前，红灯 PR 仍可被人工合并，合并纪律只能靠人。该风险记入 `AGENT_HANDOFF.md` 残余风险，并在具备条件时优先补齐。
+
 ### M2：契约内核
 
 **目标**：只实现第一条闭环必需的稳定 DTO、Protocol 和纯函数边界。
