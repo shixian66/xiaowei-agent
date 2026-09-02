@@ -22,7 +22,7 @@
 | M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
 | M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
-| M2 状态 | **实现完成，未合入 `main`，待技术审查与验收**；分支 `claude/m2-contract-kernel`；提交数与精确 SHA 用 `git log --oneline main..HEAD` 查询——本文件不维护会随修订漂移的计数 |
+| M2 状态 | **代码合并准入通过，已以 `--ff-only` 合入 `main`**（合并对象 `56ef5990a6a9627ba18acbeff21a08e7a41ff03d`，无合并提交，历史未改写）。**这只是代码合并准入，不代表部署、CI、线上观察或用户验收已完成**——M2 交付的仍只是契约与 fake。逐提交 SHA 用 `git log --oneline d0971666..56ef5990` 查询 |
 | M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工（本分支已带入该文件） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -151,7 +151,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 已验证
 
-- **M2 分支 `claude/m2-contract-kernel` 在提交 `e8e75ae` 上四条命令全绿**：`python -m pytest -q` 623 passed；`python -m pytest -m security -q` 482 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
+- **M2 合并对象 `56ef5990` 在 `main` 上四条命令全绿**（合并前在分支同一 SHA 上亦全绿）：`python -m pytest -q` 623 passed；`python -m pytest -m security -q` 482 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..56ef5990` 无输出。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
 - 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
