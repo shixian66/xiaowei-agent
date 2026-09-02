@@ -25,7 +25,15 @@ _ALLOWED_INTERNAL = {
     # contracts 除叶子外不得依赖任何内部模块；log / config / trace 一律不可。
     "contracts": {"xiaowei_agent.contracts"},
     "capabilities": {"xiaowei_agent.contracts", "xiaowei_agent.capabilities"},
-    "planning": {"xiaowei_agent.contracts", "xiaowei_agent.planning"},
+    # planning 需要 capabilities：PlanCompiler 必须经 build_plan_step() 构造步骤
+    # （test_only_effect_module_constructs_plan_step 禁止直接构造 PlanStep），而分类
+    # 派生的唯一来源在 capabilities/effect.py。方向是 planning → capabilities，
+    # 而 capabilities 只依赖 contracts，因此无环。
+    "planning": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.capabilities",
+        "xiaowei_agent.planning",
+    },
     # governance 需要 capabilities：分类必须在准入边界重算，不能依赖 Runner 记得调。
     "governance": {
         "xiaowei_agent.contracts",

@@ -19,7 +19,21 @@ from typing import Final
 
 from sqlglot import exp
 
-from xiaowei_agent.contracts import SqlSurface
+from xiaowei_agent.capabilities.effect import build_plan_step
+from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
+from xiaowei_agent.contracts import (
+    Candidate,
+    CapabilitySnapshot,
+    ExecutionPlan,
+    JsonScalar,
+    PlanBudget,
+    PlanStep,
+    RequestContext,
+    ResolvedTarget,
+    SqlSurface,
+    StepCondition,
+    StepConditionKind,
+)
 from xiaowei_agent.planning.starrocks.params import SQL_TIME_FORMAT, SlowQueryParams
 
 LIST_V1: Final[str] = "starrocks.slow_query.list.v1"
@@ -200,3 +214,118 @@ def compile_sql(*, template_id: str, params: SlowQueryParams, surface: SqlSurfac
         raise ValueError("unknown sql dialect")
     builder = _compile_list if template_id == LIST_V1 else _compile_count
     return builder(params, surface).sql(dialect=surface.dialect)
+
+
+# --- 计划编译 -----------------------------------------------------------------
+
+STEP_LIST: Final[str] = "s1"
+STEP_COUNT: Final[str] = "s2"
+
+PLAN_BUDGET: Final[PlanBudget] = PlanBudget(
+    max_steps=2, max_tool_calls=2, max_model_tokens=4000
+)
+
+_COUNT_CONDITION: Final[StepCondition] = StepCondition(
+    kind=StepConditionKind.EVIDENCE_ROW_COUNT_BELOW,
+    ref_step_id=STEP_LIST,
+    threshold=1,
+)
+"""s2 的执行条件：s1 一行都没取到时才跑。
+
+条件是**闭集枚举成员**，不是谓词表达式：它无法引用模型输出、无法承载代码，
+新增一种条件必须改 ``StepConditionKind`` 并过评审（ARCHITECTURE §4.2）。
+"""
+
+_PLAN_SHAPE: Final[
+    tuple[tuple[str, str, str, tuple[str, ...], StepCondition | None], ...]
+] = (
+    (STEP_LIST, OP_LIST, LIST_V1, (), None),
+    (STEP_COUNT, OP_COUNT, COUNT_V1, (STEP_LIST,), _COUNT_CONDITION),
+)
+"""计划形状是**编译器的确定性决定**。
+
+步骤、顺序、依赖与条件都写在这里，不由候选、模型或用户挑选——决策权责矩阵
+（ARCHITECTURE §4.3）把"步骤与工具调用顺序"划归 Resolver + PlanCompiler。
+"""
+
+ENTRY_OPERATION: Final[str] = OP_LIST
+"""计划的入口 operation。候选必须指向它，否则拒绝。"""
+
+
+def _step_arguments(
+    *, template_id: str, params: SlowQueryParams, surface: SqlSurface
+) -> dict[str, JsonScalar]:
+    """步骤携带的 ``typed_arguments``：SQL 信封 + 该模板消费的参数子集。
+
+    只放该模板真正消费的参数键：多出来的键会进 ``plan_hash``，成为"看起来生效
+    但其实不影响执行"的第二真源。
+    """
+    arguments = params.to_typed_arguments()
+    return {
+        "sql": compile_sql(template_id=template_id, params=params, surface=surface),
+        "sql_template_id": template_id,
+        **{key: arguments[key] for key in TEMPLATE_PARAM_KEYS[template_id]},
+    }
+
+
+def compile_plan(
+    *,
+    candidate: Candidate,
+    params: SlowQueryParams,
+    target: ResolvedTarget,
+    context: RequestContext,
+    snapshot: CapabilitySnapshot,
+    surface: SqlSurface,
+) -> ExecutionPlan:
+    """把一个已解析候选编译成确定性 ``ExecutionPlan``。
+
+    同一组输入必然产生逐字节相同的计划与 ``plan_hash``；审批绑定与恢复时的漂移
+    检测都依赖这一点。
+
+    分类字段一律经 :func:`build_plan_step` 从快照派生——编译器无从设置、覆盖或
+    降级 ``side_effect`` 与 ``effect_class``。
+
+    :raises ValueError: 候选不指向入口 operation，目标与上下文的环境不一致，
+        或快照里没有该候选声明的能力。
+    """
+    if candidate.operation != ENTRY_OPERATION:
+        raise ValueError("candidate does not point at the plan entry operation")
+    if target.environment_id != context.environment_id:
+        raise ValueError("target environment does not match the request context")
+    spec = next(
+        (
+            item
+            for item in snapshot.specs
+            if item.capability_id == candidate.capability_id
+            and item.version == candidate.capability_version
+        ),
+        None,
+    )
+    if spec is None:
+        raise ValueError("candidate capability is absent from the snapshot")
+
+    steps: list[PlanStep] = [
+        build_plan_step(
+            snapshot,
+            capability_id=candidate.capability_id,
+            capability_version=candidate.capability_version,
+            operation=operation,
+            step_id=step_id,
+            typed_arguments=_step_arguments(
+                template_id=template_id, params=params, surface=surface
+            ),
+            depends_on=depends_on,
+            condition=condition,
+        )
+        for step_id, operation, template_id, depends_on, condition in _PLAN_SHAPE
+    ]
+    return ExecutionPlan(
+        capability_id=candidate.capability_id,
+        capability_version=candidate.capability_version,
+        steps=tuple(steps),
+        # policy_profile 取自快照声明，不写死在编译器里：profile 变更必须经能力
+        # 声明并过评审，编译器不是第二个声明处。
+        policy_profile=spec.policy_profile,
+        policy_revision=context.policy_revision,
+        budget=PLAN_BUDGET,
+    )
