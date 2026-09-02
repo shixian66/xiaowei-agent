@@ -47,33 +47,77 @@ def test_no_unvalidated_copy_escape_hatch_exists_anywhere() -> None:
     assert not offenders, f"不得引入未校验复制通道: {offenders}"
 
 
+def _after_validators_returning_non_self(path: Path) -> list[str]:
+    """找出 ``model_validator(mode="after")`` 中返回非 ``self`` 的写法。
+
+    只看 ``mode="after"``：``mode="before"`` 的校验器本就应当返回待校验的数据，
+    对它套同一条规则会把正常写法误报为违规。
+    """
+    hits: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        is_after = any(
+            isinstance(d, ast.Call)
+            and getattr(d.func, "id", "") == "model_validator"
+            and any(
+                kw.arg == "mode"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == "after"
+                for kw in d.keywords
+            )
+            for d in node.decorator_list
+        )
+        if not is_after:
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Return) and not (
+                isinstance(inner.value, ast.Name) and inner.value.id == "self"
+            ):
+                hits.append(node.name)
+    return hits
+
+
 def test_model_level_after_validators_always_return_self() -> None:
     """model_validator(mode="after") 内不得出现返回其他对象的写法。
 
-    Pydantic 只发一条警告就丢弃返回值，规范化静默失效——这类缺陷无法由普通
-    断言发现，只能在源码层禁止。
+    Pydantic 经 ``__init__`` 构造时只发一条警告就丢弃返回值，规范化会静默失效
+    ——这类缺陷无法由普通断言发现，只能在源码层禁止。需要改写取值时用**字段级**
+    ``AfterValidator``。
     """
-    import ast
-
-    offenders: list[str] = []
-    for path in _SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            decorated = any(
-                (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "model_validator")
-                or getattr(d, "id", "") == "model_validator"
-                for d in node.decorator_list
-            )
-            if not decorated:
-                continue
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Return) and not (
-                    isinstance(inner.value, ast.Name) and inner.value.id == "self"
-                ):
-                    offenders.append(f"{path.relative_to(_SRC)}:{node.name}")
+    offenders = [
+        f"{path.relative_to(_SRC)}:{name}"
+        for path in _SRC.rglob("*.py")
+        for name in _after_validators_returning_non_self(path)
+    ]
     assert not offenders, f"model 级 after-validator 只能 return self: {offenders}"
+
+
+def test_the_after_validator_detector_distinguishes_before_from_after(
+    tmp_path: Path,
+) -> None:
+    """检测器自身必须先被证明有效，且不误报 mode="before"。"""
+    bad = tmp_path / "bad.py"
+    bad.write_text(
+        "from pydantic import model_validator\n"
+        "class M:\n"
+        "    @model_validator(mode='after')\n"
+        "    def v(self):\n        return other\n",
+        encoding="utf-8",
+    )
+    assert _after_validators_returning_non_self(bad) == ["v"]
+
+    ok = tmp_path / "ok.py"
+    ok.write_text(
+        "from pydantic import model_validator\n"
+        "class M:\n"
+        "    @model_validator(mode='before')\n"
+        "    def v(cls, data):\n        return data\n"
+        "    @model_validator(mode='after')\n"
+        "    def w(self):\n        return self\n",
+        encoding="utf-8",
+    )
+    assert _after_validators_returning_non_self(ok) == []
 
 
 def _unbound_bypass_calls(path: Path) -> list[str]:
