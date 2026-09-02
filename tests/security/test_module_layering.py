@@ -63,6 +63,24 @@ _ALLOWED_INTERNAL = {
     # evidence 是纯构造器：只依赖 contracts（+ 通用叶子 redaction）。这条窄依赖是
     # runners → evidence 那条边的对价，由 test_evidence_layer_purity.py 承重。
     "evidence": {"xiaowei_agent.contracts", "xiaowei_agent.evidence"},
+    # application 是编排层：除 interfaces 外的全部业务包 + trace。它是依赖面最宽的
+    # 一层，代价是 test_runtime_bypass.py 用 AST 封死"绕过 port 直接摸 Runner 内部"、
+    # "自签凭证"与"直接调 Gateway"三条路径。
+    "application": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.capabilities",
+        "xiaowei_agent.planning",
+        "xiaowei_agent.governance",
+        "xiaowei_agent.persistence",
+        "xiaowei_agent.tools",
+        "xiaowei_agent.evidence",
+        "xiaowei_agent.reflection",
+        "xiaowei_agent.rendering",
+        "xiaowei_agent.runners",
+        "xiaowei_agent.observability",
+        "xiaowei_agent.trace",
+        "xiaowei_agent.application",
+    },
     # reflection 只消费结构化证据，rendering 只做投影：两者都不得触达工具、存储或
     # 治理组件（test_reflection_has_no_authority.py 另有更严的同向断言）。
     "reflection": {"xiaowei_agent.contracts", "xiaowei_agent.reflection"},

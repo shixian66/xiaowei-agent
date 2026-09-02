@@ -9,16 +9,25 @@
 fake 实现拉进生产导入链（``tests/security/test_fake_isolation.py`` 断言这一点，
 故此处的 fake 导入同样只在类型检查期存在）。
 
-**冻结但无实现锚点的 Protocol**：``CapabilityRegistry``、``CapabilityResolver``、
-``TraceSink`` 在 M2 没有任何实现（分别属 M3 与采集后端），因此只冻结形状、不设锚点。
-M3 落地实现时必须在此补上对应赋值。
+M3 补齐了五个此前只有形状、没有实现的 Protocol 锚点：``CapabilityRegistry``、
+``CapabilityResolver``、``TraceSink``、``PlanStore``、``EvidenceLedger``。
 """
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
+    from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
+    from xiaowei_agent.capabilities.resolver import (
+        CapabilityRegistry,
+        CapabilityResolver,
+    )
+    from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
     from xiaowei_agent.contracts import TaskStatus
+    from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
+    from xiaowei_agent.observability.sink import TraceSink
+    from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
+    from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.store import Clock, TaskStore
     from xiaowei_agent.runners.fake import ScriptedRunner
     from xiaowei_agent.runners.runner import WorkflowRunner
@@ -36,4 +45,9 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         runner: WorkflowRunner = ScriptedRunner(
             store, outcome_status=TaskStatus.SUCCEEDED
         )
-        _ = (gateway, runner)
+        registry: CapabilityRegistry = StaticCapabilityRegistry()
+        resolver: CapabilityResolver = DeterministicCapabilityResolver()
+        sink: TraceSink = StructuredLogTraceSink()
+        plans: PlanStore = InMemoryPlanStore()
+        ledger: EvidenceLedger = InMemoryEvidenceLedger()
+        _ = (gateway, runner, registry, resolver, sink, plans, ledger)

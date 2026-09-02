@@ -392,6 +392,7 @@ _DOMAIN_PACKAGES = (
     "evidence",
     "reflection",
     "rendering",
+    "application",
 )
 """只扫**领域层**。
 
