@@ -29,6 +29,22 @@ class _RaisingBothError(RuntimeError):
         raise RuntimeError("repr failed")
 
 
+class _BaseExceptionStrError(RuntimeError):
+    """``__str__`` 抛 ``BaseException`` 而不是 ``Exception``。
+
+    只捕 ``Exception`` 时这条路径仍能打穿边界：``__str__`` 抛 ``KeyboardInterrupt``
+    的对象让渲染 helper 自己抛出去，Gateway 的异常分支再次失效，原文随之逃逸。
+    """
+
+    def __str__(self) -> str:
+        raise KeyboardInterrupt(f"str failed: password={CANARY}")
+
+
+class _SystemExitStrError(RuntimeError):
+    def __str__(self) -> str:
+        raise SystemExit(f"str failed: password={CANARY}")
+
+
 class _NonStrReturnError(RuntimeError):
     def __str__(self) -> str:
         return 42  # type: ignore[return-value]
@@ -36,8 +52,20 @@ class _NonStrReturnError(RuntimeError):
 
 @pytest.mark.parametrize(
     "exc",
-    [_RaisingStrError(), _RaisingBothError(), _NonStrReturnError()],
-    ids=["raising_str", "raising_str_and_repr", "str_returns_non_str"],
+    [
+        _RaisingStrError(),
+        _RaisingBothError(),
+        _NonStrReturnError(),
+        _BaseExceptionStrError(),
+        _SystemExitStrError(),
+    ],
+    ids=[
+        "raising_str",
+        "raising_str_and_repr",
+        "str_returns_non_str",
+        "raising_keyboard_interrupt",
+        "raising_system_exit",
+    ],
 )
 def test_never_raises(exc: BaseException) -> None:
     """渲染失败必须降级，不得把失败本身抛给调用方。
@@ -78,3 +106,24 @@ def test_falls_back_when_even_the_type_name_fails() -> None:
 
     text = safe_exception_text(_HostileTypeError("boom"))
     assert isinstance(text, str)
+
+
+def test_redact_also_survives_baseexception_from_hostile_objects() -> None:
+    """同一个洞在 ``redact`` 的映射/序列迭代分支上也存在。
+
+    日志边界与异常边界共用同一条不变量：被记录对象自身出错，绝不能变成调用方
+    的异常。
+    """
+    from xiaowei_agent.redaction import redact
+
+    class _HostileMapping(dict):  # type: ignore[type-arg]
+        def items(self):  # type: ignore[no-untyped-def]
+            raise KeyboardInterrupt(f"password={CANARY}")
+
+    class _HostileSequence(list):  # type: ignore[type-arg]
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            raise KeyboardInterrupt(f"password={CANARY}")
+
+    for hostile in (_HostileMapping(), _HostileSequence()):
+        rendered = repr(redact(hostile))
+        assert CANARY not in rendered

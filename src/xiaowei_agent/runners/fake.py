@@ -14,13 +14,19 @@ from xiaowei_agent.contracts import (
     TaskOutcome,
     TaskStatus,
 )
-from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.persistence.store import TaskIdCarryingError, TaskStore
 
 IS_FAKE: Final[bool] = True
 
 
-class TerminalOrLeasedTaskError(RuntimeError):
-    """任务已终态，或租约被他人持有——两种情况下本 Runner 都不应推进它。"""
+class TerminalOrLeasedTaskError(TaskIdCarryingError, RuntimeError):
+    """任务已终态，或租约被他人持有——两种情况下本 Runner 都不应推进它。
+
+    ``task_id`` 放结构化属性、不进 ``str(exc)``：理由见 :class:`TaskIdCarryingError`。
+    """
+
+    def __init__(self, *, task_id: str) -> None:
+        super().__init__("task is terminal or leased by another owner", task_id=task_id)
 
 
 class ScriptedRunner:
@@ -62,7 +68,7 @@ class ScriptedRunner:
         )
         if lease is None:
             # 终态任务不可 acquire lease，因此这也是"任务已结束"的信号。
-            raise TerminalOrLeasedTaskError(task_id)
+            raise TerminalOrLeasedTaskError(task_id=task_id)
         record = await self._store.get(task_id)
         for status in (*path, self._status):
             if record.status is status:

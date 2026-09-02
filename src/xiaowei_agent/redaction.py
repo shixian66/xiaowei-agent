@@ -47,13 +47,25 @@ _VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
 
 
 def _safe_str(value: object) -> str:
-    """字符串化任意对象；``__str__``/``__repr__`` 抛异常时降级为 :data:`REDACTED`。
+    """字符串化任意对象；渲染失败时降级为 :data:`REDACTED`。
 
     日志绝不能因为被记录对象自身出错而抛异常到调用方，或丢失整条记录。
+
+    **捕获 ``BaseException`` 而不是 ``Exception``**：一个 ``__str__`` 抛
+    ``KeyboardInterrupt`` 的对象否则仍能打穿这条边界。这是一次有意识的取舍：
+
+    * 代价：真实的 Ctrl-C 若恰好落在这几微秒的渲染窗口里会被吞掉，用户需要再按
+      一次。窗口极短，且没有任何 IO。
+    * 不这么做的代价：任何第三方对象都能通过 ``__str__`` 伪造
+      ``KeyboardInterrupt``，既穿透安全边界又能终止进程——那是一条 DoS 通道。
+
+    作用域严格限于**渲染**。真正的取消语义由调用点负责：Gateway 包在
+    ``adapter.execute`` 外面的 ``except Exception`` 保持不变，因此 adapter 自身
+    抛出的 ``CancelledError`` 照常向上传播。
     """
     try:
         return str(value)
-    except Exception:
+    except BaseException:
         return REDACTED
 
 
@@ -89,13 +101,15 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
                 skey = scrub_text(key if isinstance(key, str) else _safe_str(key))
                 out[skey] = REDACTED if _KEY_RE.search(skey) else redact(item, _depth=_depth + 1)
             return out
-        except Exception:
+        except BaseException:
+            # 与 _safe_str 同一取舍：恶意/故障对象的 __iter__、__hash__、keys()
+            # 同样能抛 BaseException，只捕 Exception 会让日志边界被打穿。
             return REDACTED
     if isinstance(value, Sequence | set | frozenset):
         try:
             return [redact(v, _depth=_depth + 1) for v in value]
-        except Exception:
-            # 迭代自定义序列/集合时同样可能抛异常。
+        except BaseException:
+            # 迭代自定义序列/集合时同样可能抛异常，包括 BaseException。
             return REDACTED
     return scrub_text(_safe_str(value))
 
@@ -141,13 +155,17 @@ def safe_exception_text(exc: BaseException) -> str:
 
     ``type(exc).__name__`` 同样不假定为安全：元类可以让属性访问抛异常。因此整个
     渲染过程都在保护之下，任何一步失败都降级为 :data:`REDACTED`。
+
+    捕获范围是 ``BaseException`` 而非 ``Exception``——只捕后者时，一个 ``__str__``
+    抛 ``KeyboardInterrupt`` 的异常对象仍能打穿 Gateway 的异常分支并带出原文。
+    取舍与作用域见 :func:`_safe_str`。
     """
     try:
         name = type(exc).__name__
-    except Exception:
+    except BaseException:
         name = REDACTED
     body = _safe_str(exc)
     try:
         return scrub_text(f"{name}: {body}")
-    except Exception:
+    except BaseException:
         return REDACTED

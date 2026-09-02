@@ -71,7 +71,7 @@ class InMemoryTaskStore:
         try:
             return self._records[task_id]
         except KeyError as exc:
-            raise TaskNotFoundError(task_id) from exc
+            raise TaskNotFoundError(task_id=task_id) from exc
 
     def _check_fencing(
         self, record: TaskRecord, fencing_token: int | None

@@ -40,8 +40,27 @@ from xiaowei_agent.planning import canonical_json
 Clock: TypeAlias = Callable[[], _dt.datetime]
 
 
-class TaskNotFoundError(LookupError):
+class TaskIdCarryingError(Exception):
+    """携带 ``task_id`` 但**不把它放进 ``str(exc)``** 的错误基类。
+
+    ``raise TaskNotFoundError(task_id)`` 会让 task_id 成为异常的唯一参数，于是它
+    出现在 ``str(exc)``、``repr(exc)`` 与 traceback 里——与 f-string 回显是同一条
+    缺陷，只是没有插值语法，所以只扫字符串拼接的检测器看不到它。
+
+    诊断值放在结构化属性上：需要的调用方显式读 ``exc.task_id``，而默认的错误
+    文本恒为常量，不会被日志或错误响应顺手带出去。
+    """
+
+    def __init__(self, message: str, *, task_id: str) -> None:
+        super().__init__(message)
+        self.task_id = task_id
+
+
+class TaskNotFoundError(TaskIdCarryingError, LookupError):
     """任务不存在。"""
+
+    def __init__(self, *, task_id: str) -> None:
+        super().__init__("task not found", task_id=task_id)
 
 
 class IdempotencyConflictError(RuntimeError):

@@ -1,6 +1,7 @@
 """ToolGateway 是数据面唯一工具入口，且 M0-M7 的 E1 调用次数恒为 0。"""
 
 import ast
+import asyncio
 import datetime as dt
 from pathlib import Path
 
@@ -507,3 +508,66 @@ async def test_renderable_exception_text_never_reaches_the_result(
     result = await gateway.invoke(ok_call, context=context, admission=admission)
     assert result.status is ToolCallStatus.ERROR
     assert _HOSTILE_CANARY not in result.model_dump_json()
+
+
+class _BaseExceptionStrError(RuntimeError):
+    """``__str__`` 抛 ``BaseException``。
+
+    渲染 helper 只捕 ``Exception`` 时，这条路径让 Gateway 的异常分支再次失效：
+    不返回结构化 ERROR，原文随 ``KeyboardInterrupt`` 一起逃逸。这与 adapter
+    **自己**抛取消/中断是两回事——那种情况下真实语义就该向上传播。
+    """
+
+    def __str__(self) -> str:
+        raise KeyboardInterrupt(f"str failed: {_HOSTILE_CANARY}")
+
+
+@pytest.mark.asyncio
+async def test_exception_whose_str_raises_baseexception_is_absorbed(
+    ok_call: ToolCall, context: RequestContext, admission: AdmissionCertificate
+) -> None:
+    gateway = DeterministicToolGateway(
+        adapters={ok_call.gateway: _HostileAdapter(_BaseExceptionStrError())}
+    )
+    result = await gateway.invoke(ok_call, context=context, admission=admission)
+    assert result.status is ToolCallStatus.ERROR
+    assert _HOSTILE_CANARY not in result.model_dump_json()
+
+
+class _CustomBaseError(BaseException):
+    """任意 ``BaseException`` 子类。
+
+    不用 ``KeyboardInterrupt`` / ``SystemExit`` 作参数：它们从 asyncio task 里
+    逃出时会绕过测试内的 try/except、直接打到 pytest 的 session 层，把整轮测试
+    截断。Gateway 的 ``except Exception`` 对任意 ``BaseException`` 子类行为完全
+    一致，因此用自定义子类覆盖的是同一条语义，没有损失。
+    """
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [_CustomBaseError("interrupted"), asyncio.CancelledError()],
+    ids=["custom_baseexception", "cancelled"],
+)
+@pytest.mark.asyncio
+async def test_adapter_raising_baseexception_itself_still_propagates(
+    exc: BaseException,
+    ok_call: ToolCall,
+    context: RequestContext,
+    admission: AdmissionCertificate,
+) -> None:
+    """反例配对：加固的是**渲染**，不是吞掉真实的中断。
+
+    adapter 自身抛出的 KeyboardInterrupt / SystemExit / CancelledError 必须照常
+    向上传播；把它们一起吞掉会让进程无法被中断，那是比泄漏更糟的故障。
+
+    手工 try/except 而不是 ``pytest.raises``：后者对 ``BaseException`` 的处理与
+    pytest 的 session 级中断语义纠缠，断言"确实传播"更直接。
+    """
+    gateway = DeterministicToolGateway(adapters={ok_call.gateway: _HostileAdapter(exc)})
+    raised: BaseException | None = None
+    try:
+        await gateway.invoke(ok_call, context=context, admission=admission)
+    except BaseException as caught:
+        raised = caught
+    assert type(raised) is type(exc), "adapter 自身抛出的 BaseException 必须传播"

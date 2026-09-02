@@ -44,6 +44,12 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         # --- 已经过安全投影 ---
         # config.py 的 detail 来自 redaction.safe_error_details，只含 loc 与 type。
         "detail",
+        # --- BindingRejection 枚举成员：取值域是代码里的闭集 ---
+        "BindingRejection.POLICY_REVISION_DRIFT",
+        "BindingRejection.APPROVAL_EXPIRED",
+        "BindingRejection.APPROVAL_NOT_GRANTED",
+        "BindingRejection.PLAN_DRIFT",
+        "BindingRejection.TARGET_DRIFT",
         # --- 显式豁免（环境变量名，非取值）---
         # 未知配置变量的**名字**是 fail-fast 诊断的全部价值所在，而 secret 存在
         # 取值里、不在名字里；环境变量名也不可能包含 "="。这是一次有意识的决定，
@@ -53,36 +59,58 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
 )
 
 
-def _raise_interpolations() -> list[tuple[str, str]]:
-    """返回 ``raise`` 语句消息里出现的全部插值表达式 (位置, 源文本)。"""
+def _raise_dynamic_values() -> list[tuple[str, str]]:
+    """``raise`` 语句里出现的**全部**动态取值 (位置, 源文本)。
+
+    早先版本只扫 f-string / ``%`` / ``.format()``，于是漏掉了没有插值语法的形式::
+
+        raise TaskNotFoundError(task_id)      # task_id 成为 str(exc) 的全部内容
+
+    这与 f-string 回显是同一条缺陷，只是没有拼接语法。**两个覆盖面不同的扫描器
+    本身就是缝隙**，所以这里合并成一个：既看字符串拼接，也看传给异常构造器的
+    每一个非常量实参。
+    """
     found: list[tuple[str, str]] = []
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Raise) or node.exc is None:
                 continue
+            loc = f"{path.relative_to(SRC)}:{node.lineno}"
             for sub in ast.walk(node):
                 if isinstance(sub, ast.JoinedStr):
                     found.extend(
-                        (f"{path.relative_to(SRC)}:{node.lineno}", ast.unparse(part.value))
+                        (loc, ast.unparse(part.value))
                         for part in sub.values
                         if isinstance(part, ast.FormattedValue)
                     )
                 elif isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Mod):
-                    found.append((f"{path.relative_to(SRC)}:{node.lineno}", "%-format"))
+                    found.append((loc, "%-format"))
                 elif (
                     isinstance(sub, ast.Call)
                     and isinstance(sub.func, ast.Attribute)
                     and sub.func.attr == "format"
                 ):
-                    found.append((f"{path.relative_to(SRC)}:{node.lineno}", ".format()"))
+                    found.append((loc, ".format()"))
+            if isinstance(node.exc, ast.Call):
+                # 只查**位置**参数。Python 默认的 ``BaseException.__str__`` 渲染的是
+                # ``args``，而 ``args`` 只收位置参数——``raise X(task_id)`` 因此让
+                # task_id 成为错误文本的全部内容。关键字参数进不了 ``args``，除非
+                # 异常类自己把它塞进去；那属于运行时性质，由
+                # ``test_structured_errors_keep_a_constant_message`` 断言。
+                found.extend(
+                    (loc, ast.unparse(arg))
+                    for arg in node.exc.args
+                    # 常量与 f-string 已由上面的循环处理，这里只补"裸传一个值"。
+                    if not isinstance(arg, ast.Constant | ast.JoinedStr)
+                )
     return found
 
 
-def test_no_raise_message_interpolates_unvetted_values() -> None:
+def test_no_raise_carries_unvetted_values() -> None:
     offenders = [
         f"{loc}  ->  {expr}"
-        for loc, expr in _raise_interpolations()
+        for loc, expr in _raise_dynamic_values()
         if expr not in SAFE_INTERPOLATIONS
     ]
     assert offenders == [], (
@@ -98,7 +126,7 @@ def test_allowlist_has_no_dead_entries() -> None:
     死条目会悄悄放宽护栏：一个被删掉的表达式留在名单里，下次有人写出同名表达式
     时就会被静默放行。与 hash 映射表必须与 model_fields 相等是同一条要求。
     """
-    live = {expr for _loc, expr in _raise_interpolations()}
+    live = {expr for _loc, expr in _raise_dynamic_values()}
     assert SAFE_INTERPOLATIONS - live == set()
 
 
@@ -202,3 +230,43 @@ def test_plan_validator_messages_carry_no_step_id() -> None:
     with pytest.raises(ValidationError) as caught:
         FIXTURE_PLAN.model_copy(update={"steps": (dangling,)})
     assert CANARY not in str(caught.value)
+
+
+def test_structured_errors_keep_a_constant_message() -> None:
+    """携带 ``task_id`` 的异常，其 ``str``/``repr`` 必须与 task_id 无关。
+
+    静态扫描只能保证 task_id 不是位置参数；"关键字参数不会进 ``args``"是运行时
+    性质，必须在这里直接断言——否则一个把 task_id 转存进 ``args`` 的
+    ``__init__`` 会让静态规则给出虚假保证。
+    """
+    from xiaowei_agent.persistence.store import TaskNotFoundError
+    from xiaowei_agent.runners.fake import TerminalOrLeasedTaskError
+
+    for factory in (TaskNotFoundError, TerminalOrLeasedTaskError):
+        exc = factory(task_id=CANARY)
+        assert CANARY not in str(exc)
+        assert CANARY not in repr(exc)
+        assert CANARY not in repr(exc.args)
+        # 反例配对：结构化字段仍然可读，否则这个改动等于丢掉诊断能力
+        assert exc.task_id == CANARY
+
+
+def test_detector_catches_a_bare_positional_value() -> None:
+    """检测器自测：``raise X(value)`` 这种无插值语法的形式必须被抓到。
+
+    早先只扫 f-string / % / .format() 的版本对它完全无感——两个覆盖面不同的
+    扫描器本身就是缝隙。
+    """
+    tree = ast.parse("raise TaskNotFoundError(task_id)" + chr(10))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.Raise))
+    assert isinstance(node.exc, ast.Call)
+    dynamic = [ast.unparse(a) for a in node.exc.args if not isinstance(a, ast.Constant)]
+    assert dynamic == ["task_id"]
+
+
+def test_detector_allows_keyword_carried_values() -> None:
+    """反例：关键字参数不进 ``args``，不得被误报——否则规则会逼人把诊断值删掉。"""
+    tree = ast.parse("raise TaskNotFoundError(task_id=task_id)" + chr(10))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.Raise))
+    assert isinstance(node.exc, ast.Call)
+    assert [a for a in node.exc.args if not isinstance(a, ast.Constant)] == []
