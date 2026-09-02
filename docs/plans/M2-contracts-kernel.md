@@ -131,7 +131,7 @@ tests/
 └── security/
 ```
 
-**为何 `redaction.py` 放顶层而非 `contracts/redaction.py`**：脱敏是通用工具而非跨模块契约，放进 `contracts/` 会让契约包承担非契约职责。顶层叶子模块同时满足"`contracts` 零对内依赖"与"脱敏规则单一真源"两个要求。
+**为何 `redaction.py` 放顶层而非 `contracts/redaction.py`**：脱敏是通用工具而非跨模块契约，放进 `contracts/` 会让契约包承担非契约职责。顶层叶子模块同时满足"`contracts` 只依赖 `redaction` 与标准库"（§2 取向 3 的唯一口径）与"脱敏规则单一真源"两个要求。
 
 **为何仍保留 `tests/fakes/`**：`ManualClock` 与固定夹具只服务测试，不需要被生产代码复用；而 adapter / store / runner 的 fake 被 DEVELOPMENT_PLAN §7 M2 明文要求放在对应业务包下。
 
@@ -274,7 +274,7 @@ git commit -m "refactor(redaction): 脱敏规则下沉为叶子模块，log 反�
 
 **文件**：
 - 创建：`src/xiaowei_agent/contracts/__init__.py`、`base.py`、`enums.py`、`errors.py`、`external.py`
-- 测试：`tests/unit/test_contracts_base.py`、`tests/security/test_deep_immutability.py`、`tests/security/test_external_content.py`
+- 测试：`tests/unit/test_contracts_base.py`、`tests/security/test_deep_immutability.py`、`tests/security/test_copy_validation.py`、`tests/security/test_validation_bypass_surface.py`、`tests/security/test_external_content.py`
 
 **接口**：
 - 产出：`Contract`、`JsonScalar`、`StrictStr`、`FrozenMap`、`FrozenStrMap`、`frozen_map()`、`AgentError`、`ExternalContent`、`content_digest()`，以及 **18 个共享枚举**：`ExternalSource` `TrustLevel` `EffectClass` `ErrorCategory` `Channel` `IntentSource` `RiskLevel` `ApprovalState` `StepConditionKind` `StepResultStatus` `TaskStatus` `TransitionRejection` `AdapterStatus` `ToolCallStatus` `PipelineStage` `StageOutcome` `ExternalInputKind` `BindingRejection`
@@ -284,11 +284,13 @@ git commit -m "refactor(redaction): 脱敏规则下沉为叶子模块，log 反�
 `tests/security/test_deep_immutability.py`：
 
 ```python
-"""映射字段必须深不可变。
+"""映射字段必须深不可变，且不接受不可规范化的标量。
 
 Pydantic 的 frozen=True 只挡属性重绑定，挡不住内部 dict 被原地改写。
 若不解决，"计划已冻结"就是假的——plan_hash 算完之后仍可改 typed_arguments。
 """
+
+import math
 
 import pytest
 from pydantic import ValidationError
@@ -329,6 +331,18 @@ def test_nested_mapping_values_are_rejected_by_scalar_maps() -> None:
     """标量映射不接受嵌套容器；嵌套是夹带任意载荷的通道。"""
     with pytest.raises(ValidationError):
         _Sample(data={"a": {"nested": 1}})
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+def test_non_finite_floats_are_rejected_at_construction(bad: float) -> None:
+    """必须在构造时拒绝，而不是等到 canonical_json。
+
+    AdapterResponse.payload 与 EvidenceEnvelope.facts 不经过 canonical_json；
+    typed_arguments 里的 NaN 则要到准入时刻算 plan_hash 才抛错，那时计划已经
+    进了 TaskStore。
+    """
+    with pytest.raises(ValidationError):
+        _Sample(data={"a": bad})
 ```
 
 `tests/security/test_copy_validation.py`（本任务只覆盖**通用机制**，T11 再追加跨 DTO 矩阵）：
@@ -401,6 +415,122 @@ def test_copy_without_update_is_unchanged() -> None:
 
 def test_valid_copy_still_works() -> None:
     assert _ok().model_copy(update={"n": 5}).n == 5
+
+
+def test_model_construct_is_blocked_on_every_contract() -> None:
+    """model_construct 跳过全部校验，是与 model_copy 同类的绕过通道。"""
+    with pytest.raises(NotImplementedError):
+        _Bounded.model_construct(n=-1, ids=(), data={})
+
+
+def test_blocking_model_construct_does_not_break_normal_paths() -> None:
+    """封死它不得波及 model_validate / model_copy() / model_dump()。"""
+    ok = _ok()
+    assert _Bounded.model_validate({"n": 2, "ids": ("a",), "data": {}}).n == 2
+    assert ok.model_copy() == ok
+    assert ok.model_dump()["n"] == 1
+```
+
+`tests/security/test_validation_bypass_surface.py`：
+
+```python
+"""未校验通道的收口。
+
+``Contract.model_copy`` 的覆盖只挡住**绑定调用**。还有两条同类通道：
+``BaseModel.model_copy(obj, update=...)`` 这种未绑定调用会跳过子类覆盖
+（实证可写入违反 ``Field(gt=0)`` 的值），而 ``_copy_within_validation`` 是我们
+自己为 after-validator 保留的未校验入口。两者都必须由源码扫描限定调用点，
+否则 P0-1 的根因只是换了个名字。
+"""
+
+import ast
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.security
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
+_BASE = _SRC / "contracts" / "base.py"
+# 仅有的两个 after-validator 会在校验途中复制自身。新增调用点必须同时更新此处
+# 并说明为何该 validator 是幂等的。
+_ALLOWED_ESCAPE_HATCH = {
+    _BASE,
+    _SRC / "contracts" / "target.py",
+    _SRC / "contracts" / "trace_events.py",
+}
+
+
+def _referenced_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+    return names
+
+
+def test_escape_hatch_is_confined_to_its_declared_call_sites() -> None:
+    offenders = [
+        path.relative_to(_SRC)
+        for path in _SRC.rglob("*.py")
+        if path not in _ALLOWED_ESCAPE_HATCH
+        and "_copy_within_validation" in _referenced_names(path)
+    ]
+    assert not offenders, (
+        f"_copy_within_validation 只允许在 after-validator 中使用: {offenders}"
+    )
+
+
+def test_no_unbound_basemodel_bypass_outside_base() -> None:
+    """BaseModel.model_copy(obj, ...) / BaseModel.model_construct(cls, ...)
+    是未绑定调用，会跳过 Contract 的覆盖。"""
+    offenders: list[tuple[str, str]] = []
+    for path in _SRC.rglob("*.py"):
+        if path == _BASE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr not in {"model_copy", "model_construct"}:
+                continue
+            owner = func.value
+            owner_name = owner.id if isinstance(owner, ast.Name) else None
+            if owner_name in {"BaseModel", "Contract"}:
+                offenders.append((str(path.relative_to(_SRC)), func.attr))
+    assert not offenders, f"禁止未绑定的校验绕过调用: {offenders}"
+
+
+def test_the_detector_catches_an_unbound_bypass(tmp_path: Path) -> None:
+    """检测器自身必须先被证明有效。"""
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from pydantic import BaseModel\n"
+        "def f(x):\n    return BaseModel.model_copy(x, update={'n': -1})\n",
+        encoding="utf-8",
+    )
+    tree = ast.parse(probe.read_text(encoding="utf-8"))
+    hits = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "model_copy"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "BaseModel"
+    ]
+    assert hits
+
+
+def test_escape_hatch_detector_catches_a_stray_call(tmp_path: Path) -> None:
+    probe = tmp_path / "stray.py"
+    probe.write_text("def f(o):\n    return o._copy_within_validation(a=1)\n",
+                     encoding="utf-8")
+    assert "_copy_within_validation" in _referenced_names(probe)
 ```
 
 `tests/security/test_external_content.py`：
@@ -489,11 +619,21 @@ JSON 往返丢失信息。
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Any, Self, TypeAlias
+from typing import Annotated, Any, Never, Self, TypeAlias
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-JsonScalar: TypeAlias = None | bool | int | float | str
+FiniteFloat: TypeAlias = Annotated[float, Field(allow_inf_nan=False)]
+"""禁止 NaN / ±Inf 的浮点。
+
+**必须在 DTO 构造阶段拒绝，而不是等到 canonical_json**：``AdapterResponse.payload``
+与 ``EvidenceEnvelope.facts`` 根本不经过 canonical_json，NaN 会一路流进证据与
+渲染；而 ``PlanStep.typed_arguments`` 里的 NaN 会让 ``compute_plan_hash`` 在
+准入时刻才抛错——那时计划已经存进 TaskStore 了。canonical_json 的同名检查保留，
+作为第二道防线。
+"""
+
+JsonScalar: TypeAlias = None | bool | int | FiniteFloat | str
 
 
 def _strict_str(value: str) -> str:
@@ -533,12 +673,28 @@ class Contract(BaseModel):
             return super().model_copy(deep=deep)
         return type(self).model_validate({**self.__dict__, **update})
 
+    @classmethod
+    def model_construct(cls, *args: Any, **kwargs: Any) -> Never:
+        """``model_construct`` 跳过**全部**校验，比 ``model_copy`` 更彻底。
+
+        与 ``model_copy(update=...)`` 是同一类绕过通道，因此在基类一并封死，
+        而不是只在个别 DTO 上覆盖。实证：封死它不影响 ``model_validate``、
+        ``model_copy()``、``model_dump()`` 等正常路径。
+        """
+        raise NotImplementedError(
+            "Contract 禁止 model_construct：它跳过全部校验，请用 model_validate"
+        )
+
     def _copy_within_validation(self, **update: Any) -> Self:
         """**仅供本类自身的 after-validator 使用**的未校验复制。
 
         after-validator 正在校验途中，此时调用会重新校验的 ``model_copy`` 会
         重入同一个校验器。使用本方法的 validator 必须满足**幂等**：第二次看到
         已规范化的值时原样返回，否则仍会无限递归。
+
+        **这是一个被刻意保留的未校验通道**，因此由
+        ``tests/security/test_validation_bypass_surface.py`` 以源码扫描白名单
+        限定调用点；否则 P0-1 的根因只是换了个名字继续存在。
         """
         return super().model_copy(update=update)
 ```
@@ -800,8 +956,8 @@ class ExternalContent(Contract):
 - [ ] **步骤 6：四条命令全绿后提交**
 
 ```bash
-git add src/xiaowei_agent/contracts tests/unit/test_contracts_base.py tests/security/test_deep_immutability.py tests/security/test_external_content.py
-git commit -m "feat(contracts): 深不可变基座、18 个共享枚举、错误模型与不可信外部文本"
+git add src/xiaowei_agent/contracts tests/unit/test_contracts_base.py tests/security/test_deep_immutability.py tests/security/test_copy_validation.py tests/security/test_validation_bypass_surface.py tests/security/test_external_content.py
+git commit -m "feat(contracts): 深不可变基座、封死校验绕过通道、18 个共享枚举与不可信外部文本"
 ```
 
 ---
@@ -812,7 +968,7 @@ git commit -m "feat(contracts): 深不可变基座、18 个共享枚举、错误
 - 创建：`src/xiaowei_agent/contracts/request.py`、`intent.py`、`capability.py`、`candidates.py`
 - 创建：`tests/fakes/fixtures.py`（`SNAPSHOT`）
 - 修改：`pyproject.toml` 增加 `pythonpath = ["."]`，使 `tests.fakes`（隐式命名空间包）可导入
-- 测试：`tests/unit/test_capability_spec.py`、`tests/security/test_intent_pollution.py`
+- 测试：`tests/unit/test_capability_spec.py`、`tests/unit/test_candidates.py`、`tests/security/test_intent_pollution.py`
 
 **接口**：
 - 产出：`RequestEnvelope`、`RequestContext`、`TraceId`、`IntentDraft`、`OperationSpec`、`CapabilitySpec`、`CapabilitySnapshot`、`Candidate`、`Rejection`、`CandidateSet`
@@ -1015,7 +1171,9 @@ class IntentDraft(Contract):
     intent: StrictStr
     slots: FrozenStrMap
     missing: tuple[StrictStr, ...]
-    confidence: float = Field(ge=0.0, le=1.0)
+    # 显式 allow_inf_nan=False：靠 ge/le 隐式挡住 NaN 依赖"NaN 比较恒为假"这一
+    # 间接性质，读者无从看出意图，也挡不住将来放宽边界时重新引入。
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     source: IntentSource
 ```
 
@@ -1087,6 +1245,10 @@ class CapabilitySnapshot(Contract):
 # contracts/candidates.py
 """Resolver 的唯一输出。route_shadow 只消费同一份 CandidateSet，不自行 build。"""
 
+from typing import Self
+
+from pydantic import Field, model_validator
+
 from xiaowei_agent.contracts.base import Contract, StrictStr
 
 
@@ -1094,7 +1256,9 @@ class Candidate(Contract):
     capability_id: StrictStr
     capability_version: StrictStr
     operation: StrictStr
-    score: float
+    # 有界且有限：候选排序若允许 NaN，比较结果不满足全序，排序结果依赖实现
+    # 细节而非数据；允许 Inf 则任一候选都能压过其余全部。
+    score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     match_evidence: tuple[str, ...]
     required_context: tuple[StrictStr, ...]
 
@@ -1110,6 +1274,84 @@ class CandidateSet(Contract):
     snapshot_id: StrictStr
     items: tuple[Candidate, ...]
     rejections: tuple[Rejection, ...]
+
+    @model_validator(mode="after")
+    def _candidates_are_unambiguous(self) -> Self:
+        """同一 (capability, version, operation) 不得既是候选又被拒绝，也不得重复。
+
+        Resolver 是唯一候选真源；同一目标出现两条记录时，"选中了哪一条"就依赖
+        遍历顺序，shadow 对比也失去意义。
+        """
+        keys = [
+            (c.capability_id, c.capability_version, c.operation) for c in self.items
+        ]
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate candidate in CandidateSet")
+        rejected = [(r.capability_id, r.capability_version) for r in self.rejections]
+        if len(set(rejected)) != len(rejected):
+            raise ValueError("duplicate rejection in CandidateSet")
+        if set(rejected) & {(cid, ver) for cid, ver, _ in keys}:
+            raise ValueError("capability appears as both candidate and rejection")
+        return self
+```
+
+对应 `tests/unit/test_candidates.py`：
+
+```python
+"""候选集必须无歧义、可确定性排序。"""
+
+import math
+
+import pytest
+from pydantic import ValidationError
+
+from xiaowei_agent.contracts import Candidate, CandidateSet, Rejection
+
+
+def _candidate(**overrides: object) -> Candidate:
+    base: dict[str, object] = {
+        "capability_id": "starrocks.slow_query.diagnose", "capability_version": "1.0.0",
+        "operation": "list_slow_queries", "score": 0.9,
+        "match_evidence": ("domain match",), "required_context": ("environment_id",),
+    }
+    return Candidate(**(base | overrides))
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -0.1, 1.1])
+def test_score_must_be_a_finite_unit_interval_value(bad: float) -> None:
+    with pytest.raises(ValidationError):
+        _candidate(score=bad)
+
+
+def test_duplicate_candidate_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate candidate"):
+        CandidateSet(resolver_version="1", snapshot_id="s",
+                     items=(_candidate(), _candidate()), rejections=())
+
+
+def test_duplicate_rejection_is_rejected() -> None:
+    reject = Rejection(capability_id="c", capability_version="1.0.0", reason_code="x")
+    with pytest.raises(ValidationError, match="duplicate rejection"):
+        CandidateSet(resolver_version="1", snapshot_id="s", items=(),
+                     rejections=(reject, reject))
+
+
+def test_capability_cannot_be_both_candidate_and_rejection() -> None:
+    reject = Rejection(
+        capability_id="starrocks.slow_query.diagnose",
+        capability_version="1.0.0", reason_code="x",
+    )
+    with pytest.raises(ValidationError, match="both candidate and rejection"):
+        CandidateSet(resolver_version="1", snapshot_id="s",
+                     items=(_candidate(),), rejections=(reject,))
+
+
+def test_same_capability_with_different_operations_is_allowed() -> None:
+    got = CandidateSet(
+        resolver_version="1", snapshot_id="s",
+        items=(_candidate(), _candidate(operation="describe_profile")), rejections=(),
+    )
+    assert len(got.items) == 2
 ```
 
 - [ ] **步骤 5：实现 `tests/fakes/fixtures.py`**
@@ -1157,7 +1399,7 @@ SNAPSHOT = CapabilitySnapshot(
 - [ ] **步骤 6：四条命令全绿后提交**
 
 ```bash
-git add src/xiaowei_agent/contracts tests/fakes tests/unit/test_capability_spec.py tests/security/test_intent_pollution.py pyproject.toml
+git add src/xiaowei_agent/contracts tests/fakes tests/unit/test_capability_spec.py tests/unit/test_candidates.py tests/security/test_intent_pollution.py pyproject.toml
 git commit -m "feat(contracts): 执行上下文、意图污染防护与能力声明快照唯一性"
 ```
 
@@ -1735,6 +1977,15 @@ def test_integral_float_and_int_stay_distinct() -> None:
     assert canonical_json({"k": 1}) != canonical_json({"k": 1.0})
 
 
+def test_negative_zero_is_normalised_to_zero() -> None:
+    """-0.0 == 0.0 为真，但 json.dumps 分别产出 "-0.0" 与 "0.0"。
+
+    两个**相等**的取值得到不同指纹，与 NFC 未规范化是同一类不稳定。
+    """
+    assert canonical_json({"k": -0.0}) == canonical_json({"k": 0.0})
+    assert canonical_json({"k": -0.0}) == b'{"k":0.0}'
+
+
 def test_bytes_are_rejected() -> None:
     with pytest.raises(TypeError):
         canonical_json({"k": b"raw"})
@@ -2044,7 +2295,9 @@ def _normalise(value: object) -> object:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("non-finite float is not canonicalisable")
-        return value
+        # -0.0 == 0.0 为真，但 json.dumps 分别产出 "-0.0" 与 "0.0"，会让两个
+        # **相等**的取值得到不同指纹。这与 NFC 未规范化是同一类不稳定，必须归一。
+        return 0.0 if value == 0.0 else value
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
     if isinstance(value, bytes | bytearray):
@@ -2757,10 +3010,10 @@ git commit -m "feat(governance): 审批绑定与 policy revision 的确定性校
 - 创建：`src/xiaowei_agent/tools/__init__.py`、`adapter.py`、`gateway.py`、`fake.py`
 - 新建目录：`tests/contract/`
 - 修改：`tests/conftest.py`（共享 fixture）
-- 测试：`tests/contract/test_tool_result_factory.py`、`tests/security/test_gateway_boundary.py`
+- 测试：`tests/contract/test_tool_result_factory.py`、`tests/contract/test_protocol_conformance.py`、`tests/security/test_gateway_boundary.py`
 
 **接口**：
-- 产出：`ToolCall`、`ToolResult`、`AdapterResponse`、`ToolAdapter`、`ToolGateway`、`DeterministicToolGateway`、`RecordingToolAdapter`
+- 产出：`ToolCall`、`ToolResult`、`AdapterResponse`、`ToolAdapter`、**`ToolGateway`（Protocol 本体，领域层只依赖它）**、`DeterministicToolGateway`（M2 唯一实现）、`RecordingToolAdapter`
 
 - [ ] **步骤 1：补 `tests/conftest.py` 的共享 fixture**
 
@@ -2908,16 +3161,23 @@ async def test_result_data_view_is_deeply_immutable(
 """ToolGateway 是数据面唯一工具入口，且 M0-M7 的 E1 调用次数恒为 0。"""
 
 import ast
+import datetime as dt
 from pathlib import Path
 
 import pytest
 
-from xiaowei_agent.contracts import EffectClass, RiskLevel, PolicyDecision
-from xiaowei_agent.tools.gateway import _E1_EXECUTION_ENABLED
+from xiaowei_agent.contracts import (
+    AdapterStatus, EffectClass, ErrorCategory, ExternalContent, ExternalSource,
+    PolicyDecision, RiskLevel, ToolCallStatus,
+)
+from xiaowei_agent.tools.adapter import AdapterResponse
+from xiaowei_agent.tools.fake import RecordingToolAdapter
+from xiaowei_agent.tools.gateway import DeterministicToolGateway, _E1_EXECUTION_ENABLED
 
 pytestmark = pytest.mark.security
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
+_AT = dt.datetime(2026, 9, 2, tzinfo=dt.UTC)
 
 
 def test_e1_execution_is_disabled() -> None:
@@ -3046,6 +3306,31 @@ async def test_adapter_error_text_never_reaches_the_tool_result(
     assert secret_ish not in result.model_dump_json()
 
 
+async def test_non_conforming_adapter_return_is_refused(
+    context, ok_call, admission,
+) -> None:
+    """Protocol 是静态的；运行时必须自己 fail-closed。
+
+    否则一个返回 dict 或鸭子类型对象的 adapter 能把未经契约约束的数据带进
+    ToolResult——领域层拿到的"结果"再也不是 Gateway 归一化过的结果。
+    """
+
+    class _RogueAdapter:
+        call_count = 0
+
+        async def execute(self, call: object, *, context: object) -> object:
+            return {"status": "ok", "payload": ({"injected": "row"},)}
+
+    gw = DeterministicToolGateway(adapters={"starrocks": _RogueAdapter()})
+    with pytest.raises(TypeError, match="expected AdapterResponse"):
+        await gw.invoke(ok_call, context=context, admission=admission)
+
+
+def test_gateway_requires_at_least_one_adapter() -> None:
+    with pytest.raises(ValueError):
+        DeterministicToolGateway(adapters={})
+
+
 async def test_failed_call_carries_no_data_view(context, ok_call, admission) -> None:
     """失败时不得把半截 payload 当作证据传出去。"""
     adapter = RecordingToolAdapter(responses=(AdapterResponse(
@@ -3144,7 +3429,7 @@ class ToolCall(Contract):
     operation: StrictStr
     step_id: StrictStr
     typed_args: FrozenMap
-    timeout_seconds: float = Field(gt=0.0, le=300.0)
+    timeout_seconds: float = Field(gt=0.0, le=300.0, allow_inf_nan=False)
     idempotency_key: StrictStr
 
 
@@ -3168,6 +3453,8 @@ class ToolResult(Contract):
 
     @classmethod
     def model_construct(cls, *args: Any, **kwargs: Any) -> Never:
+        # 基类已统一封死 model_construct；此处覆盖只为给出更准确的错误信息
+        # （"只能由 ToolGateway 构造"而非"请用 model_validate"）。
         raise NotImplementedError("ToolResult 只能由 ToolGateway 构造")
 
     def model_copy(
@@ -3233,7 +3520,7 @@ class ToolAdapter(Protocol):
 import asyncio
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Protocol
 
 from xiaowei_agent.contracts import (
     AdapterStatus, AdmissionCertificate, AgentError, EffectClass, ErrorCategory,
@@ -3241,7 +3528,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.contracts.tool import _TOOL_RESULT_WITNESS, _WITNESS_KEY
 from xiaowei_agent.planning import compute_tool_call_hash
-from xiaowei_agent.tools.adapter import ToolAdapter
+from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
 
 _E1_EXECUTION_ENABLED: Final[bool] = False
 """ADR-007 D7：M0-M7 全程禁止 E1，含非生产环境。M8 才可由独立评审开闸。"""
@@ -3275,8 +3562,24 @@ def _map_error(status: AdapterStatus, cause: ExternalContent | None) -> AgentErr
     )
 
 
+class ToolGateway(Protocol):
+    """数据面唯一工具入口的**契约**。
+
+    领域层只依赖本 Protocol，不依赖任何具体实现——这是"实现可以替换，契约不随
+    框架变化"的落点。M2 只提供 ``DeterministicToolGateway`` 一个实现；M6b 的真实
+    StarRocks adapter 仍经同一个 Gateway，不新增第二条工具路由。
+    """
+
+    async def invoke(
+        self, call: ToolCall, *, context: RequestContext,
+        admission: AdmissionCertificate,
+    ) -> ToolResult: ...
+
+
 class DeterministicToolGateway:
     def __init__(self, adapters: Mapping[str, ToolAdapter]) -> None:
+        if not adapters:
+            raise ValueError("DeterministicToolGateway requires at least one adapter")
         self._adapters = dict(adapters)
 
     async def invoke(
@@ -3309,6 +3612,14 @@ class DeterministicToolGateway:
                 context, status=ToolCallStatus.TIMEOUT, data_view=(),
                 source=call.gateway, limitations=("adapter timed out",),
                 error=_map_error(AdapterStatus.TIMEOUT, None),
+            )
+        # Protocol 只在静态检查时生效，运行时不拦任何东西。adapter 是外部实现，
+        # 返回一个鸭子类型对象或 dict 都能一路流到下面的字段访问，把未经契约
+        # 约束的数据带进 ToolResult。因此在此 fail-closed 做一次类型校验。
+        if not isinstance(response, AdapterResponse):
+            raise TypeError(
+                f"adapter {call.gateway!r} returned {type(response).__name__}, "
+                "expected AdapterResponse"
             )
         # adapter 出错时不得返回空成功：状态与结构化错误一起传出去。
         return self._issue(
@@ -3376,9 +3687,78 @@ class RecordingToolAdapter:
 | 删除 `tool_call_hash` 比对 | `test_admission_with_tampered_args_is_refused`、`test_admission_with_tampered_timeout_is_refused` |
 | 删除 `step_id`/`operation` 比对 | `test_admission_for_another_step_is_refused` |
 | 删除 `_require_gateway_witness` | 工厂契约四条测试 |
+| 删除 `isinstance(response, AdapterResponse)` 校验 | `test_non_conforming_adapter_return_is_refused` |
 | 把 `error=_map_error(...)` 改回 `error=None` | `test_adapter_error_becomes_a_structured_agent_error` |
 | 让 `_map_error` 把 `cause.content` 写进 `message_key` | `test_adapter_error_text_never_reaches_the_tool_result` |
 | 把 `_DOMAIN_PACKAGES` 改回整个 `src` 并在 `tools/` 放一条 `import httpx` | `test_domain_layer_has_no_third_party_client_import` 误杀（证明 V1 口径确实过宽） |
+
+- [ ] **步骤 5.5：补 Protocol 一致性契约测试**
+
+`Protocol` 只在有赋值/传参发生时才被静态检查；一个只被 `isinstance` 用的
+Protocol 可能与实现悄悄漂移而 mypy 毫无反应。补
+`tests/contract/test_protocol_conformance.py`，把"实现满足契约"变成显式断言：
+
+```python
+"""每个 Protocol 都必须有实现满足它，且签名不漂移。
+
+赋值给带类型标注的变量会让 mypy 真正检查结构兼容性；再用 inspect 比对关键字
+参数，覆盖 mypy 未运行的场景。
+"""
+
+import inspect
+
+from xiaowei_agent.contracts import TaskStatus
+from xiaowei_agent.persistence.fake import InMemoryTaskStore
+from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.runners.fake import ScriptedRunner
+from xiaowei_agent.runners.runner import WorkflowRunner
+from xiaowei_agent.tools.adapter import ToolAdapter
+from xiaowei_agent.tools.fake import RecordingToolAdapter
+from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
+from tests.fakes.clock import ManualClock
+
+
+def test_deterministic_gateway_satisfies_the_tool_gateway_protocol(
+    recording_adapter: RecordingToolAdapter,
+) -> None:
+    gateway: ToolGateway = DeterministicToolGateway(
+        adapters={"starrocks": recording_adapter})
+    assert gateway is not None
+
+
+def test_recording_adapter_satisfies_the_tool_adapter_protocol(
+    recording_adapter: RecordingToolAdapter,
+) -> None:
+    adapter: ToolAdapter = recording_adapter
+    assert adapter is not None
+
+
+def test_in_memory_store_satisfies_the_task_store_protocol() -> None:
+    store: TaskStore = InMemoryTaskStore(clock=ManualClock())
+    assert store is not None
+
+
+def test_scripted_runner_satisfies_the_workflow_runner_protocol() -> None:
+    runner: WorkflowRunner = ScriptedRunner(
+        InMemoryTaskStore(clock=ManualClock()), outcome_status=TaskStatus.SUCCEEDED)
+    assert runner is not None
+
+
+def _keyword_params(func: object) -> set[str]:
+    return {
+        name for name, param in inspect.signature(func).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+
+
+def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
+    """关键字参数漂移不会被结构兼容性检查发现，但会在调用点炸掉。"""
+    assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(
+        ToolGateway.invoke)
+```
+
+> `CapabilityResolver` 与 `TraceSink` 在 M2 没有实现，因此只断言它们**是**
+> Protocol 且方法签名符合预期，不构造实现——不为了让测试好看而提前实现。
 
 - [ ] **步骤 6：四条命令全绿后提交**
 
@@ -3673,10 +4053,32 @@ class TaskStore(Protocol):
 
 import pytest
 
-from xiaowei_agent.contracts import Channel, RequestEnvelope, TaskStatus, TransitionRejection
+from xiaowei_agent.contracts import TaskStatus, TransitionRejection
 from xiaowei_agent.persistence import ContextMismatch, IdempotencyConflict, TaskNotFound
+from tests.conftest import make_envelope   # 共享夹具工厂，fixture 在 conftest 中
+
+
+> **`clock` / `store` / `task` / `_envelope` 必须放 `tests/conftest.py`，不能放本文件。**
+> `tests/security/test_lease_fencing.py` 与 `test_terminal_protection.py`、
+> `tests/contract/test_runner_contract.py` 都要用它们，而 pytest 的 fixture 不跨
+> 测试文件可见——定义在某个测试文件里，其他文件会直接 `fixture not found`。
+> 这与 helper 未定义是同一类问题：**片段不可原样落盘执行**。追加到 `tests/conftest.py`：
+
+```python
+# 追加到 tests/conftest.py
+from xiaowei_agent.contracts import Channel, RequestEnvelope, TaskStatus
+from xiaowei_agent.contracts.task import ALLOWED_TRANSITIONS, TERMINAL_STATUSES
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from tests.fakes.clock import ManualClock
+
+
+def makemake_envelope(**overrides: object) -> RequestEnvelope:
+    base: dict[str, object] = {
+        "request_id": "r1", "tenant_id": "dev-local", "actor": "alice",
+        "channel": Channel.CLI, "text": "why is the query slow",
+        "idempotency_key": "idem-1", "environment_id": "dev",
+    }
+    return RequestEnvelope(**(base | overrides))
 
 
 @pytest.fixture
@@ -3689,52 +4091,84 @@ def store(clock: ManualClock) -> InMemoryTaskStore:
     return InMemoryTaskStore(clock=clock)
 
 
-def _envelope(**overrides: object) -> RequestEnvelope:
-    base: dict[str, object] = {
-        "request_id": "r1", "tenant_id": "dev-local", "actor": "alice",
-        "channel": Channel.CLI, "text": "why is the query slow",
-        "idempotency_key": "idem-1", "environment_id": "dev",
-    }
-    return RequestEnvelope(**(base | overrides))
+@pytest.fixture
+async def task(store: InMemoryTaskStore, context: RequestContext):
+    return await store.create_task(envelope=makemake_envelope(), context=context)
+
+
+def _path_to(target: TaskStatus) -> tuple[TaskStatus, ...]:
+    """在 ALLOWED_TRANSITIONS 上做 BFS，求 CREATED → target 的一条最短合法路径。
+
+    写成搜索而不是硬编码路径，是因为硬编码会在迁移表变化时悄悄失配；搜索失败
+    本身也是一条断言——说明该终态从 CREATED 不可达，迁移表有问题。
+    """
+    queue: list[tuple[TaskStatus, tuple[TaskStatus, ...]]] = [(TaskStatus.CREATED, ())]
+    seen = {TaskStatus.CREATED}
+    while queue:
+        current, path = queue.pop(0)
+        if current is target:
+            return path
+        for nxt in sorted(ALLOWED_TRANSITIONS[current], key=lambda s: s.value):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, (*path, nxt)))
+    raise AssertionError(f"{target.value} is unreachable from CREATED")
+
+
+async def drive_to_terminal(
+    store: InMemoryTaskStore, task_id: str, terminal: TaskStatus
+) -> None:
+    """把任务沿一条合法路径推到指定终态，全程采纳存储层 winner。"""
+    assert terminal in TERMINAL_STATUSES
+    record = await store.get(task_id)
+    for status in _path_to(terminal):
+        result = await store.transition(
+            task_id=task_id, expected_version=record.version, to_status=status,
+        )
+        assert result.applied, result.rejection
+        record = result.winner
 
 
 @pytest.fixture
-async def task(store: InMemoryTaskStore, context):
-    return await store.create_task(envelope=_envelope(), context=context)
-
+def two_step_plan() -> ExecutionPlan:
+    """两步计划；用于证明 ordered_steps 的顺序进入 plan_hash。"""
+    first = FIXTURE_PLAN.steps[0]
+    second = first.model_copy(update={"step_id": "s2", "depends_on": ("s1",)})
+    return FIXTURE_PLAN.model_copy(update={"steps": (first, second)})
+```
 
 async def test_create_is_idempotent_by_key(store, context) -> None:
-    first = await store.create_task(envelope=_envelope(), context=context)
-    second = await store.create_task(envelope=_envelope(), context=context)
+    first = await store.create_task(envelope=make_envelope(), context=context)
+    second = await store.create_task(envelope=make_envelope(), context=context)
     assert first.task_id == second.task_id
     assert first.version == second.version
 
 
 async def test_idempotency_key_is_scoped_per_tenant(store, context) -> None:
     """审核 #6 同路径缺口：V1 用全局键表，跨租户同键会共用一个任务。"""
-    a = await store.create_task(envelope=_envelope(), context=context)
+    a = await store.create_task(envelope=make_envelope(), context=context)
     other = context.model_copy(update={"tenant_id": "other-tenant"})
     b = await store.create_task(
-        envelope=_envelope(tenant_id="other-tenant"), context=other,
+        envelope=make_envelope(tenant_id="other-tenant"), context=other,
     )
     assert a.task_id != b.task_id
 
 
 async def test_idempotency_key_is_scoped_per_environment(store, context) -> None:
-    a = await store.create_task(envelope=_envelope(), context=context)
+    a = await store.create_task(envelope=make_envelope(), context=context)
     other = context.model_copy(update={"environment_id": "staging"})
     b = await store.create_task(
-        envelope=_envelope(environment_id="staging"), context=other,
+        envelope=make_envelope(environment_id="staging"), context=other,
     )
     assert a.task_id != b.task_id
 
 
 async def test_same_key_with_a_different_request_is_rejected(store, context) -> None:
     """否则第二个不同的请求会静默搭上第一个任务的结果。"""
-    await store.create_task(envelope=_envelope(), context=context)
+    await store.create_task(envelope=make_envelope(), context=context)
     with pytest.raises(IdempotencyConflict):
         await store.create_task(
-            envelope=_envelope(text="a completely different question"), context=context,
+            envelope=make_envelope(text="a completely different question"), context=context,
         )
 
 
@@ -3744,8 +4178,8 @@ async def test_retry_with_a_new_request_id_reuses_the_same_task(store, context) 
     ``request_id`` 每次重试都不同，若把它算进去重摘要，合法重试会被误判为
     "同键不同请求"而被拒——这正是 V2 用 ``envelope.model_dump()`` 的缺陷。
     """
-    first = await store.create_task(envelope=_envelope(request_id="r1"), context=context)
-    second = await store.create_task(envelope=_envelope(request_id="r2"), context=context)
+    first = await store.create_task(envelope=make_envelope(request_id="r1"), context=context)
+    second = await store.create_task(envelope=make_envelope(request_id="r2"), context=context)
     assert first.task_id == second.task_id
     assert first.version == second.version
 
@@ -3759,13 +4193,13 @@ async def test_envelope_context_mismatch_is_rejected(
 ) -> None:
     """伪造信封上下文必须拒绝，否则任务会记在未经解析确认的租户/环境下。"""
     with pytest.raises(ContextMismatch):
-        await store.create_task(envelope=_envelope(**{field: value}), context=context)
+        await store.create_task(envelope=make_envelope(**{field: value}), context=context)
 
 
 async def test_envelope_without_environment_id_is_accepted(store, context) -> None:
     """environment_id 在信封中可选；缺省时以 context 解析结果为准（ADR-007 D2）。"""
     record = await store.create_task(
-        envelope=_envelope(environment_id=None), context=context,
+        envelope=make_envelope(environment_id=None), context=context,
     )
     assert record.environment_id == context.environment_id
 
@@ -3922,8 +4356,11 @@ async def test_terminal_task_cannot_acquire_lease(store, task) -> None:
 """终态不可被后到事件覆盖，且必须由存储层承重（ARCHITECTURE §7.3）。"""
 
 import pytest
+from pydantic import ValidationError
 
-from xiaowei_agent.contracts import TERMINAL_STATUSES, TaskOutcome, TaskStatus, TransitionRejection
+from xiaowei_agent.contracts import TaskOutcome, TaskStatus, TransitionRejection
+from xiaowei_agent.contracts.task import ALLOWED_TRANSITIONS, TERMINAL_STATUSES
+from tests.conftest import drive_to_terminal
 
 pytestmark = pytest.mark.security
 
@@ -3936,7 +4373,7 @@ def test_terminal_set_matches_architecture() -> None:
 
 @pytest.mark.parametrize("terminal", sorted(TERMINAL_STATUSES, key=lambda s: s.value))
 async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -> None:
-    await _drive_to_terminal(store, task.task_id, terminal)
+    await drive_to_terminal(store, task.task_id, terminal)
     current = await store.get(task.task_id)
     for target in TaskStatus:
         result = await store.transition(
@@ -3958,9 +4395,19 @@ async def test_terminal_protection_wins_over_version_mismatch(store, task) -> No
     assert result.rejection is TransitionRejection.TERMINAL_PROTECTED
 
 
-def test_task_outcome_rejects_non_terminal_status() -> None:
-    from pydantic import ValidationError
+def test_terminal_statuses_have_no_outgoing_edges() -> None:
+    """终态集合与迁移表必须一致，否则两处会各自漂移。"""
+    for status in TERMINAL_STATUSES:
+        assert ALLOWED_TRANSITIONS[status] == frozenset()
 
+
+def test_every_status_is_a_key_in_the_transition_table() -> None:
+    """缺键会让 ALLOWED_TRANSITIONS[status] 抛 KeyError 而不是给出确定的拒绝。"""
+    for status in TaskStatus:
+        assert status in ALLOWED_TRANSITIONS
+
+
+def test_task_outcome_rejects_non_terminal_status() -> None:
     with pytest.raises(ValidationError):
         TaskOutcome(task_id="t1", status=TaskStatus.RUNNING, terminal_reason=None,
                     evidence_refs=(), render_ref=None)
@@ -4538,19 +4985,39 @@ class WorkflowRunner(Protocol):
 形状。因此它既不持有 ToolGateway，也不接触 adapter：**adapter 调用次数恒为 0**。
 """
 
+from typing import Final
+
+from xiaowei_agent.contracts import ExternalInput, TaskOutcome, TaskStatus
+from xiaowei_agent.contracts.task import ALLOWED_TRANSITIONS, TERMINAL_STATUSES
+from xiaowei_agent.persistence.store import TaskStore
+
 IS_FAKE: Final[bool] = True
+
+
+class TerminalOrLeasedTaskError(RuntimeError):
+    """任务已终态，或租约被他人持有——两种情况下本 Runner 都不应推进它。"""
 
 
 class ScriptedRunner:
     def __init__(
         self, store: TaskStore, *, outcome_status: TaskStatus,
-        terminal_reason: str | None = None,
+        terminal_reason: str | None = None, owner: str = "scripted-runner",
     ) -> None:
         if outcome_status not in TERMINAL_STATUSES:
             raise ValueError("ScriptedRunner requires a terminal outcome status")
+        # 从 RUNNING 不可达的终态（如 REJECTED，只能由 PLANNING/AWAITING_APPROVAL
+        # 到达）必须在构造时就拒绝，否则要跑到最后一步迁移才失败。
+        if outcome_status not in ALLOWED_TRANSITIONS[TaskStatus.RUNNING]:
+            raise ValueError(
+                f"{outcome_status.value} is not reachable from RUNNING; "
+                "ScriptedRunner only drives the running → terminal edge"
+            )
+        if not owner or owner != owner.strip():
+            raise ValueError("owner must be a non-empty, unpadded string")
         self._store = store
         self._status = outcome_status
         self._reason = terminal_reason
+        self._owner = owner
 
     async def start(self, task_id: str) -> TaskOutcome:
         return await self._drive(task_id, path=(TaskStatus.PLANNING, TaskStatus.RUNNING))
@@ -4592,6 +5059,14 @@ class ScriptedRunner:
 对应契约测试 `tests/contract/test_runner_contract.py`：
 
 ```python
+"""Runner 契约：采纳存储层 winner、不越过终态、不触碰 Gateway。"""
+
+import pytest
+
+from xiaowei_agent.contracts import TaskStatus
+from xiaowei_agent.runners.fake import ScriptedRunner, TerminalOrLeasedTaskError
+
+
 async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
     outcome = await runner.start(task.task_id)
@@ -4617,6 +5092,33 @@ def test_runner_rejects_a_terminal_status_unreachable_from_running(store) -> Non
         ScriptedRunner(store, outcome_status=TaskStatus.REJECTED)
 
 
+def test_runner_rejects_a_non_terminal_outcome(store) -> None:
+    with pytest.raises(ValueError):
+        ScriptedRunner(store, outcome_status=TaskStatus.RUNNING)
+
+
+@pytest.mark.parametrize("bad_owner", ["", "  ", " w1 "])
+def test_runner_rejects_a_blank_or_padded_owner(store, bad_owner: str) -> None:
+    with pytest.raises(ValueError):
+        ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner=bad_owner)
+
+
+async def test_runner_holds_the_lease_under_its_own_owner(store, task) -> None:
+    """owner 必须真的被用于取租约——否则 _drive 里引用的是一个未定义属性。"""
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w-alpha")
+    await runner.start(task.task_id)
+    final = await store.get(task.task_id)
+    assert final.lease_owner == "w-alpha"
+
+
+async def test_two_runners_cannot_drive_the_same_task_concurrently(store, task) -> None:
+    """第二个 owner 拿不到租约，必须失败而不是并行推进同一任务。"""
+    assert await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w2")
+    with pytest.raises(TerminalOrLeasedTaskError):
+        await runner.start(task.task_id)
+
+
 async def test_runner_never_touches_a_gateway_or_adapter(store, task) -> None:
     """M2 的 fake runner 不执行步骤；adapter 调用次数恒为 0。"""
     import inspect
@@ -4630,7 +5132,24 @@ async def test_runner_never_touches_a_gateway_or_adapter(store, task) -> None:
 
 - [ ] **步骤 4：追加跨 DTO 的 copy 绕过矩阵**
 
-T2 已覆盖 `Contract.model_copy` 的通用机制；此处补上具体 DTO，证明真实约束确实挡得住 copy。追加到 `tests/security/test_copy_validation.py`：
+T2 已覆盖 `Contract.model_copy` 的通用机制；此处补上具体 DTO，证明真实约束确实挡得住 copy。追加到 `tests/security/test_copy_validation.py`，**同时把该文件的 import 头扩展为**：
+
+```python
+import datetime as dt
+import math
+from typing import Self
+
+import pytest
+from pydantic import Field, ValidationError, model_validator
+
+from xiaowei_agent.contracts import (
+    Contract, EffectClass, ExternalContent, ExternalSource, FrozenMap,
+    ResolvedTarget, TaskOutcome, TaskStatus,
+)
+from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET, SNAPSHOT
+
+_AT = dt.datetime(2026, 9, 2, tzinfo=dt.UTC)
+```
 
 ```python
 def test_copy_cannot_forge_external_content_digest() -> None:
@@ -4675,10 +5194,16 @@ def test_copy_cannot_produce_a_non_terminal_task_outcome() -> None:
 
 
 def test_after_validator_copy_is_idempotent() -> None:
-    """ResolvedTarget / TraceEvent 的校验器在校验途中复制，必须幂等不递归。"""
-    target = ResolvedTarget(**_target_payload_with(resource_ids=("café",)))
+    """ResolvedTarget / TraceEvent 的校验器在校验途中复制，必须幂等不递归。
+
+    第一次构造会把组合式规范化为预组合式；再 copy 一次时校验器看到的已是
+    规范化值，必须走"原样返回"分支，否则无限递归。
+    """
+    decomposed = "café"          # cafe + 组合尖音符
+    target = FIXTURE_TARGET.model_copy(update={"resource_ids": (decomposed,)})
     assert target.resource_ids == ("café",)
-    assert target.model_copy(update={"selector_version": "2"}).resource_ids == ("café",)
+    again = target.model_copy(update={"selector_version": "2"})
+    assert again.resource_ids == ("café",)
 ```
 
 - [ ] **步骤 5：同步文档（ADR-009 与 `ARCHITECTURE.md` 已在 T0 完成，本步只做其余三份）**
@@ -4736,7 +5261,9 @@ M2 **明确不做**，出现即视为超范围：
 
 按 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §9 输出四段：
 
-- **已验证**：四条命令的实际调用、exit code、精确 SHA、尾部输出；**全部 21 组 TDD 反证**（T1 回归基准 1 组、T5 五组、T6 三组、T7 三组、T8 五组、T10 六组）各自的转红与还原后转绿证据。
+- **已验证**：四条命令的实际调用、exit code、精确 SHA、尾部输出；**各任务「TDD 反证」表中的每一条**都要给出转红与还原后转绿的证据，外加 T1 的重构回归基准（迁移前后逐字相同的输出）。
+
+  > 计数以各任务的反证表为准，**本节不再写一个会漂移的总数**——V2.1 写"21 组"而分项相加是 23，正是硬编码聚合数与真实来源脱节的老毛病，与 V1 漏 hash 字段同根。当前分布：T5 五条、T6 三条、T7 三条、T8 七条、T10 八条，合计 26 条；新增反证行时无需回来改本节。
 - **只读推理**：无运行证据的判断，例如"本形状足以支撑 M4 的 PostgreSQL 实现"——在 M4 之前这只是设计推理。
 - **未覆盖**：未连接的环境、未实现的故障路径、未创建的测试目录。
 - **残余风险**：即使全部 gate 通过仍存在的限制及升级条件，至少包含：
@@ -4802,5 +5329,6 @@ M2 结束时全部能力仍为 `declared`，**不得表述为 `tests` 之外的�
 ## 12. 版本记录
 
 - **V1**（2026-09-02）：初版，10 个任务。Codex 审核判定不可开工，列出 10 项阻断与 8 项裁定。
-- **V2.1**（2026-09-02，本版）：按 Codex 第二轮审核的 4 项 P0 + 5 项 P1 做定向修订，**不重写架构**。P0：① `Contract` 基类统一覆盖 `model_copy`，带 update 必重新校验（实证：原生实现同时绕过 `Field(gt=0)` 与 after-validator），after-validator 内改用幂等的 `_copy_within_validation`；② `PlanBudget` / `StepCondition` 补入 hash 覆盖映射表；③ ADR-009 提为 **T0**，先于任何代码；④ 幂等摘要改用 `request_dedup_digest()`，排除 `request_id` 等易变字段。P1：contracts 依赖口径统一为"只依赖 redaction 与标准库"；`create_task` 校验信封/上下文一致性；`PlanStep` 构造检测器支持别名与属性访问并自带检测器自测；`ToolGateway` 补确定性 error mapper（只出摘要引用，不出原文）；补全 `contracts/task.py`、`ScriptedRunner`、`TraceEvent` 三处占位。任务数 11 → **T0 + 11**，TDD 反证 20 → 21 组。
+- **V2.2**（2026-09-02，本版）：按 Codex 第三轮审核的 8 项做定向修订，不改架构。补 `ToolGateway` Protocol 本体与 Protocol 一致性契约测试；`ScriptedRunner` 补 `owner` 及可达性/owner 校验；**校验绕过面按根因扩面**——基类一并封死 `model_construct`，新增 `test_validation_bypass_surface.py` 白名单化 `_copy_within_validation` 并禁止未绑定的 `BaseModel.model_copy`（实证该调用可绕过覆盖）；`FiniteFloat` 把非有限 float 的拒绝前移到 DTO 构造阶段，`canonical_json` 归一 `-0.0`；`Candidate.score` 有界有限并补 `CandidateSet` 去歧义校验；Gateway 增 `AdapterResponse` 运行时 fail-closed 校验与空 adapter 拒绝；测试片段补全（`drive_to_terminal`、`two_step_plan`、T8 完整 import），并把 `clock/store/task/make_envelope` 移入 `tests/conftest.py`——此前定义在测试文件内、跨文件不可见；统一依赖口径最后一处旧表述；反证计数改为以各任务表为准（当前 26 条）。
+- **V2.1**（2026-09-02）：按 Codex 第二轮审核的 4 项 P0 + 5 项 P1 做定向修订，**不重写架构**。P0：① `Contract` 基类统一覆盖 `model_copy`，带 update 必重新校验（实证：原生实现同时绕过 `Field(gt=0)` 与 after-validator），after-validator 内改用幂等的 `_copy_within_validation`；② `PlanBudget` / `StepCondition` 补入 hash 覆盖映射表；③ ADR-009 提为 **T0**，先于任何代码；④ 幂等摘要改用 `request_dedup_digest()`，排除 `request_id` 等易变字段。P1：contracts 依赖口径统一为"只依赖 redaction 与标准库"；`create_task` 校验信封/上下文一致性；`PlanStep` 构造检测器支持别名与属性访问并自带检测器自测；`ToolGateway` 补确定性 error mapper（只出摘要引用，不出原文）；补全 `contracts/task.py`、`ScriptedRunner`、`TraceEvent` 三处占位。任务数 11 → **T0 + 11**，TDD 反证 20 → 21 组。
 - **V2**（2026-09-02）：按根因重写。任务重排为严格线性 11 个、单分支单 PR；新增 `redaction.py` 下沉、`governance/binding.py`、`FrozenMap` 深不可变、三张 hash 覆盖映射表、`tool_call_hash`、闭合 fencing 规则、`StepResultStatus`；fake 迁入业务包；移除 `PlanStep` 的 capability 字段与 `src/` 内的 `assert`；扫描口径收敛到领域层。
