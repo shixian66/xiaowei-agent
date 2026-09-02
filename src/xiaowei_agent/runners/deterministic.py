@@ -30,12 +30,14 @@ from xiaowei_agent.contracts import (
     ExecutionPlan,
     ExternalInput,
     LeaseGrant,
+    PipelineStage,
     PlanStep,
     PolicyProfile,
     PolicySnapshot,
     RequestContext,
     ResolvedTarget,
     SqlSurface,
+    StageOutcome,
     StepCondition,
     StepConditionKind,
     TaskOutcome,
@@ -44,10 +46,12 @@ from xiaowei_agent.contracts import (
     ToolCall,
     ToolCallStatus,
     ToolResult,
+    TraceEvent,
 )
 from xiaowei_agent.evidence import build_evidence
 from xiaowei_agent.governance.approval import ApprovalGate, ApprovalRequiredError
 from xiaowei_agent.governance.step_admission import admit_step
+from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanStore
 from xiaowei_agent.persistence.store import Clock, TaskStore
@@ -109,6 +113,7 @@ class DeterministicStepRunner:
         surface: SqlSurface,
         clock: Clock,
         owner: str,
+        sink: TraceSink,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     ) -> None:
         self._tasks = task_store
@@ -122,7 +127,44 @@ class DeterministicStepRunner:
         self._surface = surface
         self._clock = clock
         self._owner = owner
+        self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._event_seq = 0
+
+    # --- trace --------------------------------------------------------------
+
+    def _emit(
+        self,
+        *,
+        stage: PipelineStage,
+        outcome: StageOutcome,
+        context: RequestContext,
+        task_id: str,
+        plan: ExecutionPlan | None = None,
+        step_id: str | None = None,
+    ) -> None:
+        """发一条阶段事件。
+
+        **detail 恒为空**：阶段、结果、步骤与 capability 已经足以把一次失败定位到
+        唯一一个阶段，而 detail 是最容易把 SQL 或外部文本带出去的地方。需要更多
+        诊断信息时应先扩契约字段，而不是往 detail 里塞自由文本。
+        """
+        self._event_seq += 1
+        self._sink.emit(
+            TraceEvent(
+                event_id=f"{task_id}:{self._event_seq}",
+                trace_id=context.trace_id,
+                task_id=task_id,
+                stage=stage,
+                outcome=outcome,
+                occurred_at=self._clock(),
+                capability_id=None if plan is None else plan.capability_id,
+                step_id=step_id,
+                policy_revision=context.policy_revision,
+                error=None,
+                detail={},
+            )
+        )
 
     # --- 公开入口 -----------------------------------------------------------
 
@@ -149,6 +191,13 @@ class DeterministicStepRunner:
             record = await self._advance(
                 task_id, record.version, status, grant.fencing_token
             )
+        self._emit(
+            stage=PipelineStage.LIFECYCLE,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=task_id,
+            plan=plan,
+        )
         return await self._run_steps(
             task_id=task_id,
             plan=plan,
@@ -189,6 +238,13 @@ class DeterministicStepRunner:
             record = await self._advance(
                 task_id, record.version, TaskStatus.RUNNING, grant.fencing_token
             )
+        self._emit(
+            stage=PipelineStage.LIFECYCLE,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=task_id,
+            plan=plan,
+        )
         return await self._run_steps(
             task_id=task_id,
             plan=plan,
@@ -271,7 +327,7 @@ class DeterministicStepRunner:
                     terminal_reason=BUDGET_EXHAUSTED_REASON,
                 )
             try:
-                result = await self._execute(
+                certificate, call = self._admit(
                     task_id=task_id,
                     step=step,
                     plan=plan,
@@ -280,6 +336,14 @@ class DeterministicStepRunner:
                     approval=approval,
                 )
             except ApprovalRequiredError as exc:
+                self._emit(
+                    stage=PipelineStage.ADMISSION,
+                    outcome=StageOutcome.REJECTED,
+                    context=context,
+                    task_id=task_id,
+                    plan=plan,
+                    step_id=step.step_id,
+                )
                 await self._pause(
                     task_id=task_id,
                     step=step,
@@ -289,6 +353,30 @@ class DeterministicStepRunner:
                     version=version,
                     step_id=exc.step_id,
                 )
+            except Exception:
+                # 准入的任何拒绝都归因到 ADMISSION，然后照常向上传播——Runner
+                # 不吞掉治理层的拒绝，只负责让它在 trace 上落到正确的阶段。
+                self._emit(
+                    stage=PipelineStage.ADMISSION,
+                    outcome=StageOutcome.REJECTED,
+                    context=context,
+                    task_id=task_id,
+                    plan=plan,
+                    step_id=step.step_id,
+                )
+                raise
+            self._emit(
+                stage=PipelineStage.ADMISSION,
+                outcome=StageOutcome.OK,
+                context=context,
+                task_id=task_id,
+                plan=plan,
+                step_id=step.step_id,
+            )
+            try:
+                result = await self._gateway.invoke(
+                    call, context=context, admission=certificate
+                )
             except TypeError:
                 # Gateway 对"adapter 返回了非 AdapterResponse"抛 TypeError。这是
                 # 上游故障，不是本进程的编程错误：让它冒泡会把一次可降级的取数失败
@@ -296,13 +384,38 @@ class DeterministicStepRunner:
                 tool_calls_used += 1
                 degraded = True
                 failed_steps.add(step.step_id)
+                self._emit(
+                    stage=PipelineStage.GATEWAY,
+                    outcome=StageOutcome.FAILED,
+                    context=context,
+                    task_id=task_id,
+                    plan=plan,
+                    step_id=step.step_id,
+                )
                 continue
             tool_calls_used += 1
-            if result.status is not ToolCallStatus.OK:
+            ok = result.status is ToolCallStatus.OK
+            self._emit(
+                stage=PipelineStage.GATEWAY,
+                outcome=StageOutcome.OK if ok else StageOutcome.FAILED,
+                context=context,
+                task_id=task_id,
+                plan=plan,
+                step_id=step.step_id,
+            )
+            if not ok:
                 degraded = True
                 failed_steps.add(step.step_id)
             await self._record_evidence(
                 task_id=task_id, step=step, plan=plan, result=result
+            )
+            self._emit(
+                stage=PipelineStage.EVIDENCE,
+                outcome=StageOutcome.OK,
+                context=context,
+                task_id=task_id,
+                plan=plan,
+                step_id=step.step_id,
             )
         status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
         return await self._outcome(task_id, status, terminal_reason=None)
@@ -340,7 +453,7 @@ class DeterministicStepRunner:
                 return len(envelope.facts)
         return 0
 
-    async def _execute(
+    def _admit(
         self,
         *,
         task_id: str,
@@ -349,7 +462,8 @@ class DeterministicStepRunner:
         target: ResolvedTarget,
         context: RequestContext,
         approval: ApprovalRequest | None,
-    ) -> ToolResult:
+    ) -> tuple[AdmissionCertificate, ToolCall]:
+        """六段准入。**同步**：准入不做 I/O，把它与工具调用分开才能各自归因。"""
         call = self._build_call(
             step=step,
             idempotency_key=f"{compute_plan_hash(plan)[:16]}:{step.step_id}",
@@ -369,9 +483,7 @@ class DeterministicStepRunner:
             task_id=task_id,
             now=self._clock(),
         )
-        return await self._gateway.invoke(
-            call, context=context, admission=certificate
-        )
+        return certificate, call
 
     def _build_call(self, *, step: PlanStep, idempotency_key: str) -> ToolCall:
         """构造本步骤的工具调用。

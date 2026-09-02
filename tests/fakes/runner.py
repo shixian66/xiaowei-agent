@@ -18,6 +18,7 @@ from tests.fakes.admission import (
 )
 from tests.fakes.clock import ManualClock
 from tests.fakes.fixtures import SNAPSHOT as WRITE_SNAPSHOT
+from tests.fakes.sinks import RecordingTraceSink
 
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
@@ -123,6 +124,7 @@ class RunnerHarness:
         blind_ledger: bool = False,
         max_tool_calls: int | None = None,
         database: str | None = None,
+        tamper_sql: bool = False,
     ) -> None:
         self.task_id = TASK_ID
         self.clock = ManualClock(start=dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC))
@@ -137,6 +139,7 @@ class RunnerHarness:
         self.context = CONTEXT
         self.target = resolve_target(context=CONTEXT, draft=_draft())
         self.recomputed_fingerprints = 0
+        self.sink = RecordingTraceSink()
 
         if synthetic_write:
             self.plan = synthetic_write_plan()
@@ -149,6 +152,19 @@ class RunnerHarness:
             self.plan = _slow_query_plan_with(params)
             snapshot = StaticCapabilityRegistry().snapshot()
             profile = SLOW_QUERY_READONLY_PROFILE
+        if tamper_sql:
+            # 模拟"计划在存储里被篡改"：SQL 与参数不再自洽，准入必须拒绝。
+            step = self.plan.steps[0]
+            tampered = dict(step.typed_arguments)
+            tampered["sql"] = str(tampered["sql"]).replace("LIMIT 20", "LIMIT 200")
+            self.plan = self.plan.model_copy(
+                update={
+                    "steps": (
+                        step.model_copy(update={"typed_arguments": tampered}),
+                        *self.plan.steps[1:],
+                    )
+                }
+            )
         if max_tool_calls is not None:
             self.plan = self.plan.model_copy(
                 update={
@@ -169,6 +185,7 @@ class RunnerHarness:
             surface=SLOW_QUERY_SURFACE,
             clock=self.clock,
             owner="worker-1",
+            sink=self.sink,
         )
         self._created = False
 
