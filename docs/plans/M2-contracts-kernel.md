@@ -20,8 +20,10 @@
 
 1. **不可表达优于运行时校验。** 能用类型、`Literal`、闭集枚举、`extra="forbid"` 表达的约束，不写成 `if`。
 2. **派生优于存储。** 可确定性推出的值不作字段持久化，避免"存了但不同步"的第二真源。
-3. **单向依赖。** `contracts/` 是叶子，不 import 任何其他 `xiaowei_agent` 模块（含 `log`）；其余模块只依赖 `contracts/` 与标准库。由源码扫描测试承重。
-4. **深不可变。** Pydantic 的 `frozen=True` 只挡属性重绑定，挡不住内部 `dict` 被原地改写。所有映射字段统一经 `FrozenMap` 复制并包装为 `MappingProxyType`；模块级映射常量同样包装。**否则"计划已冻结"是假的**——hash 算完后仍可改 `typed_arguments`。
+3. **单向依赖，口径唯一。** 分层自下而上是：标准库 → `redaction.py`（无对内依赖的叶子）→ `contracts/` → 其余业务包。因此准确表述是：**`contracts/` 只允许依赖 `xiaowei_agent.redaction` 与标准库**，不依赖任何业务模块（`log`、`config`、`trace` 均不可）；其余包只依赖 `contracts/`、`planning/` 与标准库。由 `test_module_layering.py` 承重。（V2 前文写"不 import 任何其他内部模块"、后文又放行 `redaction`，口径自相矛盾，此处统一。）
+4. **深不可变，且不可绕过校验重建。** 有两条独立的绕过路径，必须一起堵：
+   - `frozen=True` 只挡属性重绑定，挡不住内部 `dict` 被原地改写 → 所有映射字段经 `FrozenMap` **先复制再包装**为 `MappingProxyType`，模块级映射常量同样包装。
+   - **`model_copy(update=...)` 完全不触发校验** → 在 `Contract` 基类统一覆盖，带 `update` 时强制重新校验。V2 只发现了它绕过 `FrozenMap` 包装这一个症状；实证表明它同时绕过 `Field(gt=0)` 与 `model_validator(mode="after")`，因此 `PlanBudget` 可被 copy 成负预算、`ResolvedTarget` 可被 copy 出碰撞资源、`ExecutionPlan` 可被 copy 出前向依赖。**不堵住这一条，"违反安全边界的构造在契约层不可表达"整条取向都不成立。**
 5. **覆盖完备性由结构测试承重，而不是由人记得。** 凡"某个 DTO 的全部字段都必须进入某个 hash"这类要求，一律用「字段名 → hash 键」的显式映射表实现，并断言 `set(映射表) == set(model_fields)`。将来给 DTO 加字段却忘了加进 hash，测试立刻转红。V1 的 `plan_hash` 漏掉 `capability_id`/`capability_version`/`budget`，正是缺这一层导致的。
 
 ## 3. 技术栈
@@ -78,7 +80,7 @@ Python 3.11、Pydantic v2（已在 `uv.lock`）、标准库 `hashlib` / `json` /
 src/xiaowei_agent/
 ├── redaction.py                # 新增叶子模块：scrub_text / redact（由 log.py 反向复用）
 ├── log.py                      # 修改：改为从 redaction 导入并 re-export，对外签名不变
-├── contracts/                  # 叶子层：不 import 任何其他 xiaowei_agent 模块
+├── contracts/                  # 只依赖 redaction 与标准库，不依赖任何业务模块
 │   ├── __init__.py             # 唯一公开导入面
 │   ├── base.py                 # Contract 基类、JsonScalar、StrictStr、FrozenMap
 │   ├── enums.py                # 全部 18 个共享闭集枚举，一次性定义
@@ -135,11 +137,47 @@ tests/
 
 ## 7. 任务拆分
 
-一条分支 `claude/m2-contract-kernel`，11 个任务**严格线性**，每个任务一个 TDD 提交，同时是审查 checkpoint。每个任务结束都必须四条命令全绿才进入下一个。
+一条分支 `claude/m2-contract-kernel`，**T0 + 11 个任务**严格线性，每个任务一个 TDD 提交，同时是审查 checkpoint。每个任务结束都必须四条命令全绿才进入下一个。
 
 ---
 
-### T1：脱敏规则下沉，`contracts` 得以零对内依赖
+### T0：先写 ADR-009，再动代码
+
+**根因背景**：V2 把 ADR-009 放在 T11 收口，与自身第 11 节"先写 ADR 并获批"自相矛盾。[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §8 步骤 2 要求"涉及新契约或不可逆选择时**先**写 ADR"。D1/D3/D4/D5 冻结的是 hash canonicalization、审批绑定与工具准入形状，全部属于不可逆选择，因此必须前置。
+
+**本任务只改 ADR 与必要真源文档，不写一行代码。**
+
+**文件**：
+- 创建：`docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md`
+- 修改：`ARCHITECTURE.md`（§7.1、§6、§16）
+
+- [ ] **步骤 1：写 ADR-009**
+
+按既有 ADR 结构（背景 / 决策 / 后果 / 备选方案与否决理由 / 回滚），记录四项冻结：
+
+| 决策 | 内容 | 回滚方式 |
+| --- | --- | --- |
+| D1 | `plan_hash` 规范输入集含 `effect_class`、`condition`、`budget`；`PLAN_SCHEMA_VERSION = 1`；覆盖完备性由「字段→键」映射表 + 安全测试承重 | 改映射表并递增 `PLAN_SCHEMA_VERSION`，同步更新固定向量与 §7.1 |
+| D2 | `ExecutionPlan` 绑定单一 capability，步骤不携带 capability 字段 | 跨 capability 计划须递增 schema version 并另立 ADR |
+| D3 | 两个指纹不作 `ExecutionPlan` 字段；绑定值存于 `ApprovalRequest`（含 `policy_revision`） | 恢复为字段须同时给出"存储值与重算值不一致时以谁为准"的规则 |
+| D4 | `AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`；`_E1_EXECUTION_ENABLED` 为 M0–M7 硬闸 | 开闸只改该常量一行，须独立评审与 ADR-007 修订 |
+
+- [ ] **步骤 2：同步 `ARCHITECTURE.md` 三处**
+
+- **§7.1**：canonical 形状的 `ordered_steps` 元素增加 `effect_class` 与 `condition`，顶层增加 `budget`；注明 `plan_schema_version` 首个取值为 `1`，且步骤**不携带** capability 字段。
+- **§6**：`ExecutionPlan` 行字段改为 `plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget`，约束列注明两个指纹由 `planning` 按需计算；`ApprovalRequest` 行补 `policy_revision`；新增 `AdmissionCertificate` 行（含 `tool_call_hash`）。
+- **§16**：ADR 索引增加 ADR-009。
+
+- [ ] **步骤 3：确认四条命令仍全绿（本任务不改代码，应无变化）并提交**
+
+```bash
+git add docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md ARCHITECTURE.md
+git commit -m "docs(adr): ADR-009 冻结 plan_hash、审批绑定与工具准入形状"
+```
+
+---
+
+### T1：脱敏规则下沉为叶子模块
 
 **根因背景**：V1 让 `contracts/trace_events.py` import `xiaowei_agent.log` 以复用脱敏。审核裁定不白名单化。真正的问题不是"谁 import 谁"，而是**脱敏实现的位置错了**——它是通用工具，却被放在 logging 模块里。
 
@@ -293,6 +331,78 @@ def test_nested_mapping_values_are_rejected_by_scalar_maps() -> None:
         _Sample(data={"a": {"nested": 1}})
 ```
 
+`tests/security/test_copy_validation.py`（本任务只覆盖**通用机制**，T11 再追加跨 DTO 矩阵）：
+
+```python
+"""model_copy(update=...) 必须重新校验。
+
+Pydantic v2 的原生实现直接写字段、跳过全部校验：Field 约束、model_validator、
+AfterValidator 一律不跑。若不覆盖，任何"构造时不可表达"的约束都能被一次 copy
+绕过，本项目最核心的取向随之失效。
+"""
+
+from typing import Self
+
+import pytest
+from pydantic import Field, ValidationError, model_validator
+
+from xiaowei_agent.contracts import Contract, FrozenMap
+
+pytestmark = pytest.mark.security
+
+
+class _Bounded(Contract):
+    n: int = Field(gt=0)
+    ids: tuple[str, ...] = Field(min_length=1)
+    data: FrozenMap
+
+    @model_validator(mode="after")
+    def _ids_are_unique(self) -> Self:
+        if len(set(self.ids)) != len(self.ids):
+            raise ValueError("duplicate id")
+        return self
+
+
+def _ok() -> _Bounded:
+    return _Bounded(n=1, ids=("a",), data={"k": 1})
+
+
+def test_copy_cannot_bypass_field_constraints() -> None:
+    with pytest.raises(ValidationError):
+        _ok().model_copy(update={"n": -1})
+
+
+def test_copy_cannot_bypass_model_validators() -> None:
+    with pytest.raises(ValidationError):
+        _ok().model_copy(update={"ids": ("x", "x")})
+
+
+def test_copy_cannot_bypass_min_length() -> None:
+    with pytest.raises(ValidationError):
+        _ok().model_copy(update={"ids": ()})
+
+
+def test_copy_cannot_bypass_extra_forbid() -> None:
+    with pytest.raises(ValidationError):
+        _ok().model_copy(update={"unknown_field": 1})
+
+
+def test_copy_rewraps_mapping_fields_as_frozen() -> None:
+    """写回普通 dict 后必须重新过 FrozenMap，否则可变性从 copy 泄漏回来。"""
+    copied = _ok().model_copy(update={"data": {"k": 2}})
+    with pytest.raises(TypeError):
+        copied.data["k"] = 3  # type: ignore[index]
+
+
+def test_copy_without_update_is_unchanged() -> None:
+    original = _ok()
+    assert original.model_copy() == original
+
+
+def test_valid_copy_still_works() -> None:
+    assert _ok().model_copy(update={"n": 5}).n == 5
+```
+
 `tests/security/test_external_content.py`：
 
 ```python
@@ -367,13 +477,19 @@ def test_capture_rejects_undeclared_keyword() -> None:
 复制（切断与调用方原对象的联系），再用 ``MappingProxyType`` 包装（挡住原地
 改写）。两步缺一不可——只包装不复制等于给外部 dict 套视图，外部一改内部就变。
 
+``model_copy(update=...)`` 在 Pydantic v2 中**完全不触发校验**——``Field`` 约束、
+``model_validator`` 与 ``AfterValidator`` 全部被跳过。因此本基类覆盖它：带
+``update`` 时用 ``{**self.__dict__, **update}`` 重新走一遍 ``model_validate``。
+不用 ``model_dump()`` 是为了保留嵌套契约实例与 ``datetime`` 的原始类型，避免
+JSON 往返丢失信息。
+
 **已知取舍**：``MappingProxyType`` 不可哈希，因此携带映射字段的契约实例不可
 作为 dict 键或放入 set。本项目不依赖契约的可哈希性，比较一律用 ``==``。
 """
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, TypeAlias
+from typing import Annotated, Any, Self, TypeAlias
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
@@ -399,9 +515,32 @@ FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map)]
 
 
 class Contract(BaseModel):
-    """不可变、拒绝未声明字段的契约基类。"""
+    """不可变、拒绝未声明字段、复制即重新校验的契约基类。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """带 ``update`` 的复制必须重新校验。
+
+        Pydantic 原生实现直接写字段、跳过全部校验，使任何"构造时不可表达"的
+        约束都能被一次 copy 绕过。
+
+        :raises ValidationError: update 后的取值违反任何字段或模型级约束。
+        """
+        if not update:
+            return super().model_copy(deep=deep)
+        return type(self).model_validate({**self.__dict__, **update})
+
+    def _copy_within_validation(self, **update: Any) -> Self:
+        """**仅供本类自身的 after-validator 使用**的未校验复制。
+
+        after-validator 正在校验途中，此时调用会重新校验的 ``model_copy`` 会
+        重入同一个校验器。使用本方法的 validator 必须满足**幂等**：第二次看到
+        已规范化的值时原样返回，否则仍会无限递归。
+        """
+        return super().model_copy(update=update)
 ```
 
 - [ ] **步骤 4：实现 `enums.py` —— 一次性定义全部 18 个共享枚举**
@@ -1170,9 +1309,39 @@ def test_row_count_threshold_must_be_non_negative() -> None:
         )
 ```
 
-`tests/unit/test_plan_contracts.py` 关键用例：
+`tests/unit/test_plan_contracts.py`：
 
 ```python
+"""计划契约的结构完整性。"""
+
+import pytest
+from pydantic import ValidationError
+
+from xiaowei_agent.contracts import (
+    AdmissionCertificate, ApprovalRequest, EffectClass, ExecutionPlan, PlanBudget,
+    PlanStep, StepCondition, StepConditionKind, StepResultStatus,
+)
+
+_BUDGET = PlanBudget(max_steps=2, max_tool_calls=2, max_model_tokens=8000)
+
+
+def _step(step_id: str = "s1", **overrides: object) -> PlanStep:
+    base: dict[str, object] = {
+        "step_id": step_id, "operation": "list_slow_queries",
+        "typed_arguments": {"window_minutes": 30}, "depends_on": (),
+        "side_effect": False, "effect_class": EffectClass.READ,
+    }
+    return PlanStep(**(base | overrides))
+
+
+def _plan(*steps: PlanStep, budget: PlanBudget = _BUDGET) -> ExecutionPlan:
+    return ExecutionPlan(
+        capability_id="starrocks.slow_query.diagnose", capability_version="1.0.0",
+        steps=steps, policy_profile="readonly.default",
+        policy_revision="policy-2026-09-01", budget=budget,
+    )
+
+
 def test_plan_step_carries_no_capability_fields() -> None:
     """计划绑定单 capability；step 级 capability 字段会造成 hash 覆盖缺口（审核 #1）。"""
     assert not ({"capability_id", "capability_version"} & set(PlanStep.model_fields))
@@ -1182,15 +1351,70 @@ def test_execution_plan_has_no_self_declared_hash_fields() -> None:
     assert not ({"plan_hash", "target_fingerprint"} & set(ExecutionPlan.model_fields))
 
 
-def test_duplicate_step_ids_are_rejected() -> None: ...
-def test_forward_or_unknown_dependency_is_rejected() -> None: ...
-def test_condition_referencing_a_later_step_is_rejected() -> None: ...
-def test_step_count_exceeding_budget_is_rejected() -> None: ...
-def test_typed_arguments_reject_nested_structures() -> None: ...
-def test_typed_arguments_are_deeply_immutable() -> None: ...
+def test_duplicate_step_ids_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate step_id"):
+        _plan(_step("s1"), _step("s1"))
+
+
+def test_unknown_dependency_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _plan(_step("s1", depends_on=("nope",)))
+
+
+def test_forward_dependency_is_rejected() -> None:
+    """只能依赖序列中更早的步骤，因此环与前向引用在校验期即失败。"""
+    with pytest.raises(ValidationError):
+        _plan(_step("s1", depends_on=("s2",)), _step("s2"))
+
+
+def test_backward_dependency_is_accepted() -> None:
+    plan = _plan(_step("s1"), _step("s2", depends_on=("s1",)))
+    assert plan.steps[1].depends_on == ("s1",)
+
+
+def test_condition_referencing_a_later_step_is_rejected() -> None:
+    later = StepCondition(
+        kind=StepConditionKind.PRIOR_STEP_RESULT_IS, ref_step_id="s2",
+        expected_result=StepResultStatus.FAILED,
+    )
+    with pytest.raises(ValidationError):
+        _plan(_step("s1", condition=later), _step("s2"))
+
+
+def test_condition_referencing_an_earlier_step_is_accepted() -> None:
+    earlier = StepCondition(
+        kind=StepConditionKind.PRIOR_STEP_RESULT_IS, ref_step_id="s1",
+        expected_result=StepResultStatus.FAILED,
+    )
+    plan = _plan(_step("s1"), _step("s2", condition=earlier))
+    assert plan.steps[1].condition.ref_step_id == "s1"
+
+
+def test_step_count_exceeding_budget_is_rejected() -> None:
+    tight = PlanBudget(max_steps=1, max_tool_calls=1, max_model_tokens=100)
+    with pytest.raises(ValidationError, match="max_steps"):
+        _plan(_step("s1"), _step("s2"), budget=tight)
+
+
+def test_typed_arguments_reject_nested_structures() -> None:
+    """参数只允许 JSON 标量；嵌套结构会成为夹带任意 SQL 或代码的通道。"""
+    with pytest.raises(ValidationError):
+        _step(typed_arguments={"filter": {"db": "prod"}})
+
+
+def test_typed_arguments_are_deeply_immutable() -> None:
+    step = _step()
+    with pytest.raises(TypeError):
+        step.typed_arguments["window_minutes"] = 1440  # type: ignore[index]
+
+
 def test_admission_certificate_requires_tool_call_hash() -> None:
+    """审核 #2：凭证必须绑定调用内容，而不只是步骤身份。"""
     assert "tool_call_hash" in AdmissionCertificate.model_fields
+
+
 def test_approval_request_carries_policy_revision() -> None:
+    """审核 #7：policy 变化不能静默让旧审批继续生效。"""
     assert "policy_revision" in ApprovalRequest.model_fields
 ```
 
@@ -1239,7 +1463,9 @@ class ResolvedTarget(Contract):
                 "target contains unconfirmed aliases"
             )
         if normalised != self.resource_ids:
-            return self.model_copy(update={"resource_ids": normalised})
+            # 校验途中不能用会重新校验的 model_copy（会重入本校验器）。
+            # 本校验器幂等：第二次看到已规范化的值时走上面的 return self。
+            return self._copy_within_validation(resource_ids=normalised)
         return self
 ```
 
@@ -1655,21 +1881,28 @@ V1 的 plan_hash 漏掉 capability_id / capability_version / budget，根因是�
 
 import pytest
 
-from xiaowei_agent.contracts import ExecutionPlan, PlanStep, ResolvedTarget, ToolCall
+from xiaowei_agent.contracts import (
+    ExecutionPlan, PlanBudget, PlanStep, ResolvedTarget, StepCondition, ToolCall,
+)
 from xiaowei_agent.planning import (
-    PLAN_FIELD_TO_HASH_KEY, STEP_FIELD_TO_HASH_KEY,
+    PLAN_BUDGET_FIELD_TO_HASH_KEY, PLAN_FIELD_TO_HASH_KEY,
+    STEP_CONDITION_FIELD_TO_HASH_KEY, STEP_FIELD_TO_HASH_KEY,
     TARGET_FIELD_TO_HASH_KEY, TOOL_CALL_FIELD_TO_HASH_KEY,
 )
 from xiaowei_agent.planning.canonical import (
-    _plan_payload, _target_payload, _tool_call_payload,
+    _budget_payload, _condition_payload, _plan_payload, _target_payload, _tool_call_payload,
 )
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET, FIXTURE_TOOL_CALL
 
 pytestmark = pytest.mark.security
 
+# **嵌套 DTO 必须同样纳入**：V2 只覆盖四个顶层 DTO，PlanBudget 与 StepCondition
+# 的字段是手写展开的，给它们加字段仍会重演 V1 漏 hash 的根因。
 _CASES = [
     (ExecutionPlan, PLAN_FIELD_TO_HASH_KEY),
     (PlanStep, STEP_FIELD_TO_HASH_KEY),
+    (PlanBudget, PLAN_BUDGET_FIELD_TO_HASH_KEY),
+    (StepCondition, STEP_CONDITION_FIELD_TO_HASH_KEY),
     (ResolvedTarget, TARGET_FIELD_TO_HASH_KEY),
     (ToolCall, TOOL_CALL_FIELD_TO_HASH_KEY),
 ]
@@ -1692,9 +1925,18 @@ def test_payload_keys_equal_the_declared_hash_keys() -> None:
     )
 
 
-def test_step_payload_keys_equal_the_declared_step_hash_keys() -> None:
+def test_nested_payload_keys_equal_their_declared_hash_keys() -> None:
     payload = _plan_payload(FIXTURE_PLAN)
-    assert set(payload["ordered_steps"][0]) == set(STEP_FIELD_TO_HASH_KEY.values())
+    step_payload = payload["ordered_steps"][0]
+    assert set(step_payload) == set(STEP_FIELD_TO_HASH_KEY.values())
+    assert set(step_payload["condition"]) == set(STEP_CONDITION_FIELD_TO_HASH_KEY.values())
+    assert set(payload["budget"]) == set(PLAN_BUDGET_FIELD_TO_HASH_KEY.values())
+    assert set(_condition_payload(FIXTURE_PLAN.steps[0].condition)) == set(
+        STEP_CONDITION_FIELD_TO_HASH_KEY.values()
+    )
+    assert set(_budget_payload(FIXTURE_PLAN.budget)) == set(
+        PLAN_BUDGET_FIELD_TO_HASH_KEY.values()
+    )
 
 
 _VOLATILE_OR_SENSITIVE = {
@@ -1739,7 +1981,9 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Final
 
-from xiaowei_agent.contracts import ExecutionPlan, PlanStep, ResolvedTarget, ToolCall
+from xiaowei_agent.contracts import (
+    ExecutionPlan, PlanBudget, PlanStep, ResolvedTarget, StepCondition, ToolCall,
+)
 
 PLAN_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType({
     "plan_schema_version": "plan_schema_version",
@@ -1759,6 +2003,20 @@ STEP_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType({
     "side_effect": "side_effect",
     "effect_class": "effect_class",
     "condition": "condition",
+})
+
+PLAN_BUDGET_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType({
+    "max_steps": "max_steps",
+    "max_tool_calls": "max_tool_calls",
+    "max_model_tokens": "max_model_tokens",
+})
+
+STEP_CONDITION_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType({
+    "kind": "kind",
+    "ref_step_id": "ref_step_id",
+    "field": "field",
+    "threshold": "threshold",
+    "expected_result": "expected_result",
 })
 
 TARGET_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType({
@@ -1814,9 +2072,31 @@ def canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _condition_payload(condition: StepCondition) -> dict[str, Any]:
+    k = STEP_CONDITION_FIELD_TO_HASH_KEY
+    return {
+        k["kind"]: condition.kind.value,
+        k["ref_step_id"]: condition.ref_step_id,
+        k["field"]: condition.field,
+        k["threshold"]: condition.threshold,
+        k["expected_result"]: (
+            condition.expected_result.value
+            if condition.expected_result is not None else None
+        ),
+    }
+
+
+def _budget_payload(budget: PlanBudget) -> dict[str, Any]:
+    k = PLAN_BUDGET_FIELD_TO_HASH_KEY
+    return {
+        k["max_steps"]: budget.max_steps,
+        k["max_tool_calls"]: budget.max_tool_calls,
+        k["max_model_tokens"]: budget.max_model_tokens,
+    }
+
+
 def _step_payload(step: PlanStep) -> dict[str, Any]:
     k = STEP_FIELD_TO_HASH_KEY
-    condition = step.condition
     return {
         k["step_id"]: step.step_id,
         k["operation"]: step.operation,
@@ -1824,16 +2104,7 @@ def _step_payload(step: PlanStep) -> dict[str, Any]:
         k["depends_on"]: list(step.depends_on),
         k["side_effect"]: step.side_effect,
         k["effect_class"]: step.effect_class.value,
-        k["condition"]: {
-            "kind": condition.kind.value,
-            "ref_step_id": condition.ref_step_id,
-            "field": condition.field,
-            "threshold": condition.threshold,
-            "expected_result": (
-                condition.expected_result.value
-                if condition.expected_result is not None else None
-            ),
-        },
+        k["condition"]: _condition_payload(step.condition),
     }
 
 
@@ -1846,11 +2117,7 @@ def _plan_payload(plan: ExecutionPlan) -> dict[str, Any]:
         k["steps"]: [_step_payload(s) for s in plan.steps],
         k["policy_profile"]: plan.policy_profile,
         k["policy_revision"]: plan.policy_revision,
-        k["budget"]: {
-            "max_steps": plan.budget.max_steps,
-            "max_tool_calls": plan.budget.max_tool_calls,
-            "max_model_tokens": plan.budget.max_model_tokens,
-        },
+        k["budget"]: _budget_payload(plan.budget),
     }
 
 
@@ -1910,6 +2177,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/unit tests/security -q
 | 删除映射键碰撞检测 | `test_canonical_json_rejects_key_collision_after_nfc` |
 | 从 `_plan_payload` 移除 `budget` 键 | `test_payload_keys_equal_the_declared_hash_keys`、`test_changing_budget_changes_plan_hash` |
 | 给 `PlanStep` 加一个字段但不更新 `STEP_FIELD_TO_HASH_KEY` | `test_every_model_field_maps_to_a_hash_key` |
+| 给 `PlanBudget` 加一个字段但不更新 `PLAN_BUDGET_FIELD_TO_HASH_KEY` | 同上（嵌套 DTO 同样承重） |
 
 第四条是本任务最重要的反证：它证明**将来的字段遗漏会被自动发现**，而不是靠评审看出来。
 
@@ -2082,12 +2350,49 @@ _ALLOWED = {_SRC / "capabilities" / "effect.py"}
 
 
 def _constructs_plan_step(path: Path) -> bool:
+    """检测对 PlanStep 的构造，覆盖三种写法。
+
+    只匹配裸名 ``PlanStep(...)`` 会漏掉 ``contracts.PlanStep(...)``、
+    ``plan.PlanStep(...)`` 与 ``from ... import PlanStep as PS`` 后的 ``PS(...)``，
+    使这条禁令形同虚设。
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    # 1) 收集 import 别名：from x import PlanStep as PS  →  {"PS"}
+    aliases = {
+        alias.asname or alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names if alias.name == "PlanStep"
+    }
+    aliases.add("PlanStep")
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "PlanStep":
-                return True
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # 2) 裸名或别名：PlanStep(...) / PS(...)
+        if isinstance(func, ast.Name) and func.id in aliases:
+            return True
+        # 3) 属性访问：contracts.PlanStep(...) / plan.PlanStep(...)
+        if isinstance(func, ast.Attribute) and func.attr == "PlanStep":
+            return True
     return False
+
+
+def test_the_detector_catches_all_three_spellings(tmp_path: Path) -> None:
+    """检测器自身必须先被证明有效，否则这条禁令可能一直是空的。"""
+    for source in (
+        "from xiaowei_agent.contracts import PlanStep\nPlanStep(step_id='s')\n",
+        "from xiaowei_agent.contracts import PlanStep as PS\nPS(step_id='s')\n",
+        "from xiaowei_agent import contracts\ncontracts.PlanStep(step_id='s')\n",
+    ):
+        probe = tmp_path / "probe.py"
+        probe.write_text(source, encoding="utf-8")
+        assert _constructs_plan_step(probe), source
+
+
+def test_the_detector_does_not_flag_unrelated_calls(tmp_path: Path) -> None:
+    probe = tmp_path / "clean.py"
+    probe.write_text("x = dict(step_id='s')\n", encoding="utf-8")
+    assert not _constructs_plan_step(probe)
 
 
 def test_only_effect_module_constructs_plan_step() -> None:
@@ -2702,6 +3007,57 @@ def test_adapter_error_is_wrapped_as_untrusted_external_content() -> None:
     assert ExternalContent in getattr(annotation, "__args__", (annotation,))
 
 
+async def test_adapter_error_becomes_a_structured_agent_error(
+    context, ok_call, admission,
+) -> None:
+    """V2 直接丢弃 AdapterResponse.error，ToolResult.error 永远是 None，
+    使上游失败在结果里看起来像一次空成功。"""
+    cause = ExternalContent.capture(
+        source=ExternalSource.TOOL,
+        content="ERROR 1045 (28000): Access denied for user 'x'@'h'",
+        captured_at=_AT,
+    )
+    adapter = RecordingToolAdapter(responses=(AdapterResponse(
+        status=AdapterStatus.ERROR, payload=(), source="starrocks-fake",
+        error=cause, elapsed_ms=7,
+    ),))
+    gw = DeterministicToolGateway(adapters={"starrocks": adapter})
+    result = await gw.invoke(ok_call, context=context, admission=admission)
+
+    assert result.status is ToolCallStatus.ERROR
+    assert result.error is not None
+    assert result.error.category is ErrorCategory.UPSTREAM
+    assert result.error.cause_ref == cause.digest
+
+
+async def test_adapter_error_text_never_reaches_the_tool_result(
+    context, ok_call, admission,
+) -> None:
+    """只有摘要引用出去，原文留在 ExternalContent 里。"""
+    secret_ish = "Access denied for user 'admin'"
+    cause = ExternalContent.capture(
+        source=ExternalSource.TOOL, content=secret_ish, captured_at=_AT)
+    adapter = RecordingToolAdapter(responses=(AdapterResponse(
+        status=AdapterStatus.ERROR, payload=(), source="starrocks-fake",
+        error=cause, elapsed_ms=7,
+    ),))
+    gw = DeterministicToolGateway(adapters={"starrocks": adapter})
+    result = await gw.invoke(ok_call, context=context, admission=admission)
+    assert secret_ish not in result.model_dump_json()
+
+
+async def test_failed_call_carries_no_data_view(context, ok_call, admission) -> None:
+    """失败时不得把半截 payload 当作证据传出去。"""
+    adapter = RecordingToolAdapter(responses=(AdapterResponse(
+        status=AdapterStatus.ERROR, payload=({"partial": "row"},),
+        source="starrocks-fake", error=None, elapsed_ms=7,
+    ),))
+    gw = DeterministicToolGateway(adapters={"starrocks": adapter})
+    result = await gw.invoke(ok_call, context=context, admission=admission)
+    assert result.data_view == ()
+    assert result.error is not None
+
+
 def test_only_gateway_module_references_the_construction_witness() -> None:
     allowed = {_SRC / "tools" / "gateway.py", _SRC / "contracts" / "tool.py"}
     names = {"_TOOL_RESULT_WITNESS", "_WITNESS_KEY"}
@@ -2811,10 +3167,15 @@ class ToolResult(Contract):
         return data
 
     @classmethod
-    def model_construct(cls, *args: object, **kwargs: object) -> Never:
+    def model_construct(cls, *args: Any, **kwargs: Any) -> Never:
         raise NotImplementedError("ToolResult 只能由 ToolGateway 构造")
 
-    def model_copy(self, *args: object, **kwargs: object) -> Never:
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Never:
+        # 签名与 Contract.model_copy 对齐，否则 mypy strict 报不兼容覆盖。
+        # 这里比基类更严：ToolResult 连"重新校验后的复制"也不允许，因为复制出
+        # 的结果不再由 Gateway 签发，来源无从追溯。
         raise NotImplementedError("ToolResult 不可复制修改；请由 ToolGateway 重新生成")
 ```
 
@@ -2875,8 +3236,8 @@ from types import MappingProxyType
 from typing import Final
 
 from xiaowei_agent.contracts import (
-    AdapterStatus, AdmissionCertificate, EffectClass, FrozenMap, RequestContext,
-    ToolCall, ToolCallStatus, ToolResult,
+    AdapterStatus, AdmissionCertificate, AgentError, EffectClass, ErrorCategory,
+    ExternalContent, FrozenMap, RequestContext, ToolCall, ToolCallStatus, ToolResult,
 )
 from xiaowei_agent.contracts.tool import _TOOL_RESULT_WITNESS, _WITNESS_KEY
 from xiaowei_agent.planning import compute_tool_call_hash
@@ -2890,6 +3251,28 @@ _STATUS_MAP: Final[Mapping[AdapterStatus, ToolCallStatus]] = MappingProxyType({
     AdapterStatus.ERROR: ToolCallStatus.ERROR,
     AdapterStatus.TIMEOUT: ToolCallStatus.TIMEOUT,
 })
+
+# 确定性 error mapper：adapter 状态 → (code, category, retryable)。
+# **第三方错误文本永远不进入 AgentError**——只有它的 ExternalContent 摘要作为
+# cause_ref 被引用。这样错误既可追溯，又不会成为可信控制信号（ARCHITECTURE §9）。
+_ERROR_MAP: Final[Mapping[AdapterStatus, tuple[str, ErrorCategory, bool]]] = (
+    MappingProxyType({
+        AdapterStatus.ERROR: ("tool.upstream_error", ErrorCategory.UPSTREAM, True),
+        AdapterStatus.TIMEOUT: ("tool.timeout", ErrorCategory.TIMEOUT, True),
+    })
+)
+
+
+def _map_error(status: AdapterStatus, cause: ExternalContent | None) -> AgentError | None:
+    """把 adapter 状态归类为结构化错误；错误原文只留摘要引用。"""
+    if status is AdapterStatus.OK:
+        return None
+    code, category, retryable = _ERROR_MAP[status]
+    return AgentError(
+        code=code, category=category, retryable=retryable,
+        message_key=f"error.{code}",
+        cause_ref=cause.digest if cause is not None else None,
+    )
 
 
 class DeterministicToolGateway:
@@ -2925,23 +3308,28 @@ class DeterministicToolGateway:
             return self._issue(
                 context, status=ToolCallStatus.TIMEOUT, data_view=(),
                 source=call.gateway, limitations=("adapter timed out",),
+                error=_map_error(AdapterStatus.TIMEOUT, None),
             )
+        # adapter 出错时不得返回空成功：状态与结构化错误一起传出去。
         return self._issue(
-            context, status=_STATUS_MAP[response.status], data_view=response.payload,
+            context, status=_STATUS_MAP[response.status],
+            data_view=response.payload if response.status is AdapterStatus.OK else (),
             source=response.source, limitations=(),
+            error=_map_error(response.status, response.error),
         )
 
     @staticmethod
     def _issue(
         context: RequestContext, *, status: ToolCallStatus,
         data_view: tuple[FrozenMap, ...], source: str, limitations: tuple[str, ...],
+        error: AgentError | None,
     ) -> ToolResult:
         """唯一的 ToolResult 构造点。"""
         return ToolResult(**{
             _WITNESS_KEY: _TOOL_RESULT_WITNESS,
             "status": status, "data_view": data_view, "raw_ref": None,
             "source": source, "limitations": limitations,
-            "trace_id": context.trace_id, "error": None,
+            "trace_id": context.trace_id, "error": error,
         })
 ```
 
@@ -2988,6 +3376,8 @@ class RecordingToolAdapter:
 | 删除 `tool_call_hash` 比对 | `test_admission_with_tampered_args_is_refused`、`test_admission_with_tampered_timeout_is_refused` |
 | 删除 `step_id`/`operation` 比对 | `test_admission_for_another_step_is_refused` |
 | 删除 `_require_gateway_witness` | 工厂契约四条测试 |
+| 把 `error=_map_error(...)` 改回 `error=None` | `test_adapter_error_becomes_a_structured_agent_error` |
+| 让 `_map_error` 把 `cause.content` 写进 `message_key` | `test_adapter_error_text_never_reaches_the_tool_result` |
 | 把 `_DOMAIN_PACKAGES` 改回整个 `src` 并在 `tools/` 放一条 `import httpx` | `test_domain_layer_has_no_third_party_client_import` 误杀（证明 V1 口径确实过宽） |
 
 - [ ] **步骤 6：四条命令全绿后提交**
@@ -3190,8 +3580,38 @@ Clock: TypeAlias = Callable[[], datetime]
 
 
 class TaskNotFound(LookupError): ...
+
+
 class IdempotencyConflict(RuntimeError):
-    """同一幂等键被用于内容不同的请求。"""
+    """同一幂等键被用于**语义**不同的请求。"""
+
+
+class ContextMismatch(RuntimeError):
+    """RequestEnvelope 与 RequestContext 的执行上下文不一致。
+
+    Gateway 从信封解析出上下文，两者不一致意味着解析环节出错或被绕过；
+    此时继续创建任务会让任务记在一个未经解析确认的租户/环境下。
+    """
+
+
+def request_dedup_digest(
+    envelope: RequestEnvelope, context: RequestContext
+) -> str:
+    """幂等去重摘要：只覆盖**语义**字段。
+
+    刻意**排除** ``request_id``——同一 ``idempotency_key`` 的正常重试会带一个新
+    的 ``request_id``，把它算进摘要会让合法重试被误判为"同键不同请求"。同理排除
+    trace_id 与任何时间戳。保留的是"这两次请求是不是在问同一件事"的判据。
+    """
+    payload = {
+        "tenant_id": context.tenant_id,
+        "environment_id": context.environment_id,
+        "actor": context.actor,
+        "channel": envelope.channel.value,
+        "text": envelope.text,
+        "idempotency_key": envelope.idempotency_key,
+    }
+    return content_digest(canonical_json(payload).decode("utf-8"))
 
 
 class TaskStore(Protocol):
@@ -3200,7 +3620,8 @@ class TaskStore(Protocol):
     ) -> TaskRecord:
         """按 (tenant_id, environment_id, idempotency_key) 幂等创建。
 
-        :raises IdempotencyConflict: 同一作用域内同键但请求内容不同。
+        :raises ContextMismatch: 信封与执行上下文的 tenant/actor/environment 不一致。
+        :raises IdempotencyConflict: 同一作用域内同键但**语义**不同的请求。
         """
 
     async def get(self, task_id: str) -> TaskRecord:
@@ -3253,7 +3674,7 @@ class TaskStore(Protocol):
 import pytest
 
 from xiaowei_agent.contracts import Channel, RequestEnvelope, TaskStatus, TransitionRejection
-from xiaowei_agent.persistence import IdempotencyConflict, TaskNotFound
+from xiaowei_agent.persistence import ContextMismatch, IdempotencyConflict, TaskNotFound
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from tests.fakes.clock import ManualClock
 
@@ -3315,6 +3736,38 @@ async def test_same_key_with_a_different_request_is_rejected(store, context) -> 
         await store.create_task(
             envelope=_envelope(text="a completely different question"), context=context,
         )
+
+
+async def test_retry_with_a_new_request_id_reuses_the_same_task(store, context) -> None:
+    """同键同语义的正常重试必须复用任务。
+
+    ``request_id`` 每次重试都不同，若把它算进去重摘要，合法重试会被误判为
+    "同键不同请求"而被拒——这正是 V2 用 ``envelope.model_dump()`` 的缺陷。
+    """
+    first = await store.create_task(envelope=_envelope(request_id="r1"), context=context)
+    second = await store.create_task(envelope=_envelope(request_id="r2"), context=context)
+    assert first.task_id == second.task_id
+    assert first.version == second.version
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("tenant_id", "other-tenant"), ("actor", "mallory"), ("environment_id", "prod")],
+)
+async def test_envelope_context_mismatch_is_rejected(
+    store, context, field: str, value: str,
+) -> None:
+    """伪造信封上下文必须拒绝，否则任务会记在未经解析确认的租户/环境下。"""
+    with pytest.raises(ContextMismatch):
+        await store.create_task(envelope=_envelope(**{field: value}), context=context)
+
+
+async def test_envelope_without_environment_id_is_accepted(store, context) -> None:
+    """environment_id 在信封中可选；缺省时以 context 解析结果为准（ADR-007 D2）。"""
+    record = await store.create_task(
+        envelope=_envelope(environment_id=None), context=context,
+    )
+    assert record.environment_id == context.environment_id
 
 
 async def test_get_unknown_task_raises(store) -> None:
@@ -3515,7 +3968,109 @@ def test_task_outcome_rejects_non_terminal_status() -> None:
 
 - [ ] **步骤 2：确认失败后实现 `contracts/task.py`**
 
-要点：`TERMINAL_STATUSES`、`ALLOWED_TRANSITIONS`（用 `MappingProxyType` 包装）、`TaskRecord`、`TransitionResult`（`applied` 与 `rejection` 互斥校验）、`LeaseGrant`、`TaskOutcome`（终态校验）。`TaskRecord` 新增 `request_digest: StrictStr`，用于幂等冲突检测。
+```python
+"""任务生命周期契约。
+
+状态迁移表是**闭集**：不在表中的迁移一律拒绝。终态集合独立定义并由
+``test_terminal_protection.py`` 与 ARCHITECTURE §7.3 交叉校验，避免两处各写
+一份而悄悄漂移。终态的出边显式写成空集合，而不是"表里没有这个键"——后者会
+让 ``ALLOWED_TRANSITIONS[status]`` 抛 KeyError 而不是给出确定的拒绝。
+"""
+
+import datetime as _dt
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final, Self
+
+from pydantic import Field, model_validator
+
+from xiaowei_agent.contracts.base import Contract, StrictStr
+from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
+
+TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset({
+    TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED,
+    TaskStatus.CANCELED, TaskStatus.INDETERMINATE,
+})
+
+ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = (
+    MappingProxyType({
+        TaskStatus.CREATED: frozenset({
+            TaskStatus.PLANNING, TaskStatus.CANCELED, TaskStatus.FAILED}),
+        TaskStatus.PLANNING: frozenset({
+            TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELED,
+            TaskStatus.REJECTED}),
+        TaskStatus.RUNNING: frozenset({
+            TaskStatus.AWAITING_APPROVAL, TaskStatus.SUCCEEDED, TaskStatus.FAILED,
+            TaskStatus.CANCELED, TaskStatus.INDETERMINATE}),
+        TaskStatus.AWAITING_APPROVAL: frozenset({
+            TaskStatus.RUNNING, TaskStatus.REJECTED, TaskStatus.CANCELED,
+            TaskStatus.FAILED}),
+        **{status: frozenset() for status in TERMINAL_STATUSES},
+    })
+)
+
+
+class TaskRecord(Contract):
+    task_id: StrictStr
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    actor: StrictStr
+    idempotency_key: StrictStr
+    request_digest: StrictStr
+    status: TaskStatus
+    version: int = Field(ge=0)
+    lease_owner: str | None = None
+    lease_expires_at: _dt.datetime | None = None
+    fencing_token: int | None = Field(default=None, gt=0)
+    terminal_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _lease_fields_are_consistent(self) -> Self:
+        held = self.lease_owner is not None
+        if held != (self.lease_expires_at is not None) or held != (
+            self.fencing_token is not None
+        ):
+            raise ValueError("lease_owner, lease_expires_at and fencing_token "
+                             "must be set or cleared together")
+        return self
+
+
+class LeaseGrant(Contract):
+    task_id: StrictStr
+    owner: StrictStr
+    expires_at: _dt.datetime
+    fencing_token: int = Field(gt=0)
+
+
+class TransitionResult(Contract):
+    applied: bool
+    winner: TaskRecord
+    rejection: TransitionRejection | None = None
+
+    @model_validator(mode="after")
+    def _applied_xor_rejection(self) -> Self:
+        if self.applied is (self.rejection is not None):
+            raise ValueError("applied and rejection must be mutually exclusive")
+        return self
+
+
+class TaskOutcome(Contract):
+    task_id: StrictStr
+    status: TaskStatus
+    terminal_reason: str | None
+    evidence_refs: tuple[StrictStr, ...]
+    render_ref: str | None
+
+    @model_validator(mode="after")
+    def _status_must_be_terminal(self) -> Self:
+        if self.status not in TERMINAL_STATUSES:
+            raise ValueError(f"TaskOutcome requires a terminal status, got {self.status}")
+        return self
+```
+
+> `ALLOWED_TRANSITIONS` 必须与 `TERMINAL_STATUSES` 一致，因此补一条一致性测试：
+> `test_terminal_statuses_have_no_outgoing_edges`（每个终态的出边集合为空）与
+> `test_every_status_is_a_key_in_the_transition_table`（不会 KeyError）。
 
 - [ ] **步骤 3：实现 `persistence/fake.py`**
 
@@ -3556,7 +4111,13 @@ class InMemoryTaskStore:
     async def create_task(
         self, *, envelope: RequestEnvelope, context: RequestContext
     ) -> TaskRecord:
-        digest = content_digest(canonical_json(envelope.model_dump(mode="json")).decode())
+        # 先校验上下文一致性，再谈幂等：不一致时连"属于哪个作用域"都不成立。
+        if (envelope.tenant_id != context.tenant_id
+                or envelope.actor != context.actor
+                or (envelope.environment_id is not None
+                    and envelope.environment_id != context.environment_id)):
+            raise ContextMismatch("envelope and context disagree on execution context")
+        digest = request_dedup_digest(envelope, context)
         scope = (context.tenant_id, context.environment_id, envelope.idempotency_key)
         async with self._lock:
             existing_id = self._by_key.get(scope)
@@ -3688,6 +4249,8 @@ class ManualClock:
 | 幂等键表改回全局单键 | `test_idempotency_key_is_scoped_per_tenant` |
 | 删除 `acquire_lease` 的终态检查 | `test_terminal_task_cannot_acquire_lease` |
 | 删除 `request_digest` 比对 | `test_same_key_with_a_different_request_is_rejected` |
+| 把 `request_dedup_digest` 改回 `envelope.model_dump()`（含 request_id） | `test_retry_with_a_new_request_id_reuses_the_same_task` |
+| 删除信封/上下文一致性校验 | `test_envelope_context_mismatch_is_rejected` |
 
 - [ ] **步骤 6：四条命令全绿后提交**
 
@@ -3847,7 +4410,8 @@ pytestmark = pytest.mark.security
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 
 _ALLOWED_INTERNAL = {
-    # contracts 是叶子：对内零依赖（脱敏已下沉为 xiaowei_agent.redaction）。
+    # contracts 允许且仅允许依赖 redaction（无对内依赖的叶子）与标准库；
+    # log / config / trace 一律不可（§2 取向 3）。
     "contracts": {"xiaowei_agent.contracts", "xiaowei_agent.redaction"},
     "capabilities": {"xiaowei_agent.contracts", "xiaowei_agent.capabilities"},
     "planning": {"xiaowei_agent.contracts", "xiaowei_agent.planning"},
@@ -3895,8 +4459,26 @@ def test_contracts_never_depend_on_implementations() -> None:
 - [ ] **步骤 2：实现 `contracts/trace_events.py`、`render.py`、`external_input.py`**
 
 ```python
-# contracts/trace_events.py（关键部分）
+# contracts/trace_events.py
+"""最小步骤级 trace / audit 事件契约。
+
+**只定义事件形状与阶段枚举，不实现采集后端**（DEVELOPMENT_PLAN §7 M2）。
+九个阶段与 ARCHITECTURE §13.1 的错误归因阶段逐一对应，使一次失败能被定位到
+具体阶段——这是 M3 建立首个错误分析闭环的前提。
+
+``detail`` 的取值在构造时脱敏并限长 256 字符：它是标签，不是载荷。脱敏复用
+下沉后的 ``xiaowei_agent.redaction``（而非 ``log``），因此 contracts 保持
+只依赖 redaction 与标准库。
+"""
+
+import datetime as _dt
+from typing import Annotated, Self
+
+from pydantic import Field, model_validator
+
 from xiaowei_agent.contracts.base import Contract, FrozenStrMap, StrictStr, frozen_map
+from xiaowei_agent.contracts.enums import PipelineStage, StageOutcome
+from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.redaction import scrub_text   # 下沉后的叶子模块，不再是 log
 
 DetailValue = Annotated[str, Field(max_length=256)]
@@ -3920,16 +4502,18 @@ class TraceEvent(Contract):
         scrubbed = {k: scrub_text(v) for k, v in self.detail.items()}
         if scrubbed == dict(self.detail):
             return self
-        # 必须显式 frozen_map()：model_copy 不重新校验，直接写回普通 dict 会
-        # 绕过 FrozenMap 的包装，使 detail 重新变成可变对象。
-        return self.model_copy(update={"detail": frozen_map(scrubbed)})
+        # 校验途中用 _copy_within_validation（不重入本校验器），因此必须自己
+        # 补上 frozen_map()——AfterValidator 不会再跑一次。
+        return self._copy_within_validation(detail=frozen_map(scrubbed))
 ```
 
-> **同类风险提示**：凡在 `model_validator(mode="after")` 中用 `model_copy(update=...)`
-> 写回**映射**字段，都必须显式调用 `frozen_map()`——`model_copy` 不触发校验，
-> `AfterValidator` 不会再跑一次。写回 `tuple` 字段（如 `ResolvedTarget.resource_ids`）
-> 不受影响，因为 tuple 本身已不可变。T11 的 `test_detail_is_deeply_immutable`
-> 就是这条规则的承重测试。
+> **after-validator 内复制的两条规则**（`ResolvedTarget` 与 `TraceEvent` 是仅有的两处）：
+> ① 用 `_copy_within_validation()` 而非 `model_copy()`，否则重入同一校验器；
+> ② 因此必须自己补上 `frozen_map()` 等归一化——`AfterValidator` 不会再跑一次；
+> ③ 校验器必须**幂等**，第二次看到已规范化的值要原样返回，否则仍会无限递归。
+> 写回 `tuple` 字段不需要 ①② 之外的处理，因为 tuple 本身已不可变。
+> `test_detail_is_deeply_immutable` 与 `test_after_validator_copy_is_idempotent`
+> 是这两条规则的承重测试。
 
 `render.py` 提供 `RenderSection`、`RenderPayload`（`answer`、`sections`、`next_steps`、`status`、`refs`）；`external_input.py` 提供 `ExternalInput`（`kind`、`approval_ref`、`user_text: ExternalContent | None`）。
 
@@ -3968,30 +4552,137 @@ class ScriptedRunner:
         self._status = outcome_status
         self._reason = terminal_reason
 
-    async def start(self, task_id: str) -> TaskOutcome: ...
+    async def start(self, task_id: str) -> TaskOutcome:
+        return await self._drive(task_id, path=(TaskStatus.PLANNING, TaskStatus.RUNNING))
+
     async def resume(
         self, task_id: str, external_input: ExternalInput | None = None
-    ) -> TaskOutcome: ...
+    ) -> TaskOutcome:
+        return await self._drive(task_id, path=(TaskStatus.RUNNING,))
+
+    async def _drive(
+        self, task_id: str, *, path: tuple[TaskStatus, ...]
+    ) -> TaskOutcome:
+        lease = await self._store.acquire_lease(
+            task_id=task_id, owner=self._owner, ttl_seconds=30)
+        if lease is None:
+            # 终态任务不可 acquire lease，因此这也是"任务已结束"的信号。
+            raise TerminalOrLeasedTaskError(task_id)
+        record = await self._store.get(task_id)
+        for status in (*path, self._status):
+            if record.status is status:
+                continue
+            result = await self._store.transition(
+                task_id=task_id, expected_version=record.version, to_status=status,
+                fencing_token=lease.fencing_token,
+                terminal_reason=self._reason if status is self._status else None,
+            )
+            if not result.applied:
+                raise RuntimeError(f"transition rejected: {result.rejection}")
+            record = result.winner      # 必须采纳存储层 winner，不用本地旧对象
+        return TaskOutcome(
+            task_id=task_id, status=record.status,
+            terminal_reason=record.terminal_reason, evidence_refs=(), render_ref=None,
+        )
 ```
 
-对应契约测试 `tests/contract/test_runner_contract.py`：`ScriptedRunner` 每次迁移都携带存储层返回的 `winner.version`；驱动到终态后再次 `resume` 必须得到 `TERMINAL_PROTECTED` 而不是覆盖终态。
+`__init__` 另需校验 `outcome_status in ALLOWED_TRANSITIONS[TaskStatus.RUNNING]`——否则
+配一个从 `RUNNING` 不可达的终态（如 `REJECTED`）会在运行到最后一步才失败。
 
-- [ ] **步骤 4：写 ADR-009**
+对应契约测试 `tests/contract/test_runner_contract.py`：
 
-`docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md`，按既有 ADR 结构（背景 / 决策 / 后果 / 备选方案与否决理由 / 回滚）记录四项冻结：
+```python
+async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
+    outcome = await runner.start(task.task_id)
+    assert outcome.status is TaskStatus.SUCCEEDED
+    final = await store.get(task.task_id)
+    assert final.version == 3        # created→planning→running→succeeded
 
-- **D1** `plan_hash` 的规范输入集：含 `effect_class`、`condition`、`budget`，`PLAN_SCHEMA_VERSION = 1`；覆盖完备性由「字段→键」映射表与安全测试承重。
-- **D2** `ExecutionPlan` 绑定单一 capability，步骤不携带 capability 字段；跨 capability 计划须递增 schema version 并另立 ADR。
-- **D3** `plan_hash` / `target_fingerprint` 不作为 `ExecutionPlan` 字段，绑定值存于 `ApprovalRequest`（含 `policy_revision`）。
-- **D4** 工具准入形状：`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`；`_E1_EXECUTION_ENABLED` 为 M0–M7 的硬闸。
 
-回滚方式：每项均给出"改哪一个常量/字段 + 需要同步更新的测试与文档"。
+async def test_resume_on_a_terminal_task_does_not_overwrite_it(store, task) -> None:
+    """终态保护由存储层承重；Runner 只是拿不到租约而已。"""
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
+    await runner.start(task.task_id)
+    before = await store.get(task.task_id)
+    with pytest.raises(TerminalOrLeasedTaskError):
+        await runner.resume(task.task_id)
+    after = await store.get(task.task_id)
+    assert after.version == before.version
+    assert after.status is TaskStatus.SUCCEEDED
 
-- [ ] **步骤 5：同步四份文档**
 
-- **`ARCHITECTURE.md` §7.1**：canonical 形状的 `ordered_steps` 元素增加 `effect_class` 与 `condition`，顶层增加 `budget`；注明 `plan_schema_version` 首个取值为 `1`；注明步骤不携带 capability 字段。
-- **`ARCHITECTURE.md` §6**：`ExecutionPlan` 行字段改为 `plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget`，约束列注明两个指纹由 `planning` 按需计算；`ApprovalRequest` 行补 `policy_revision`；新增 `AdmissionCertificate` 行（含 `tool_call_hash`）。
-- **`ARCHITECTURE.md` §16**：ADR 索引增加 ADR-009。
+def test_runner_rejects_a_terminal_status_unreachable_from_running(store) -> None:
+    with pytest.raises(ValueError):
+        ScriptedRunner(store, outcome_status=TaskStatus.REJECTED)
+
+
+async def test_runner_never_touches_a_gateway_or_adapter(store, task) -> None:
+    """M2 的 fake runner 不执行步骤；adapter 调用次数恒为 0。"""
+    import inspect
+
+    from xiaowei_agent.runners import fake
+
+    source = inspect.getsource(fake)
+    assert "ToolGateway" not in source
+    assert "adapter" not in source.lower()
+```
+
+- [ ] **步骤 4：追加跨 DTO 的 copy 绕过矩阵**
+
+T2 已覆盖 `Contract.model_copy` 的通用机制；此处补上具体 DTO，证明真实约束确实挡得住 copy。追加到 `tests/security/test_copy_validation.py`：
+
+```python
+def test_copy_cannot_forge_external_content_digest() -> None:
+    original = ExternalContent.capture(
+        source=ExternalSource.TOOL, content="hello", captured_at=_AT)
+    with pytest.raises(ValidationError):
+        original.model_copy(update={"content": "tampered"})
+
+
+def test_copy_cannot_create_colliding_resource_ids() -> None:
+    with pytest.raises(ValidationError):
+        FIXTURE_TARGET.model_copy(update={"resource_ids": ("café", "café")})
+
+
+def test_copy_cannot_empty_resource_ids() -> None:
+    with pytest.raises(ValidationError):
+        FIXTURE_TARGET.model_copy(update={"resource_ids": ()})
+
+
+def test_copy_cannot_create_forward_dependency() -> None:
+    bad = FIXTURE_PLAN.steps[0].model_copy(update={"depends_on": ("s99",)})
+    with pytest.raises(ValidationError):
+        FIXTURE_PLAN.model_copy(update={"steps": (bad,)})
+
+
+def test_copy_cannot_create_non_positive_budget() -> None:
+    with pytest.raises(ValidationError):
+        FIXTURE_PLAN.budget.model_copy(update={"max_tool_calls": 0})
+
+
+def test_copy_cannot_make_an_operation_spec_self_contradictory() -> None:
+    spec = SNAPSHOT.specs[0].operations[0]
+    with pytest.raises(ValidationError):
+        spec.model_copy(update={"effect_class": EffectClass.MUTATE_TARGET})
+
+
+def test_copy_cannot_produce_a_non_terminal_task_outcome() -> None:
+    outcome = TaskOutcome(task_id="t1", status=TaskStatus.SUCCEEDED,
+                          terminal_reason=None, evidence_refs=(), render_ref=None)
+    with pytest.raises(ValidationError):
+        outcome.model_copy(update={"status": TaskStatus.RUNNING})
+
+
+def test_after_validator_copy_is_idempotent() -> None:
+    """ResolvedTarget / TraceEvent 的校验器在校验途中复制，必须幂等不递归。"""
+    target = ResolvedTarget(**_target_payload_with(resource_ids=("café",)))
+    assert target.resource_ids == ("café",)
+    assert target.model_copy(update={"selector_version": "2"}).resource_ids == ("café",)
+```
+
+- [ ] **步骤 5：同步文档（ADR-009 与 `ARCHITECTURE.md` 已在 T0 完成，本步只做其余三份）**
+
 - **`AGENTS.md`** 落点表新增两行：`trace/audit 事件出口 | observability/ | 在业务模块内各自实现采集`；`脱敏规则 | redaction.py | 在 log/contracts 中各写一份`。
 - **`README.md`** 目录树把 M2 已建立的包改注，新增 `redaction.py`、`governance/`、`observability/`、`tests/contract/`。**不改动架构图**（M0 已复核其与执行链一致）。
 - **`AGENT_HANDOFF.md`**：阶段、M2 基线 SHA 与 CI run；§2 补入 ADR-009 的四项结论；§5 下一步改为"为 M3 单独编写详细实施计划并获批"；§7「不要盲改」新增五条（见下）；§8 更新验证记录与残余风险。
@@ -4020,8 +4711,8 @@ mypy src
 - [ ] **步骤 7：提交并开 PR**
 
 ```bash
-git add src/xiaowei_agent/contracts src/xiaowei_agent/runners src/xiaowei_agent/observability docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md ARCHITECTURE.md AGENTS.md README.md AGENT_HANDOFF.md tests
-git commit -m "feat(runners): Runner 契约与 fake 替身；docs: ADR-009 与四份真源同步"
+git add src/xiaowei_agent/contracts src/xiaowei_agent/runners src/xiaowei_agent/observability AGENTS.md README.md AGENT_HANDOFF.md tests
+git commit -m "feat(runners): Runner 契约与 fake 替身；docs: 落点表与 handoff 同步"
 ```
 
 PR 描述附四条命令真实尾部输出与全部 TDD 反证记录；**PR 描述不替代真实 diff**。
@@ -4045,7 +4736,7 @@ M2 **明确不做**，出现即视为超范围：
 
 按 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §9 输出四段：
 
-- **已验证**：四条命令的实际调用、exit code、精确 SHA、尾部输出；**全部 20 组 TDD 反证**（T1 回归基准 1 组、T5 四组、T6 三组、T7 三组、T8 五组、T10 六组）各自的转红与还原后转绿证据。
+- **已验证**：四条命令的实际调用、exit code、精确 SHA、尾部输出；**全部 21 组 TDD 反证**（T1 回归基准 1 组、T5 五组、T6 三组、T7 三组、T8 五组、T10 六组）各自的转红与还原后转绿证据。
 - **只读推理**：无运行证据的判断，例如"本形状足以支撑 M4 的 PostgreSQL 实现"——在 M4 之前这只是设计推理。
 - **未覆盖**：未连接的环境、未实现的故障路径、未创建的测试目录。
 - **残余风险**：即使全部 gate 通过仍存在的限制及升级条件，至少包含：
@@ -4093,22 +4784,23 @@ M2 结束时全部能力仍为 `declared`，**不得表述为 `tests` 之外的�
 2. 固定向量占位符 —— **已解决**，改为直接写出规范 JSON 字节串，测试自包含。
 3. T3/T4 循环引用 —— **已解决**，随移除 step 级 capability 字段一并消失；任务恢复严格线性。
 
-**V2 仍存在、需在复审时确认的两点**：
+**两点裁定已获复审确认，V2.1 按确认结果固化**：
 
-1. **`governance/binding.py` 超出 DEVELOPMENT_PLAN §7 M2 交付物的字面清单**。它是为满足同文件"未知 policy revision"测试门所必需的最小实现。若复审认为该测试门应整体移到 M3，则删除 T7 并在 DEVELOPMENT_PLAN 中显式修订该测试门——**但不能两者都不做**。
-2. **`observability/` 是 `AGENTS.md` 落点表之外的新顶层包**。T11 步骤 5 会把它补进落点表。若复审认为不应新增顶层包，替代方案是把 `TraceSink` 并入 `contracts/trace_events.py`；请在批准时指明。
+1. **`governance/binding.py` 留在 M2** —— 已接受。否则"未知 policy revision"这个 M2 测试门无处承重。
+2. **`observability/` 新增为顶层包** —— 已接受，理由是 trace sink 是**出口**而非 DTO 本体。T11 步骤 5 必须同步修改 `AGENTS.md` 落点表；**这不是可选项**，落点表不改就等于新增了一个无依据的目录。
 
 ## 11. 执行说明
 
 本计划**不自行进入实现**。按 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §8：
 
 1. 项目负责人与 Codex 复审本版，确认十项处置与第 10 节两点。
-2. 先写 ADR-009 并获批（本计划已把它作为 T11 的交付物，若要求前置可提到 T0）。
-3. 批准后从最新 `main` 创建**单一分支** `claude/m2-contract-kernel`，按 **T1 → T11 的顺序**逐任务 TDD 落地。每个任务结束四条命令必须全绿才进入下一个。
-4. 每个任务一个提交，同时是审查 checkpoint；全部完成后开**一个 PR**，附四条命令真实尾部输出与 20 组 TDD 反证记录。
+2. 批准后从最新 `main` 创建**单一分支** `claude/m2-contract-kernel`，按 **T0 → T11 的顺序**逐任务 TDD 落地。**T0 只写 ADR-009 与 `ARCHITECTURE.md`，不含代码**，因此可作为独立的前置审批点（DEVELOPMENT_PLAN §8 步骤 2）。
+3. 每个任务结束四条命令必须全绿才进入下一个。
+4. 每个任务一个提交，同时是审查 checkpoint；全部完成后开**一个 PR**，附四条命令真实尾部输出与 21 组 TDD 反证记录。
 5. 合入后按第 9 节输出 M2 验收报告，更新 `AGENT_HANDOFF.md`。
 
 ## 12. 版本记录
 
 - **V1**（2026-09-02）：初版，10 个任务。Codex 审核判定不可开工，列出 10 项阻断与 8 项裁定。
-- **V2**（2026-09-02，本版）：按根因重写。任务重排为严格线性 11 个、单分支单 PR；新增 `redaction.py` 下沉、`governance/binding.py`、`FrozenMap` 深不可变、三张 hash 覆盖映射表、`tool_call_hash`、闭合 fencing 规则、`StepResultStatus`；fake 迁入业务包；移除 `PlanStep` 的 capability 字段与 `src/` 内的 `assert`；扫描口径收敛到领域层。
+- **V2.1**（2026-09-02，本版）：按 Codex 第二轮审核的 4 项 P0 + 5 项 P1 做定向修订，**不重写架构**。P0：① `Contract` 基类统一覆盖 `model_copy`，带 update 必重新校验（实证：原生实现同时绕过 `Field(gt=0)` 与 after-validator），after-validator 内改用幂等的 `_copy_within_validation`；② `PlanBudget` / `StepCondition` 补入 hash 覆盖映射表；③ ADR-009 提为 **T0**，先于任何代码；④ 幂等摘要改用 `request_dedup_digest()`，排除 `request_id` 等易变字段。P1：contracts 依赖口径统一为"只依赖 redaction 与标准库"；`create_task` 校验信封/上下文一致性；`PlanStep` 构造检测器支持别名与属性访问并自带检测器自测；`ToolGateway` 补确定性 error mapper（只出摘要引用，不出原文）；补全 `contracts/task.py`、`ScriptedRunner`、`TraceEvent` 三处占位。任务数 11 → **T0 + 11**，TDD 反证 20 → 21 组。
+- **V2**（2026-09-02）：按根因重写。任务重排为严格线性 11 个、单分支单 PR；新增 `redaction.py` 下沉、`governance/binding.py`、`FrozenMap` 深不可变、三张 hash 覆盖映射表、`tool_call_hash`、闭合 fencing 规则、`StepResultStatus`；fake 迁入业务包；移除 `PlanStep` 的 capability 字段与 `src/` 内的 `assert`；扫描口径收敛到领域层。
