@@ -61,3 +61,30 @@ async def test_concurrent_tasks_do_not_share_trace_id() -> None:
     assert all(ids), "每个任务退出时必须仍看到自己绑定的 trace_id"
     assert ids[0] != ids[1]
     assert get_trace_id() is None
+
+
+def test_trace_id_format_has_a_single_definition() -> None:
+    """生成端与校验端共用同一个格式常量，否则两处会悄悄漂移。
+
+    contracts 侧用 ``re.fullmatch``（pydantic v2 的 Rust regex 引擎不支持
+    ``\\A`` / ``\\Z``），trace 侧用显式锚点；两者必须来自同一个 pattern。
+    """
+    from xiaowei_agent.contracts.base import TRACE_ID_PATTERN
+    from xiaowei_agent.trace import _TRACE_ID_RE
+
+    assert TRACE_ID_PATTERN in _TRACE_ID_RE.pattern
+
+
+def test_generated_trace_id_is_accepted_by_the_contract() -> None:
+    """反向断言：生成器产出的值必须能通过契约校验。"""
+    from xiaowei_agent.contracts import RequestContext
+    from xiaowei_agent.trace import new_trace_id
+
+    ctx = RequestContext(
+        tenant_id="dev-local",
+        actor="alice",
+        environment_id="dev",
+        trace_id=new_trace_id(),
+        policy_revision="policy-2026-09-01",
+    )
+    assert len(ctx.trace_id) == 32

@@ -25,11 +25,32 @@
 dict 键或放入 set。本项目不依赖契约的可哈希性，比较一律用 ``==``。
 """
 
+import re
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Any, Never, Self, TypeAlias
+from typing import Annotated, Any, Final, Never, Self, TypeAlias
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+TRACE_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"
+"""trace_id 的字面格式，全项目**唯一**定义处。
+
+``trace.py`` 反向引用本常量：格式若在两处各写一份，生成端与校验端会悄悄漂移。
+不写成 Pydantic 的 ``pattern=``——pydantic v2 用 Rust regex 引擎，不支持 ``\\A`` /
+``\\Z`` 锚点，而 ``^``/``$`` 在该引擎下的多行语义与 Python 不一致；统一用
+``re.fullmatch`` 校验，语义确定。
+"""
+
+_TRACE_ID_RE: Final[re.Pattern[str]] = re.compile(TRACE_ID_PATTERN)
+
+
+def _trace_id(value: str) -> str:
+    if not _TRACE_ID_RE.fullmatch(value):
+        raise ValueError("trace_id must be 32 lowercase hex characters")
+    return value
+
+
+TraceId = Annotated[str, Field(strict=True), AfterValidator(_trace_id)]
 
 StrictInt: TypeAlias = Annotated[int, Field(strict=True)]
 """拒绝隐式转换的整数。

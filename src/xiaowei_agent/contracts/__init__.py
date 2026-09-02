@@ -13,7 +13,14 @@ from xiaowei_agent.contracts.base import (
     JsonScalar,
     StrictInt,
     StrictStr,
+    TraceId,
     frozen_map,
+)
+from xiaowei_agent.contracts.candidates import Candidate, CandidateSet, Rejection
+from xiaowei_agent.contracts.capability import (
+    CapabilitySnapshot,
+    CapabilitySpec,
+    OperationSpec,
 )
 from xiaowei_agent.contracts.enums import (
     AdapterStatus,
@@ -37,12 +44,18 @@ from xiaowei_agent.contracts.enums import (
 )
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
+from xiaowei_agent.contracts.intent import IntentDraft
+from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 
 __all__ = [
     "AdapterStatus",
     "AgentError",
     "ApprovalState",
     "BindingRejection",
+    "Candidate",
+    "CandidateSet",
+    "CapabilitySnapshot",
+    "CapabilitySpec",
     "Channel",
     "Contract",
     "EffectClass",
@@ -53,9 +66,14 @@ __all__ = [
     "FiniteFloat",
     "FrozenMap",
     "FrozenStrMap",
+    "IntentDraft",
     "IntentSource",
     "JsonScalar",
+    "OperationSpec",
     "PipelineStage",
+    "Rejection",
+    "RequestContext",
+    "RequestEnvelope",
     "RiskLevel",
     "StageOutcome",
     "StepConditionKind",
@@ -64,6 +82,7 @@ __all__ = [
     "StrictStr",
     "TaskStatus",
     "ToolCallStatus",
+    "TraceId",
     "TransitionRejection",
     "TrustLevel",
     "content_digest",

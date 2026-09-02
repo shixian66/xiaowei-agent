@@ -11,8 +11,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Final
 
+from xiaowei_agent.contracts.base import TRACE_ID_PATTERN
+
 _TRACE_ID: ContextVar[str | None] = ContextVar("xiaowei_trace_id", default=None)
-_TRACE_ID_RE: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{32}\Z")
+# 格式的单一真源在 contracts.base；此处只补 Python 侧的锚点写法。
+_TRACE_ID_RE: Final[re.Pattern[str]] = re.compile(rf"\A{TRACE_ID_PATTERN}\Z")
 
 
 def new_trace_id() -> str:
