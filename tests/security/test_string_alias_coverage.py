@@ -52,16 +52,77 @@ def _contract_fields(source: str) -> list[tuple[str, str, set[str]]]:
     return out
 
 
-def test_no_contract_field_is_annotated_with_bare_str() -> None:
+def _type_aliases() -> dict[str, set[str]]:
+    """收集全部模块级类型别名 -> 它引用的名字。
+
+    **必须跨模块收集**:``FrozenStrMap`` 定义在 base.py、用在 intent.py。只看
+    字段标注会漏掉别名内部的裸 ``str`` —— ``FrozenStrMap = Mapping[StrictStr, str]``
+    与 ``DetailValue = Annotated[str, Field(max_length=256)]`` 两处都是这样藏住的。
+    """
+    aliases: dict[str, set[str]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for stmt in tree.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                target, value = stmt.target.id, stmt.value
+            elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(
+                stmt.targets[0], ast.Name
+            ):
+                target, value = stmt.targets[0].id, stmt.value
+            else:
+                continue
+            # 只把"看起来是类型表达式"的赋值当别名:Subscript(Mapping[...]、
+            # Annotated[...])、BinOp(联合)、裸 Name。object()、常量等排除。
+            if not isinstance(value, ast.Subscript | ast.BinOp | ast.Name):
+                continue
+            aliases[target] = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+    return aliases
+
+
+def _expand(names: set[str], aliases: dict[str, set[str]]) -> set[str]:
+    """把标注里的名字沿别名表展开。
+
+    **在已批准的别名处停止展开**:``StrictStr = Annotated[str, ...]`` 本身就以
+    ``str`` 收尾,继续展开会让每个字段都"含裸 str"。已批准别名正是合法包装
+    ``str`` 的叶子。
+    """
+    seen: set[str] = set()
+    queue = list(names)
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in APPROVED:
+            continue
+        queue.extend(aliases.get(name, ()))
+    return seen
+
+
+def test_no_contract_field_resolves_to_bare_str() -> None:
+    aliases = _type_aliases()
     offenders: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         for cls, field, used in _contract_fields(path.read_text(encoding="utf-8")):
-            if "str" in used:
+            if "str" in _expand(used, aliases):
                 offenders.append(f"{path.relative_to(SRC)}::{cls}.{field}")
     assert offenders == [], (
-        "以下字段用了裸 str,必须显式选择 StrictStr / NonEmptyText / FreeText:\n"
-        + "\n".join(offenders)
+        "以下字段(含经别名间接引用)用了裸 str,必须显式选择 "
+        "StrictStr / NonEmptyText / FreeText:\n" + "\n".join(offenders)
     )
+
+
+def test_alias_expansion_is_load_bearing() -> None:
+    """检测器自测:别名内部的裸 str 必须被展开抓到,已批准别名不得被误报。"""
+    aliases = {
+        "Leaky": {"Mapping", "StrictStr", "str"},
+        "Nested": {"Leaky"},
+        "Clean": {"Mapping", "StrictStr"},
+    }
+    assert "str" in _expand({"Leaky"}, aliases)
+    assert "str" in _expand({"Nested"}, aliases)      # 传递展开
+    assert "str" not in _expand({"Clean"}, aliases)
+    assert "str" not in _expand({"StrictStr"}, aliases)  # 已批准别名处停止
 
 
 def test_every_contract_string_field_uses_an_approved_alias() -> None:
@@ -122,9 +183,53 @@ def test_every_module_under_tests_security_declares_the_marker() -> None:
     仍停在 390,只有 deselected 数变了)。
     """
     root = pathlib.Path(__file__).resolve().parent
-    missing = [
-        p.name
-        for p in sorted(root.glob("test_*.py"))
-        if "pytestmark = pytest.mark.security" not in p.read_text(encoding="utf-8")
-    ]
+    missing = [p.name for p in sorted(root.glob("test_*.py")) if not _declares_marker(p)]
     assert missing == [], f"以下安全测试模块未声明 security marker: {missing}"
+
+
+def _declares_marker(path: pathlib.Path) -> bool:
+    """AST 判定模块是否声明了 ``pytestmark = pytest.mark.security``。
+
+    **不能用文本扫描**:docstring 或注释里出现同一句话就能骗过它——本轮我已经
+    因为文本扫描栽过两次(``test_runner_never_touches_a_gateway_or_adapter``、
+    ``test_fake_is_not_exported_from_its_package_init``),这里是第三次,同一个根因。
+
+    同时接受 ``pytestmark = pytest.mark.security`` 与列表形式
+    ``pytestmark = [pytest.mark.security, ...]``。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in stmt.targets):
+            continue
+        candidates = (
+            stmt.value.elts if isinstance(stmt.value, ast.List | ast.Tuple) else [stmt.value]
+        )
+        for item in candidates:
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "security"
+                and isinstance(item.value, ast.Attribute)
+                and item.value.attr == "mark"
+            ):
+                return True
+    return False
+
+
+def test_marker_detector_is_not_fooled_by_text(tmp_path: pathlib.Path) -> None:
+    """反例:只在 docstring 里写下同一句话,不得算作声明。"""
+    faker = tmp_path / "test_faker.py"
+    faker.write_text('"""pytestmark = pytest.mark.security"""\n', encoding="utf-8")
+    assert not _declares_marker(faker)
+
+    real = tmp_path / "test_real.py"
+    real.write_text("import pytest\n\npytestmark = pytest.mark.security\n", encoding="utf-8")
+    assert _declares_marker(real)
+
+    listed = tmp_path / "test_listed.py"
+    listed.write_text(
+        "import pytest\n\npytestmark = [pytest.mark.security, pytest.mark.slow]\n",
+        encoding="utf-8",
+    )
+    assert _declares_marker(listed)

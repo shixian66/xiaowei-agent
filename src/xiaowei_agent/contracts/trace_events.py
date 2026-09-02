@@ -10,13 +10,14 @@ M3 建立首个错误分析闭环的前提。
 """
 
 from collections.abc import Mapping
-from typing import Annotated
+from typing import Annotated, Final
 
-from pydantic import AfterValidator, Field, PlainSerializer
+from pydantic import AfterValidator, BeforeValidator, PlainSerializer
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
     Contract,
+    FreeText,
     StrictStr,
     TraceId,
     frozen_map,
@@ -26,7 +27,7 @@ from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.redaction import scrub_text
 
 
-def _scrub_details(value: Mapping[str, str]) -> Mapping[str, str]:
+def _scrub_details(value: object) -> Mapping[str, str]:
     """**键与值都脱敏**后冻结。
 
     只脱敏值会把 secret 留在键里：``{"token=abc123def456": "safe"}`` 原样出现在
@@ -36,22 +37,46 @@ def _scrub_details(value: Mapping[str, str]) -> Mapping[str, str]:
     静默覆盖会丢失一条事件明细，因此**碰撞即拒绝**——与 ``canonical_json`` 的 NFC
     键碰撞是同一类缺陷。
 
-    写成**字段级** validator 而非 model 级 after-validator：后者返回非 ``self`` 的
-    对象在 ``__init__`` 路径上会被 Pydantic 丢弃（只发一条警告），脱敏会静默失效。
+    写成 ``BeforeValidator`` 而非 ``AfterValidator``，有两个各自独立的理由：
+
+    1. **顺序**：写成后置校验时，内层 ``Mapping[StrictStr, ...]`` 的键类型与值的
+       长度约束都在脱敏之前执行，未脱敏的原文会被拒绝路径带出去。
+    2. **错误内容**：内层校验失败时 ``ValidationError`` 的 ``loc`` 会把出错的键
+       原样嵌进去（``detail.  token=secret  .[key]``）。``hide_input_in_errors``
+       只隐藏 ``input``，对 ``loc`` 无效。
+
+    因此全部检查都必须在这里手写，且错误文本只用序号定位，不回显任何取值。
+    模型级 after-validator 同样不可用：返回非 ``self`` 的对象在 ``__init__``
+    路径上会被 Pydantic 丢弃（只发一条警告），脱敏会静默失效。
     """
+    if not isinstance(value, Mapping):
+        raise ValueError("detail must be a mapping")
     scrubbed: dict[str, str] = {}
-    for key, item in value.items():
+    for index, (key, item) in enumerate(value.items()):
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise ValueError(f"detail entry #{index} must map str to str")
         safe_key = scrub_text(key)
+        if not safe_key or safe_key != safe_key.strip():
+            raise ValueError(f"detail key #{index} is empty or padded with whitespace")
         if safe_key in scrubbed:
-            raise ValueError(f"detail keys collide after redaction: {safe_key!r}")
-        scrubbed[safe_key] = scrub_text(item)
+            raise ValueError(f"detail key #{index} collides with an earlier key after redaction")
+        safe_value = scrub_text(item)
+        if len(safe_value) > _DETAIL_VALUE_MAX:
+            raise ValueError(
+                f"detail value at key #{index} exceeds "
+                f"{_DETAIL_VALUE_MAX} characters after redaction"
+            )
+        scrubbed[safe_key] = safe_value
     return frozen_map(scrubbed)
 
 
-DetailValue = Annotated[str, Field(max_length=256)]
+_DETAIL_VALUE_MAX: Final[int] = 256
 TraceDetail = Annotated[
-    Mapping[StrictStr, DetailValue],
-    AfterValidator(_scrub_details),
+    Mapping[StrictStr, FreeText],
+    BeforeValidator(_scrub_details),
+    # 前置脱敏返回的 MappingProxyType 会被内层 Mapping 校验重建成普通 dict，
+    # 必须在其后再冻结一次；前置管顺序与错误内容，后置管不可变性。
+    AfterValidator(frozen_map),
     # 与 FrozenMap 同理：MappingProxyType 不是 pydantic 认识的序列化目标，
     # 不显式转换时 model_dump() 会发 PydanticSerializationUnexpectedValue 警告。
     PlainSerializer(dict, return_type=dict, when_used="always"),

@@ -108,34 +108,59 @@ def make_certificate(call: "ToolCall", **overrides: object) -> "AdmissionCertifi
     from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 
     from xiaowei_agent.contracts import (
-        AdmissionCertificate,
         EffectClass,
         PolicyDecision,
+        RequestContext,
         RiskLevel,
     )
+    from xiaowei_agent.governance import issue_admission_certificate
     from xiaowei_agent.planning import (
         compute_plan_hash,
         compute_target_fingerprint,
-        compute_tool_call_hash,
     )
 
-    base: dict[str, object] = {
-        "step_id": call.step_id,
-        "operation": call.operation,
-        "effect_class": EffectClass.READ,
-        "policy_decision": PolicyDecision(
+    certificate = issue_admission_certificate(
+        call=call,
+        context=RequestContext(
+            tenant_id="dev-local",
+            actor="alice",
+            environment_id="dev",
+            trace_id="0" * 32,
+            policy_revision="policy-2026-09-01",
+        ),
+        decision=PolicyDecision(
             allow=True,
             reason_code="readonly.allowed",
             risk=RiskLevel.LOW,
             policy_revision="policy-2026-09-01",
             obligations=(),
         ),
-        "approval_ref": None,
-        "plan_hash": compute_plan_hash(FIXTURE_PLAN),
-        "target_fingerprint": compute_target_fingerprint(FIXTURE_TARGET),
-        "tool_call_hash": compute_tool_call_hash(call),
-    }
-    return AdmissionCertificate(**(base | overrides))
+        effect_class=EffectClass.READ,
+        plan_hash=compute_plan_hash(FIXTURE_PLAN),
+        target_fingerprint=compute_target_fingerprint(FIXTURE_TARGET),
+    )
+    if not overrides:
+        return certificate
+    # 凭证不可复制（复制出的凭证不再由 StepAdmission 签发），因此制造"不匹配"
+    # 的测试凭证必须重新签发。overrides 里的 tool_call_hash 无法经签发入口伪造
+    # ——那正是这条边界的意义——需要它的用例改用 forge_certificate。
+    return _reissue(certificate, overrides)
+
+
+def _reissue(
+    certificate: "AdmissionCertificate", overrides: dict[str, object]
+) -> "AdmissionCertificate":
+    """按 overrides 重新签发一张凭证，走与生产同一条签发路径。"""
+    from xiaowei_agent.contracts import AdmissionCertificate
+    from xiaowei_agent.contracts.approval import (
+        _ADMISSION_WITNESS,
+        _ADMISSION_WITNESS_KEY,
+    )
+
+    payload = {f: getattr(certificate, f) for f in AdmissionCertificate.model_fields}
+    return AdmissionCertificate.model_validate(
+        {_ADMISSION_WITNESS_KEY: _ADMISSION_WITNESS, **payload, **overrides}
+    )
 
 
 @pytest.fixture

@@ -293,13 +293,34 @@ def _referenced(path: Path) -> set[str]:
     return names
 
 
-def test_only_gateway_module_references_the_construction_witness() -> None:
-    allowed = {_SRC / "tools" / "gateway.py", _SRC / "contracts" / "tool.py"}
-    witness = {"_TOOL_RESULT_WITNESS", "_WITNESS_KEY"}
+@pytest.mark.parametrize(
+    ("witness", "allowed"),
+    [
+        (
+            {"_TOOL_RESULT_WITNESS", "_TOOL_RESULT_WITNESS_KEY"},
+            {("tools", "gateway.py"), ("contracts", "tool.py")},
+        ),
+        (
+            {"_ADMISSION_WITNESS", "_ADMISSION_WITNESS_KEY"},
+            {("governance", "admission.py"), ("contracts", "approval.py")},
+        ),
+    ],
+    ids=["tool_result", "admission_certificate"],
+)
+def test_only_the_issuing_module_references_a_construction_witness(
+    witness: set[str], allowed: set[tuple[str, ...]]
+) -> None:
+    """每个签发凭据只有"定义它的契约"和"唯一签发者"两个模块可以引用。
+
+    两组分开参数化而不是并成一个集合:并起来会让 gateway.py 也"合法地"引用
+    准入凭据,而 Gateway 是凭证的**消费者**,一旦它能拿到签发凭据就能自签自用,
+    整个模式失效。
+    """
+    allowed_paths = {_SRC.joinpath(*parts) for parts in allowed}
     offenders = [
         path.relative_to(_SRC)
         for path in _SRC.rglob("*.py")
-        if path not in allowed and witness & _referenced(path)
+        if path not in allowed_paths and witness & _referenced(path)
     ]
     assert not offenders, f"以下模块不得引用构造凭证: {offenders}"
 

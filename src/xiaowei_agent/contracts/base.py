@@ -44,7 +44,16 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, Final, Never, Self, TypeAlias
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    TypeAdapter,
+    ValidationError,
+)
 
 
 def _require_aware(value: _dt.datetime) -> _dt.datetime:
@@ -114,9 +123,6 @@ FiniteFloat: TypeAlias = Annotated[float, Field(allow_inf_nan=False)]
 ``canonical_json`` 的同名检查保留，作为第二道防线。
 """
 
-JsonScalar: TypeAlias = bool | int | FiniteFloat | str | None
-
-
 def _strict_str(value: str) -> str:
     if not value or value != value.strip():
         raise ValueError("must not be empty or padded with whitespace")
@@ -150,6 +156,15 @@ NonEmptyText = Annotated[str, Field(strict=True), AfterValidator(_non_empty)]
 
 FreeText = Annotated[str, Field(strict=True)]
 
+JsonScalar: TypeAlias = bool | int | FiniteFloat | FreeText | None
+"""JSON 标量。
+
+``str`` 分支写成 ``FreeText``：这些值来自 adapter 返回的行、证据事实与
+typed_args，空串与空白都是合法数据（NULL 样式的空单元格）。写成裸 ``str``
+会让别名内部成为"没有选档"的洞——AST 扫描只看字段标注，看不进别名里。
+"""
+
+
 SHA256_HEX_PATTERN: Final[str] = r"[0-9a-f]{64}"
 
 
@@ -172,19 +187,90 @@ def frozen_map(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(dict(value))
 
 
+def _checked_map(
+    value: object, *, key_adapter: TypeAdapter[Any], value_adapter: TypeAdapter[Any], label: str
+) -> Mapping[str, Any]:
+    """逐项校验映射的键与值，**错误文本里只出现序号，不出现取值**。
+
+    为什么不写成 ``Mapping[StrictStr, JsonScalar]`` 让 Pydantic 自己校验：那样
+    做时 ``ValidationError`` 的 ``loc`` 会把**出错的那个键原样嵌进去**，例如
+    ``detail.  token=secret  .[key]``。``hide_input_in_errors`` 只隐藏 ``input``，
+    对 ``loc`` 无效，因此原始键会出现在 ``str(exc)``、traceback 与任何基于
+    ``loc`` 的"安全"投影里——``safe_error_details`` 也不例外。
+
+    映射的键正是外部文本：trace detail 的键由调用方拼装、slots 的键来自模型
+    输出、typed_args 的键来自计划编译。用序号定位在诊断上略差，但这是唯一能
+    让拒绝路径不携带外部数据的写法。
+
+    与 ``TraceDetail`` 的长度检查同一个根因：把约束交给内层值类型，就同时交出了
+    执行顺序与错误内容的控制权。
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping")
+    out: dict[str, Any] = {}
+    for index, (key, item) in enumerate(value.items()):
+        try:
+            safe_key = key_adapter.validate_python(key, strict=True)
+        except ValidationError:
+            raise ValueError(f"{label}: key #{index} is not a valid identifier") from None
+        try:
+            out[safe_key] = value_adapter.validate_python(item, strict=True)
+        except ValidationError:
+            raise ValueError(f"{label}: value at key #{index} is invalid") from None
+    return MappingProxyType(out)
+
+
 # ``PlainSerializer(dict)``：``MappingProxyType`` 不是 pydantic 认识的序列化目标，
 # 不显式转换时 ``model_dump()`` 会发 PydanticSerializationUnexpectedValue 警告。
 # M4 要把契约持久化进 TaskStore，序列化必须是干净的。
 _as_dict = PlainSerializer(dict, return_type=dict, when_used="always")
 
-FrozenMap = Annotated[Mapping[StrictStr, JsonScalar], AfterValidator(frozen_map), _as_dict]
-FrozenStrMap = Annotated[Mapping[StrictStr, str], AfterValidator(frozen_map), _as_dict]
+_KEY_ADAPTER: TypeAdapter[str] = TypeAdapter(StrictStr)
+_SCALAR_ADAPTER: TypeAdapter[Any] = TypeAdapter(JsonScalar)
+_STR_ADAPTER: TypeAdapter[str] = TypeAdapter(StrictStr)
+
+FrozenMap = Annotated[
+    Mapping[StrictStr, JsonScalar],
+    BeforeValidator(
+        lambda v: _checked_map(
+            v, key_adapter=_KEY_ADAPTER, value_adapter=_SCALAR_ADAPTER, label="mapping"
+        )
+    ),
+    # 前置校验返回的 MappingProxyType 会被 Pydantic 的 Mapping 校验重建成普通
+    # dict——只有前置校验时深不可变性会静默失效。因此必须在**内层校验之后**
+    # 再冻结一次：前置管错误内容，后置管不可变性，两者不可互相替代。
+    AfterValidator(frozen_map),
+    _as_dict,
+]
+FrozenStrMap = Annotated[
+    Mapping[StrictStr, StrictStr],
+    BeforeValidator(
+        lambda v: _checked_map(
+            v, key_adapter=_KEY_ADAPTER, value_adapter=_STR_ADAPTER, label="mapping"
+        )
+    ),
+    # 前置校验返回的 MappingProxyType 会被 Pydantic 的 Mapping 校验重建成普通
+    # dict——只有前置校验时深不可变性会静默失效。因此必须在**内层校验之后**
+    # 再冻结一次：前置管错误内容，后置管不可变性，两者不可互相替代。
+    AfterValidator(frozen_map),
+    _as_dict,
+]
 
 
 class Contract(BaseModel):
     """不可变、拒绝未声明字段、复制即重新校验的契约基类。"""
 
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    # ``hide_input_in_errors=True`` 是**安全配置，不是可读性偏好**：默认的
+    # ValidationError 会把被拒绝的原始输入回填进 ``errors()[i]["input"]`` 与
+    # ``str(exc)``。契约层校验的正是外部文本、槽位、typed_args、trace detail
+    # 这类可能携带 secret 的值，而拒绝路径的异常最终会进 traceback、日志与
+    # 错误响应——于是"被拒绝"反而成了原文外泄的通道。
+    #
+    # 必须放在基类：逐个 DTO 配置会以与 P0-1（严格性逐字段选择加入）完全相同
+    # 的方式漏掉下一个新增契约。
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", hide_input_in_errors=True
+    )
 
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False

@@ -17,6 +17,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
+from pydantic import ValidationError
+
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 """``redact`` 的返回类型：保证 ``json.dumps`` 可直接序列化。"""
 
@@ -96,3 +98,31 @@ def redact(value: object, *, _depth: int = 0) -> JsonValue:
             # 迭代自定义序列/集合时同样可能抛异常。
             return REDACTED
     return scrub_text(_safe_str(value))
+
+
+def safe_error_details(exc: "ValidationError") -> tuple[str, ...]:
+    """把 ``ValidationError`` 投影成不含取值的 ``"位置: 类型"`` 序列。
+
+    **这是 ``.errors()`` 的唯一合法出口。** ``model_config`` 里的
+    ``hide_input_in_errors=True`` 只影响 ``str(exc)``——``exc.errors()`` 返回的
+    字典里 ``input`` 仍然是**完整原始输入**。只开基类配置并不能关闭泄漏路径，
+    这一点必须靠机制固定下来，因此 ``test_no_raw_validation_error_egress``
+    禁止本函数之外的任何 ``.errors()`` 调用。
+
+    只取 ``loc`` 与 ``type``：``type`` 是错误种类常量；``msg`` 在部分错误类型里会
+    内联取值，因此不取。
+
+    ``loc`` 需要额外说明：映射字段出错时，Pydantic 会把**出错的那个键**嵌进
+    ``loc``（``detail.  token=secret  .[key]``），而映射的键恰恰全是外部文本。
+    ``hide_input_in_errors`` 对 ``loc`` 无效。因此契约层的映射校验一律改为在
+    ``BeforeValidator`` 内部手写、错误只用序号定位（见
+    ``contracts.base._checked_map``）——本函数的 ``loc`` 之所以安全，靠的是那一侧
+    的约束，而不是这里做了过滤。
+    """
+    return tuple(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}"
+        # include_input=False 在当前实现下**不承重**（下面只取 loc 与 type，
+        # 根本不读 input），变异测试已确认去掉它测试仍全绿。保留它是为了限制
+        # 未来扩展投影字段时的影响面——把它写成"这就是防线"会是错的。
+        for item in exc.errors(include_input=False, include_url=False)
+    )

@@ -103,7 +103,7 @@ def test_detail_keys_are_redacted_too() -> None:
 
 def test_detail_key_collision_after_redaction_is_rejected() -> None:
     """脱敏后两个键塌成同一个，静默覆盖会丢失一条事件明细。"""
-    with pytest.raises(ValidationError, match="collide after redaction"):
+    with pytest.raises(ValidationError, match="collides with an earlier key after redaction"):
         _event({"token=aaaaaaaaaaaa": "1", "token=bbbbbbbbbbbb": "2"})
 
 

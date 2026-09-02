@@ -26,7 +26,7 @@ from xiaowei_agent.contracts.enums import ToolCallStatus
 from xiaowei_agent.contracts.errors import AgentError
 
 _TOOL_RESULT_WITNESS: Final[object] = object()
-_WITNESS_KEY: Final[str] = "__gateway_witness__"
+_TOOL_RESULT_WITNESS_KEY: Final[str] = "__gateway_witness__"
 
 
 class ToolCall(Contract):
@@ -52,7 +52,7 @@ class ToolResult(Contract):
     def _require_gateway_witness(cls, data: object) -> object:
         if not isinstance(data, dict):
             raise ValueError("ToolResult 只能由 ToolGateway 构造")
-        if data.pop(_WITNESS_KEY, None) is not _TOOL_RESULT_WITNESS:
+        if data.pop(_TOOL_RESULT_WITNESS_KEY, None) is not _TOOL_RESULT_WITNESS:
             raise ValueError("ToolResult 只能由 ToolGateway 构造")
         return data
 

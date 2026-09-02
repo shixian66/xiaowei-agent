@@ -18,6 +18,8 @@ from typing import Annotated, Final, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 
+from xiaowei_agent.redaction import safe_error_details
+
 ENV_PREFIX: Final[str] = "XIAOWEI_"
 DEFAULT_TENANT_ID: Final[str] = "dev-local"
 
@@ -41,7 +43,10 @@ class ConfigError(RuntimeError):
 class Settings(BaseModel):
     """本轮请求之外的进程级配置。不可变。"""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # 与 Contract 基类同理：环境变量取值可能是凭证一类的敏感串，被拒绝时不得
+    # 回填进异常文本。Settings 不是 Contract 子类，所以必须在这里单独声明——
+    # 这正是"逐个模型配置会漏"的又一个实例。
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     environment_id: StrictStr
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -77,9 +82,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     try:
         return Settings.model_validate(kwargs)
     except ValidationError as exc:
-        detail = "; ".join(
-            f"{'.'.join(str(p) for p in e['loc'])}: {e['type']}" for e in exc.errors()
-        )
+        # 经 safe_error_details 投影：绝不能把 exc.errors() 的 input 带出去。
+        detail = "; ".join(safe_error_details(exc))
     # 在 except 块之外抛出：`from None` 只会设置 __suppress_context__，
     # 不会清空 __context__，原始 ValidationError（含非法取值）仍会挂在异常对象上。
     raise ConfigError(f"配置非法: {detail}")

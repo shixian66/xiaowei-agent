@@ -36,7 +36,7 @@ from xiaowei_agent.contracts import (
     ToolCallStatus,
     ToolResult,
 )
-from xiaowei_agent.contracts.tool import _TOOL_RESULT_WITNESS, _WITNESS_KEY
+from xiaowei_agent.contracts.tool import _TOOL_RESULT_WITNESS, _TOOL_RESULT_WITNESS_KEY
 from xiaowei_agent.planning import compute_tool_call_hash
 from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
 
@@ -108,6 +108,13 @@ class DeterministicToolGateway:
             raise PermissionError("admission certificate does not match this step")
         if admission.tool_call_hash != compute_tool_call_hash(call):
             raise PermissionError("admission certificate does not match this call")
+        # policy revision 必须在 allow 之前检查：凭证一旦过期，它携带的 allow
+        # 就不再代表任何有效判断——先看 allow 等于用一份已失效的策略结论放行。
+        #
+        # 这条校验此前缺失，凭证因此永久有效：policy 收紧后，旧凭证仍能调用
+        # adapter，"policy 变化不能静默让旧授权继续生效"在执行边界上没有落实。
+        if admission.policy_decision.policy_revision != context.policy_revision:
+            raise PermissionError("admission certificate was issued under a stale policy revision")
         if not admission.policy_decision.allow:
             raise PermissionError("policy denied")
         if admission.effect_class is not EffectClass.READ and not _E1_EXECUTION_ENABLED:
@@ -186,7 +193,7 @@ class DeterministicToolGateway:
         """
         return ToolResult.model_validate(
             {
-                _WITNESS_KEY: _TOOL_RESULT_WITNESS,
+                _TOOL_RESULT_WITNESS_KEY: _TOOL_RESULT_WITNESS,
                 "status": status,
                 "data_view": data_view,
                 "raw_ref": None,
