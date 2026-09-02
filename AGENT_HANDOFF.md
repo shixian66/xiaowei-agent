@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-02（Asia/Shanghai） |
-| 阶段 | **M0、M1 均已验收；M2 尚未开始** |
+| 阶段 | **M0、M1 已验收；M2 实现完成，待验收** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -22,6 +22,8 @@
 | M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
 | M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
+| M2 状态 | **实现完成，未合入 `main`，待技术审查与验收**；分支 `claude/m2-contract-kernel`，11 个提交（T0–T11），四条命令全绿 |
+| M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工；计划本身在分支 `claude/m2-plan` |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
@@ -52,6 +54,9 @@
 - **E1 默认关闭**：E1 指**任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True` 并通过 `StepAdmission`。M0-M7 全程禁止 E1（含非生产环境），M8 的受控 E1 需三项显式条件齐备，生产写另需独立授权。
 - **E1 分类必须确定性派生**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 派生；模型、用户输入和 adapter 都不得设置、覆盖或降级；未知分类、声明冲突、写操作误标只读一律 fail-closed。
 - **Reflection 只消费结构化 Evidence，不拥有执行权**：只输出证据充分性、限制、缺失项，以及是否降级为 `indeterminate`、是否需用户补充信息的**建议**；是否真的进入 `indeterminate` 由 Runtime/Runner 依据该结构化结论确定性决定并由 TaskStore 保护，**Reflection 不设置终态、不写 TaskStore**；不得新增/修改计划步骤、选工具、扩大目标、提高权限、生成 SQL、触发 adapter 或改写 TaskStore 事实。缺槽与初始证据需求由 `CapabilityResolver` / `PlanCompiler` 处理。确需按条件追加取数时，只能是 `ExecutionPlan` 中预编译、预算内的可选只读分支，由 Runner 依确定性条件执行并照常经过 `StepAdmission`。
+- **ADR-009 固化 hash 与准入形状**（M2）：`plan_hash` 规范输入集含 `effect_class`、`condition` 与 `budget`，`PLAN_SCHEMA_VERSION = 1`；`ExecutionPlan` 绑定**单一 capability**，步骤不携带 capability 标识；两个指纹**不作为 `ExecutionPlan` 字段**，绑定值存于 `ApprovalRequest`（含 `policy_revision`）；`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`。详见 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)。
+- **覆盖完备性由机制承重，不由人记得**（M2）：凡"某 DTO 全部字段必须进入某 hash"一律用显式「字段 → 指纹键」映射表实现，安全测试断言映射表键集等于 `model_fields`；含嵌套 DTO（`PlanBudget`、`StepCondition`）。给 DTO 加字段却不更新映射表会立即转红。
+- **校验绕过面已封死**（M2）：`model_copy(update=...)` 与 `model_construct` 在 Pydantic v2 中完全不触发校验，均已在 `Contract` 基类封死/重新校验；未绑定的 `BaseModel.model_copy(obj, ...)` 由源码扫描禁止；不保留任何"未校验复制"的逃生口。需在校验期改写取值时一律用**字段级** `AfterValidator`——model 级 after-validator 返回非 `self` 的对象在 `__init__` 路径上会被 Pydantic 丢弃，规范化会静默失效。
 - **决策权责矩阵已显式化**（`ARCHITECTURE.md` §4.3）：LLM 只在意图提取、证据解释和澄清措辞上可建议；capability/目标/参数/步骤/SQL/工具顺序由 Resolver+PlanCompiler 决定；Policy、effect 分类、审批有效性由确定性治理组件决定；工具执行由 Runner 经 StepAdmission+ToolGateway 驱动；测试环境连接授权与 E1 审批属人工授权；生产连接与生产写当前不授权；`route_shadow` record-only。该表**不授予任何新权限、不放宽 ADR-007，也不引入 `autonomy_level` 运行字段**；自治程度提升必须有 eval、失败样本、明确授权和 ADR，**不因模型或框架升级自动提高**。
 - **错误分析闭环与 eval 边界**（`ARCHITECTURE.md` §13.1/§13.2）：闭环为「运行/eval → 阅读 trace → 错误归因 → 选择单一根因 → 修复 → 脱敏失败样本晋升为 regression/eval case → 复测」。职责时点：**M1 只建通用结构化日志、`trace_id` 传递与脱敏基础，不定义业务事件契约；M2 定义最小步骤级 trace/audit 事件契约；M3 建立首个完整闭环**。组件级与端到端 eval 分开记录；安全、权限、SQL、审批、终态由确定性断言验收，**LLM-as-judge 不得裁决安全正确性**；eval 与人工判断不一致时先校准 evaluator；离线 eval 不表述为部署、canary 或用户验收。
 - **Multi-Agent 独立延期**（`ARCHITECTURE.md` §12.1）：M9 只评估 `WorkflowRunner` 实现，**不授予 Multi-Agent 权限**；采用 LangGraph ≠ 采用 Multi-Agent；Multi-Agent 须在 M9 之后另设独立里程碑与独立 ADR，且永远不得绕过既有安全链或产生第二个状态、计划、审批、工具路由真源。
@@ -95,9 +100,9 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
-3. **下一步**：为 M2 单独编写详细实施计划并获批后才能开工；M2 落地 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore。
-4. M2 实现 contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 和 fake TaskStore。
-5. 以 TDD 落地 M3 第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
+3. ~~M2 详细计划编写与审批~~ **已完成**：经三轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
+4. ~~M2 实现~~ **已完成，待验收**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地并通过四条门。
+5. **下一步**：M2 技术审查与验收；通过后为 M3 单独编写详细实施计划并获批，才能以 TDD 落地第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
 7. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
@@ -132,12 +137,23 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 不要用 LLM-as-judge 裁决安全、权限、SQL、审批或终态的正确性；也不要为迎合指标去改业务逻辑而不校准 evaluator。
 - 不要把采用 LangGraph 当作 Multi-Agent 许可；不要在 M9 内启动 Multi-Agent 工作。
 - 不要宣称代码已部署、线上可用或能力已被用户接受，除非本文件有对应 SHA、命令、环境和验收证据。
+- 不要给 `ExecutionPlan` / `PlanStep` / `PlanBudget` / `StepCondition` / `ResolvedTarget` / `ToolCall` 加字段却不更新 `planning` 的「字段 → 指纹键」映射表。
+- 不要把 `plan_hash` / `target_fingerprint` 改成 `ExecutionPlan` 的字段；也不要给 `PlanStep` 加回 capability 标识。
+- 不要在 `capabilities/effect.py` 之外直接构造 `PlanStep`；用 `build_plan_step()`。
+- 不要为了让某个 adapter 跑通而放宽 `tools/gateway.py` 的 `_E1_EXECUTION_ENABLED`。
+- 不要在 `model_validator(mode="after")` 里改写取值（返回值会被丢弃且只发警告）；用字段级 `AfterValidator`。也不要重新引入任何"未校验复制"的逃生口。
+- 不要把 `test_domain_layer_has_no_third_party_client_import` 的扫描范围扩大到 `tools/` 或 `persistence/`，也不要为了让某模块通过而把它从领域层名单里删掉。
+- 不要用**文本扫描**代替 AST 扫描来断言代码行为——docstring 里的说明文字会让断言失真。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
 ## 8. 验证记录
 
 ### 已验证
 
+- **M2 分支 `claude/m2-contract-kernel`（起点 `d0971666`，11 个提交 `ce8a9d3`…`dff7701` 之后另有 T11 提交）四条命令全绿**：`python -m pytest -q` 450 passed；`python -m pytest -m security -q` 314 passed / 136 deselected；`ruff check .` 与 `mypy src` 均通过。
+- **M2 累计 55 组 TDD 反证**逐条先转红后还原转绿（T2 三组、T3 三组、T4 五组、T5 五组、T6 四组、T7 四组、T8 七组、T9 三组、T10 九组、T11 六组，另加 T1 的迁移前后逐字相同回归基准）。
+- **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
+- 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
 - M0 验收对象 `a1a8c888…` 已以 `--ff-only` 合入 `main`，无合并提交，历史未改写。
 - 远程 `git@github.com:shixian66/xiaowei-agent.git`（private），默认分支 `main`；播种前已核验远程无任何历史。
 - M1 候选 SHA 见本节「M1 候选」条目；在该 SHA 上，激活 `.venv` 后原样执行 ADR-008 四条命令全部 exit 0。
@@ -155,9 +171,10 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未用户验收。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
-- 无业务 DTO、Capability、Planner、TaskStore、Gateway 或 Compose；`tests/{contract,integration,evals}/` 尚未创建。
+- **M2 只有契约与 fake，没有任何可执行的业务能力**：没有 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 或 `XiaoweiRuntime` 实现——全部属 M3。`governance/binding.py` 只是纯校验函数，不是 ApprovalGate。
+- `tests/{integration,evals}/` 与 `docs/CAPABILITIES.md` 尚未创建；`docker-compose.yml`、API、Worker、数据库迁移均不存在。
 - ADR-001 至 ADR-006 尚未编写。
-- 决策权责矩阵、错误分析闭环、Reflection 越权拒绝和 Multi-Agent 准入条件目前都只是文档要求，其代码护栏要到 M2/M3 才落地。
+- 错误分析闭环与 Multi-Agent 准入条件目前仍只是文档要求，其代码护栏要到 M3 之后才落地。
 
 ### 残余风险
 
@@ -168,4 +185,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - `pip-audit` 只能发现已收录漏洞，不能证明依赖无恶意代码。
 - 架构约束（Reflection 边界、E1 分类、能力扩展成本）尚无代码验证，要到 M2/M3/M6a 才可证。
 - Reflection 的越权拒绝目前靠契约设计保证（结论 DTO 不含步骤/工具字段），真正的护栏要等 M2/M3 的契约与安全测试落地。
-- 「预编译的预算内可选只读分支」只给了边界，未给出具体形状；其 DTO 与执行条件表达留待 M2/M3 详细计划，存在被实现成变相动态扩计划的风险。
+- 「预编译的预算内可选只读分支」的形状已在 M2 给出（`StepCondition` 四成员闭集枚举，条件只能引用更早的步骤）。**残余部分**：该闭集是否覆盖 M3 实际需要的条件种类，要到 M3 才可证；不足时须改枚举并过评审，不得改成开放表达式。
+- `ToolResult` 的私有性只封堵了直接构造、`model_validate`、`model_construct`、`model_copy` 四条实用路径；`object.__setattr__` 与重定义模块无法在语言层封堵，属已知残余风险，只能由评审与源码扫描覆盖。
+- `InMemoryTaskStore` 的 CAS 语义只在单进程内成立（一把 `asyncio.Lock` 串行化写入）；跨进程原子性、崩溃恢复与隔离级别要到 M4 的 PostgreSQL 实现才可证。
+- M2 的全部安全保证都是**契约层与纯函数层**的：它们尚未被任何真实闭环消费，"这些契约足以支撑 M3/M4"目前只是设计推理，无运行证据。

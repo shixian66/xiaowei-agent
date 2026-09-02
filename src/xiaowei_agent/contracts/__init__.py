@@ -47,6 +47,7 @@ from xiaowei_agent.contracts.enums import (
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
+from xiaowei_agent.contracts.external_input import ExternalInput
 from xiaowei_agent.contracts.intent import IntentDraft
 from xiaowei_agent.contracts.plan import (
     PLAN_SCHEMA_VERSION,
@@ -56,6 +57,7 @@ from xiaowei_agent.contracts.plan import (
     StepCondition,
 )
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicySnapshot
+from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 from xiaowei_agent.contracts.target import ResolvedTarget
 from xiaowei_agent.contracts.task import (
@@ -67,6 +69,7 @@ from xiaowei_agent.contracts.task import (
     TransitionResult,
 )
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
+from xiaowei_agent.contracts.trace_events import TraceEvent
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -90,6 +93,7 @@ __all__ = [
     "EvidenceEnvelope",
     "ExecutionPlan",
     "ExternalContent",
+    "ExternalInput",
     "ExternalInputKind",
     "ExternalSource",
     "FiniteFloat",
@@ -107,6 +111,8 @@ __all__ = [
     "PolicyDecision",
     "PolicySnapshot",
     "Rejection",
+    "RenderPayload",
+    "RenderSection",
     "RequestContext",
     "RequestEnvelope",
     "ResolvedTarget",
@@ -123,6 +129,7 @@ __all__ = [
     "ToolCall",
     "ToolCallStatus",
     "ToolResult",
+    "TraceEvent",
     "TraceId",
     "TransitionRejection",
     "TransitionResult",

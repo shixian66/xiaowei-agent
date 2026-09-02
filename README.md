@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：已具备可安装、可测试、可静态检查的 Python 工程基线（配置、trace、日志三个模块）与 CI；**尚未**具备可运行的 API、Worker、数据库迁移、容器镜像或任何线上能力。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：已具备可安装、可测试、可静态检查的 Python 工程基线与 CI，以及 M2 的契约内核（DTO、Protocol、确定性指纹、治理校验函数与 fake 实现）；**尚未**具备可运行的 API、Worker、数据库迁移、容器镜像或任何线上能力，也**没有任何可执行的业务能力**。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -97,27 +97,30 @@ agent/
 ├── pyproject.toml              # 已建立（M1）
 ├── docker-compose.yml          # Compose 阶段建立（尚未创建）
 ├── src/xiaowei_agent/          # 业务包
-│   ├── contracts/              # 跨模块 DTO / Protocol
-│   ├── application/            # Runtime / 用例编排
-│   ├── capabilities/           # CapabilitySpec / Resolver；受限 DSL 达准入门槛后再加入
-│   ├── planning/               # 意图到计划的确定性编译
-│   ├── governance/             # Policy / Approval / SQLGuard
-│   ├── runners/                # DeterministicRunner / LangGraph adapter
-│   ├── tools/                  # ToolGateway / 外部适配器
-│   ├── persistence/            # TaskStore / migrations
-│   ├── evidence/               # Evidence / Memory
-│   ├── reflection/             # Reflection / answerability
-│   ├── rendering/              # RenderPayload 和通道投影
-│   └── interfaces/             # API / CLI / 飞书 / Web
+│   ├── redaction.py            # 已建立（M2）：脱敏规则单一真源，无对内依赖的叶子
+│   ├── contracts/              # 已建立（M2）：跨模块 DTO / Protocol
+│   ├── capabilities/           # 已建立（M2）：分类派生与 Resolver Protocol
+│   ├── planning/               # 已建立（M2）：canonical JSON 与三个指纹
+│   ├── governance/             # 已建立（M2）：审批绑定与 policy revision 校验
+│   ├── tools/                  # 已建立（M2）：ToolGateway / adapter 契约
+│   ├── persistence/            # 已建立（M2）：TaskStore 交互形状
+│   ├── runners/                # 已建立（M2）：WorkflowRunner 契约
+│   ├── observability/          # 已建立（M2）：TraceSink Protocol
+│   ├── application/            # Runtime / 用例编排（尚未创建）
+│   ├── evidence/               # Evidence / Memory（尚未创建）
+│   ├── reflection/             # Reflection / answerability（尚未创建）
+│   ├── rendering/              # RenderPayload 和通道投影（尚未创建）
+│   └── interfaces/             # API / CLI / 飞书 / Web（尚未创建）
 └── tests/
-    ├── unit/
-    ├── contract/
-    ├── security/
-    ├── integration/
-    └── evals/
+    ├── unit/                   # 已建立
+    ├── contract/               # 已建立（M2）
+    ├── security/               # 已建立
+    ├── fakes/                  # 已建立（M2）：测试夹具
+    ├── integration/            # 尚未创建
+    └── evals/                  # 尚未创建
 ```
 
-上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 已在 M1 建立；其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
+上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 在 M1 建立；上表标注「已建立（M2）」的包在 M2 建立。其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
 
 ## 从 0 开始的开发顺序
 
@@ -167,7 +170,7 @@ export XIAOWEI_LOG_LEVEL=INFO
 
 ### 尚未完成
 
-Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。
+Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。M2 只交付契约与 fake：没有 Resolver、PlanCompiler、StepAdmission、SQLGuard、ApprovalGate 或任何真实 Runner 实现，也没有连接任何外部系统。
 
 ## 旧项目关系
 

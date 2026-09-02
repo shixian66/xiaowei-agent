@@ -70,6 +70,8 @@
 | 事实、证据、记忆 | `evidence/` | 在 prompt 或入口层拼隐式业务结果 |
 | 反思与可答性判断 | `reflection/` | 让模型或入口层决定执行权限 |
 | 回复投影 | `rendering/` | 在 Web、飞书、CLI 中复制业务文案和状态判断 |
+| trace/audit 事件出口 | `observability/` | 在各业务模块内各自实现采集 |
+| 脱敏规则 | `redaction.py`（顶层叶子模块） | 在 `log/` 与 `contracts/` 中各写一份 |
 | 测试和离线评测 | `tests/unit/`、`tests/contract/`、`tests/security/`、`tests/integration/`、`tests/evals/` | 只在手工对话中验证 |
 
 可以随着第一轮实现调整目录，但必须先更新 `ARCHITECTURE.md`，并保证每个模块仍只有一个责任。
