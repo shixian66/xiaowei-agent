@@ -1,0 +1,460 @@
+"""确定性步骤 Runner：任务生命周期的宿主。
+
+Runner 拥有租约、CAS 推进、可选分支求值、预算与暂停；它**不拥有领域安全规则**：
+分类、策略、SQL 与审批一律经 ``admit_step``，工具一律经 ``ToolGateway``，证据一律
+经 ``EvidenceLedger``。
+
+三条承重设计：
+
+1. **条件求值从 ledger 读回，不读本地变量。** 这让 ledger 在**执行期**就成为唯一
+   路径，而不只是事后归档；M4 的跨进程恢复因此不必改变消费方。
+2. **每次状态变更都携带 ``expected_version`` 与 ``fencing_token``，并采纳存储层
+   ``winner``。** CAS 失败是正常并发结果，不是异常路径。
+3. **Runner 不写终态。** 终态由 Runtime 依 Answerability 的结构化结论确定性判定
+   （ARCHITECTURE §4.3）。Runner 若先写 ``SUCCEEDED``，终态保护会让 Runtime 再也
+   无法把一次"空证据"降级为 ``indeterminate``——"空证据不得渲染成成功"就在存储层
+   被堵死了。Runner 返回的 ``TaskOutcome`` 是**执行层结论**，最终那一次 CAS 由
+   Runtime 完成。
+"""
+
+import datetime as _dt
+from typing import Final, Protocol
+
+from xiaowei_agent.capabilities.specs import GATEWAY_NAME
+from xiaowei_agent.contracts import (
+    AdmissionCertificate,
+    ApprovalRequest,
+    ApprovalState,
+    CapabilitySnapshot,
+    EvidenceEnvelope,
+    ExecutionPlan,
+    ExternalInput,
+    LeaseGrant,
+    PlanStep,
+    PolicyProfile,
+    PolicySnapshot,
+    RequestContext,
+    ResolvedTarget,
+    SqlSurface,
+    StepCondition,
+    StepConditionKind,
+    TaskOutcome,
+    TaskRecord,
+    TaskStatus,
+    ToolCall,
+    ToolCallStatus,
+    ToolResult,
+)
+from xiaowei_agent.evidence import build_evidence
+from xiaowei_agent.governance.approval import ApprovalGate, ApprovalRequiredError
+from xiaowei_agent.governance.step_admission import admit_step
+from xiaowei_agent.persistence.evidence import EvidenceLedger
+from xiaowei_agent.persistence.plans import PlanStore
+from xiaowei_agent.persistence.store import Clock, TaskStore
+from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
+from xiaowei_agent.planning.starrocks.params import SlowQueryParams
+from xiaowei_agent.runners.runner import WorkflowPaused
+
+BUDGET_EXHAUSTED_REASON: Final[str] = "budget.tool_calls_exhausted"
+APPROVAL_TTL_SECONDS: Final[int] = 3600
+DEFAULT_LEASE_TTL_SECONDS: Final[int] = 60
+DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+class _Gateway(Protocol):
+    """Runner 只需要 Gateway 的这一个方法。
+
+    用结构化类型而不是 ``object``：``object`` 会让"Runner 还调了 Gateway 的别的
+    什么"在类型层不可见，而 Runner 与 Gateway 的边界正是这条链路最需要窄的地方。
+    """
+
+    async def invoke(
+        self,
+        call: ToolCall,
+        *,
+        context: RequestContext,
+        admission: AdmissionCertificate,
+    ) -> ToolResult: ...
+
+
+class LifecycleError(RuntimeError):
+    """无法推进生命周期：租约拿不到、CAS 被拒或任务已终态。
+
+    消息恒为常量；``rejection`` 放结构化属性。
+    """
+
+    def __init__(self, message: str, *, rejection: object = None) -> None:
+        super().__init__(message)
+        self.rejection = rejection
+
+
+class DriftError(RuntimeError):
+    """恢复时重解析/重算的结果与存储中的事实不一致。"""
+
+
+class DeterministicStepRunner:
+    """按计划顺序推进的 Runner。"""
+
+    def __init__(
+        self,
+        *,
+        task_store: TaskStore,
+        plan_store: PlanStore,
+        ledger: EvidenceLedger,
+        gateway: _Gateway,
+        approval_gate: ApprovalGate,
+        snapshot: CapabilitySnapshot,
+        policy_snapshot: PolicySnapshot,
+        profile: PolicyProfile,
+        surface: SqlSurface,
+        clock: Clock,
+        owner: str,
+        lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+    ) -> None:
+        self._tasks = task_store
+        self._plans = plan_store
+        self._ledger = ledger
+        self._gateway = gateway
+        self._approval_gate = approval_gate
+        self._snapshot = snapshot
+        self._policy_snapshot = policy_snapshot
+        self._profile = profile
+        self._surface = surface
+        self._clock = clock
+        self._owner = owner
+        self._lease_ttl_seconds = lease_ttl_seconds
+
+    # --- 公开入口 -----------------------------------------------------------
+
+    async def start(
+        self,
+        task_id: str,
+        *,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+    ) -> TaskOutcome:
+        """执行一份新编译的计划。
+
+        计划与目标先落 ``PlanStore``——resume 要重算指纹，就必须先拿得回**当初
+        那份**计划。
+
+        :raises LifecycleError: 租约拿不到，或状态迁移被存储层拒绝。
+        :raises WorkflowPaused: 遇到需要审批的副作用步骤。
+        """
+        await self._plans.save(task_id=task_id, plan=plan, target=target)
+        grant = await self._acquire(task_id)
+        record = await self._tasks.get(task_id)
+        for status in (TaskStatus.PLANNING, TaskStatus.RUNNING):
+            record = await self._advance(
+                task_id, record.version, status, grant.fencing_token
+            )
+        return await self._run_steps(
+            task_id=task_id,
+            plan=plan,
+            target=target,
+            context=context,
+            fencing_token=grant.fencing_token,
+            version=record.version,
+        )
+
+    async def resume(
+        self,
+        task_id: str,
+        external_input: ExternalInput | None = None,
+        *,
+        context: RequestContext,
+        target: ResolvedTarget,
+        approval: ApprovalRequest | None = None,
+    ) -> TaskOutcome:
+        """恢复一个暂停的任务。
+
+        **重解析并重算**：从 ``PlanStore`` 取回计划与目标，重新算 ``plan_hash`` 与
+        ``target_fingerprint``，与调用方重新解析出的目标、当前 policy revision 逐一
+        比对；任一不匹配即拒绝，且 Gateway 调用次数为 0。
+
+        不信任存储里"自称"的指纹——存一份自称的 hash 只会制造可被篡改的第二真源。
+
+        :raises DriftError: 计划、目标或 policy revision 任一漂移。
+        :raises WorkflowPaused: 仍然缺少有效审批。
+        """
+        stored = await self._plans.load(task_id=task_id)
+        plan = stored.plan
+        self._verify_no_drift(
+            plan=plan, stored_target=stored.target, target=target, context=context
+        )
+        grant = await self._acquire(task_id)
+        record = await self._tasks.get(task_id)
+        if record.status is TaskStatus.AWAITING_APPROVAL:
+            record = await self._advance(
+                task_id, record.version, TaskStatus.RUNNING, grant.fencing_token
+            )
+        return await self._run_steps(
+            task_id=task_id,
+            plan=plan,
+            target=stored.target,
+            context=context,
+            fencing_token=grant.fencing_token,
+            version=record.version,
+            approval=approval,
+        )
+
+    # --- 漂移检测 -----------------------------------------------------------
+
+    def _verify_no_drift(
+        self,
+        *,
+        plan: ExecutionPlan,
+        stored_target: ResolvedTarget,
+        target: ResolvedTarget,
+        context: RequestContext,
+    ) -> None:
+        if compute_plan_hash(plan) != compute_plan_hash(plan.model_copy()):
+            raise DriftError("plan_hash is not reproducible")
+        if compute_target_fingerprint(stored_target) != compute_target_fingerprint(target):
+            raise DriftError("target_fingerprint drifted since the plan was stored")
+        if plan.policy_revision != context.policy_revision:
+            raise DriftError("policy revision drifted since the plan was stored")
+
+    # --- 生命周期 -----------------------------------------------------------
+
+    async def _acquire(self, task_id: str) -> LeaseGrant:
+        grant = await self._tasks.acquire_lease(
+            task_id=task_id, owner=self._owner, ttl_seconds=self._lease_ttl_seconds
+        )
+        if grant is None:
+            # 终态任务或已被他人持有——两种情况都不该继续推进。
+            raise LifecycleError("task lease is unavailable")
+        return grant
+
+    async def _advance(
+        self, task_id: str, version: int, status: TaskStatus, fencing_token: int
+    ) -> TaskRecord:
+        result = await self._tasks.transition(
+            task_id=task_id,
+            expected_version=version,
+            to_status=status,
+            fencing_token=fencing_token,
+        )
+        if not result.applied:
+            # 必须采纳 winner 并停下，不能用本地旧对象继续推进。
+            raise LifecycleError("transition rejected", rejection=result.rejection)
+        return result.winner
+
+    # --- 步骤循环 -----------------------------------------------------------
+
+    async def _run_steps(
+        self,
+        *,
+        task_id: str,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+        fencing_token: int,
+        version: int,
+        approval: ApprovalRequest | None = None,
+    ) -> TaskOutcome:
+        tool_calls_used = 0
+        degraded = False
+        # 只记录"哪些步骤执行后未成功"——这是 Runner 自己的生命周期知识，不是证据
+        # 内容。证据内容一律从 ledger 读回。
+        failed_steps: set[str] = set()
+        for step in plan.steps:
+            if not await self._condition_holds(
+                task_id=task_id, condition=step.condition, failed_steps=failed_steps
+            ):
+                continue
+            if tool_calls_used >= plan.budget.max_tool_calls:
+                return await self._outcome(
+                    task_id,
+                    TaskStatus.FAILED,
+                    terminal_reason=BUDGET_EXHAUSTED_REASON,
+                )
+            try:
+                result = await self._execute(
+                    task_id=task_id,
+                    step=step,
+                    plan=plan,
+                    target=target,
+                    context=context,
+                    approval=approval,
+                )
+            except ApprovalRequiredError as exc:
+                await self._pause(
+                    task_id=task_id,
+                    step=step,
+                    plan=plan,
+                    target=target,
+                    fencing_token=fencing_token,
+                    version=version,
+                    step_id=exc.step_id,
+                )
+            except TypeError:
+                # Gateway 对"adapter 返回了非 AdapterResponse"抛 TypeError。这是
+                # 上游故障，不是本进程的编程错误：让它冒泡会把一次可降级的取数失败
+                # 变成崩溃，而崩溃既没有证据也没有终态。降级为 indeterminate。
+                tool_calls_used += 1
+                degraded = True
+                failed_steps.add(step.step_id)
+                continue
+            tool_calls_used += 1
+            if result.status is not ToolCallStatus.OK:
+                degraded = True
+                failed_steps.add(step.step_id)
+            await self._record_evidence(
+                task_id=task_id, step=step, plan=plan, result=result
+            )
+        status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
+        return await self._outcome(task_id, status, terminal_reason=None)
+
+    async def _condition_holds(
+        self, *, task_id: str, condition: StepCondition, failed_steps: set[str]
+    ) -> bool:
+        """按闭集条件决定是否执行该步骤。
+
+        **证据从 ledger 读回**，不读本地变量：这让 ledger 在执行期就成为唯一路径。
+
+        但**被引用的步骤若执行失败，条件一律不成立**（fail-closed）：
+        ``EVIDENCE_ROW_COUNT_BELOW`` 在数值上无法区分"取到零行"与"根本没取到"，
+        而这两者的含义相反。s1 失败时仍去跑 s2，会让一次取数故障看起来像是在
+        "确认范围内有没有流量"——那正是本闭环要避免的、自信但错误的结论。
+        """
+        if condition.kind is StepConditionKind.ALWAYS:
+            return True
+        if condition.kind is StepConditionKind.EVIDENCE_ROW_COUNT_BELOW:
+            threshold = condition.threshold
+            if threshold is None or condition.ref_step_id is None:
+                return False
+            if condition.ref_step_id in failed_steps:
+                return False
+            rows = await self._rows_recorded_for(
+                task_id=task_id, step_id=condition.ref_step_id
+            )
+            return rows < threshold
+        # 其余两个成员 M3 未消费；不猜测语义，一律不执行（fail-closed）。
+        return False
+
+    async def _rows_recorded_for(self, *, task_id: str, step_id: str) -> int:
+        for envelope in await self._ledger.load(task_id=task_id):
+            if envelope.evidence_id.endswith(f":{step_id}"):
+                return len(envelope.facts)
+        return 0
+
+    async def _execute(
+        self,
+        *,
+        task_id: str,
+        step: PlanStep,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+        approval: ApprovalRequest | None,
+    ) -> ToolResult:
+        call = self._build_call(
+            step=step,
+            idempotency_key=f"{compute_plan_hash(plan)[:16]}:{step.step_id}",
+        )
+        certificate = admit_step(
+            step=step,
+            plan=plan,
+            call=call,
+            context=context,
+            target=target,
+            snapshot=self._snapshot,
+            policy_snapshot=self._policy_snapshot,
+            profile=self._profile,
+            surface=self._surface,
+            approval_gate=self._approval_gate,
+            approval=approval,
+            task_id=task_id,
+            now=self._clock(),
+        )
+        return await self._gateway.invoke(
+            call, context=context, admission=certificate
+        )
+
+    def _build_call(self, *, step: PlanStep, idempotency_key: str) -> ToolCall:
+        """构造本步骤的工具调用。
+
+        **幂等键由 plan_hash + step_id 派生，不含 task_id**：退出标准要求"固定
+        IntentDraft 重复运行产生逐字节相同的 ToolCall 与 tool_call_hash"，而
+        task_id 由存储层生成、每次都不同。用计划指纹派生既满足这条，也保持了正确
+        的幂等语义——同一份计划的同一步骤就是同一次尝试。
+        """
+        return ToolCall(
+            gateway=GATEWAY_NAME,
+            operation=step.operation,
+            step_id=step.step_id,
+            typed_args=dict(step.typed_arguments),
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _record_evidence(
+        self, *, task_id: str, step: PlanStep, plan: ExecutionPlan, result: ToolResult
+    ) -> EvidenceEnvelope:
+        envelope = build_evidence(
+            task_id=task_id,
+            step=step,
+            plan=plan,
+            result=result,
+            surface=self._surface,
+            params=SlowQueryParams.from_typed_arguments(step.typed_arguments),
+            captured_at=self._clock(),
+        )
+        await self._ledger.append(task_id=task_id, envelope=envelope)
+        return envelope
+
+    async def _pause(
+        self,
+        *,
+        task_id: str,
+        step: PlanStep,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        fencing_token: int,
+        version: int,
+        step_id: str,
+    ) -> None:
+        """记录审批请求、CAS 到 AWAITING_APPROVAL，然后抛出 ``WorkflowPaused``。
+
+        顺序是刻意的：**先**留下可审计的审批请求，**再**改状态。反过来时，一次
+        崩溃会留下一个"等待审批但没有审批请求"的任务。
+        """
+        now = self._clock()
+        request = ApprovalRequest(
+            task_id=task_id,
+            step_id=step_id,
+            plan_hash=compute_plan_hash(plan),
+            target_fingerprint=compute_target_fingerprint(target),
+            policy_revision=plan.policy_revision,
+            subject=self._owner,
+            expires_at=now + _dt.timedelta(seconds=APPROVAL_TTL_SECONDS),
+            state=ApprovalState.PENDING,
+        )
+        await self._tasks.record_approval(request=request)
+        record = await self._tasks.get(task_id)
+        await self._advance(
+            task_id, record.version, TaskStatus.AWAITING_APPROVAL, fencing_token
+        )
+        # 在 raise 之外拼装：拒绝路径的 raise 语句里不得出现任何插值，哪怕取值
+        # 本身安全——这条不变量靠"语句里没有插值"来机械保证，不靠逐个判断。
+        approval_ref = f"{task_id}:{step_id}"
+        raise WorkflowPaused(
+            task_id=task_id, step_id=step_id, approval_ref=approval_ref
+        )
+
+    async def _outcome(
+        self, task_id: str, status: TaskStatus, *, terminal_reason: str | None
+    ) -> TaskOutcome:
+        refs = tuple(
+            envelope.evidence_id for envelope in await self._ledger.load(task_id=task_id)
+        )
+        return TaskOutcome(
+            task_id=task_id,
+            status=status,
+            terminal_reason=terminal_reason,
+            evidence_refs=refs,
+            # M3 不持久化 RenderPayload：它由 Runtime 同步返回，没有任何读回方。
+            render_ref=None,
+        )
