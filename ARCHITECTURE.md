@@ -262,9 +262,10 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
 | `CapabilitySpec` | id、version、domain、operation、schemas、policy_profile、evidence_contract | 声明能力，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
-| `ExecutionPlan` | plan_version、steps、dependencies、plan_hash、target_fingerprint | 确定性、可重放、不可由模型直接覆盖 |
+| `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
 | `PolicyDecision` | allow、reason、risk、policy_revision、obligations | fail-closed，理由结构化 |
-| `ApprovalRequest` | task_id、step_id、plan_hash、target_fingerprint、subject、expires_at | 审批与具体步骤绑定 |
+| `ApprovalRequest` | task_id、step_id、plan_hash、target_fingerprint、policy_revision、subject、expires_at、state | 审批与具体步骤绑定；`policy_revision` 使「policy 变化不能静默让旧审批继续生效」可独立断言（ADR-009 D3） |
+| `AdmissionCertificate` | step_id、operation、effect_class、policy_decision、approval_ref、plan_hash、target_fingerprint、tool_call_hash | `StepAdmission` 产出、`ToolGateway` 消费；**同时绑定步骤身份与调用内容**，`tool_call_hash` 覆盖 `ToolCall` 全部字段，使「未经准入即调用工具」与「持合法凭证替换参数」都不可表达（ADR-009 D4） |
 | `ToolCall` | gateway、operation、typed_args、timeout、idempotency_key | 不含任意代码/任意 SQL escape hatch |
 | `ToolResult` | status、data_view、raw_ref、source、limitations、trace_id | 由 Gateway 构造，原始数据默认不进模型 |
 | `ExternalContent` | source、trust、content、digest、captured_at | 所有外部文本的统一包装；恒为 untrusted，不能改变 policy、目标、权限、审批状态或执行计划 |
@@ -292,14 +293,21 @@ sha256(canonical_json({
   "capability_version": ...,
   "ordered_steps": [
     {"step_id": ..., "operation": ..., "typed_arguments": ...,
-     "depends_on": ..., "side_effect": ...}
+     "depends_on": ..., "side_effect": ..., "effect_class": ...,
+     "condition": {"kind": ..., "ref_step_id": ..., "field": ...,
+                   "threshold": ..., "expected_result": ...}}
   ],
   "policy_profile": ...,
-  "policy_revision": ...
+  "policy_revision": ...,
+  "budget": {"max_steps": ..., "max_tool_calls": ..., "max_model_tokens": ...}
 }))
 ```
 
-`canonical_json` 使用固定字段顺序、UTF-8、无空白、稳定数字和字符串规范化；不包含 request_id、trace_id、时间戳、模型原文、日志、secret、token 或显示文案。计划字段新增或语义变化必须递增 schema version。
+`plan_schema_version` 的首个取值为 `1`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D1）。**计划绑定单一 capability，步骤不携带 capability 标识**；跨 capability 计划须递增 schema version 并另立 ADR（ADR-009 D2）。
+
+`effect_class`、`condition` 与 `budget` 进入规范输入集的理由见 ADR-009 D1：分类漂移、可选分支条件变化和预算被放大，都必须被 `plan_hash` 检出，否则一份已批准的计划可在恢复时执行不同的动作。
+
+`canonical_json` 使用固定字段顺序、UTF-8、无空白、稳定数字和字符串规范化；不包含 request_id、trace_id、时间戳、模型原文、日志、secret、token 或显示文案。计划字段新增或语义变化必须递增 schema version，并同步更新实现中的「字段 → 指纹键」映射表——该映射表由安全测试断言其键集等于对应 DTO 的字段集，因此漏加字段会立即失败。
 
 ### 7.2 `target_fingerprint`
 
@@ -530,5 +538,6 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-006：PostgreSQL 全文检索到 pgvector 的升级门槛。
 - ADR-007：首批能力、初始执行上下文与真实调用许可（已记录：[docs/adr/ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)）。
 - ADR-008：工程与测试基线，含 Python 3.11、pytest、security marker gate、Ruff 和 mypy（已记录：[docs/adr/ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）。
+- ADR-009：`plan_hash` 规范形状、审批绑定与工具准入（已记录：[docs/adr/ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。
