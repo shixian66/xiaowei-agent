@@ -61,9 +61,14 @@ from xiaowei_agent.contracts.plan import (
     PlanStep,
     StepCondition,
 )
-from xiaowei_agent.contracts.policy import PolicyDecision, PolicySnapshot
+from xiaowei_agent.contracts.policy import PolicyDecision, PolicyProfile, PolicySnapshot
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
+from xiaowei_agent.contracts.sql_surface import (
+    MAX_ROW_LIMIT,
+    MAX_WINDOW_MINUTES,
+    SqlSurface,
+)
 from xiaowei_agent.contracts.target import ResolvedTarget
 from xiaowei_agent.contracts.task import (
     ALLOWED_TRANSITIONS,
@@ -78,6 +83,8 @@ from xiaowei_agent.contracts.trace_events import TraceEvent
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "MAX_ROW_LIMIT",
+    "MAX_WINDOW_MINUTES",
     "PLAN_SCHEMA_VERSION",
     "TERMINAL_STATUSES",
     "AdapterStatus",
@@ -118,6 +125,7 @@ __all__ = [
     "PlanBudget",
     "PlanStep",
     "PolicyDecision",
+    "PolicyProfile",
     "PolicySnapshot",
     "Rejection",
     "RenderPayload",
@@ -127,6 +135,7 @@ __all__ = [
     "ResolvedTarget",
     "RiskLevel",
     "Sha256Hex",
+    "SqlSurface",
     "StageOutcome",
     "StepCondition",
     "StepConditionKind",
