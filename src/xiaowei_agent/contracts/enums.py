@@ -152,6 +152,23 @@ class ExternalInputKind(StrEnum):
     USER_SUPPLEMENT = "user_supplement"
 
 
+class PolicyReason(StrEnum):
+    """ToolPolicy 判定原因的闭集。
+
+    ``ALLOWED`` 之外的每一个成员都是一条**拒绝**理由。把理由写成闭集而不是自由
+    文本，使审计里的原因可以被聚合、被断言，也使新增一种放行路径必须改枚举并
+    过评审。
+    """
+
+    ALLOWED = "policy.allowed"
+    PROFILE_MISMATCH = "policy.profile_mismatch"
+    OPERATION_NOT_ALLOWED = "policy.operation_not_allowed"
+    EFFECT_CLASS_NOT_ALLOWED = "policy.effect_class_not_allowed"
+    ENVIRONMENT_NOT_ALLOWED = "policy.environment_not_allowed"
+    TIMEOUT_EXCEEDS_PROFILE = "policy.timeout_exceeds_profile"
+    TENANT_MISMATCH = "policy.tenant_mismatch"
+
+
 class SqlGuardRejection(StrEnum):
     """SQL AST 校验失败的闭集原因。
 
