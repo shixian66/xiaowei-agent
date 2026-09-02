@@ -152,6 +152,33 @@ class ExternalInputKind(StrEnum):
     USER_SUPPLEMENT = "user_supplement"
 
 
+class SqlGuardRejection(StrEnum):
+    """SQL AST 校验失败的闭集原因。
+
+    每个成员对应 SQLGuard 的一条规则。拒绝码是**审计里看到的原因**，因此规则
+    顺序决定了它有多具体：最宽泛的 ``RECOMPILE_MISMATCH`` 排在最后，否则它会
+    吞掉所有更具体的原因，AST 规则也随之成为不可达的死代码。
+    """
+
+    UNKNOWN_TEMPLATE = "unknown_template"
+    UNKNOWN_DIALECT = "unknown_dialect"
+    AMBIGUOUS_CHARACTER = "ambiguous_character"
+    UNPARSABLE = "unparsable"
+    MULTIPLE_STATEMENTS = "multiple_statements"
+    NON_SELECT = "non_select"
+    FORBIDDEN_NODE = "forbidden_node"
+    TABLE_NOT_ALLOWED = "table_not_allowed"
+    COLUMN_NOT_ALLOWED = "column_not_allowed"
+    STAR_NOT_ALLOWED = "star_not_allowed"
+    COMMENT_PRESENT = "comment_present"
+    LIMIT_MISSING = "limit_missing"
+    LIMIT_EXCEEDED = "limit_exceeded"
+    WINDOW_UNBOUNDED = "window_unbounded"
+    WINDOW_MISMATCH = "window_mismatch"
+    WINDOW_TOO_WIDE = "window_too_wide"
+    RECOMPILE_MISMATCH = "recompile_mismatch"
+
+
 class TargetRejection(StrEnum):
     """目标解析失败的闭集原因。
 

@@ -49,6 +49,27 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         # --- 已经过安全投影 ---
         # config.py 的 detail 来自 redaction.safe_error_details，只含 loc 与 type。
         "detail",
+        # --- SqlGuardRejection 枚举成员：取值域是代码里的闭集 ---
+        # 被检 SQL 是最可能携带外部数据的东西，一律不进消息；由
+        # test_rejection_message_never_echoes_the_sql 与
+        # test_unparsable_sql_is_structured_not_a_raw_parse_error 反向承重。
+        "SqlGuardRejection.AMBIGUOUS_CHARACTER",
+        "SqlGuardRejection.COLUMN_NOT_ALLOWED",
+        "SqlGuardRejection.COMMENT_PRESENT",
+        "SqlGuardRejection.FORBIDDEN_NODE",
+        "SqlGuardRejection.LIMIT_EXCEEDED",
+        "SqlGuardRejection.LIMIT_MISSING",
+        "SqlGuardRejection.MULTIPLE_STATEMENTS",
+        "SqlGuardRejection.NON_SELECT",
+        "SqlGuardRejection.RECOMPILE_MISMATCH",
+        "SqlGuardRejection.STAR_NOT_ALLOWED",
+        "SqlGuardRejection.TABLE_NOT_ALLOWED",
+        "SqlGuardRejection.UNKNOWN_DIALECT",
+        "SqlGuardRejection.UNKNOWN_TEMPLATE",
+        "SqlGuardRejection.UNPARSABLE",
+        "SqlGuardRejection.WINDOW_MISMATCH",
+        "SqlGuardRejection.WINDOW_TOO_WIDE",
+        "SqlGuardRejection.WINDOW_UNBOUNDED",
         # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
         # 被拒的环境标识来自调用方，不进消息；由
         # test_rejection_message_never_echoes_the_environment_id 反向承重。
