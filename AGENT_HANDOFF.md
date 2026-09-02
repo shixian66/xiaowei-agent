@@ -151,7 +151,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 已验证
 
-- **M2 分支 `claude/m2-contract-kernel` 在提交 `5cb71dc2` 上四条命令全绿**：`python -m pytest -q` 570 passed；`python -m pytest -m security -q` 429 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
+- **M2 分支 `claude/m2-contract-kernel` 在提交 `c689d6cd` 上四条命令全绿**：`python -m pytest -q` 595 passed；`python -m pytest -m security -q` 454 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
 - 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
