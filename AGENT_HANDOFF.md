@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-02（Asia/Shanghai） |
-| 阶段 | **M0、M1 已验收；M2 实现完成，待验收** |
+| 阶段 | **M0、M1 已验收；M2 已合入 `main` 但尚未验收** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -22,7 +22,7 @@
 | M1 合入基线 SHA | `634aec016d422e7b0b474b9fb48bbd1966e5efd0`——以 `--ff-only` 快进合入，无合并提交，20 个受审 SHA 原样保留 |
 | M1 合并后 CI | `main` 上 run [`33580222221`](https://github.com/shixian66/xiaowei-agent/actions/runs/33580222221)，六个 gate 全绿 |
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
-| M2 状态 | **代码合并准入通过，已以 `--ff-only` 合入 `main`**（合并对象 `56ef5990a6a9627ba18acbeff21a08e7a41ff03d`，无合并提交，历史未改写）。**这只是代码合并准入，不代表部署、CI、线上观察或用户验收已完成**——M2 交付的仍只是契约与 fake。逐提交 SHA 用 `git log --oneline d0971666..56ef5990` 查询 |
+| M2 状态 | **已合入 `main`（PR #3，fast-forward，合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`，无合并提交，历史未改写），但尚未验收。** 合并后补审又发现三类拒绝路径泄漏，正在 `claude/m2-reject-path-followup` 上修复。**合并 ≠ 验收**：验收需项目负责人在 Codex 对新 SHA 复审通过后明确声明。逐提交 SHA 用 `git log --oneline d0971666..main` 查询 |
 | M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经三轮 Codex 审核后获批开工（本分支已带入该文件） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -102,7 +102,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
 3. ~~M2 详细计划编写与审批~~ **已完成**：经三轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
-4. ~~M2 实现~~ **已完成，待验收**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地并通过四条门。
+4. ~~M2 实现~~ **已合入 `main`，待验收**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地并通过四条门。
 5. **下一步**：M2 技术审查与验收；通过后为 M3 单独编写详细实施计划并获批，才能以 TDD 落地第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
 6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
 7. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
@@ -151,7 +151,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 
 ### 已验证
 
-- **M2 合并对象 `56ef5990` 在 `main` 上四条命令全绿**（合并前在分支同一 SHA 上亦全绿）：`python -m pytest -q` 623 passed；`python -m pytest -m security -q` 482 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..56ef5990` 无输出。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
+- **M2 合并对象 `527cd7f` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 633 passed；`python -m pytest -m security -q` 492 passed / 141 deselected；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..527cd7f` 无输出。**数字绑定到这个确切 SHA**——不写成「本分支有 N 个提交、N 条测试」，那种写法每修订一次就失真一次（本条此前记的 11 个提交 / 450 passed 即已过期）。更早的逐 SHA 结果见各提交信息。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
 - 变异测试暴露并修补了两个**测试覆盖缺口**：`verify_plan_effects` 的 `side_effect` 比对此前从未单独承重（既有伪造用例总是先被 `effect_class` 抓住）；`verify_approval_binding` 的过期/状态检查顺序此前是空断言（用例里 state 仍是 GRANTED，顺序对结果无影响）。两处均已补齐隔离用例。
