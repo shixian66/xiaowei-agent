@@ -11,12 +11,18 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    from tests.fakes.clock import ManualClock
+
     from xiaowei_agent.contracts import (
         AdmissionCertificate,
         ExecutionPlan,
         RequestContext,
+        RequestEnvelope,
+        TaskRecord,
+        TaskStatus,
         ToolCall,
     )
+    from xiaowei_agent.persistence.fake import InMemoryTaskStore
     from xiaowei_agent.tools.fake import RecordingToolAdapter
     from xiaowei_agent.tools.gateway import DeterministicToolGateway
 
@@ -135,3 +141,71 @@ def make_certificate(call: "ToolCall", **overrides: object) -> "AdmissionCertifi
 @pytest.fixture
 def admission(ok_call: "ToolCall") -> "AdmissionCertificate":
     return make_certificate(ok_call)
+
+
+def make_envelope(**overrides: object) -> "RequestEnvelope":
+    from xiaowei_agent.contracts import Channel, RequestEnvelope
+
+    base: dict[str, object] = {
+        "request_id": "r1",
+        "tenant_id": "dev-local",
+        "actor": "alice",
+        "channel": Channel.CLI,
+        "text": "why is the query slow",
+        "idempotency_key": "idem-1",
+        "environment_id": "dev",
+    }
+    return RequestEnvelope(**(base | overrides))
+
+
+@pytest.fixture
+def clock() -> "ManualClock":
+    from tests.fakes.clock import ManualClock
+
+    return ManualClock()
+
+
+@pytest.fixture
+def store(clock: "ManualClock") -> "InMemoryTaskStore":
+    from xiaowei_agent.persistence.fake import InMemoryTaskStore
+
+    return InMemoryTaskStore(clock=clock)
+
+
+@pytest.fixture
+async def task(store: "InMemoryTaskStore", context: "RequestContext") -> "TaskRecord":
+    return await store.create_task(envelope=make_envelope(), context=context)
+
+
+def _path_to(target: "TaskStatus") -> tuple["TaskStatus", ...]:
+    """在 ALLOWED_TRANSITIONS 上做 BFS，求 CREATED → target 的一条最短合法路径。
+
+    写成搜索而不是硬编码路径，是因为硬编码会在迁移表变化时悄悄失配；搜索失败本身
+    也是一条断言——说明该终态从 CREATED 不可达，迁移表有问题。
+    """
+    from xiaowei_agent.contracts import ALLOWED_TRANSITIONS, TaskStatus
+
+    queue: list[tuple[TaskStatus, tuple[TaskStatus, ...]]] = [(TaskStatus.CREATED, ())]
+    seen = {TaskStatus.CREATED}
+    while queue:
+        current, path = queue.pop(0)
+        if current is target:
+            return path
+        for nxt in sorted(ALLOWED_TRANSITIONS[current], key=lambda s: s.value):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, (*path, nxt)))
+    raise AssertionError(f"{target.value} is unreachable from CREATED")
+
+
+async def drive_to_terminal(
+    store: "InMemoryTaskStore", task_id: str, terminal: "TaskStatus"
+) -> None:
+    """把任务沿一条合法路径推到指定终态，全程采纳存储层 winner。"""
+    record = await store.get(task_id)
+    for status in _path_to(terminal):
+        result = await store.transition(
+            task_id=task_id, expected_version=record.version, to_status=status
+        )
+        assert result.applied, result.rejection
+        record = result.winner

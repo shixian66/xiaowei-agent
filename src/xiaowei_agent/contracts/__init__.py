@@ -58,10 +58,20 @@ from xiaowei_agent.contracts.plan import (
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicySnapshot
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 from xiaowei_agent.contracts.target import ResolvedTarget
+from xiaowei_agent.contracts.task import (
+    ALLOWED_TRANSITIONS,
+    TERMINAL_STATUSES,
+    LeaseGrant,
+    TaskOutcome,
+    TaskRecord,
+    TransitionResult,
+)
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
 
 __all__ = [
+    "ALLOWED_TRANSITIONS",
     "PLAN_SCHEMA_VERSION",
+    "TERMINAL_STATUSES",
     "AdapterStatus",
     "AdmissionCertificate",
     "AgentError",
@@ -88,6 +98,7 @@ __all__ = [
     "IntentDraft",
     "IntentSource",
     "JsonScalar",
+    "LeaseGrant",
     "MissingItem",
     "OperationSpec",
     "PipelineStage",
@@ -106,12 +117,15 @@ __all__ = [
     "StepResultStatus",
     "StrictInt",
     "StrictStr",
+    "TaskOutcome",
+    "TaskRecord",
     "TaskStatus",
     "ToolCall",
     "ToolCallStatus",
     "ToolResult",
     "TraceId",
     "TransitionRejection",
+    "TransitionResult",
     "TrustLevel",
     "content_digest",
     "frozen_map",

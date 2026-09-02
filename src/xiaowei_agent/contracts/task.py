@@ -1,0 +1,124 @@
+"""任务生命周期契约。
+
+状态迁移表是**闭集**：不在表中的迁移一律拒绝。终态的出边显式写成空集合，而不是
+"表里没有这个键"——后者会让 ``ALLOWED_TRANSITIONS[status]`` 抛 ``KeyError`` 而不是
+给出确定的拒绝。终态集合与迁移表由测试交叉校验，避免两处各写一份而悄悄漂移。
+"""
+
+import datetime as _dt
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final, Self
+
+from pydantic import Field, model_validator
+
+from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
+
+TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+        TaskStatus.CANCELED,
+        TaskStatus.INDETERMINATE,
+    }
+)
+
+ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = MappingProxyType(
+    {
+        TaskStatus.CREATED: frozenset(
+            {TaskStatus.PLANNING, TaskStatus.CANCELED, TaskStatus.FAILED}
+        ),
+        TaskStatus.PLANNING: frozenset(
+            {
+                TaskStatus.RUNNING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELED,
+                TaskStatus.REJECTED,
+            }
+        ),
+        TaskStatus.RUNNING: frozenset(
+            {
+                TaskStatus.AWAITING_APPROVAL,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELED,
+                TaskStatus.INDETERMINATE,
+            }
+        ),
+        TaskStatus.AWAITING_APPROVAL: frozenset(
+            {
+                TaskStatus.RUNNING,
+                TaskStatus.REJECTED,
+                TaskStatus.CANCELED,
+                TaskStatus.FAILED,
+            }
+        ),
+        **{status: frozenset() for status in TERMINAL_STATUSES},
+    }
+)
+
+
+class TaskRecord(Contract):
+    task_id: StrictStr
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    actor: StrictStr
+    idempotency_key: StrictStr
+    request_digest: StrictStr
+    status: TaskStatus
+    version: StrictInt = Field(ge=0)
+    lease_owner: str | None = None
+    lease_expires_at: _dt.datetime | None = None
+    fencing_token: StrictInt | None = Field(default=None, gt=0)
+    terminal_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _lease_fields_are_consistent(self) -> Self:
+        """三个租约字段必须同时置位或同时清空。
+
+        任一单独存在都意味着状态机中间态泄漏出来了；此时"是否持有租约"没有确定
+        答案，fencing 检查也就失去依据。
+        """
+        held = self.lease_owner is not None
+        if held != (self.lease_expires_at is not None) or held != (
+            self.fencing_token is not None
+        ):
+            raise ValueError(
+                "lease_owner, lease_expires_at and fencing_token must be set or cleared together"
+            )
+        return self
+
+
+class LeaseGrant(Contract):
+    task_id: StrictStr
+    owner: StrictStr
+    expires_at: _dt.datetime
+    fencing_token: StrictInt = Field(gt=0)
+
+
+class TransitionResult(Contract):
+    applied: bool
+    winner: TaskRecord
+    rejection: TransitionRejection | None = None
+
+    @model_validator(mode="after")
+    def _applied_xor_rejection(self) -> Self:
+        if self.applied is (self.rejection is not None):
+            raise ValueError("applied and rejection must be mutually exclusive")
+        return self
+
+
+class TaskOutcome(Contract):
+    task_id: StrictStr
+    status: TaskStatus
+    terminal_reason: str | None
+    evidence_refs: tuple[StrictStr, ...]
+    render_ref: str | None
+
+    @model_validator(mode="after")
+    def _status_must_be_terminal(self) -> Self:
+        if self.status not in TERMINAL_STATUSES:
+            raise ValueError(f"TaskOutcome requires a terminal status, got {self.status}")
+        return self
