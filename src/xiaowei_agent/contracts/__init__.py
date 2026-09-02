@@ -56,6 +56,7 @@ from xiaowei_agent.contracts.plan import (
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicySnapshot
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 from xiaowei_agent.contracts.target import ResolvedTarget
+from xiaowei_agent.contracts.tool import ToolCall
 
 __all__ = [
     "PLAN_SCHEMA_VERSION",
@@ -101,6 +102,7 @@ __all__ = [
     "StrictInt",
     "StrictStr",
     "TaskStatus",
+    "ToolCall",
     "ToolCallStatus",
     "TraceId",
     "TransitionRejection",

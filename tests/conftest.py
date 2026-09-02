@@ -6,8 +6,12 @@
 
 import os
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from xiaowei_agent.contracts import ExecutionPlan
 
 _PREFIX = "XIAOWEI_"
 
@@ -24,3 +28,13 @@ def clean_xiaowei_env() -> Iterator[None]:
         for k in [k for k in os.environ if k.upper().startswith(_PREFIX)]:
             del os.environ[k]
         os.environ.update(saved)
+
+
+@pytest.fixture
+def two_step_plan() -> "ExecutionPlan":
+    """两步计划；用于证明 ordered_steps 的顺序进入 plan_hash。"""
+    from tests.fakes.fixtures import FIXTURE_PLAN
+
+    first = FIXTURE_PLAN.steps[0]
+    second = first.model_copy(update={"step_id": "s2", "depends_on": ("s1",)})
+    return FIXTURE_PLAN.model_copy(update={"steps": (first, second)})

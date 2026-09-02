@@ -8,7 +8,12 @@ from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     CapabilitySpec,
     EffectClass,
+    ExecutionPlan,
     OperationSpec,
+    PlanBudget,
+    PlanStep,
+    ResolvedTarget,
+    ToolCall,
 )
 
 READ_CAP = "starrocks.slow_query.diagnose"
@@ -53,4 +58,43 @@ SNAPSHOT = CapabilitySnapshot(
             eval_ref="evals.test.write",
         ),
     ),
+)
+
+
+BUDGET = PlanBudget(max_steps=4, max_tool_calls=4, max_model_tokens=8000)
+
+FIXTURE_PLAN = ExecutionPlan(
+    capability_id=READ_CAP,
+    capability_version=CAP_VERSION,
+    steps=(
+        PlanStep(
+            step_id="s1",
+            operation=READ_OP,
+            typed_arguments={"window_minutes": 30},
+            depends_on=(),
+            side_effect=False,
+            effect_class=EffectClass.READ,
+        ),
+    ),
+    policy_profile="readonly.default",
+    policy_revision="policy-2026-09-01",
+    budget=BUDGET,
+)
+
+FIXTURE_TARGET = ResolvedTarget(
+    tenant_id="dev-local",
+    environment_id="dev",
+    provider="starrocks",
+    resource_kind="cluster",
+    resource_ids=("c1", "c2"),
+    selector_version="1",
+)
+
+FIXTURE_TOOL_CALL = ToolCall(
+    gateway="starrocks",
+    operation=READ_OP,
+    step_id="s1",
+    typed_args={"window_minutes": 30},
+    timeout_seconds=30.0,
+    idempotency_key="idem-1",
 )
