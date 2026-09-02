@@ -30,7 +30,7 @@ from xiaowei_agent.redaction import scrub_text
 def _scrub_details(value: object) -> Mapping[str, str]:
     """**键与值都脱敏**后冻结。
 
-    只脱敏值会把 secret 留在键里：``{"token=abc123def456": "safe"}`` 原样出现在
+    只脱敏值会把 secret 留在键里：``{"token=<值>": "safe"}`` 原样出现在
     审计事件中。键同样是调用方拼出来的自由文本。
 
     脱敏后两个键可能塌成同一个（``token=a`` 与 ``token=b`` 都变成 ``token=***``）。

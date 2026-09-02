@@ -25,6 +25,11 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.governance import BindingError, verify_approval_binding
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 
+# 伪造取值必须**拆开写**：连续的 ``token=<值>`` 会被 secret-scan 判为泄漏。
+# 这是仓库既有约定（见 tests/security/test_redaction.py 的 _PW / _TOKEN），
+# 由 test_no_contiguous_secret_shaped_literal 在本地 gate 内强制。
+_FAKE = "abc123" + "def456"
+
 pytestmark = pytest.mark.security
 
 _AT = dt.datetime(2026, 9, 2, tzinfo=dt.UTC)
@@ -97,14 +102,14 @@ def _event(detail: dict[str, str], **overrides: object) -> TraceEvent:
 
 def test_detail_keys_are_redacted_too() -> None:
     """只脱敏 value 会把 secret 留在 key 里——key 同样是调用方拼出来的自由文本。"""
-    event = _event({"token=abc123def456": "safe"})
-    assert not any("abc123def456" in key for key in event.detail)
+    event = _event({"token=" + _FAKE: "safe"})
+    assert not any(_FAKE in key for key in event.detail)
 
 
 def test_detail_key_collision_after_redaction_is_rejected() -> None:
     """脱敏后两个键塌成同一个，静默覆盖会丢失一条事件明细。"""
     with pytest.raises(ValidationError, match="collides with an earlier key after redaction"):
-        _event({"token=aaaaaaaaaaaa": "1", "token=bbbbbbbbbbbb": "2"})
+        _event({"token=" + "a" * 12: "1", "token=" + "b" * 12: "2"})
 
 
 def test_trace_id_must_be_a_real_trace_id() -> None:

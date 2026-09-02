@@ -13,6 +13,11 @@ from pydantic import ValidationError
 
 from xiaowei_agent.contracts import PipelineStage, StageOutcome, TraceEvent
 
+# 伪造取值必须**拆开写**：连续的 ``token=<值>`` 会被 secret-scan 判为泄漏。
+# 这是仓库既有约定（见 tests/security/test_redaction.py 的 _PW / _TOKEN），
+# 由 test_no_contiguous_secret_shaped_literal 在本地 gate 内强制。
+_FAKE = "abc123" + "def456"
+
 pytestmark = pytest.mark.security
 
 
@@ -53,8 +58,8 @@ def test_detail_is_deeply_immutable() -> None:
 def test_redaction_survives_a_copy() -> None:
     """copy 会重新走完整校验，脱敏与冻结都必须再次生效。"""
     event = _event({"k": "v"})
-    copied = event.model_copy(update={"detail": {"k": "token=abc123def456"}})
-    assert "abc123def456" not in copied.detail["k"]
+    copied = event.model_copy(update={"detail": {"k": "token=" + _FAKE}})
+    assert _FAKE not in copied.detail["k"]
     with pytest.raises(TypeError):
         copied.detail["k"] = "x"  # type: ignore[index]
 

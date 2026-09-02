@@ -134,5 +134,28 @@ jobs:
           fi
           echo "scanner self-test passed: bait detected (exit 1)"
           rm -rf "$tmp"
+      - name: Allowlist narrowness self-test
+        run: |
+          set -uo pipefail
+          # .gitleaks.toml 豁免了一个已知的伪造取值。豁免的窄度必须由机器证明：
+          # 只写 paths 会整文件放行（gitleaks 对 paths/regexes 取 OR），
+          # matchCondition="AND" 在 8.30 顶层 allowlist 里不生效且更宽。
+          # 这里放一个随机高熵 secret，它必须仍被拦下。
+          tmp="$(mktemp -d)"
+          cp .gitleaks.toml "$tmp/"
+          mkdir -p "$tmp/tests/security"
+          printf 'y = "token=%s"\n' \
+            "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" \
+            > "$tmp/tests/security/test_trace_event_redaction.py"
+          set +e
+          ./gitleaks dir --redact --no-banner "$tmp"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "allowlist narrowness FAILED: 豁免过宽，真实 secret 未被拦下 (exit $rc)"
+            exit 1
+          fi
+          echo "allowlist narrowness passed: 同路径下的真实 secret 仍被拦下"
+          rm -rf "$tmp"
       - name: Scan full git history
         run: ./gitleaks git --log-opts="--all" --redact --no-banner .
