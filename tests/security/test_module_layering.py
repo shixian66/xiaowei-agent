@@ -63,6 +63,10 @@ _ALLOWED_INTERNAL = {
     # evidence 是纯构造器：只依赖 contracts（+ 通用叶子 redaction）。这条窄依赖是
     # runners → evidence 那条边的对价，由 test_evidence_layer_purity.py 承重。
     "evidence": {"xiaowei_agent.contracts", "xiaowei_agent.evidence"},
+    # reflection 只消费结构化证据，rendering 只做投影：两者都不得触达工具、存储或
+    # 治理组件（test_reflection_has_no_authority.py 另有更严的同向断言）。
+    "reflection": {"xiaowei_agent.contracts", "xiaowei_agent.reflection"},
+    "rendering": {"xiaowei_agent.contracts", "xiaowei_agent.rendering"},
     "observability": {"xiaowei_agent.contracts", "xiaowei_agent.observability"},
 }
 

@@ -390,6 +390,8 @@ _DOMAIN_PACKAGES = (
     "runners",
     "observability",
     "evidence",
+    "reflection",
+    "rendering",
 )
 """只扫**领域层**。
 
