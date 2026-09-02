@@ -98,18 +98,21 @@ class ExecutionPlan(Contract):
         条件只能看已经执行过的步骤。
         """
         seen: set[str] = set()
-        for step in self.steps:
+        # 用步骤序号而不是 step_id 定位：step_id 由计划编译产生，仍是数据；
+        # 拒绝路径统一不回显取值（与 canonical、Gateway、ValidationError 同一条
+        # 不变量），序号在同一个 steps 元组里已经足以定位。
+        for index, step in enumerate(self.steps):
             if step.step_id in seen:
-                raise ValueError(f"duplicate step_id: {step.step_id}")
+                raise ValueError(f"duplicate step_id at step #{index}")
             for dep in step.depends_on:
                 if dep not in seen:
                     raise ValueError(
-                        f"step {step.step_id} depends on unknown or later step {dep}"
+                        f"step #{index} depends on an unknown or later step"
                     )
             ref = step.condition.ref_step_id
             if ref is not None and ref not in seen:
                 raise ValueError(
-                    f"step {step.step_id} condition references unknown or later step"
+                    f"step #{index} condition references an unknown or later step"
                 )
             seen.add(step.step_id)
         if len(self.steps) > self.budget.max_steps:

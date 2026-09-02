@@ -30,7 +30,7 @@ def test_canonical_json_rejects_key_collision_after_nfc() -> None:
 
     与 ResolvedTarget 的 resource_ids 是同一类缺陷，这一层也必须堵住。
     """
-    with pytest.raises(ValueError, match="collision"):
+    with pytest.raises(ValueError, match="collides with an earlier key after NFC"):
         canonical_json({"e\u0301": 1, "\u00e9": 2})
 
 

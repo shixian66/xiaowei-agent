@@ -38,6 +38,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.contracts.tool import _TOOL_RESULT_WITNESS, _TOOL_RESULT_WITNESS_KEY
 from xiaowei_agent.planning import compute_tool_call_hash
+from xiaowei_agent.redaction import safe_exception_text
 from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
 
 _E1_EXECUTION_ENABLED: Final[bool] = False
@@ -121,7 +122,9 @@ class DeterministicToolGateway:
             raise PermissionError("E1 execution is disabled for M0-M7")
         adapter = self._adapters.get(call.gateway)
         if adapter is None:
-            raise LookupError(f"adapter not registered: {call.gateway}")
+            # 不回显 call.gateway：网关名来自调用方，拒绝路径不得把外部输入
+            # 拼进异常消息（与 ValidationError 不回显 input 同一条不变量）。
+            raise LookupError("adapter not registered for this call")
 
         try:
             response = await asyncio.wait_for(
@@ -146,9 +149,12 @@ class DeterministicToolGateway:
             #
             # M8 开放 E1 后需重新审视：写操作抛异常时目标状态不可知，应映射为
             # ``INDETERMINATE`` 而非 ``ERROR``。M2 只读，故此处用 ERROR。
+            # 不直接 str(exc)：见 redaction.safe_exception_text —— __str__ 抛异常
+            # 的错误对象会让这条 except 分支本身再抛，整条"异常必被结构化吸收"
+            # 的承诺随之失效。安全原语项目里早就有，缺的是执行点调用它。
             cause = ExternalContent.capture(
                 source=ExternalSource.TOOL,
-                content=f"{type(exc).__name__}: {exc}",
+                content=safe_exception_text(exc),
                 captured_at=_dt.datetime.now(tz=_dt.UTC),
             )
             return self._issue(
@@ -161,8 +167,7 @@ class DeterministicToolGateway:
             )
         if not isinstance(response, AdapterResponse):
             raise TypeError(
-                f"adapter {call.gateway!r} returned {type(response).__name__}, "
-                "expected AdapterResponse"
+                f"adapter returned {type(response).__name__}, expected AdapterResponse"
             )
         # adapter 出错时不得返回空成功：状态与结构化错误一起传出去，且不把半截
         # payload 当作证据。

@@ -110,12 +110,16 @@ def _normalise(value: object) -> object:
         raise TypeError("bytes are not canonicalisable")
     if isinstance(value, Mapping):
         out: dict[str, object] = {}
-        for key, item in value.items():
+        for index, (key, item) in enumerate(value.items()):
             if not isinstance(key, str):
                 raise TypeError("canonical mapping keys must be str")
             nkey = unicodedata.normalize("NFC", key)
             if nkey in out:
-                raise ValueError(f"canonical key collision after NFC: {nkey!r}")
+                # 用序号而不是键本身定位：映射的键是外部文本，回显它会让"拒绝"
+                # 变成外泄通道（与 ValidationError 的 loc 泄漏同一条不变量）。
+                raise ValueError(
+                    f"canonical key #{index} collides with an earlier key after NFC"
+                )
             out[nkey] = _normalise(item)
         return out
     if isinstance(value, Sequence):

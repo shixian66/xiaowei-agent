@@ -13,10 +13,17 @@ pytestmark = pytest.mark.security
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 
+# ``redaction`` 是**无对内依赖的叶子**：它只含脱敏正则与安全投影原语，不 import
+# 任何 xiaowei_agent 模块。因此任何层依赖它都不构成分层违规，写成全局允许而不是
+# 逐包加白名单——后者每新增一个使用方就要改一次，必然漂移。
+#
+# 这条允许是有代价的双向约束：``redaction`` 一旦获得对内依赖，就会从叶子变成
+# 环的一部分，故由 ``test_redaction_stays_a_leaf`` 单独钉死。
+_UNIVERSAL_LEAF = {"xiaowei_agent.redaction"}
+
 _ALLOWED_INTERNAL = {
-    # contracts 允许且仅允许依赖 redaction（无对内依赖的叶子）与标准库；
-    # log / config / trace 一律不可。
-    "contracts": {"xiaowei_agent.contracts", "xiaowei_agent.redaction"},
+    # contracts 除叶子外不得依赖任何内部模块；log / config / trace 一律不可。
+    "contracts": {"xiaowei_agent.contracts"},
     "capabilities": {"xiaowei_agent.contracts", "xiaowei_agent.capabilities"},
     "planning": {"xiaowei_agent.contracts", "xiaowei_agent.planning"},
     "governance": {
@@ -52,7 +59,7 @@ def _internal_imports(path: Path) -> set[str]:
 
 @pytest.mark.parametrize("package", sorted(_ALLOWED_INTERNAL))
 def test_package_only_imports_allowed_internal_modules(package: str) -> None:
-    allowed = _ALLOWED_INTERNAL[package]
+    allowed = _ALLOWED_INTERNAL[package] | _UNIVERSAL_LEAF
     offenders: list[tuple[str, str]] = []
     for path in (_SRC / package).rglob("*.py"):
         for module in _internal_imports(path):
@@ -80,3 +87,16 @@ def test_contracts_never_depend_on_implementations() -> None:
 
 def test_redaction_is_a_leaf() -> None:
     assert not _internal_imports(_SRC / "redaction.py")
+
+
+def test_redaction_stays_a_leaf() -> None:
+    """``redaction`` 对所有层开放，代价是它自己不得有任何对内依赖。
+
+    一旦它 import 了别的 xiaowei_agent 模块，上面的全局允许就会把环引进来。
+    """
+    offenders = [
+        (str(path.relative_to(_SRC)), module)
+        for path in [_SRC / "redaction.py"]
+        for module in _internal_imports(path)
+    ]
+    assert not offenders, f"redaction 必须保持无对内依赖: {offenders}"

@@ -126,3 +126,28 @@ def safe_error_details(exc: "ValidationError") -> tuple[str, ...]:
         # 未来扩展投影字段时的影响面——把它写成"这就是防线"会是错的。
         for item in exc.errors(include_input=False, include_url=False)
     )
+
+
+def safe_exception_text(exc: BaseException) -> str:
+    """把任意异常渲染成**永不再抛异常**且已脱敏的一行文本。
+
+    ``f"{type(exc).__name__}: {exc}"`` 有两个独立缺陷：
+
+    1. ``str(exc)`` 会调用异常自己的 ``__str__``。一个 ``__str__`` 抛异常的错误
+       对象（故障的第三方 driver，或恶意实现）会让**异常处理分支本身再抛异常**，
+       于是"任何 adapter 异常都被结构化吸收"这条承诺当场失效，原始异常还会一路
+       逃逸到调用方。根因与"先派生后校验"相同：处理器假定某个操作是全函数。
+    2. 渲染出来的文本是上游原文，可能带连接串、口令。
+
+    ``type(exc).__name__`` 同样不假定为安全：元类可以让属性访问抛异常。因此整个
+    渲染过程都在保护之下，任何一步失败都降级为 :data:`REDACTED`。
+    """
+    try:
+        name = type(exc).__name__
+    except Exception:
+        name = REDACTED
+    body = _safe_str(exc)
+    try:
+        return scrub_text(f"{name}: {body}")
+    except Exception:
+        return REDACTED

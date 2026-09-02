@@ -47,12 +47,10 @@ def derive_effect(
         for op in spec.operations:
             if op.operation == operation:
                 return op
-        raise SpecResolutionError(
-            f"operation not declared: {capability_id}@{capability_version}:{operation}"
-        )
-    raise SpecResolutionError(
-        f"capability version not in snapshot: {capability_id}@{capability_version}"
-    )
+        # 不回显 capability_id / version / operation：这三个正是本次未能在快照中
+        # 匹配上的输入，属于未经校验的调用方数据。调用方本就持有它们。
+        raise SpecResolutionError("operation is not declared by the resolved capability")
+    raise SpecResolutionError("capability version is not present in the snapshot")
 
 
 def build_plan_step(
@@ -89,7 +87,7 @@ def verify_plan_effects(snapshot: CapabilitySnapshot, plan: ExecutionPlan) -> No
 
     :raises SpecResolutionError: 分类无法派生，或与步骤标记不一致（双向皆拒）。
     """
-    for step in plan.steps:
+    for index, step in enumerate(plan.steps):
         declared = derive_effect(
             snapshot,
             capability_id=plan.capability_id,
@@ -97,6 +95,6 @@ def verify_plan_effects(snapshot: CapabilitySnapshot, plan: ExecutionPlan) -> No
             operation=step.operation,
         )
         if step.effect_class is not declared.effect_class:
-            raise SpecResolutionError(f"effect_class mismatch on step {step.step_id}")
+            raise SpecResolutionError(f"effect_class mismatch on step #{index}")
         if step.side_effect != declared.side_effect:
-            raise SpecResolutionError(f"side_effect mismatch on step {step.step_id}")
+            raise SpecResolutionError(f"side_effect mismatch on step #{index}")

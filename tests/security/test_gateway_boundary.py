@@ -9,12 +9,15 @@ from tests.conftest import make_certificate
 
 from xiaowei_agent.contracts import (
     AdapterStatus,
+    AdmissionCertificate,
     EffectClass,
     ErrorCategory,
     ExternalContent,
     ExternalSource,
     PolicyDecision,
+    RequestContext,
     RiskLevel,
+    ToolCall,
     ToolCallStatus,
 )
 from xiaowei_agent.tools.adapter import AdapterResponse
@@ -284,13 +287,65 @@ async def test_cancellation_is_not_swallowed(ok_call, context, admission) -> Non
 
 
 def _referenced(path: Path) -> set[str]:
+    """模块里出现过的所有标识符：裸名、from-import 名，以及**属性名**。
+
+    漏掉 ``ast.Attribute.attr`` 会留下一条完整的绕过路径::
+
+        import xiaowei_agent.contracts.approval as approval
+        approval._ADMISSION_WITNESS      # 只看 Name 时，扫描器只看到 ``approval``
+
+    签发凭据的整个价值就在于"除签发者外没人拿得到"，一个只盖住 import 形式的
+    扫描器给出的是虚假保证。
+    """
     names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Name):
             names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
         elif isinstance(node, ast.ImportFrom):
             names |= {a.name for a in node.names}
+        elif isinstance(node, ast.Import):
+            # ``import a.b.c`` 与 ``import a.b as c``：点分路径的每一段都算引用。
+            for alias in node.names:
+                names |= set(alias.name.split("."))
+                if alias.asname:
+                    names.add(alias.asname)
     return names
+
+
+def test_referenced_detects_aliased_attribute_access(tmp_path: Path) -> None:
+    """检测器自测：三种引用形式都必须被看到。
+
+    只测 from-import 形式会让别名属性访问这条路径长期隐形——护栏本身必须有反例。
+    """
+    nl = chr(10)
+    from_import = tmp_path / "a.py"
+    from_import.write_text(
+        "from xiaowei_agent.contracts.approval import _ADMISSION_WITNESS" + nl,
+        encoding="utf-8",
+    )
+    assert "_ADMISSION_WITNESS" in _referenced(from_import)
+
+    aliased = tmp_path / "b.py"
+    aliased.write_text(
+        "import xiaowei_agent.contracts.approval as approval" + nl
+        + "x = approval._ADMISSION_WITNESS" + nl,
+        encoding="utf-8",
+    )
+    assert "_ADMISSION_WITNESS" in _referenced(aliased)
+
+    dotted = tmp_path / "c.py"
+    dotted.write_text(
+        "import xiaowei_agent.contracts.approval" + nl
+        + "x = xiaowei_agent.contracts.approval._ADMISSION_WITNESS" + nl,
+        encoding="utf-8",
+    )
+    assert "_ADMISSION_WITNESS" in _referenced(dotted)
+
+    clean = tmp_path / "d.py"
+    clean.write_text("x = 1" + nl, encoding="utf-8")
+    assert "_ADMISSION_WITNESS" not in _referenced(clean)
 
 
 @pytest.mark.parametrize(
@@ -374,3 +429,81 @@ def test_domain_layer_has_no_third_party_client_import() -> None:
                 if (module or "").split(".")[0] in _BANNED_ROOTS:
                     offenders.append((str(path.relative_to(_SRC)), module or ""))
     assert not offenders, f"领域层不得导入外部客户端: {offenders}"
+
+
+# --- 异常处理分支自身的健壮性 -----------------------------------------------
+
+_HOSTILE_CANARY = "synthetic-canary-password=hunter2"
+
+
+class _HostileStrError(RuntimeError):
+    """``__str__`` 自身抛异常的错误对象。
+
+    现实里这来自故障的第三方 driver（例如格式化错误详情时又访问了已关闭的连接），
+    不必假设恶意也成立。
+    """
+
+    def __str__(self) -> str:
+        raise RuntimeError(f"str failed: {_HOSTILE_CANARY}")
+
+
+class _HostileReprError(RuntimeError):
+    def __str__(self) -> str:
+        raise RuntimeError("str failed")
+
+    def __repr__(self) -> str:
+        raise RuntimeError("repr failed")
+
+
+class _HostileAdapter:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self.calls: list[object] = []
+
+    async def execute(self, call: object, *, context: object) -> object:
+        self.calls.append(call)
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [_HostileStrError(), _HostileReprError()],
+    ids=["hostile_str", "hostile_str_and_repr"],
+)
+@pytest.mark.asyncio
+async def test_adapter_exception_with_failing_str_is_still_absorbed(
+    exc: BaseException,
+    ok_call: ToolCall,
+    context: RequestContext,
+    admission: AdmissionCertificate,
+) -> None:
+    """``str(exc)`` 会调用异常自己的 ``__str__``。
+
+    直接写 ``f"{type(exc).__name__}: {exc}"`` 时，一个 ``__str__`` 抛异常的错误
+    对象会让**异常处理分支本身再抛异常**：Gateway 不返回结构化 ERROR，原始异常
+    连同它携带的内容一路逃逸到调用方。"任何 adapter 异常都被结构化吸收"这条承诺
+    在最需要它的时候失效。
+
+    根因与"先派生后校验"相同：处理器假定某个操作是全函数，而它不是。
+    """
+    gateway = DeterministicToolGateway(adapters={ok_call.gateway: _HostileAdapter(exc)})
+    result = await gateway.invoke(ok_call, context=context, admission=admission)
+    assert result.status is ToolCallStatus.ERROR
+    assert result.data_view == ()
+    assert _HOSTILE_CANARY not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_renderable_exception_text_never_reaches_the_result(
+    ok_call: ToolCall, context: RequestContext, admission: AdmissionCertificate
+) -> None:
+    """反例配对：能被渲染的异常同样不得把原文带进结果。
+
+    只测"不崩溃"是不够的——降级路径可能把原文写进 limitations 或 error。
+    """
+    gateway = DeterministicToolGateway(
+        adapters={ok_call.gateway: _HostileAdapter(RuntimeError(_HOSTILE_CANARY))}
+    )
+    result = await gateway.invoke(ok_call, context=context, admission=admission)
+    assert result.status is ToolCallStatus.ERROR
+    assert _HOSTILE_CANARY not in result.model_dump_json()
