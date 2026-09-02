@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：已具备可安装、可测试、可静态检查的 Python 工程基线与 CI，以及 M2 的契约内核（DTO、Protocol、确定性指纹、治理校验函数与 fake 实现）；**尚未**具备可运行的 API、Worker、数据库迁移、容器镜像或任何线上能力，也**没有任何可执行的业务能力**。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：已具备工程基线与 CI、M2 契约内核，以及 M3 的**第一条只读垂直闭环**——`starrocks.slow_query.diagnose` 可以从结构化意图走完 Resolver → PlanCompiler → StepAdmission → ToolGateway → Evidence → Answerability → RenderPayload，**全部使用 fake/recording 数据**。**尚未**具备可运行的 API、Worker、数据库迁移或容器镜像；**未连接任何真实系统**，能力状态最强为 `tests`（非部署、非 canary、非用户验收）。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -75,7 +75,7 @@
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
 - 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
-- `sqlglot` 用于 SQL AST 解析和安全校验。
+- `sqlglot` 用于 SQL AST 解析和安全校验（M3 引入，是 M3 唯一新增的运行依赖）。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 当前这些是目标技术基线，不代表依赖已经安装或服务已经可启动。
@@ -107,21 +107,23 @@ agent/
 │   ├── persistence/            # 已建立（M2）：TaskStore 交互形状
 │   ├── runners/                # 已建立（M2）：WorkflowRunner 契约
 │   ├── observability/          # 已建立（M2）：TraceSink Protocol
-│   ├── application/            # Runtime / 用例编排（尚未创建）
-│   ├── evidence/               # Evidence / Memory（尚未创建）
-│   ├── reflection/             # Reflection / answerability（尚未创建）
-│   ├── rendering/              # RenderPayload 和通道投影（尚未创建）
+│   ├── application/            # 已建立（M3）：XiaoweiRuntime facade
+│   ├── evidence/               # 已建立（M3）：纯证据构造器
+│   ├── reflection/             # 已建立（M3）：可答性判定
+│   ├── rendering/              # 已建立（M3）：RenderPayload 投影
 │   └── interfaces/             # API / CLI / 飞书 / Web（尚未创建）
 └── tests/
     ├── unit/                   # 已建立
     ├── contract/               # 已建立（M2）
     ├── security/               # 已建立
-    ├── fakes/                  # 已建立（M2）：测试夹具
-    ├── integration/            # 尚未创建
-    └── evals/                  # 尚未创建
+    ├── fakes/                  # 已建立（M2/M3）：测试夹具与 recording
+    ├── evals/                  # 已建立（M3）：L0-L2 语料与断言
+    └── integration/            # 尚未创建
 ```
 
-上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 在 M1 建立；上表标注「已建立（M2）」的包在 M2 建立。其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
+上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 在 M1 建立；标注「已建立（M2）」「已建立（M3）」的包分别在对应里程碑建立。其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
+
+`docs/CAPABILITIES.md` 由 `xiaowei_agent.capabilities.doc.render_capabilities_doc()` 生成，一致性由 `tests/security/test_capabilities_doc.py` 检查；**不要手工编辑**。
 
 ## 从 0 开始的开发顺序
 
@@ -171,7 +173,9 @@ export XIAOWEI_LOG_LEVEL=INFO
 
 ### 尚未完成
 
-Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。M2 只交付契约与 fake：没有 Resolver、PlanCompiler、StepAdmission、SQLGuard、ApprovalGate 或任何真实 Runner 实现，也没有连接任何外部系统。
+Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**：`InMemoryTaskStore` / `InMemoryPlanStore` / `InMemoryEvidenceLedger` 只有单进程保证，跨进程原子性与崩溃恢复要到 M4 的 PostgreSQL 实现才可证。
+
+M3 **没有**：真实 StarRocks 连接、真实模型 API 调用、任何 E1（写）能力、API/CLI/Worker 入口、`tests/integration/`。`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 
 ## 旧项目关系
 

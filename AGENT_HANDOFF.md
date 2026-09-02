@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-02（Asia/Shanghai） |
-| 阶段 | **M0、M1、M2 已验收；下一步 M3 详细计划** |
+| 阶段 | **M0、M1、M2 已验收；M3 已实现完毕，待 Codex 深档验收** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -24,11 +24,14 @@
 | M1 工作分支 | `claude/m1-engineering-baseline` 已合入 `main`，保留备查 |
 | M2 状态 | **已验收通过并归档**。PR #3 以 fast-forward 合入契约内核（合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`）；PR #4 以 fast-forward 合入拒绝路径泄漏补修（最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e`）。归档见 [docs/handoff/archive/2026-09-02-M2-contract-kernel.md](docs/handoff/archive/2026-09-02-M2-contract-kernel.md) |
 | M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经多轮 Codex 审核后获批开工（已带入 `main`） |
+| M3 详细计划 | [docs/plans/M3-starrocks-slow-query.md](docs/plans/M3-starrocks-slow-query.md) V3，经两轮 Codex 审核批准 |
+| M3 状态 | **实现完毕、未合并、未验收**。分支 `claude/m3-starrocks-slow-query`，T0-T14 共 15 个 TDD 提交。验收报告见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md) |
+| M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
-| 首个闭环 | `starrocks.slow_query.diagnose`（已拍板，M3 实现，当前未实现） |
+| 首个闭环 | `starrocks.slow_query.diagnose`——**已实现**，仅 fake/recording 数据，未连接真实 StarRocks |
 
 旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目的分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
 
@@ -103,9 +106,11 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
 3. ~~M2 详细计划编写与审批~~ **已完成**：经多轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
 4. ~~M2 实现与验收~~ **已完成**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地；合并后拒绝路径泄漏补修已在 PR #4 合入并通过复审。
-5. **下一步**：为 M3 单独编写详细实施计划并获批，才能以 TDD 落地第一条只读垂直闭环，并用仅测试的合成副作用步骤反证 ApprovalGate 不能被绕过。
-6. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
-7. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
+5. ~~M3 详细计划编写与审批~~ **已完成**：V3 经两轮 Codex 审核批准。
+6. ~~M3 实现~~ **已完成，待验收**：T0-T14 共 15 个 TDD 提交在 `claude/m3-starrocks-slow-query`。
+7. **下一步**：Codex 按精确 SHA 做深档验收（真实 diff、调用链、安全绕过、测试充分性）。通过后由授权人员合并，并把逐条提交历史归档到 `docs/handoff/archive/`。
+8. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
+9. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
 
@@ -145,6 +150,12 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 不要在 `model_validator(mode="after")` 里改写取值（返回值会被丢弃且只发警告）；用字段级 `AfterValidator`。也不要重新引入任何"未校验复制"的逃生口。
 - 不要把 `test_domain_layer_has_no_third_party_client_import` 的扫描范围扩大到 `tools/` 或 `persistence/`，也不要为了让某模块通过而把它从领域层名单里删掉。
 - 不要用**文本扫描**代替 AST 扫描来断言代码行为——docstring 里的说明文字会让断言失真。
+- 不要让 count 模板与 list 模板各自演化：两者必须共用 `_scope_predicates()`。count 只回答"目标范围内有没有任何查询"，去掉目标过滤会把"拿不到该范围的审计数据"误报成"该范围没有慢查询"——一个自信但错误的结论。
+- 不要把 SQLGuard 的重编译比对挪到 AST 规则之前：那会让每条攻击都得到最宽泛的 `RECOMPILE_MISMATCH`，并使规则 1-13 变成不可达的死代码。
+- 不要让 Runner 写终态：终态由 Runtime 依 Answerability 的结论写且只写一次，Runner 先写会让终态保护堵死"降级为 indeterminate"这条路。
+- 不要手工编辑 `docs/CAPABILITIES.md`；它由 `capabilities/doc.py` 生成并由测试检查。
+- 不要在 `evidence/` 里加 `async` 或对 `contracts` 之外的内部依赖；不要让 `reflection/` / `rendering/` 够到 tools、存储或治理组件。
+- 不要在被引用步骤执行失败时仍然执行可选分支：`EVIDENCE_ROW_COUNT_BELOW` 无法区分"取到零行"与"根本没取到"，而两者含义相反。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
 
 ## 8. 验证记录
@@ -161,6 +172,9 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 依赖由 `uv.lock` 锁定，构建后端 `hatchling` 精确钉版并纳入锁定与 `pip-audit` 审计集。
 - 日志脱敏的攻击矩阵（Basic 认证、带引号 JSON 键、mapping 作格式化参数、含空格未引号值、自定义对象 `__str__`、非 JSON 映射键、同名 logger 上的外部 handler、格式化占位符破坏）逐条复现后封堵，并固化为回归测试。
 - 变异反证：移除 `redact()` 键分支、配置异常改回 `except` 块内 `from exc`、workflow 注入 `secrets[...]` 与 job 级 `write-all`，三类变异均使对应安全测试转红。
+- **M3 的四条命令在分支上全绿**：`python -m pytest -q` 1213 passed；`python -m pytest -m security -q` 809 passed / 404 deselected；`ruff check .` 与 `mypy src`（74 个源文件）均通过。精确 SHA 与逐条 TDD 反证记录见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md)。
+- **M3 的每个任务都做了 TDD 反证**：撤掉承重保护确认转红、还原确认转绿，逐条写在各任务提交信息里。其中**四次反证首轮全绿，暴露了真实的覆盖缺口**并已各自补测试：`result.applied` 检查（原用例被"终态任务拿不到租约"先挡住）、`gateway.invoke` 的属性访问（原 AST 断言只扫 `ast.Call`）、sink 的常量消息（原用例绿的理由不对——detail 在契约层已被 scrub）、以及 L0 语料里 A26/A29 两条只在语料中、无驱动的纸面条目。
+- **B1（count 模板必须复用目标范围）由三层共 5 条用例承重**：把 count 改成只带窗口后，T4 的集合等式 3 组、T6 的 A36、L0 的 A36 同时转红。
 
 ### 只读推理
 
@@ -172,8 +186,11 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未用户验收。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
-- **M2 只有契约与 fake，没有任何可执行的业务能力**：没有 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 或 `XiaoweiRuntime` 实现——全部属 M3。`governance/binding.py` 只是纯校验函数，不是 ApprovalGate。
-- `tests/{integration,evals}/` 与 `docs/CAPABILITIES.md` 尚未创建；`docker-compose.yml`、API、Worker、数据库迁移均不存在。
+- ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
+- `tests/integration/`、`docker-compose.yml`、API、Worker、数据库迁移仍不存在。
+- **`StepConditionKind` 四个成员 M3 只消费了两个**：`ALWAYS` 与 `EVIDENCE_ROW_COUNT_BELOW` 已被真实闭环消费；`EVIDENCE_FIELD_ABSENT` 与 `PRIOR_STEP_RESULT_IS` **未被消费、未被验证**，不要误以为四个都已验证。
+- **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
+- 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
 - ADR-001 至 ADR-006 尚未编写。
 - 错误分析闭环与 Multi-Agent 准入条件目前仍只是文档要求，其代码护栏要到 M3 之后才落地。
 
@@ -189,4 +206,12 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 「预编译的预算内可选只读分支」的形状已在 M2 给出（`StepCondition` 四成员闭集枚举，条件只能引用更早的步骤）。**残余部分**：该闭集是否覆盖 M3 实际需要的条件种类，要到 M3 才可证；不足时须改枚举并过评审，不得改成开放表达式。
 - `ToolResult` 的私有性只封堵了直接构造、`model_validate`、`model_construct`、`model_copy` 四条实用路径；`object.__setattr__` 与重定义模块无法在语言层封堵，属已知残余风险，只能由评审与源码扫描覆盖。
 - `InMemoryTaskStore` 的 CAS 语义只在单进程内成立（一把 `asyncio.Lock` 串行化写入）；跨进程原子性、崩溃恢复与隔离级别要到 M4 的 PostgreSQL 实现才可证。
-- M2 的全部安全保证都是**契约层与纯函数层**的：它们尚未被任何真实闭环消费，"这些契约足以支撑 M3/M4"目前只是设计推理，无运行证据。
+- ~~M2 的全部安全保证尚未被真实闭环消费~~：M3 已消费它们；但下列风险是新增的。
+- **审计表结构未在真实 StarRocks 核对**：表名 `starrocks_audit_db__.starrocks_audit_tbl__`、13 个列名、`state`/`errorCode` 的取值域，以及刻意排除的 `clientIp`/`digest`/`stmt` 是否存在，全部来自旧项目 `ivor_aiops` 的实证与推断。M6b 首次连接时必须用 `SHOW CREATE TABLE` 核对并回修。
+- **`sqlglot` 的 AST 形状随版本可能变化**：节点闭集白名单是对**当前锁定版本 30.17.0** 的断言，升级必须重跑 `tests/unit/test_sqlglot_baseline.py` 基线。
+- **`InMemoryTaskStore` / `InMemoryPlanStore` / `InMemoryEvidenceLedger` 只有单进程保证**；跨进程原子性与崩溃恢复要到 M4 才可证。
+- **`WorkflowPaused` 用异常表达暂停**是对 M2 Protocol 的一种解释（已获复审裁定接受）：`TaskOutcome` 要求终态，而 `awaiting_approval` 是非终态，暂停在返回值里不可表达。若将来 Runner 需要表达更多非终态，应重新评估返回类型而不是继续加异常。
+- **方向判断阈值来自旧项目，未在本项目的真实工作负载上校准**：因此结论一律带"疑似"，且只进渲染说明段、不进 `facts`。
+- **`evidence/` 的纯度由一条 AST 测试承重**：删除 `tests/security/test_evidence_layer_purity.py` 即等于默默取消 `runners → evidence` 这条依赖边的正当性。
+- **重编译比对在原理上无法捕获编译器自身的改动**（它用同一个编译器重算）：这正是 T4 的集合等式断言必须独立存在的理由，不要因为"已经有 A36 了"就删掉它。
+- **`application` 是依赖面最宽的一层**（除 interfaces 外的全部业务包）：其正当性由 `tests/security/test_runtime_bypass.py` 的三条 AST 断言承重（不够到 Gateway、不自签凭证、只调 Runner 的 start/resume）。
