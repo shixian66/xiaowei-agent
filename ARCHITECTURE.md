@@ -245,6 +245,7 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 ### 5.9 Evidence、Memory 与 Rendering
 
 - `EvidenceEnvelope` 记录来源、来源类型、capability、时间、是否样本、是否只读、限制和脱敏引用。
+- **证据在步骤边界生成并写入 ledger**：Runner 在每个步骤的工具调用返回后构造 `EvidenceEnvelope`，并写入任务作用域的 append-only `EvidenceLedger`。`TaskOutcome.evidence_refs` 只携带引用，因此消费方（Runtime 渲染、Runner 求值可选分支的 `StepCondition`）一律按引用从 ledger 读回，**不读 Runner 的内部变量**。这使"证据是可寻址、可审计的事实"在执行期就成立，而不是事后归档；也使 M4 的跨进程恢复不必改变消费方。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
 - working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
@@ -501,6 +502,8 @@ tests/
 ### Phase 2：第一条只读闭环
 
 选择一个高价值、低副作用场景，例如 StarRocks 慢查询诊断。完成确定性 planner、只读 SQL AST guard、fake/recording adapter、证据和 L0-L2 eval。此时不接 LangGraph，不开放写入。
+
+本阶段新增的包为 `evidence/`（纯证据构造器，无 async、无 I/O）、`reflection/`、`rendering/` 和 `application/`；`persistence/` 新增 `PlanStore` 与 `EvidenceLedger` 两个 port，`governance/` 新增 `ToolPolicy`、`SQLGuard`、`ApprovalGate` 与 `StepAdmission`。SQL AST 解析引入唯一的新运行依赖 `sqlglot`。
 
 ### Phase 3：TaskStore 与恢复
 

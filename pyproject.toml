@@ -7,7 +7,8 @@ name = "xiaowei-agent"
 version = "0.1.0"
 description = "Policy-governed workflow agent for operations"
 requires-python = ">=3.11,<3.12"
-dependencies = ["pydantic>=2.13,<3"]
+# sqlglot 是 SQLGuard 的 AST 解析器，属**生产**代码依赖，不是 dev 工具。
+dependencies = ["pydantic>=2.13,<3", "sqlglot>=27,<31"]
 
 [project.optional-dependencies]
 dev = [

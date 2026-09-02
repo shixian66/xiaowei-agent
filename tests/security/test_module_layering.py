@@ -26,9 +26,11 @@ _ALLOWED_INTERNAL = {
     "contracts": {"xiaowei_agent.contracts"},
     "capabilities": {"xiaowei_agent.contracts", "xiaowei_agent.capabilities"},
     "planning": {"xiaowei_agent.contracts", "xiaowei_agent.planning"},
+    # governance 需要 capabilities：分类必须在准入边界重算，不能依赖 Runner 记得调。
     "governance": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.planning",
+        "xiaowei_agent.capabilities",
         "xiaowei_agent.governance",
     },
     "tools": {"xiaowei_agent.contracts", "xiaowei_agent.planning", "xiaowei_agent.tools"},
@@ -37,13 +39,26 @@ _ALLOWED_INTERNAL = {
         "xiaowei_agent.planning",
         "xiaowei_agent.persistence",
     },
+    # runners 是生命周期宿主（ARCHITECTURE §5.6），必须驱动准入与工具调用。
+    # 对 evidence 的依赖以 test_evidence_package_is_a_pure_builder 为对价。
     "runners": {
         "xiaowei_agent.contracts",
+        "xiaowei_agent.planning",
+        "xiaowei_agent.capabilities",
+        "xiaowei_agent.governance",
         "xiaowei_agent.persistence",
+        "xiaowei_agent.tools",
+        "xiaowei_agent.evidence",
+        "xiaowei_agent.observability",
         "xiaowei_agent.runners",
     },
     "observability": {"xiaowei_agent.contracts", "xiaowei_agent.observability"},
 }
+
+
+def _existing_packages() -> set[str]:
+    """``src/xiaowei_agent`` 下磁盘上真实存在的包（含 ``__init__.py`` 的目录）。"""
+    return {child.name for child in _SRC.iterdir() if (child / "__init__.py").is_file()}
 
 
 def _internal_imports(path: Path) -> set[str]:
@@ -66,6 +81,26 @@ def test_package_only_imports_allowed_internal_modules(package: str) -> None:
             if module not in allowed:
                 offenders.append((str(path.relative_to(_SRC)), module))
     assert not offenders, f"{package} 出现非法内部依赖: {offenders}"
+
+
+def test_every_existing_package_is_registered() -> None:
+    """磁盘上存在的包必须全部登记——这是不变量，任何时刻都成立。
+
+    不在表里的包完全不被扫描：它会静默失去全部分层护栏，而所有现有测试依然全绿。
+    这比"依赖写错"更隐蔽，因此覆盖完整性必须由机制保证。
+    """
+    missing = _existing_packages() - set(_ALLOWED_INTERNAL)
+    assert not missing, f"以下包未登记进分层白名单，因此完全未被扫描：{sorted(missing)}"
+
+
+def test_every_registered_package_exists() -> None:
+    """反向：不允许预登记尚不存在的包。
+
+    预登记会让"包建好了但没登记"在很长一段时间里无法被这条测试区分出来——
+    那会把一条护栏削弱成一句注释。新包必须在**创建它的那个提交**里登记。
+    """
+    absent = set(_ALLOWED_INTERNAL) - _existing_packages()
+    assert not absent, f"以下包已登记但不存在：{sorted(absent)}"
 
 
 def test_contracts_never_depend_on_implementations() -> None:
