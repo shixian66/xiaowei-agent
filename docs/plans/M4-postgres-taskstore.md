@@ -455,9 +455,21 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 **「两个绑定用例名集合相等」目前是平凡真**（每组只有 memory 一个绑定）。写成"逐个绑定对齐分组"而不是"两两比较"，是为了让失败信息直接指出哪个绑定少了哪条。**T5 接入 postgres 绑定后必须复查这两条确实会因缺绑定而转红**。
 
-### T3：schema 与 Alembic migration
+### T3：schema 与 Alembic migration —— **已完成（真实库部分待 T5）**
 
 五张表 + fencing 序列 + 唯一索引 + CHECK 约束；`upgrade()` / `downgrade()`；空库与有数据两条 upgrade 路径。
+
+**落点**：`persistence/schema.py`（活的 Core `Table` 定义，供 T4 构造语句）、`persistence/rows.py`（DTO ↔ 行的纯映射）、`alembic.ini` + `persistence/migrations/`（`env.py` + `versions/rev_0001_initial_task_store_schema.py`）。
+
+**迁移不 import `schema.py`**。迁移是冻结的历史快照——回放这条 revision 必须建出**当初**那套表，引用活 schema 会让历史随代码一起漂移。因此两处必然重复，重复的对价是 `tests/contract/test_schema_matches_migration.py`：用 Alembic 的**离线模式**（`upgrade --sql`，不连数据库）拿到迁移真正会发出的 DDL，再把 `schema.py` 的每张表编译成同一方言的 DDL 逐表比较。**这条检查在默认测试路径上就能跑**，不必等到有 PostgreSQL 才发现两边不一致。
+
+反证：迁移里删掉租约同置同清 CHECK → 1 红；少建一张表 → 2 红；`task_id` 改 `Uuid` → 2 红；`alembic.ini` 填上连接串 → 3 红。
+
+**`rows.py` 分出来的理由与 `decisions.py` 相同**：映射写在执行 SQL 的方法里就只能靠真实数据库才能测，而"往返是否无损"根本不需要数据库来回答。`test_row_mapping.py` 的两组断言因此跑在默认路径上；T5 的 integration 跑同样的断言，只是中间多一次真实写入与读回——**这一层证明映射无损，那一层才证明数据库无损**。
+
+**JSON 路径是契约层要求的，不是实现偏好**：`Contract` 全局 `strict=True`，python 校验模式不接受 `str→StrEnum` 与 ISO 字符串→`datetime`，而 JSON 校验模式接受（`contracts/base.py` 已实证）。因此 JSONB 读回的 `dict` 必须经 `model_validate_json`，不能直接 `model_validate`。
+
+**仍未验证**：两条 upgrade 路径（空库 / 有数据）在真实 PostgreSQL 上的执行、`timestamptz` 的实际精度、JSONB 的键序与数值表示。全部推到 T5，本机无 PostgreSQL、无容器运行时。
 
 **`task_id` 列必须是 `text`，不是 `uuid`**（复审自查 P4）。`TaskRecord.task_id` 是 `StrictStr`，而 `uuid` 列读回的是 `UUID` 对象，`StrictStr` 会直接拒绝——这条在写 DDL 时的直觉恰好是错的，因此写死在计划里。同理，所有映射到 `StrictStr` 的列一律 `text`。
 
