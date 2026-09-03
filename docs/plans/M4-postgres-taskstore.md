@@ -277,7 +277,7 @@ COMMIT;
 
 | 禁令 | 若违反 | 承重测试 |
 | --- | --- | --- |
-| **S2** `transition` 不得在事务内重读 `version` 充当 `expected_version` | CAS 永远成功，并发写全部提交 | 新增：并发用例断言恰有一个 winner；反证——把 UPDATE 的 `WHERE version` 改成读到的值，用例必须转红 |
+| **S2** `transition` 不得在事务内重读 `version` 充当 `expected_version` | CAS 永远成功，并发写全部提交 | `tests/security/test_vacuous_check_ban.py`（AST 机械检查）。**原先写的"并发用例转红"是错的**，理由见 §10 T8 |
 | **S3** 审批有效性比较，`policy_revision` 的一侧必须来自调用方 `RequestContext` | policy 变化后旧审批静默继续生效 | **M4 无法施加此禁令**，见表下说明；作为设计约束记录，到 M8 引入读回路径时才可执行 |
 | **B3** `plan_hash` / `target_fingerprint` 不得落库 | 恢复时漂移检测退化成空操作 | 新增：篡改存储中的 plan 后，调用方重算的指纹必须不匹配并拒绝继续 |
 
@@ -550,9 +550,23 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 补 B3 承重测试：篡改存储中的 plan 后，调用方**当下重算**的 `plan_hash` 必须不匹配并拒绝继续。
 
-### T8：TDD 反证收口
+### T8：TDD 反证收口 —— **已完成**
 
-DEVELOPMENT_PLAN §7 M4 明文要求的三项：terminal protection、CAS、fencing。逐个撤掉承重保护确认转红、还原确认转绿，逐条写进提交信息。**任何一次反证首轮全绿都必须当作覆盖缺口处理并补测试**——M3 有四次反证首轮全绿，全部是真实缺口。
+DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全部转红、还原全绿：
+
+| 撤掉的保护 | 转红用例数 | 覆盖面 |
+| --- | --- | --- |
+| 终态保护（`classify_transition` 的第一段） | 7 | `test_terminal_protection.py` 全部 + eval `test_a29` |
+| CAS（版本比较改成两侧同源，即空洞检查本身） | 1 | `test_cas_failure_returns_the_storage_winner` |
+| fencing（`_check_fencing` 整段） | 7 | `test_lease_fencing.py` 六条 + `test_a_terminal_task_is_never_stale` |
+
+**S2 禁令是一个例外，必须说清楚，不能当作"已验证"混过去。**
+
+把 `PostgresTaskStore.transition` 的 `UPDATE ... WHERE version` 改成事务内读到的值，**没有任何用例转红**——而且**即使有真实数据库也不会**。根因是那里有两道独立的版本闸：`classify_transition`（Python 侧，两个实现共用）和 SQL 侧的 `WHERE version`。在 `FOR UPDATE` 之下第一道先命中，第二道永远走不到被单独检验的路径上。它是**纵深防御**，而纵深防御按定义没有单独的行为反证。
+
+计划 §8.4 原本把 S2 的承重测试写成"并发用例转红"，**这个预期是错的**。正确的处置是给它一个机械检查：`tests/security/test_vacuous_check_ban.py` 用 AST 直接断言 `transition` 里出现 `command.expected_version`、不出现 `current.version`，并配一条反例确认这两条有分辨力。反证：把 `WHERE version` 改成读到的值 → 2 红。
+
+没有这个文件，第二道闸可以被悄悄改成恒真而全部测试照常全绿；等到某天有人重构掉第一道闸，两道闸会一起消失。
 
 ### T9：CI job 与文档收口
 
