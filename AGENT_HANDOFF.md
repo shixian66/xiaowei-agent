@@ -7,8 +7,8 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
-| 截止时间 | 2026-09-02（Asia/Shanghai） |
-| 阶段 | **M0、M1、M2 已验收；M3 已实现完毕，待 Codex 深档验收** |
+| 截止时间 | 2026-09-03（Asia/Shanghai） |
+| 阶段 | **M0、M1、M2、M3 均已验收并合入 `main`；下一步进入 M4** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -25,13 +25,17 @@
 | M2 状态 | **已验收通过并归档**。PR #3 以 fast-forward 合入契约内核（合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`）；PR #4 以 fast-forward 合入拒绝路径泄漏补修（最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e`）。归档见 [docs/handoff/archive/2026-09-02-M2-contract-kernel.md](docs/handoff/archive/2026-09-02-M2-contract-kernel.md) |
 | M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经多轮 Codex 审核后获批开工（已带入 `main`） |
 | M3 详细计划 | [docs/plans/M3-starrocks-slow-query.md](docs/plans/M3-starrocks-slow-query.md) V3，经两轮 Codex 审核批准 |
-| M3 状态 | **实现完毕、未合并、首轮深档验收已打回并修复、待复验**。分支 `claude/m3-starrocks-slow-query`，T0-T14 逐任务 TDD 提交（**提交数以 `git log --oneline main..HEAD` 为准，本文件不维护会随修订漂移的计数**）。验收报告见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md) |
+| M3 状态 | **已验收通过并归档**。首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过。以 `--ff-only` 合入 `main`，**无合并提交**，19 个受审提交原样保留。归档见 [docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md](docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md)，验收报告见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md) |
+| M3 合入基线 SHA | `64d295c8e4f38028527ec9a496262c7a660258b1`（最终验收对象，与合入对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询** |
+| M3 合并后 CI | `main` 上 run [`33708913738`](https://github.com/shixian66/xiaowei-agent/actions/runs/33708913738)，六个 gate 全绿（lint、types、secret-scan、tests、deps-audit、security-gate） |
+| M3 工作分支 | `claude/m3-starrocks-slow-query` 已合入 `main`，保留备查 |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
+| 下一里程碑 | **M4**：PostgreSQL TaskStore 的并发、恢复与终态保护 |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
-| 首个闭环 | `starrocks.slow_query.diagnose`——**已实现**，仅 fake/recording 数据，未连接真实 StarRocks |
+| 首个闭环 | `starrocks.slow_query.diagnose`——**已实现并合入 `main`**，仅 fake/recording 数据，未连接真实 StarRocks |
 
 旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目的分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
 
@@ -98,6 +102,12 @@
 M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 [docs/handoff/archive/2026-09-01-M0-closure.md](docs/handoff/archive/2026-09-01-M0-closure.md)。
 
+M2 的 26 个受审提交与合并事实已归档至
+[docs/handoff/archive/2026-09-02-M2-contract-kernel.md](docs/handoff/archive/2026-09-02-M2-contract-kernel.md)。
+
+M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收事实已归档至
+[docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md](docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md)。
+
 **归档规则**：里程碑验收通过后，其逐条提交历史移入 `docs/handoff/archive/`，本文件只保留里程碑基线 SHA、当前阶段、已验证事实、阻塞项、下一步和禁止盲改点，**不记录随合并漂移的 HEAD**，也不随里程碑增长。
 
 ## 5. 下一步顺序
@@ -107,9 +117,9 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 3. ~~M2 详细计划编写与审批~~ **已完成**：经多轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
 4. ~~M2 实现与验收~~ **已完成**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地；合并后拒绝路径泄漏补修已在 PR #4 合入并通过复审。
 5. ~~M3 详细计划编写与审批~~ **已完成**：V3 经两轮 Codex 审核批准。
-6. ~~M3 实现~~ **已完成，首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合）并已按根因修复，待复验**：分支 `claude/m3-starrocks-slow-query`。
-7. **下一步**：Codex 按精确 SHA 做深档验收（真实 diff、调用链、安全绕过、测试充分性）。通过后由授权人员合并，并把逐条提交历史归档到 `docs/handoff/archive/`。
-8. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
+6. ~~M3 实现与验收~~ **已完成**：首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过；以 `--ff-only` 合入 `main`（`64d295c`），CI run `33708913738` 六项全绿，逐条提交历史已归档。
+7. **下一步：M4** 实现 PostgreSQL TaskStore 的并发、恢复与终态保护，并验证 M3 留下的 `PlanStore` / `EvidenceLedger` 两个 port 是否真的只需换实现。开工前先写详细计划并送审，不直接改代码。
+8. M5 完成 API/CLI/Worker/Compose。
 9. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
@@ -174,7 +184,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 依赖由 `uv.lock` 锁定，构建后端 `hatchling` 精确钉版并纳入锁定与 `pip-audit` 审计集。
 - 日志脱敏的攻击矩阵（Basic 认证、带引号 JSON 键、mapping 作格式化参数、含空格未引号值、自定义对象 `__str__`、非 JSON 映射键、同名 logger 上的外部 handler、格式化占位符破坏）逐条复现后封堵，并固化为回归测试。
 - 变异反证：移除 `redact()` 键分支、配置异常改回 `except` 块内 `from exc`、workflow 注入 `secrets[...]` 与 job 级 `write-all`，三类变异均使对应安全测试转红。
-- **M3 的四条命令在分支上全绿**：`python -m pytest -q` 1213 passed；`python -m pytest -m security -q` 809 passed / 404 deselected；`ruff check .` 与 `mypy src`（74 个源文件）均通过。精确 SHA 与逐条 TDD 反证记录见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md)。
+- **M3 最终验收对象 `64d295c8e4f38028527ec9a496262c7a660258b1` 在 `main` 上四条命令全绿，GitHub CI 六项全绿**：`python -m pytest -q` 1229 passed / 3 warnings；`python -m pytest -m security -q` 823 passed / 406 deselected / 3 warnings；`ruff check .` 与 `mypy src`（74 个源文件）均通过；`git diff --check 4e3e309..64d295c` 无输出；`main` 独立 CI run `33708913738` 为 success。对照 M2 的 640 / 499：全量 +589，安全 gate +324。逐条 TDD 反证记录见各提交信息与 [docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md](docs/handoff/archive/2026-09-03-M3-starrocks-slow-query.md)。
 - **M3 的每个任务都做了 TDD 反证**：撤掉承重保护确认转红、还原确认转绿，逐条写在各任务提交信息里。其中**四次反证首轮全绿，暴露了真实的覆盖缺口**并已各自补测试：`result.applied` 检查（原用例被"终态任务拿不到租约"先挡住）、`gateway.invoke` 的属性访问（原 AST 断言只扫 `ast.Call`）、sink 的常量消息（原用例绿的理由不对——detail 在契约层已被 scrub）、以及 L0 语料里 A26/A29 两条只在语料中、无驱动的纸面条目。
 - **B1（count 模板必须复用目标范围）由三层共 5 条用例承重**：把 count 改成只带窗口后，T4 的集合等式 3 组、T6 的 A36、L0 的 A36 同时转红。
 

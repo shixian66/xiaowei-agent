@@ -10,7 +10,9 @@
 > 描述的对象一个提交，验收方拿到的 SHA 与报告里写的对不上。这与 AGENT_HANDOFF.md
 > 「本文件所在提交的 SHA 不写在文件内」是同一条纪律，此处补齐。
 >
-> **状态：已实现、未合并、未验收。** 本报告是提交给 Codex 深档审查的证据，不是验收结论。
+> **状态：已验收通过并合入 `main`（最终对象 `64d295c8e4f38028527ec9a496262c7a660258b1`）。**
+> 本报告是当时提交给 Codex 深档审查的证据，保留原貌备查；合并后的完整事实以
+> [archive/2026-09-03-M3-starrocks-slow-query.md](archive/2026-09-03-M3-starrocks-slow-query.md) 为准。
 > 能力状态最强为 `tests`——**不是** `deployed SHA`、**不是** `canary`、**不是** `user-accepted`。
 
 ---
