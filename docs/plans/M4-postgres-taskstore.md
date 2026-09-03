@@ -1,10 +1,10 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.1）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.2）
 
 > 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。**
 >
-> 依据基线：`main` = `origin/main` = `HEAD` = `12b5b584da031bff7aa26ab5544d2122736d8945`。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
+> 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
 ---
 
@@ -85,9 +85,9 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 
 | 项 | 值 |
 | --- | --- |
-| 分支 | `main`，工作区有三个未跟踪文件：本计划、`development-route-v3-proposal.md`、`legacy-capability-migration-matrix.md` |
-| 暂存范围 | **只允许本计划文件**。另外两个未跟踪文件不属于 M4 范围，不得暂存、修改或删除（§12.3） |
-| SHA | `git rev-parse main origin/main HEAD` 三者同为 `12b5b584da031bff7aa26ab5544d2122736d8945` |
+| 分支 | `claude/m4-postgres-taskstore`，自 `main` 切出，只含本计划文件的提交；工作区有两个未跟踪文件：`development-route-v3-proposal.md`、`legacy-capability-migration-matrix.md` |
+| 暂存范围 | **只允许本计划文件**。那两个未跟踪文件不属于 M4 范围，不得暂存、修改或删除（§12.3） |
+| SHA | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`；本分支 V1 = `b546aca2c63c0a708dcdbbf53e2157a232df8a79`，V1.1 = `c235ee8f0153931214900c52d20fbdfd091e0c11` |
 | M3 验收对象 | `64d295c8e4f38028527ec9a496262c7a660258b1`，已在祖先链 |
 
 ### 5.2 `pytest-socket` 行为实证
@@ -274,7 +274,8 @@ COMMIT;
 | 禁令 | 若违反 | 承重测试 |
 | --- | --- | --- |
 | **S2** `transition` 不得在事务内重读 `version` 充当 `expected_version` | CAS 永远成功，并发写全部提交 | 新增：并发用例断言恰有一个 winner；反证——把 UPDATE 的 `WHERE version` 改成读到的值，用例必须转红 |
-| **S3** 审批有效性比较，`policy_revision` 的一侧必须来自调用方 `RequestContext` | policy 变化后旧审批静默继续生效 | **M4 无法施加此禁令，见下方说明**；作为设计约束记录，到 M8 引入读回路径时才可执行 |
+| **S3** 审批有效性比较，`policy_revision` 的一侧必须来自调用方 `RequestContext` | policy 变化后旧审批静默继续生效 | **M4 无法施加此禁令**，见表下说明；作为设计约束记录，到 M8 引入读回路径时才可执行 |
+| **B3** `plan_hash` / `target_fingerprint` 不得落库 | 恢复时漂移检测退化成空操作 | 新增：篡改存储中的 plan 后，调用方重算的指纹必须不匹配并拒绝继续 |
 
 **关于 S3 的更正（复审自查）**：初稿写「复用既有 `test_approval_binding.py` 的断言形状扩到 PostgreSQL 绑定」是**错的**。该文件测的是 `governance/verify_approval_binding()` 纯函数，用内存 fixture，与 TaskStore 无关；且 `record_approval` 在整个仓库里**只写不读**——`persistence/fake.py` 的 `_approvals` 是一个从未被查询的私有 list，`TaskStore` Protocol 也没有任何读回方法。**没有读路径，S3 就没有可施加禁令的对象。**
 
@@ -284,8 +285,7 @@ COMMIT;
 - 存储保真由 integration 测试**直接用 SQL 读表**验证，不经 Protocol。测试可以够到存储细节，生产代码不行；这样既证明了数据真的落对，又不产生一个无人调用的公开 API。
 - **S3 作为设计约束写在此处**，M8 引入读回路径时必须同时落成它的承重测试。届时若发现比较写成了两侧读库，属回归，不属新增缺陷。
 
-这是一处判断，不是拍板结论：若认为审批读回应在 M4 就进 Protocol，可以推翻，代价是多一个 M8 前无消费方的方法。
-| **B3** `plan_hash` / `target_fingerprint` 不得落库 | 恢复时漂移检测退化成空操作 | 新增：篡改存储中的 plan 后，调用方重算的指纹必须不匹配并拒绝继续 |
+**此项已于 2026-09-03 由项目负责人批准，不再是开放判断**——见 §14.4。
 
 ### 8.5 `list_stale_leases`：stale recovery 的**发现**
 
@@ -531,7 +531,7 @@ M4 明确不做：
 
 ## 14. 已拍板事项
 
-三项均由项目负责人于 **2026-09-03** 拍板，本节记录结论与理由。**本节不再是开放决策**；计划中无未决项。
+四项均由项目负责人于 **2026-09-03** 拍板，本节记录结论与理由。§14.1–§14.3 在 V1 定稿时拍板，§14.4 在 Codex 复审通过时拍板。**本节不再是开放决策**；计划中无未决项。
 
 ### 14.1 `stale recovery` 的发现方法：**M4 内实现，形状收窄**
 
@@ -551,6 +551,16 @@ M4 明确不做：
 
 **结论**：README 只写 `PYTEST_POSTGRES_DSN` 契约和"隔离 PostgreSQL"要求；本地可用单容器或本机已有实例。**仓库不新增 `docker-compose.yml`，不新增 Compose 文档流程**——Compose 留给 M5，其基础设施许可按 ADR-007 D8 属 M5 时点。见 §13。
 
+### 14.4 审批读回：**M4 不追加 Protocol 方法**
+
+**结论**：批准 §8.4 的处置。M4 建审批表、落审批记录，但**不向 `TaskStore` Protocol 追加任何审批读回方法**；存储保真由 integration 测试直接用 SQL 读表验证；审批读回的消费路径与 S3 禁令的承重测试一并留到 M8。
+
+**理由**：`record_approval` 在整个仓库里只写不读，M8 之前没有任何生产消费方。为不存在的调用者追加公开方法，等于把一个未经使用的接口形状提前冻结进 M2 已验收的契约。
+
+**代价与到期条件**：M4 结束时，"审批记录能被正确读回"只有测试级证据，没有生产路径证据。**M8 引入读回路径时，必须同时落成 S3 的承重测试**（`policy_revision` 的一侧来自调用方 `RequestContext`）；届时若发现比较写成了两侧读库，属回归，不属新增缺陷。
+
+**此项与 §14.1 的方向差异是刻意的**：`list_stale_leases` 进 Protocol，是因为 stale recovery 是 M4 自己的交付物且 M4 内就有消费方（T4 用例）；审批读回不进，是因为它的消费方在 M8。判据是"本里程碑内是否存在消费方"，不是"这个能力将来是否需要"。
+
 ---
 
 ## 15. 验收报告格式
@@ -567,8 +577,9 @@ M4 明确不做：
 
 | 检查 | 结论 |
 | --- | --- |
-| 是否有占位符 / TBD | 无。§14 三项均已于 2026-09-03 拍板。**唯一一处未经拍板的判断**是 §8.4 对审批读回的处置（不追加 Protocol 方法，改由测试直接读表），已在原处显式标注可被推翻 |
+| 是否有占位符 / TBD | 无。§14 四项均已于 2026-09-03 拍板，含 §8.4 审批读回处置（§14.4）。**计划内无未决判断** |
 | 复审自查 | 已执行，逐条核对源码，发现六项并全部修复（§6.3）。其中 P1、P3 是初稿的**过度断言**，P2 是第三次漏读交付物 |
+| Codex 复审（V1.1） | 通过。两项文档修正已在 V1.2 落实：过期的分支/SHA/工作区事实（§5.1、文首基线），§8.4 的 B3 行脱表渲染与"未拍板"表述 |
 | 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（方法数已由"五个"改为"六个"） |
 | 与真源冲突 | 无已知冲突。§7.2 与 ADR-009 一致；§4 与 §8.5 的 E1 口径与 ADR-007 D7 一致；§12.1 与 ADR-008 一致；§13 的"不引入 Compose"与 ADR-007 D8 的 M5 时点一致 |
 | 范围 | 单一里程碑，10 个任务，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
