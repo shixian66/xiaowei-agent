@@ -76,6 +76,7 @@
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
 - 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
 - `sqlglot` 用于 SQL AST 解析和安全校验（M3 引入，是 M3 唯一新增的运行依赖）。
+- `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 当前这些是目标技术基线，不代表依赖已经安装或服务已经可启动。
@@ -105,6 +106,7 @@ agent/
 │   ├── governance/             # 已建立（M2）：审批绑定与 policy revision 校验
 │   ├── tools/                  # 已建立（M2）：ToolGateway / adapter 契约
 │   ├── persistence/            # 已建立（M2）：TaskStore 交互形状
+│   │                           # M4：decisions/rows/schema/postgres + migrations/
 │   ├── runners/                # 已建立（M2）：WorkflowRunner 契约
 │   ├── observability/          # 已建立（M2）：TraceSink Protocol
 │   ├── application/            # 已建立（M3）：XiaoweiRuntime facade
@@ -118,7 +120,8 @@ agent/
     ├── security/               # 已建立
     ├── fakes/                  # 已建立（M2/M3）：测试夹具与 recording
     ├── evals/                  # 已建立（M3）：L0-L2 语料与断言
-    └── integration/            # 尚未创建
+    ├── suites/                 # 已建立（M4）：跨实现共享的行为用例（不被收集）
+    └── integration/            # 已建立（M4）：需要真实 PostgreSQL，无 DSN 时跳过
 ```
 
 上表是**目标**目录。`pyproject.toml`、`uv.lock`、`src/xiaowei_agent/{__init__,config,trace,log}.py`、`tests/{unit,security}/` 与 `.github/workflows/ci.yml` 在 M1 建立；标注「已建立（M2）」「已建立（M3）」的包分别在对应里程碑建立。其余条目按实际代码落地时才创建，**不要为了匹配树状图提前创建空模块**。
@@ -171,9 +174,23 @@ export XIAOWEI_ENVIRONMENT_ID=dev-local
 export XIAOWEI_LOG_LEVEL=INFO
 ```
 
+### 集成测试（M4）
+
+需要真实 PostgreSQL 的用例位于 `tests/integration/`，由**既有** `testpaths` 自动收集，**没有第五条命令**——ADR-008 的四条命令一字不改。开关是一个环境变量：
+
+```bash
+export PYTEST_POSTGRES_DSN='postgresql+asyncpg://postgres@127.0.0.1:5432/postgres'
+python -m pytest -q
+```
+
+- **变量名不带 `XIAOWEI_` 前缀**：它是测试 harness 配置，不是应用配置。`load_settings()` 对任何未知 `XIAOWEI_*` 变量 fail-fast，而 `tests/conftest.py` 每个用例前会清掉全部 `XIAOWEI_*`。
+- **未设置时整组跳过**；已设置时 `tests/integration/` 里**不允许有任何跳过**，否则整次运行判失败——DSN 拼错、库没起来、迁移失败都会长成「全绿」的样子。
+- 需要一个**隔离**的 PostgreSQL：用例会 `TRUNCATE` 全部表。本地可用单容器或本机已有实例；**仓库不提供 `docker-compose.yml`**，Compose 属 M5。
+- schema 由 Alembic 迁移建立，不由 `create_all` 建立。
+
 ### 尚未完成
 
-Docker Compose、API、Worker 和数据库迁移属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**：`InMemoryTaskStore` / `InMemoryPlanStore` / `InMemoryEvidenceLedger` 只有单进程保证，跨进程原子性与崩溃恢复要到 M4 的 PostgreSQL 实现才可证。
+Docker Compose、API 和 Worker 属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**。M4 的 PostgreSQL 实现使跨进程原子性与崩溃恢复**可被证明**，但证据只在 integration job 跑过之后才存在。
 
 M3 **没有**：真实 StarRocks 连接、真实模型 API 调用、任何 E1（写）能力、API/CLI/Worker 入口、`tests/integration/`。`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

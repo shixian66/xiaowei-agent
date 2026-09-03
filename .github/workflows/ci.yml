@@ -30,6 +30,43 @@ jobs:
       - run: uv sync --extra dev --frozen
       - run: python -m pytest -q
 
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    # 与 tests job 执行**同一条**命令。差别只有两处：一个 PostgreSQL service，
+    # 和一个 PYTEST_POSTGRES_DSN。ADR-008 的四条验证命令一字不改，不产生第五条。
+    services:
+      postgres:
+        # 钉到具体次版本。**尚未钉 digest**：digest 只能联网解析，本次改动在离线
+        # 环境完成，编一个未经核对的 digest 比用版本 tag 更糟。首次 CI 绿灯后用
+        # `docker buildx imagetools inspect postgres:16.10` 取回 digest 再钉死。
+        image: postgres:16.10
+        env:
+          # 无凭证：CI 不持有任何 secret，工作流里也不出现任何密码形状的字面量。
+          # trust 只对这个一次性的、只在 job 内可达的容器生效。
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTEST_POSTGRES_DSN: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: python -m pytest -q
+
   security-gate:
     name: security-gate
     runs-on: ubuntu-24.04

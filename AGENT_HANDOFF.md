@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-03（Asia/Shanghai） |
-| 阶段 | **M0、M1、M2、M3 均已验收并合入 `main`；下一步进入 M4** |
+| 阶段 | **M0–M3 已验收并合入 `main`；M4 已在 `claude/m4-postgres-taskstore` 上完成实现，等待验收** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -30,7 +30,11 @@
 | M3 合并后 CI | `main` 上 run [`33708913738`](https://github.com/shixian66/xiaowei-agent/actions/runs/33708913738)，六个 gate 全绿（lint、types、secret-scan、tests、deps-audit、security-gate） |
 | M3 工作分支 | `claude/m3-starrocks-slow-query` 已合入 `main`，保留备查 |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
-| 下一里程碑 | **M4**：PostgreSQL TaskStore 的并发、恢复与终态保护 |
+| M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.2，经 Codex 复审批准开工 |
+| M4 状态 | **实现完成，未验收，未合入**。T0–T9 各一个提交在 `claude/m4-postgres-taskstore`。**关键限制**：本机无 PostgreSQL 也无容器运行时，因此 **86 条 integration 用例一次都没跑过**——判定标准 2（并发裁决）、3（并发幂等创建）、4（崩溃无中间态）以及两个 adapter 的行为**目前没有任何运行时证据**，要等 CI 的 `integration` job |
+| M4 CI 变更 | 新增第七个 job `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。该 job 是 M4 验收硬门槛（未绿即不通过），**但不是 GitHub 强制的 required status check**——分支保护仍不可用 |
+| M4 待办（需联网） | service 镜像目前钉在 `postgres:16.10` 版本 tag，**尚未钉 digest**。首次 CI 绿灯后用 `docker buildx imagetools inspect postgres:16.10` 取回 digest 钉死，并同步 `_WORKFLOW_SHA256` |
+| 下一里程碑 | **M5**：API + Worker + Compose（M4 验收通过后） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |

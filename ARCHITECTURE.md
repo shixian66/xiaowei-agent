@@ -346,6 +346,10 @@ sha256(canonical_json({
 
 TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移、worker lease、heartbeat、fencing token、stale recovery、终态保护、审批记录和审计事件。所有写入都必须采纳存储层返回的 winner；调用方不能用本地旧对象覆盖 winner。
 
+**stale recovery 拆成「发现」与「接管」两半，只有前一半在 TaskStore 里**（M4）：`list_stale_leases(*, limit)` 是只读方法，返回「曾被租出、租约已过期、未终态」的任务，按 `(lease_expires_at, task_id)` 稳定排序。它不 claim、不调度、不判断审批是否应当恢复、不改变任何状态；接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。把两半合成一个方法会让 TaskStore 长出调度能力，而调度属 Worker。
+
+**判定规则与存储实现分离**（M4）：拒绝顺序、fencing 闭合真值表、租约与续租条件由 `persistence/decisions.py` 的纯函数持有，内存实现与 PostgreSQL 实现逐字共用。这样消除的是「两个实现各自跑偏」——那类分叉不会被任何单实现的用例发现，因为每个实现都通过自己那份断言。代价是纯函数里的 bug 会让两个实现同时通过，因此由变异反证承重。
+
 建议的通用任务状态：
 
 ```text

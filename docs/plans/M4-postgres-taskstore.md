@@ -568,9 +568,15 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 没有这个文件，第二道闸可以被悄悄改成恒真而全部测试照常全绿；等到某天有人重构掉第一道闸，两道闸会一起消失。
 
-### T9：CI job 与文档收口
+### T9：CI job 与文档收口 —— **已完成（service 可达性待首次 CI）**
 
-按 §11 清单改 `ci.yml` 与 `test_workflow_policy.py`；验证 §5.3 第 3 项（service container 可达）；更新 `AGENT_HANDOFF.md`、`README.md`、`ARCHITECTURE.md`（如有契约变化）。
+按 §11 清单改 `ci.yml` 与 `test_workflow_policy.py`；更新 `AGENT_HANDOFF.md`、`README.md`、`ARCHITECTURE.md`。
+
+§11 的六项同步全部完成，另新增四条断言（`services` 闭集、镜像版本钉死、env 取值无凭证、integration 不引入第五条命令）。
+
+**镜像用版本 tag 而不是 digest，这是一处对计划的偏离，理由是不编造未经核对的事实**：digest 只能联网解析，本次改动在离线环境完成。写一个没核对过的 digest 比用 `postgres:16.10` 更糟——前者看起来更严格，实际指向未知内容。已在 `ci.yml` 注释与 `AGENT_HANDOFF.md` 记为需联网的待办，并配了一条"镜像不得是可变 tag"的断言先挡住 `latest`。
+
+**§5.3 第 3 项（service container 从 job 容器经 `127.0.0.1:5432` 可达）仍未验证**——它只能由首次 CI 运行产生证据。
 
 ---
 

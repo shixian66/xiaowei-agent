@@ -21,14 +21,22 @@ _WF = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
 _TEXT = _WF.read_text(encoding="utf-8")
 _LINES = _TEXT.splitlines()
 
-_EXPECTED_JOBS = ("tests", "security-gate", "lint", "types", "deps-audit", "secret-scan")
+_EXPECTED_JOBS = (
+    "tests",
+    "integration",
+    "security-gate",
+    "lint",
+    "types",
+    "deps-audit",
+    "secret-scan",
+)
 
 # ---- 承重锚：整个 ci.yml 的 SHA-256 --------------------------------------
 # 契约是「任何 ci.yml 改动都必须转红并接受人工审查」。集合式白名单只能挡住
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "7bb820a8cf027fc16f8708f400d859fa3c6bc71f7aaf0f7cce37f9640e343965"
+_WORKFLOW_SHA256 = "223fc27e133886a09fe00c86c865aa4c6a71be9f409cbb744d7d86c1cfa366d9"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -137,8 +145,10 @@ def test_single_line_run_commands_match_exactly() -> None:
     """精确多重集：既拒绝多余命令，也拒绝删除必需命令。"""
     single, _ = _run_commands_and_block_digests()
     expected = Counter({
-        "uv sync --extra dev --frozen": 5,
-        "python -m pytest -q": 1,
+        "uv sync --extra dev --frozen": 6,
+        # 两次：tests job 与 integration job 执行**同一条**命令，差别只有一个
+        # PostgreSQL service 和一个 DSN。ADR-008 的四条命令因此一字不改。
+        "python -m pytest -q": 2,
         "python -m pytest -m security -q": 1,
         "ruff check .": 1,
         "mypy src": 1,
@@ -180,7 +190,7 @@ def test_each_checkout_step_binds_persist_credentials() -> None:
     assert steps == len(_EXPECTED_JOBS)
 
 
-def test_job_set_is_exactly_the_approved_six() -> None:
+def test_job_set_is_exactly_the_approved_seven() -> None:
     assert sorted(_job_ids()) == sorted(_EXPECTED_JOBS), f"实际 job 集合 = {_job_ids()}"
 
 
@@ -217,9 +227,53 @@ def test_no_write_or_write_all_permission_anywhere() -> None:
 
 
 def test_no_env_block_outside_declared_allowlist() -> None:
-    allowed = {"GITLEAKS_VERSION", "GITLEAKS_SHA256"}
+    allowed = {
+        "GITLEAKS_VERSION",
+        "GITLEAKS_SHA256",
+        "POSTGRES_HOST_AUTH_METHOD",
+        "PYTEST_POSTGRES_DSN",
+    }
     names = set(re.findall(r"(?m)^\s+([A-Z][A-Z0-9_]*):\s", _TEXT))
     assert names <= allowed, f"出现未声明的 env 变量: {sorted(names - allowed)}"
+
+
+def test_env_values_carry_no_credentials() -> None:
+    """env 取值里不得出现任何凭证。
+
+    与 ``test_secret_shaped_literals.py`` 互补：那边扫的是源码，这边扫的是 workflow。
+    DSN 是这里唯一一个"长得像连接串"的取值，因此单独钉死它的形状——**无密码段**。
+    """
+    values = re.findall(r"(?m)^\s+[A-Z][A-Z0-9_]*:\s*(.+)$", _TEXT)
+    for value in values:
+        assert "password" not in value.lower()
+        # user:password@host 形态。DSN 里只允许 user@host。
+        assert not re.search(r"//[^/\s]+:[^/\s@]+@", value), value
+
+
+def test_services_are_a_closed_set() -> None:
+    """只允许 ``integration`` 有 service，且只允许这一个 service、这一项配置。
+
+    没有这条，日后加一个带凭证的 service 只有整文件 SHA 会拦——而合法改 workflow
+    时那个常量本来就要更新，等于没拦。
+    """
+    assert _TEXT.count("    services:\n") == 1
+    assert _TEXT.count("      postgres:\n") == 1
+    images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT)
+    assert images == ["postgres:16.10"], images
+    # service 的 env 恰为一项，且是"无凭证"那一项。
+    assert _TEXT.count("POSTGRES_HOST_AUTH_METHOD: trust") == 1
+
+
+def test_service_images_are_version_pinned() -> None:
+    """镜像不得用可变 tag。``latest`` / 裸镜像名会让 CI 的运行内容随时改变。"""
+    for image in re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT):
+        assert ":" in image or "@sha256:" in image, image
+        assert not image.endswith(":latest"), image
+
+
+def test_the_integration_job_runs_no_extra_command() -> None:
+    """integration 与 tests 跑的是同一条命令，不产生 ADR-008 之外的第五条。"""
+    assert _TEXT.count("- run: python -m pytest -q\n") == 2
 
 
 def test_runner_is_pinned_not_latest() -> None:
@@ -227,7 +281,7 @@ def test_runner_is_pinned_not_latest() -> None:
     assert _TEXT.count("runs-on: ubuntu-24.04") == len(_EXPECTED_JOBS)
 
 
-def test_all_six_gates_present_with_stable_names() -> None:
+def test_all_seven_gates_present_with_stable_names() -> None:
     for job in _EXPECTED_JOBS:
         assert re.search(rf"(?m)^    name: {re.escape(job)}$", _TEXT), f"缺少 check 名 {job}"
 
