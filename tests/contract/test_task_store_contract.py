@@ -110,3 +110,32 @@ async def test_illegal_transition_is_rejected(store, task) -> None:
     )
     assert result.applied is False
     assert result.rejection is TransitionRejection.ILLEGAL_TRANSITION
+
+
+async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task) -> None:
+    """``terminal_reason`` **无条件写入，包括写 ``None``**。
+
+    T1 变异反证发现的覆盖缺口：把 ``apply_transition`` 改成"有值才写"，全部 1236 条
+    用例仍然全绿。那个改法看起来无害，实际会让"先失败置上原因、再重试转为非终态"
+    的记录残留旧原因——调用方拿到一条状态与原因互相矛盾的记录，而没有任何断言拦它。
+
+    这条同时是 M4 的跨实现约束：PostgreSQL 实现必须同样无条件 ``SET``，包括
+    ``SET terminal_reason = NULL``，不得写成"有值才进 SET 子句"。
+    """
+    marked = await store.transition(
+        task_id=task.task_id,
+        expected_version=task.version,
+        to_status=TaskStatus.PLANNING,
+        terminal_reason="transient.upstream_timeout",
+    )
+    assert marked.applied
+    assert marked.winner.terminal_reason == "transient.upstream_timeout"
+
+    resumed = await store.transition(
+        task_id=task.task_id,
+        expected_version=marked.winner.version,
+        to_status=TaskStatus.RUNNING,
+    )
+    assert resumed.applied
+    assert resumed.winner.terminal_reason is None
+    assert (await store.get(task.task_id)).terminal_reason is None

@@ -51,6 +51,27 @@ async def test_renew_by_a_non_owner_is_refused(store, task) -> None:
     )
 
 
+async def test_renew_with_a_wrong_token_is_refused(store, task) -> None:
+    """续租必须同时匹配 owner **与** fencing token。
+
+    T1 变异反证发现的覆盖缺口：把 ``may_renew_lease`` 改成只比 owner，全部 1236 条
+    用例仍然全绿。只比 owner 的后果是同名 worker 的**旧进程**可以续上**新进程**的
+    租约——owner 名字通常是主机名或角色名，进程重启后重名是常态，而那正是 fencing
+    token 存在的理由。既有用例只覆盖了"换个 owner 续租被拒"，没有覆盖"同 owner、
+    错 token"。
+    """
+    granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    assert (
+        await store.renew_lease(
+            task_id=task.task_id,
+            owner="w1",
+            fencing_token=granted.fencing_token + 1,
+            ttl_seconds=30,
+        )
+        is None
+    )
+
+
 async def test_renew_after_expiry_is_refused(store, task, clock) -> None:
     """过期后必须重新 acquire，否则旧 worker 可以复活一个已被抢占的租约。"""
     granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)

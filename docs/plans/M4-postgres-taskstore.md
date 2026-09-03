@@ -269,7 +269,7 @@ COMMIT;
 
 **`terminal_reason` 必须无条件写入，包括写 NULL**（复审自查 P6）。`InMemoryTaskStore` 用 `model_copy(update={"terminal_reason": terminal_reason})`，因此一次非终态迁移传 `None` 会**清空**它。PostgreSQL 实现若写成「有值才 SET」，同一序列会得到不同结果：先失败置上原因、再重试转为非终态时，旧原因会残留，而调用方看到的是一个状态与原因矛盾的记录。
 
-这条语义**当前没有任何测试断言**——既有用例里 `terminal_reason` 只出现在 `TaskOutcome` 的构造中，没有一条覆盖 store 层的置位/清空。因此它不是"照抄 fake 即可"，而是一个真实的覆盖缺口：需在共享套件里补一条用例（置上原因 → 再做一次不带原因的合法迁移 → 断言已清空），使两个实现被同一条断言约束。
+这条语义在 V1 定稿时**没有任何测试断言**，属真实覆盖缺口。**T1 已补上**：`test_terminal_reason_is_cleared_when_a_transition_omits_it`（置上原因 → 再做一次不带原因的合法迁移 → 断言已清空）。它是 T1 变异反证的产物——把 `apply_transition` 改成"有值才写"时全部 1236 条用例仍然全绿，证明该缺口真实存在。T2 把它并入共享套件后，两个实现被同一条断言约束。
 
 ### 8.4 空洞检查禁令
 
@@ -412,12 +412,25 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 **TDD 反证（已执行，先红后绿）**：向 `[project].dependencies` 偷加 `redis` → 集合相等用例转红；向 `persistence/store.py` 加一行 `import asyncpg` → import 禁令用例转红，且 `mypy src` 同时报 `import-untyped`（证明该禁令确实在挡真实的类型检查退化）。两次还原后全绿。
 
-### T1：抽出共享判定纯函数（零行为重构）
+### T1：抽出共享判定纯函数（零行为重构）—— **已完成**
 
-新增 `persistence/decisions.py`；`InMemoryTaskStore` 改为消费它。
+新增 `persistence/decisions.py`；`InMemoryTaskStore` 改为消费它。导出六个纯函数：`lease_is_live`、`classify_transition`、`apply_transition`、`may_acquire_lease`、`may_renew_lease`、`context_matches_envelope`。时间一律由调用方以 `now` 传入——读时钟就是 I/O，会让"同一输入必得同一输出"不成立，而那正是两个实现能被同一份断言约束的前提。
 
-- **验收**：既有 `test_task_store_contract.py`、`test_lease_fencing.py`、`test_terminal_protection.py` **一行行为断言不改**，仍然全绿。
-- **TDD 反证**：变异 `decisions.py`（分别打乱拒绝顺序、把 fencing 锚点改回"租约是否 live"、去掉终态优先），三次变异必须分别让 CAS/fencing/terminal 用例转红。反证若首轮全绿，说明该纯函数并未真正承重，必须先补测试再继续。
+判定规则的真源随之从 `fake.py` 的模块 docstring 迁到 `decisions.py`（拒绝顺序、fencing 闭合真值表）。`fake.py` 只剩"怎么存"：一把锁、两个字典、一个自增 token，代码量 97 行 → 23 行。
+
+- **验收**：既有 `test_task_store_contract.py`、`test_lease_fencing.py`、`test_terminal_protection.py` **一行行为断言未改**，全绿；重构前后 `1236 passed` / `830 passed` 逐字相同。
+- **TDD 反证（计划要求的三项，全部转红）**：打乱拒绝顺序（版本检查提到 fencing 之前）→ 1 红；fencing 锚点改回"租约此刻是否 live"→ 1 红；去掉终态优先 → 7 红。
+
+**另外四项额外探针发现两个真实覆盖缺口**（T1 明文规定"反证若首轮全绿必须先补测试再继续"，故在本任务内闭合，不推迟）：
+
+| 探针 | 首轮 | 处置 |
+| --- | --- | --- |
+| `may_acquire_lease` 去掉终态过滤 | 2 红 | 已承重 |
+| `context_matches_envelope` 忽略 `environment_id` | 1 红 | 已承重 |
+| `apply_transition` 的 `terminal_reason` 改成"有值才写" | **全绿** | 补 `test_terminal_reason_is_cleared_when_a_transition_omits_it`（§8.3 P6 预判的缺口，此处被实测确认） |
+| `may_renew_lease` 只比 `owner` 不比 `fencing_token` | **全绿** | 补 `test_renew_with_a_wrong_token_is_refused`。**这一项计划中没有预判**：既有用例只覆盖"换个 owner 续租被拒"，没覆盖"同 owner、错 token"。owner 名常是主机名或角色名，进程重启后重名是常态——而那正是 fencing token 存在的理由 |
+
+补测试后复跑这两项变异，均转红。
 
 ### T2：契约套件双绑定化
 
