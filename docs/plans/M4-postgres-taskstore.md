@@ -1,6 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.1）
 
 > 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
+>
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。
 >
 > 依据基线：`main` = `origin/main` = `HEAD` = `12b5b584da031bff7aa26ab5544d2122736d8945`。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -10,15 +12,16 @@
 
 把任务生命周期从进程内对象迁移为**存储层强制的不变量**：并发、租约、终态保护不再依赖调用方自觉，而由 PostgreSQL 承重。
 
-判定标准七条：
+判定标准八条：
 
 1. **同一套行为用例在两个实现上逐条通过。** `InMemoryTaskStore` 与 `PostgresTaskStore` 绑定同一份契约套件；**元测试断言两个绑定覆盖的用例名集合相等**，使"新增用例只落到一个实现上"不可表达。
 2. **并发结果由存储层裁决。** 真实多连接竞争同一次 CAS 时，恰有一个提交成功，其余全部拿到 `VERSION_MISMATCH` 与存储层 winner；这一条必须在**多个数据库连接**上复现，不能用 `asyncio.gather` 共用一个连接冒充并发。
-3. **崩溃恢复无中间态。** 事务执行中途断开连接后，任务状态要么是事务前的值，要么是事务后的值；不存在版本已增而状态未改、或租约字段部分置位的记录。
-4. **三个承重保护各自可反证。** terminal protection、CAS、fencing 逐个撤掉后，对应用例必须转红（DEVELOPMENT_PLAN §7 M4 测试门明文要求）。
-5. **跨进程恢复不使漂移检测退化。** plan 与 target 从 PostgreSQL 读回，`plan_hash` 与 `target_fingerprint` 由**调用方当下重算**，两个指纹在任何表里都不存在。清空/篡改存储中的 plan 必须使漂移检测转红，而不是静默通过。
-6. **网络放行的窄度可被机器证明。** `tests/integration/` 之外的用例仍然连不出去；integration 用例连非 DSN host 仍被拦；DSN 已设置时 integration 的 skip 数为 0。
-7. **stale recovery 可被发现，不只是可被接管。** 存在一条只读查询能列出"曾被租出、租约已过期、未终态"的任务；对它的接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。**只验证 `acquire_lease` 能接管一个已知 `task_id`，不构成对 stale recovery 的验证**——那只证明了接管，没证明恢复。
+3. **并发重复请求只产生一个任务事实。** 多个连接同时以同一 `(tenant_id, environment_id, idempotency_key)` 创建时，唯一索引使其中之一失败；实现必须**捕获唯一键冲突并返回既存记录**，而不是把数据库错误抛给调用方。这是 DEVELOPMENT_PLAN §7 M4 退出标准的第一句；既有用例只覆盖**串行**重复创建，并发路径此前无任何覆盖。
+4. **崩溃恢复无中间态。** 事务执行中途断开连接后，任务状态要么是事务前的值，要么是事务后的值；不存在版本已增而状态未改、或租约字段部分置位的记录。
+5. **三个承重保护各自可反证。** terminal protection、CAS、fencing 逐个撤掉后，对应用例必须转红（DEVELOPMENT_PLAN §7 M4 测试门明文要求）。
+6. **跨进程恢复不使漂移检测退化。** plan 与 target 从 PostgreSQL 读回，`plan_hash` 与 `target_fingerprint` 由**调用方当下重算**，两个指纹在任何表里都不存在。清空/篡改存储中的 plan 必须使漂移检测转红，而不是静默通过。
+7. **网络放行的窄度可被机器证明。** `tests/integration/` 之外的用例仍然连不出去；integration 用例连非 DSN host 仍被拦；DSN 已设置时 integration 的 skip 数为 0。
+8. **stale recovery 可被发现，不只是可被接管。** 存在一条只读查询能列出"曾被租出、租约已过期、未终态"的任务；对它的接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。**只验证 `acquire_lease` 能接管一个已知 `task_id`，不构成对 stale recovery 的验证**——那只证明了接管，没证明恢复。
 
 ---
 
@@ -139,6 +142,21 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 | S3 | **`policy_revision` 的审批有效性比较不得两侧都读库。** 「policy 变化不能静默让旧审批继续生效」要求把**存储中的**审批与**调用方当下的** `RequestContext.policy_revision` 比 | 与 B3 同类（空洞检查） | §8.4 列为禁令 |
 | S4 | **新增一个 CI job 会同时打破五处闭集断言，不只是整文件 SHA。** `_EXPECTED_JOBS`、checkout 计数、setup-uv 计数、单行 run 命令的精确多重集、persist-credentials 计数 | 与 B1 同类（对既有机制的断言未经核对） | §11 给出逐项清单。另：Codex 提到的 env allowlist 与 service 约束**目前并不存在**，属于本里程碑要**新增**的断言，不是要更新的 |
 
+### 6.3 计划复审自查（V1 定稿前）
+
+对 V1 初稿逐条核对源码后发现六项，其中前两项是**初稿中的过度断言**——声称某机制存在或可复用，而实际不成立。它们与本计划批评 B1 时用的是同一把尺子。
+
+| # | 问题 | 类型 | 处置 |
+| --- | --- | --- | --- |
+| P1 | 初稿称 S3 禁令「复用既有 `test_approval_binding.py` 扩到 PostgreSQL 绑定」。实际该文件测的是 `governance` 纯函数，与 TaskStore 无关；且 `record_approval` **只写不读**，全仓库无审批读回路径 | **过度断言**：声称的检查没有可施加的对象 | §8.4 改写：M4 不追加读回方法，存储保真由 integration 测试直接读表验证，S3 降级为记录在案的设计约束，M8 引入读路径时落成 |
+| P2 | 并发幂等创建无覆盖，而它是 M4 退出标准的**第一句**；既有用例只测串行重复创建 | 漏读交付物（与 B2、S1 同类，本计划内第三次） | 新增 §1 判定标准 3；T6 增用例与 TDD 反证 |
+| P3 | 初稿称两个安全测试文件「可以原样重绑」到 PostgreSQL。实际它们在 `tests/security/`，socket 被拦，原地绑定不可能；参数化 `store` fixture 会让全部安全用例尝试连库，与 §1 判定标准 7 冲突 | **过度断言**：结构上不成立 | §9.5 改为「抽取到共享套件模块再分别绑定」，并写明为何不能参数化 |
+| P4 | `task_id` 列类型未指定，而直觉选择 `uuid` 是错的——读回是 `UUID` 对象，`StrictStr` 会拒 | 未指定 + 默认选择有陷阱 | T3 写死 `text`，并推广到所有映射 `StrictStr` 的列 |
+| P5 | round-trip 测试只覆盖 JSONB 表；`tasks` 是列展开的，属另一组风险 | 覆盖缺口 | T3 拆成两组独立 round-trip |
+| P6 | `terminal_reason` 的置空语义**当前无任何测试断言**；fake 在每次迁移无条件写入（传 `None` 即清空），PostgreSQL 若写成「有值才 SET」会静默发散 | 覆盖缺口（与 M3 那四次首轮全绿的反证同类） | §8.3 写死无条件写入；共享套件补一条置位→清空用例 |
+
+P2 是本计划内第三次「交付物被漏读」（前两次是 B2 的审计事件、S1 的 stale recovery）。**这说明按印象复述交付物清单是不可靠的**：M4 交付物与测试门必须逐句对照 DEVELOPMENT_PLAN §7 原文核验，而不是凭对里程碑主题的理解概括。
+
 ---
 
 ## 7. 数据模型与迁移
@@ -245,6 +263,10 @@ COMMIT;
 
 命令 DTO（`TransitionCommand` / `LeaseCommand`）必须在**开事务之前**构造完成。既有 `test_invalid_lease_arguments_do_not_mutate_the_store` 承重：非法入参先污染存储再抛 `ValidationError`，会留下一条带无效租约字段的记录，之后所有 fencing 判定都建立在这条脏记录上。
 
+**`terminal_reason` 必须无条件写入，包括写 NULL**（复审自查 P6）。`InMemoryTaskStore` 用 `model_copy(update={"terminal_reason": terminal_reason})`，因此一次非终态迁移传 `None` 会**清空**它。PostgreSQL 实现若写成「有值才 SET」，同一序列会得到不同结果：先失败置上原因、再重试转为非终态时，旧原因会残留，而调用方看到的是一个状态与原因矛盾的记录。
+
+这条语义**当前没有任何测试断言**——既有用例里 `terminal_reason` 只出现在 `TaskOutcome` 的构造中，没有一条覆盖 store 层的置位/清空。因此它不是"照抄 fake 即可"，而是一个真实的覆盖缺口：需在共享套件里补一条用例（置上原因 → 再做一次不带原因的合法迁移 → 断言已清空），使两个实现被同一条断言约束。
+
 ### 8.4 空洞检查禁令
 
 三条禁令同一根因：**"当前值"若从存储读出来再和存储比，检查恒真**。这正是 M3 首轮深档验收打回的那条阻断项的根因。
@@ -252,7 +274,17 @@ COMMIT;
 | 禁令 | 若违反 | 承重测试 |
 | --- | --- | --- |
 | **S2** `transition` 不得在事务内重读 `version` 充当 `expected_version` | CAS 永远成功，并发写全部提交 | 新增：并发用例断言恰有一个 winner；反证——把 UPDATE 的 `WHERE version` 改成读到的值，用例必须转红 |
-| **S3** 审批有效性比较，`policy_revision` 的一侧必须来自调用方 `RequestContext` | policy 变化后旧审批静默继续生效 | 复用既有 `test_approval_binding.py` 的断言形状，扩到 PostgreSQL 绑定 |
+| **S3** 审批有效性比较，`policy_revision` 的一侧必须来自调用方 `RequestContext` | policy 变化后旧审批静默继续生效 | **M4 无法施加此禁令，见下方说明**；作为设计约束记录，到 M8 引入读回路径时才可执行 |
+
+**关于 S3 的更正（复审自查）**：初稿写「复用既有 `test_approval_binding.py` 的断言形状扩到 PostgreSQL 绑定」是**错的**。该文件测的是 `governance/verify_approval_binding()` 纯函数，用内存 fixture，与 TaskStore 无关；且 `record_approval` 在整个仓库里**只写不读**——`persistence/fake.py` 的 `_approvals` 是一个从未被查询的私有 list，`TaskStore` Protocol 也没有任何读回方法。**没有读路径，S3 就没有可施加禁令的对象。**
+
+因此 M4 的处置是：
+
+- 审批表照建（M4 交付物明列「审批记录的数据契约和存储结构」），但**不向 Protocol 追加读回方法**——它在 M8 之前没有任何生产消费方，追加等于为不存在的调用者写接口。
+- 存储保真由 integration 测试**直接用 SQL 读表**验证，不经 Protocol。测试可以够到存储细节，生产代码不行；这样既证明了数据真的落对，又不产生一个无人调用的公开 API。
+- **S3 作为设计约束写在此处**，M8 引入读回路径时必须同时落成它的承重测试。届时若发现比较写成了两侧读库，属回归，不属新增缺陷。
+
+这是一处判断，不是拍板结论：若认为审批读回应在 M4 就进 Protocol，可以推翻，代价是多一个 M8 前无消费方的方法。
 | **B3** `plan_hash` / `target_fingerprint` 不得落库 | 恢复时漂移检测退化成空操作 | 新增：篡改存储中的 plan 后，调用方重算的指纹必须不匹配并拒绝继续 |
 
 ### 8.5 `list_stale_leases`：stale recovery 的**发现**
@@ -342,14 +374,18 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 ### 9.5 契约套件的双绑定
 
-现有 `tests/contract/test_task_store_contract.py` 开头写着「M3/M4 共用的 TaskStore 交互形状。M4 的 PostgreSQL 实现必须原样通过本文件」。落实方式：
+现有 `tests/contract/test_task_store_contract.py` 开头写着「M3/M4 共用的 TaskStore 交互形状。M4 的 PostgreSQL 实现必须原样通过本文件」。
 
-- 把行为用例抽成可按实现绑定的共享套件；
-- `tests/contract/` 绑定 `InMemoryTaskStore`（不需要数据库，仍在默认路径跑）；
-- `tests/integration/` 绑定 `PostgresTaskStore`；
+**初稿说这两个安全测试文件「可以原样重绑」，这是错的**（复审自查 P3）。`test_lease_fencing.py` 与 `test_terminal_protection.py` 位于 `tests/security/`，而 §9.2 的放行只对 `tests/integration/` 生效——在原目录里它们连不上数据库。把 `store` fixture 参数化成"内存 + PostgreSQL"更糟：那会让 `tests/security/` 里的每条用例都尝试连库，与 §1 判定标准 7 直接冲突。
+
+因此落实方式是**抽取**，不是就地参数化：
+
+- 行为用例抽成一个不含 fixture 定义的共享套件模块（如 `tests/suites/task_store.py`），只声明用例函数，`store` 由绑定方提供；
+- **内存绑定**：`tests/contract/`（契约用例）与 `tests/security/`（fencing、terminal 用例，保留 `pytestmark = pytest.mark.security`）——不需要数据库，仍在默认路径跑，socket 仍被拦；
+- **PostgreSQL 绑定**：`tests/integration/`，同样保留 `security` marker，使 `python -m pytest -m security -q` 覆盖它们（无 DSN 时跳过，与 §9.4 的元测试相容）；
 - **元测试断言两个绑定收集到的用例名集合相等**——否则新增一条用例只落到一个实现上，而没有任何东西会报错。
 
-同样处理既有的 `tests/security/test_lease_fencing.py` 与 `test_terminal_protection.py`：它们已经写成实现无关（只断言 `second.fencing_token > first.fencing_token`，不断言具体取值），可以原样重绑，这是 M4 最有价值的既有资产。
+这些既有用例本身写得实现无关（只断言 `second.fencing_token > first.fencing_token`，不断言具体取值），因此抽取是**纯搬运**：一行行为断言都不改。这是 M4 最有价值的既有资产，但取用它需要先付这次搬运的代价。
 
 ---
 
@@ -374,7 +410,16 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 ### T3：schema 与 Alembic migration
 
-五张表 + fencing 序列 + 唯一索引 + CHECK 约束；`upgrade()` / `downgrade()`；空库与有数据两条 upgrade 路径。补 round-trip 测试：DTO → JSONB → DTO 与原对象相等。
+五张表 + fencing 序列 + 唯一索引 + CHECK 约束；`upgrade()` / `downgrade()`；空库与有数据两条 upgrade 路径。
+
+**`task_id` 列必须是 `text`，不是 `uuid`**（复审自查 P4）。`TaskRecord.task_id` 是 `StrictStr`，而 `uuid` 列读回的是 `UUID` 对象，`StrictStr` 会直接拒绝——这条在写 DDL 时的直觉恰好是错的，因此写死在计划里。同理，所有映射到 `StrictStr` 的列一律 `text`。
+
+**两组独立的 round-trip 测试**（复审自查 P5）：
+
+1. **JSONB 表**：DTO → JSONB → DTO 与原对象相等（`task_plans`、`task_evidence`、`task_approvals`、`task_audit_events`）。
+2. **`tasks` 表**：`TaskRecord` → 列展开 → `TaskRecord` 与原对象相等。这是**另一组风险**，不被第 1 组覆盖：`AwareDatetime` 经 `timestamptz` 往返的时区与微秒精度、`Sha256Hex` 的长度约束、`terminal_reason` 的 `None` 与 SQL `NULL` 的对应、以及三个租约字段的同置同清不变量。
+
+`task_approvals` 目前没有 Protocol 读回路径（§8.4 S3），其 round-trip 由 integration 测试**直接用 SQL 读表**验证。
 
 ### T4：`PostgresTaskStore`
 
@@ -394,9 +439,12 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 **必须用多个真实数据库连接**，不得用共用连接的 `asyncio.gather` 冒充并发：
 
 - N 个连接同时 CAS 同一版本 → 恰一个 `applied=True`，其余 `VERSION_MISMATCH` 且 winner 一致；
+- **N 个连接同时用同一幂等键创建 → 恰产生一个任务事实**，全部调用返回同一 `task_id`，无一抛出数据库唯一键冲突（§1 判定标准 3；复审自查 P2）。这是 M4 退出标准的第一句，此前**无任何覆盖**——既有用例只测串行重复创建；
 - 租约过期后被另一 worker 抢占，旧 token 写入被拒；
 - 终态后到事件被拒，终态不变；
-- 事务中途断连 → 无中间态（§1 判定标准 3）。
+- 事务中途断连 → 无中间态（§1 判定标准 4）。
+
+- **TDD 反证**：去掉唯一键冲突的捕获分支，并发创建用例必须转红（而不是变成偶发失败——因此该用例需要足够的并发度使冲突必然发生）。
 
 ### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter
 
@@ -491,7 +539,7 @@ M4 明确不做：
 
 **理由**（负责人原话要点）：`stale recovery` 已在 M4 交付物里明列；只验证 `acquire_lease` 能接管一个已知 `task_id`，不足以证明"恢复"——那只证明了接管。
 
-**收窄边界**：只返回"曾被租出、租约已过期、未终态"的任务，按 `(lease_expires_at, task_id)` 稳定排序；不 claim、不调度、不判断审批是否应恢复。接管仍走现有 `acquire_lease()`，并发 winner 仍由存储层裁决。完整语义与非目标见 §8.5，判定标准见 §1 第 7 条。
+**收窄边界**：只返回"曾被租出、租约已过期、未终态"的任务，按 `(lease_expires_at, task_id)` 稳定排序；不 claim、不调度、不判断审批是否应恢复。接管仍走现有 `acquire_lease()`，并发 winner 仍由存储层裁决。完整语义与非目标见 §8.5，判定标准见 §1 第 8 条。
 
 **这是对 M2 已冻结 Protocol 的追加，不是修改**，循 M3 新增 `PlanStore` 的先例（§2 取向 5）。落点在 T4，两个实现同时提供并进入共享套件。
 
@@ -511,7 +559,7 @@ M4 明确不做：
 
 能力状态只能使用已取得的最强证据。M4 完成后 TaskStore 的最强证据仍是 `tests`——**PostgreSQL 集成测试通过不等于部署，更不等于 canary 或用户验收**。
 
-**M4 通过的硬门槛**：ADR-008 四条命令全绿、GitHub CI **七个** job 全绿（既有六个 + `integration`）、§1 的七条判定标准逐条有证据、§10 T8 的三项 TDD 反证逐条先红后绿。`integration` 未绿即不通过（§14.2）。
+**M4 通过的硬门槛**：ADR-008 四条命令全绿、GitHub CI **七个** job 全绿（既有六个 + `integration`）、§1 的八条判定标准逐条有证据、§10 T8 的三项 TDD 反证逐条先红后绿。`integration` 未绿即不通过（§14.2）。
 
 ---
 
@@ -519,8 +567,9 @@ M4 明确不做：
 
 | 检查 | 结论 |
 | --- | --- |
-| 是否有占位符 / TBD | 无。§14 三项均已于 2026-09-03 拍板，**本计划无开放决策** |
-| 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 7 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（方法数已由"五个"改为"六个"） |
+| 是否有占位符 / TBD | 无。§14 三项均已于 2026-09-03 拍板。**唯一一处未经拍板的判断**是 §8.4 对审批读回的处置（不追加 Protocol 方法，改由测试直接读表），已在原处显式标注可被推翻 |
+| 复审自查 | 已执行，逐条核对源码，发现六项并全部修复（§6.3）。其中 P1、P3 是初稿的**过度断言**，P2 是第三次漏读交付物 |
+| 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（方法数已由"五个"改为"六个"） |
 | 与真源冲突 | 无已知冲突。§7.2 与 ADR-009 一致；§4 与 §8.5 的 E1 口径与 ADR-007 D7 一致；§12.1 与 ADR-008 一致；§13 的"不引入 Compose"与 ADR-007 D8 的 M5 时点一致 |
 | 范围 | 单一里程碑，10 个任务，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
 | 歧义 | 无。§14.2 的"必需 gate"已显式区分「验收硬门槛」与「GitHub required status check」，避免重复 M1 那类误述 |
