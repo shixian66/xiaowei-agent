@@ -29,7 +29,11 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from xiaowei_agent.persistence.postgres import PostgresTaskStore
+from xiaowei_agent.persistence.postgres import (
+    PostgresEvidenceLedger,
+    PostgresPlanStore,
+    PostgresTaskStore,
+)
 from xiaowei_agent.persistence.schema import ALL_TABLES, FENCING_SEQUENCE_NAME
 
 DSN_ENV_VAR = "PYTEST_POSTGRES_DSN"
@@ -178,6 +182,46 @@ def store(clean_database: AsyncEngine, clock: Any) -> PostgresTaskStore:
     决定——否则六条过期/抢占用例只能靠 ``sleep`` 才能测。
     """
     return PostgresTaskStore(engine=clean_database, clock=clock)
+
+
+@pytest.fixture
+def plan_store(clean_database: AsyncEngine) -> PostgresPlanStore:
+    """覆盖根 conftest 的内存 ``plan_store``。"""
+    return PostgresPlanStore(engine=clean_database)
+
+
+@pytest.fixture
+def evidence_ledger(clean_database: AsyncEngine) -> PostgresEvidenceLedger:
+    """覆盖根 conftest 的内存 ``evidence_ledger``。"""
+    return PostgresEvidenceLedger(engine=clean_database)
+
+
+@pytest.fixture
+async def independent_stores(
+    clean_database: AsyncEngine, postgres_dsn: str, clock: Any
+) -> AsyncIterator[Any]:
+    """按需创建**各自持有独立连接**的 store。
+
+    并发用例必须用多个真实连接。``asyncio.gather`` 共用一个连接不算并发——它证明
+    的是"同一个会话里两次顺序调用"，而 CAS 要防的恰恰是两个会话。这里每个 store
+    拿一个独立的 ``AsyncEngine``（``NullPool``，每次调用开新连接），把"是不是真的
+    并发"这件事变成结构上确定的，而不是靠推断连接池行为。
+    """
+    engines: list[AsyncEngine] = []
+
+    def _make(count: int) -> list[PostgresTaskStore]:
+        stores: list[PostgresTaskStore] = []
+        for _ in range(count):
+            engine = create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool)
+            engines.append(engine)
+            stores.append(PostgresTaskStore(engine=engine, clock=clock))
+        return stores
+
+    try:
+        yield _make
+    finally:
+        for engine in engines:
+            await engine.dispose()
 
 
 @pytest.fixture

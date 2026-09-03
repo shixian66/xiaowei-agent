@@ -35,9 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
+    EvidenceEnvelope,
+    ExecutionPlan,
     LeaseGrant,
     RequestContext,
     RequestEnvelope,
+    ResolvedTarget,
     TaskRecord,
     TaskStatus,
     TransitionResult,
@@ -51,8 +54,28 @@ from xiaowei_agent.persistence.decisions import (
     may_renew_lease,
     stale_lease_sort_key,
 )
-from xiaowei_agent.persistence.rows import dump_contract, record_to_row, row_to_record
-from xiaowei_agent.persistence.schema import FENCING_SEQUENCE, TASK_APPROVALS, TASKS
+from xiaowei_agent.persistence.evidence import (
+    EvidenceConflictError,
+    EvidenceNotFoundError,
+)
+from xiaowei_agent.persistence.plans import (
+    PlanConflictError,
+    PlanNotFoundError,
+    StoredPlan,
+)
+from xiaowei_agent.persistence.rows import (
+    dump_contract,
+    load_contract,
+    record_to_row,
+    row_to_record,
+)
+from xiaowei_agent.persistence.schema import (
+    FENCING_SEQUENCE,
+    TASK_APPROVALS,
+    TASK_EVIDENCE,
+    TASK_PLANS,
+    TASKS,
+)
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
@@ -65,6 +88,21 @@ from xiaowei_agent.persistence.store import (
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
+
+
+async def _serialise_on_task(connection: AsyncConnection, task_id: str) -> None:
+    """按 ``task_id`` 取一把**事务级** advisory lock。
+
+    两张 append-only 表用 ``MAX(seq) + 1`` 分配序号，这是读-改-写：并发写入同一任务
+    会算出同一个 seq，然后其中一个撞唯一约束，把数据库错误抛给调用方。
+
+    不用 ``SELECT ... FOR UPDATE`` 锁 ``tasks`` 行：那要求任务行已存在，而这两个
+    台账在契约上都不校验任务存在性（内存实现也不校验）。advisory lock 不依赖任何
+    行，事务结束自动释放。哈希碰撞只会让两个无关任务互相串行化，无害。
+    """
+    await connection.execute(
+        sa.text("SELECT pg_advisory_xact_lock(hashtext(:task_id))"), {"task_id": task_id}
+    )
 
 
 def _as_row(mapping: Mapping[Any, Any]) -> dict[str, Any]:
@@ -297,15 +335,9 @@ class PostgresTaskStore:
         return grant
 
     async def record_approval(self, *, request: ApprovalRequest) -> None:
-        """append-only 写入。
-
-        ``seq`` 在同一事务里由 ``MAX(seq) + 1`` 取得，并先对任务行加 ``FOR UPDATE``
-        使同一任务的并发写入串行化。**已知边界**：任务行不存在时没有可锁的行，此时
-        并发写入同一 ``task_id`` 会撞主键——与内存实现一样，本方法不校验任务存在性，
-        而现实里审批总是属于一个已创建的任务。
-        """
+        """append-only 写入。``seq`` 由 ``MAX(seq) + 1`` 分配，并发由 advisory lock 串行化。"""
         async with self._engine.begin() as connection:
-            await self._select_row(connection, request.task_id, for_update=True)
+            await _serialise_on_task(connection, request.task_id)
             next_seq = sa.select(
                 sa.func.coalesce(sa.func.max(TASK_APPROVALS.c.seq), 0) + 1
             ).where(TASK_APPROVALS.c.task_id == request.task_id)
@@ -318,3 +350,154 @@ class PostgresTaskStore:
                     request=dump_contract(request),
                 )
             )
+
+
+class PostgresPlanStore:
+    """``PlanStore`` 的 PostgreSQL 实现。
+
+    ``save`` 用 ``ON CONFLICT DO NOTHING`` 后比对，而不是"先查后插"：并发的两次
+    ``save`` 会双双查不到、双双插入，其中一个撞主键。冲突后读回既存内容再比较，
+    内容相同即幂等成功，不同才是 ``PlanConflictError``——重试不该被当成篡改。
+    """
+
+    def __init__(self, *, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def save(
+        self, *, task_id: str, plan: ExecutionPlan, target: ResolvedTarget
+    ) -> None:
+        candidate = StoredPlan(plan=plan, target=target)
+        insert = (
+            sa.dialects.postgresql.insert(TASK_PLANS)
+            .values(
+                task_id=task_id,
+                plan=dump_contract(plan),
+                target=dump_contract(target),
+            )
+            .on_conflict_do_nothing(index_elements=["task_id"])
+            .returning(TASK_PLANS.c.task_id)
+        )
+        async with self._engine.begin() as connection:
+            inserted = (await connection.execute(insert)).first()
+            if inserted is not None:
+                return
+            existing = await self._load_row(connection, task_id)
+        if existing is None or existing != candidate:
+            raise PlanConflictError(
+                "a different plan is already stored for this task", task_id=task_id
+            )
+
+    async def _load_row(
+        self, connection: AsyncConnection, task_id: str
+    ) -> StoredPlan | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_PLANS.c.plan, TASK_PLANS.c.target).where(
+                        TASK_PLANS.c.task_id == task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        return StoredPlan(
+            plan=load_contract(ExecutionPlan, row["plan"]),
+            target=load_contract(ResolvedTarget, row["target"]),
+        )
+
+    async def load(self, *, task_id: str) -> StoredPlan:
+        async with self._engine.connect() as connection:
+            stored = await self._load_row(connection, task_id)
+        if stored is None:
+            raise PlanNotFoundError("no plan stored for this task", task_id=task_id)
+        return stored
+
+
+class PostgresEvidenceLedger:
+    """``EvidenceLedger`` 的 PostgreSQL 实现。
+
+    ``load`` 按 ``seq`` 排序，不按 ``captured_at``：契约是"按写入顺序返回"，而同一
+    毫秒采集的两条证据时间戳可能相同，用时间排序会让顺序在两次读取之间变化。
+    """
+
+    def __init__(self, *, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def append(self, *, task_id: str, envelope: EvidenceEnvelope) -> str:
+        payload = dump_contract(envelope)
+        next_seq = sa.select(
+            sa.func.coalesce(sa.func.max(TASK_EVIDENCE.c.seq), 0) + 1
+        ).where(TASK_EVIDENCE.c.task_id == task_id)
+        insert = (
+            sa.dialects.postgresql.insert(TASK_EVIDENCE)
+            .values(
+                task_id=task_id,
+                evidence_id=envelope.evidence_id,
+                seq=next_seq.scalar_subquery(),
+                envelope=payload,
+            )
+            .on_conflict_do_nothing(index_elements=["task_id", "evidence_id"])
+            .returning(TASK_EVIDENCE.c.evidence_id)
+        )
+        async with self._engine.begin() as connection:
+            await _serialise_on_task(connection, task_id)
+            inserted = (await connection.execute(insert)).first()
+            if inserted is not None:
+                return envelope.evidence_id
+            existing = (
+                (
+                    await connection.execute(
+                        sa.select(TASK_EVIDENCE.c.envelope).where(
+                            TASK_EVIDENCE.c.task_id == task_id,
+                            TASK_EVIDENCE.c.evidence_id == envelope.evidence_id,
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        # 内容相同的重写是幂等的（重试不该被当成篡改）；不同则一律拒绝。
+        if load_contract(EvidenceEnvelope, existing["envelope"]) != envelope:
+            raise EvidenceConflictError(
+                "different evidence already recorded under this id", task_id=task_id
+            )
+        return envelope.evidence_id
+
+    async def load(self, *, task_id: str) -> tuple[EvidenceEnvelope, ...]:
+        """无证据时返回空元组，**不抛异常**——没取过数是正常状态，不是错误。"""
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(TASK_EVIDENCE.c.envelope)
+                        .where(TASK_EVIDENCE.c.task_id == task_id)
+                        .order_by(TASK_EVIDENCE.c.seq)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(load_contract(EvidenceEnvelope, row["envelope"]) for row in rows)
+
+    async def get(self, *, task_id: str, evidence_id: str) -> EvidenceEnvelope:
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.select(TASK_EVIDENCE.c.envelope).where(
+                            TASK_EVIDENCE.c.task_id == task_id,
+                            TASK_EVIDENCE.c.evidence_id == evidence_id,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise EvidenceNotFoundError(
+                "no evidence recorded under this reference", task_id=task_id
+            )
+        return load_contract(EvidenceEnvelope, row["envelope"])

@@ -22,7 +22,10 @@ if TYPE_CHECKING:
         TaskStatus,
         ToolCall,
     )
+    from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
+    from xiaowei_agent.persistence.plans import InMemoryPlanStore
+    from xiaowei_agent.persistence.store import TaskStore
     from xiaowei_agent.tools.fake import RecordingToolAdapter
     from xiaowei_agent.tools.gateway import DeterministicToolGateway
 
@@ -198,6 +201,20 @@ def store(clock: "ManualClock") -> "InMemoryTaskStore":
 
 
 @pytest.fixture
+def plan_store() -> "InMemoryPlanStore":
+    from xiaowei_agent.persistence.plans import InMemoryPlanStore
+
+    return InMemoryPlanStore()
+
+
+@pytest.fixture
+def evidence_ledger() -> "InMemoryEvidenceLedger":
+    from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
+
+    return InMemoryEvidenceLedger()
+
+
+@pytest.fixture
 async def task(store: "InMemoryTaskStore", context: "RequestContext") -> "TaskRecord":
     return await store.create_task(envelope=make_envelope(), context=context)
 
@@ -224,7 +241,7 @@ def _path_to(target: "TaskStatus") -> tuple["TaskStatus", ...]:
 
 
 async def drive_to_terminal(
-    store: "InMemoryTaskStore", task_id: str, terminal: "TaskStatus"
+    store: "TaskStore", task_id: str, terminal: "TaskStatus"
 ) -> None:
     """把任务沿一条合法路径推到指定终态，全程采纳存储层 winner。"""
     record = await store.get(task_id)

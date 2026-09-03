@@ -32,7 +32,11 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
-    from xiaowei_agent.persistence.postgres import PostgresTaskStore
+    from xiaowei_agent.persistence.postgres import (
+        PostgresEvidenceLedger,
+        PostgresPlanStore,
+        PostgresTaskStore,
+    )
     from xiaowei_agent.persistence.store import Clock, TaskStore
     from xiaowei_agent.runners.deterministic import DeterministicStepRunner
     from xiaowei_agent.runners.fake import ScriptedRunner
@@ -66,6 +70,14 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """
         anchored: TaskStore = store
         _ = anchored
+
+    def _postgres_port_anchors(
+        plans: "PostgresPlanStore", ledger: "PostgresEvidenceLedger"
+    ) -> None:
+        """T7 实现的是**既有 port**，不是新 port——两条赋值把这一点交给 mypy 检查。"""
+        anchored_plans: PlanStore = plans
+        anchored_ledger: EvidenceLedger = ledger
+        _ = (anchored_plans, anchored_ledger)
 
     def _real_runner_anchor(step_runner: "DeterministicStepRunner") -> None:
         """真实 Runner 必须**就是**一个 ``WorkflowRunner``。

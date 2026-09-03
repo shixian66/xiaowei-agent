@@ -528,7 +528,7 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 **仍未验证**：60 条 PostgreSQL 绑定用例与 4 条迁移路径用例**一次都没跑过**——本机无 PostgreSQL、无容器运行时。T5 交付的是基建与放行窄度的证据，**不是** PostgreSQL 行为的证据。
 
-### T6：并发与崩溃恢复故障注入
+### T6：并发与崩溃恢复故障注入 —— **已写，本机无法运行**
 
 **必须用多个真实数据库连接**，不得用共用连接的 `asyncio.gather` 冒充并发：
 
@@ -538,9 +538,13 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 - 终态后到事件被拒，终态不变；
 - 事务中途断连 → 无中间态（§1 判定标准 4）。
 
-- **TDD 反证**：去掉唯一键冲突的捕获分支，并发创建用例必须转红（而不是变成偶发失败——因此该用例需要足够的并发度使冲突必然发生）。
+- **TDD 反证**：去掉唯一键冲突的捕获分支，并发创建用例必须转红（而不是变成偶发失败——因此该用例需要足够的并发度使冲突必然发生）。并发度取 8，理由同上。
 
-### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter
+**崩溃注入用 `pg_terminate_backend` 真的杀后端进程**，而不是客户端 rollback：后者证明的是"我们记得回滚"，前者证明的是"我们不回滚也不会留下中间态"。生产里进程是被 OOM killer 和 pod 驱逐杀掉的，没人记得回滚。
+
+**本机无 PostgreSQL、无容器运行时，这 6 条用例一次都没跑过。** 判定标准 2 / 3 / 4 的证据要到 CI 的 integration job 才产生。
+
+### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter —— **已完成（行为待真实库）**
 
 **实现既有 port，不新增 port。** 冲突语义与内存实现一致：计划内容不同即 `PlanConflictError`；同 `evidence_id` 内容不同即 `EvidenceConflictError`；`load` 按写入顺序返回，无证据时返回空元组而非抛异常。同样走双绑定套件。
 
