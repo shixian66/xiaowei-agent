@@ -7,8 +7,11 @@ mypy 的事：确认锚点文件确实覆盖了所有已有实现的 Protocol；
 """
 
 import ast
+import importlib
 import inspect
 from pathlib import Path
+
+import pytest
 
 from xiaowei_agent import _conformance
 from xiaowei_agent.persistence.store import TaskStore
@@ -69,14 +72,45 @@ def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
     )
 
 
-def test_store_and_runner_keep_their_protocol_keyword_arguments() -> None:
-    from xiaowei_agent.persistence.fake import InMemoryTaskStore
+def _protocol_methods(protocol: type) -> tuple[str, ...]:
+    """Protocol 自己声明的方法名。
+
+    **不写死清单。** 写死的清单在 Protocol 长出新方法时不会失败，只会静默地少检
+    一个——M4 给 TaskStore 加 list_stale_leases 时正好撞上这一点。从 Protocol 派生
+    让"检查范围"随契约自动扩张。
+    """
+    return tuple(
+        name
+        for name, value in vars(protocol).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    )
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.fake:InMemoryTaskStore",
+        "xiaowei_agent.persistence.postgres:PostgresTaskStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_every_task_store_implementation_keeps_the_protocol_keyword_arguments(
+    implementation_path: str,
+) -> None:
+    """**两个实现都要检查。** 只校 fake 会让 PostgreSQL 实现的签名漂移无人发现。"""
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(TaskStore)
+    assert len(methods) == 7, f"TaskStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(TaskStore, method)
+        ), f"{class_name}.{method}"
+
+
+def test_runner_implementation_keeps_the_protocol_keyword_arguments() -> None:
     from xiaowei_agent.runners.fake import ScriptedRunner
 
-    for method in ("create_task", "transition", "acquire_lease", "renew_lease"):
-        assert _keyword_params(getattr(InMemoryTaskStore, method)) == _keyword_params(
-            getattr(TaskStore, method)
-        ), method
     for method in ("start", "resume"):
         assert _keyword_params(getattr(ScriptedRunner, method)) == _keyword_params(
             getattr(WorkflowRunner, method)

@@ -480,14 +480,28 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 `task_approvals` 目前没有 Protocol 读回路径（§8.4 S3），其 round-trip 由 integration 测试**直接用 SQL 读表**验证。
 
-### T4：`PostgresTaskStore`
+### T4：`PostgresTaskStore` —— **已完成（真实库行为待 T5/T6）**
 
 engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5 的 `list_stale_leases`）。CAS 与租约按 §8.3 形状；入参 DTO 在开事务前构造。
 
 `list_stale_leases` 同时要在 `InMemoryTaskStore` 上实现，并进入 §9.5 的共享套件——两个绑定的用例名集合相等这条元测试，正是用来保证它不会只落到一个实现上。追加 Protocol 方法还会触及 `persistence/__init__.py` 的导出与 `tests/contract/test_protocol_conformance.py` 的一致性锚点，两处都在本任务内更新。
 
-- **TDD 反证**：S2 禁令——把 UPDATE 的 `WHERE version` 改成事务内读到的值，并发用例必须转红。
-- **TDD 反证**：把 `list_stale_leases` 的"未终态"过滤去掉，终态任务会被列为可恢复，对应用例必须转红。
+**已执行的反证**：
+
+| 变异 | 结果 |
+| --- | --- |
+| 去掉 `is_stale_lease` 的"未终态"过滤 | 1 红 |
+| 把 `list_stale_leases` 的排序键第二项改成常量 | **首轮全绿 → 见下** |
+| 把 `list_stale_leases` 从 `InMemoryTaskStore` 删掉 | 1 红（Protocol 方法清单派生生效） |
+| `lease_is_live` 的 `>` 改成 `>=` | 1 红（补测试后） |
+
+**排序决胜位的反证首轮全绿，是一个真实的覆盖缺口，且暴露了一条更一般的教训**：`task_id` 由 `uuid4` 生成，插入顺序有一半概率**恰好已是**字典序，因此存储层用例对这个变异只有 50% 的检出率。**一个一半概率转红的反证等于没有反证。** 处置是把这类性质下沉到纯函数层用构造好的输入确定性钉死（`tests/contract/test_lease_decisions.py`），存储层保留契约断言。这不是重复——两层的输入可控性不同。
+
+顺带补上的 `lease_is_live` 边界方向（`>` 而非 `>=`，即"恰好等于过期时刻已算过期"）此前也无任何断言。
+
+**`test_protocol_conformance.py` 的方法清单原本是写死的四项**，Protocol 长出 `list_stale_leases` 时它不会失败，只会静默少检一个。已改为从 Protocol 派生，并对**两个实现**都跑——只校 fake 会让 PostgreSQL 的签名漂移无人发现。
+
+**仍未验证（需要真实 PostgreSQL）**：S2 禁令的反证（把 UPDATE 的 `WHERE version` 改成事务内读到的值，并发用例必须转红）——它需要多连接并发才能表达，推到 T6；`ON CONFLICT DO NOTHING` 的并发幂等创建、`FOR UPDATE` 的实际串行化、序列的单调性。**T4 交付的是代码与签名一致性，不是运行时行为证据。**
 
 ### T5：integration 基建与 PostgreSQL 绑定
 

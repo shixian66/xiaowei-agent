@@ -33,14 +33,17 @@ from xiaowei_agent.persistence.decisions import (
     apply_transition,
     classify_transition,
     context_matches_envelope,
+    is_stale_lease,
     may_acquire_lease,
     may_renew_lease,
+    stale_lease_sort_key,
 )
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
     IdempotencyConflictError,
     LeaseCommand,
+    StaleLeaseQuery,
     TaskNotFoundError,
     TransitionCommand,
     request_dedup_digest,
@@ -180,6 +183,13 @@ class InMemoryTaskStore:
             )
             self._records[task_id] = current.model_copy(update={"lease_expires_at": expires})
             return grant
+
+    async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
+        query = StaleLeaseQuery(limit=limit)
+        async with self._lock:
+            now = self._clock()
+            stale = [r for r in self._records.values() if is_stale_lease(r, now=now)]
+        return tuple(sorted(stale, key=stale_lease_sort_key)[: query.limit])
 
     async def record_approval(self, *, request: ApprovalRequest) -> None:
         async with self._lock:

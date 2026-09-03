@@ -56,9 +56,11 @@ __all__ = [
     "apply_transition",
     "classify_transition",
     "context_matches_envelope",
+    "is_stale_lease",
     "lease_is_live",
     "may_acquire_lease",
     "may_renew_lease",
+    "stale_lease_sort_key",
 ]
 
 
@@ -157,6 +159,43 @@ def may_renew_lease(
     if not lease_is_live(record, now=now):
         return False
     return record.lease_owner == owner and record.fencing_token == fencing_token
+
+
+def is_stale_lease(record: TaskRecord, *, now: _dt.datetime) -> bool:
+    """任务是否**可能**需要被接管：曾被租出、租约已过期、且未处于终态。
+
+    三个条件缺一不可，且每一条挡的是不同的错误：
+
+    - **曾被租出**（``fencing_token is not None``）——从未租出的任务没有"接管"可言，
+      它还没开始。锚点与 fencing 规则一致，都不是"租约此刻是否 live"。
+    - **租约已过期**——仍在有效期内的任务有活着的持有者，列出它等于邀请抢占。
+    - **未终态**——已结束的任务不需要被恢复。去掉这一条，每个正常结束的任务都会
+      被永久列为"可恢复"，因为它的租约字段并不清空。
+
+    这个判定只回答"可能需要被接管"。它**不**回答该不该恢复、由谁恢复、恢复后做
+    什么——那些是 Worker 的职责，属 M5 及以后。
+    """
+    return (
+        record.fencing_token is not None
+        and not lease_is_live(record, now=now)
+        and record.status not in TERMINAL_STATUSES
+    )
+
+
+def stale_lease_sort_key(record: TaskRecord) -> tuple[_dt.datetime, str]:
+    """``(lease_expires_at, task_id)``：过期最久的排最前，同刻按 id 决胜。
+
+    排序必须**稳定且全序**，否则两次调用可能返回不同的前 N 条，而调用方会以为
+    自己看到的是"最该处理的那些"。只按时间排不够——同一毫秒过期的多条租约顺序
+    不确定；``task_id`` 是主键，用它决胜保证全序。
+
+    只对 ``is_stale_lease`` 为真的记录调用。传入一条从未租出的记录会抛错，而不是
+    返回一个编造的时间戳——后者会让它悄悄排到最前面，看起来像"最该处理的任务"。
+    """
+    expires_at = record.lease_expires_at
+    if expires_at is None:
+        raise ValueError("stale_lease_sort_key requires a record that was ever leased")
+    return (expires_at, record.task_id)
 
 
 def context_matches_envelope(envelope: RequestEnvelope, context: RequestContext) -> bool:

@@ -108,6 +108,17 @@ class TransitionCommand(Contract):
     terminal_reason: StrictStr | None = None
 
 
+class StaleLeaseQuery(Contract):
+    """``list_stale_leases`` 的入参 DTO。
+
+    与另外两个命令 DTO 同一理由：``limit=True`` 在运行时会被当作 ``1``，
+    ``limit="10"`` 会被当作 10。只有一个参数也照样构造 DTO——"参数少所以不会写错"
+    正是这类隐式转换能长期潜伏的原因。
+    """
+
+    limit: StrictInt = Field(gt=0)
+
+
 class LeaseCommand(Contract):
     """``acquire_lease`` / ``renew_lease`` 的入参 DTO。"""
 
@@ -154,5 +165,19 @@ class TaskStore(Protocol):
         self, *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
     ) -> LeaseGrant | None:
         """续租保持同一 token；非持有者、token 陈旧或租约已过期时返回 ``None``。"""
+
+    async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
+        """列出曾被租出、租约已过期、且未处于终态的任务。
+
+        按 ``(lease_expires_at, task_id)`` 稳定排序，最多返回 ``limit`` 条。
+
+        **只回答"哪些任务可能需要被接管"**：不 claim、不调度、不判断审批是否应当
+        恢复、不改变任何状态。接管仍走 ``acquire_lease()``，并发 winner 仍由存储层
+        裁决——这条方法返回的记录随时可能已被别人接管，调用方不得据此假定自己拿到
+        了任何独占权。
+
+        这条边界是刻意的：把"发现"和"接管"合成一个方法，会让 TaskStore 长出调度
+        能力，而调度属 M5 的 Worker。
+        """
 
     async def record_approval(self, *, request: ApprovalRequest) -> None: ...

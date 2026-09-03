@@ -428,6 +428,128 @@ async def test_invalid_lease_arguments_do_not_mutate_the_store(
     assert after == before
 
 
+# --- stale lease 的**发现**（不是接管） ---------------------------------------
+
+
+async def _leased_task(store, context, key: str, owner: str):
+    """新建一个任务并给它一份租约，返回 ``(record, grant)``。"""
+    record = await store.create_task(
+        envelope=make_envelope(idempotency_key=key), context=context
+    )
+    grant = await store.acquire_lease(task_id=record.task_id, owner=owner, ttl_seconds=30)
+    return record, grant
+
+
+async def test_a_task_that_was_never_leased_is_not_stale(store, task) -> None:
+    """从未租出的任务没有"接管"可言——它还没开始。"""
+    assert await store.list_stale_leases(limit=10) == ()
+
+
+async def test_a_live_lease_is_not_stale(store, task) -> None:
+    """仍在有效期内的任务有活着的持有者，列出它等于邀请抢占。"""
+    await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    assert await store.list_stale_leases(limit=10) == ()
+
+
+async def test_an_expired_lease_is_stale(store, task, clock) -> None:
+    await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    clock.advance(seconds=31)
+    stale = await store.list_stale_leases(limit=10)
+    assert [record.task_id for record in stale] == [task.task_id]
+
+
+async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
+    """去掉"未终态"这条过滤，每个正常结束的任务都会被永久列为可恢复。
+
+    因为租约三字段在过期后**不清空**——``fencing_token IS NOT NULL`` 正是"曾被
+    租出"的判据，清空它会重开 fencing 的缺口。所以终态必须单独挡。
+    """
+    await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    clock.advance(seconds=31)
+    current = await store.get(task.task_id)
+    result = await store.transition(
+        task_id=task.task_id,
+        expected_version=current.version,
+        to_status=TaskStatus.CANCELED,
+    )
+    assert result.applied is False  # 过期租约下写入被拒，任务仍非终态
+    taken = await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
+    assert taken is not None
+    done = await store.transition(
+        task_id=task.task_id,
+        expected_version=current.version,
+        to_status=TaskStatus.CANCELED,
+        fencing_token=taken.fencing_token,
+    )
+    assert done.applied is True
+    clock.advance(seconds=31)
+    assert await store.list_stale_leases(limit=10) == ()
+
+
+async def test_stale_leases_are_ordered_by_expiry_then_task_id(store, context, clock) -> None:
+    """排序必须稳定且全序，否则两次调用可能返回不同的前 N 条。"""
+    first, _ = await _leased_task(store, context, "idem-a", "w1")
+    clock.advance(seconds=5)
+    second, _ = await _leased_task(store, context, "idem-b", "w2")
+    clock.advance(seconds=31)
+    stale = await store.list_stale_leases(limit=10)
+    assert [record.task_id for record in stale] == [first.task_id, second.task_id]
+
+
+async def test_stale_leases_with_the_same_expiry_are_ordered_by_task_id(
+    store, context, clock
+) -> None:
+    """同刻过期时必须由 ``task_id`` 决胜。
+
+    T4 变异反证发现的覆盖缺口：把排序键的第二项改成常量，全部用例仍然全绿——因为
+    上一条用例里两个任务的过期时间**不同**，决胜位根本没被用到。同刻过期是常态而
+    非边界：同一批 worker 用同一 TTL 领走的任务，过期时间逐条相同。
+
+    没有决胜位，返回的前 N 条在两次调用之间可能不同，而调用方会以为自己看到的是
+    "最该处理的那些"。
+    """
+    first, _ = await _leased_task(store, context, "idem-a", "w1")
+    second, _ = await _leased_task(store, context, "idem-b", "w2")
+    clock.advance(seconds=31)
+    stale = await store.list_stale_leases(limit=10)
+    assert len(stale) == 2
+    assert [record.lease_expires_at for record in stale] == [
+        stale[0].lease_expires_at,
+        stale[0].lease_expires_at,
+    ], "前提不成立：两条租约的过期时间应当相同"
+    assert [record.task_id for record in stale] == sorted(
+        [first.task_id, second.task_id]
+    )
+
+
+async def test_stale_leases_respect_the_limit(store, context, clock) -> None:
+    await _leased_task(store, context, "idem-a", "w1")
+    clock.advance(seconds=5)
+    await _leased_task(store, context, "idem-b", "w2")
+    clock.advance(seconds=31)
+    assert len(await store.list_stale_leases(limit=10)) == 2
+    assert len(await store.list_stale_leases(limit=1)) == 1
+
+
+async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
+    """**只发现，不接管。** 列出之后记录必须逐字段不变，租约仍属原主。
+
+    把"发现"和"接管"合成一个方法会让 TaskStore 长出调度能力，而调度属 M5。
+    """
+    await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
+    clock.advance(seconds=31)
+    before = await store.get(task.task_id)
+    assert await store.list_stale_leases(limit=10)
+    assert await store.get(task.task_id) == before
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, True], ids=["zero", "negative", "bool"])
+async def test_list_stale_leases_rejects_a_bad_limit(store, bad_limit: object) -> None:
+    """``limit=True`` 在运行时会被当作 1；参数少不代表不会写错。"""
+    with pytest.raises(ValidationError):
+        await store.list_stale_leases(limit=bad_limit)
+
+
 # --- 终态保护 -----------------------------------------------------------------
 
 
@@ -499,6 +621,15 @@ LEASE_FENCING_CASES = (
     test_acquire_lease_rejects_non_positive_ttl,
     test_acquire_lease_rejects_bytes_owner,
     test_invalid_lease_arguments_do_not_mutate_the_store,
+    test_a_task_that_was_never_leased_is_not_stale,
+    test_a_live_lease_is_not_stale,
+    test_an_expired_lease_is_stale,
+    test_a_terminal_task_is_never_stale,
+    test_stale_leases_are_ordered_by_expiry_then_task_id,
+    test_stale_leases_with_the_same_expiry_are_ordered_by_task_id,
+    test_stale_leases_respect_the_limit,
+    test_listing_stale_leases_claims_nothing,
+    test_list_stale_leases_rejects_a_bad_limit,
 )
 
 TERMINAL_PROTECTION_CASES = (
