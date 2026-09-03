@@ -7,8 +7,20 @@ name = "xiaowei-agent"
 version = "0.1.0"
 description = "Policy-governed workflow agent for operations"
 requires-python = ">=3.11,<3.12"
-# sqlglot 是 SQLGuard 的 AST 解析器，属**生产**代码依赖，不是 dev 工具。
-dependencies = ["pydantic>=2.13,<3", "sqlglot>=27,<31"]
+# 全部为**生产**代码依赖，不是 dev 工具：
+#   sqlglot     —— SQLGuard 的 AST 解析器（M3）。
+#   sqlalchemy  —— TaskStore 的 Core 语句构造与连接管理（M4）。用 Core 不用 ORM：
+#                  ORM 的 identity map 与 flush 时机会让"必须采纳存储层 winner"
+#                  这条不变量更难断言，而并发语义正是 M4 的全部承重点。
+#   alembic     —— 迁移入口随应用发布，M5 的 Compose 要调用它，故不进 dev。
+#   asyncpg     —— SQLAlchemy 2.0 的 async PostgreSQL 驱动。
+dependencies = [
+    "pydantic>=2.13,<3",
+    "sqlglot>=27,<31",
+    "sqlalchemy[asyncio]>=2.0.44,<2.1",
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<0.31",
+]
 
 [project.optional-dependencies]
 dev = [

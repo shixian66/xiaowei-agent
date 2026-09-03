@@ -107,13 +107,17 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 
 关于第三条事实的残余风险，须说清楚它**不是**静默失效：全局 `--allow-hosts` 会使 `test_no_network.py` 的创建拦截断言**转红**——实证中我自己的等价用例正是这样失败的。所以该文件本身就是这条边界的哨兵。真正的残余风险是**人**：有人看到红灯后，为了让 integration 跑起来而去放宽 `test_no_network.py`，而不是收窄放行范围。这条风险无法用测试消除，只能靠评审；因此 §9.2 的三条测试把「窄度」表述成独立的正面断言，使放宽哨兵的代价从"改一个文件"变成"同时改三处并解释理由"。
 
-### 5.3 待 T0 实证的事项
+### 5.3 T0 实证事项
 
-以下三项**尚未验证**，不得在计划中当作既成事实；T0 必须落成可执行断言：
+三项在 V1 定稿时**均未验证**，不得当作既成事实。前两项已由 T0 实测收口，第三项仍待 T9：
 
-1. SQLAlchemy 2.0 Core 在 `mypy strict` 下的类型完备性。若报缺失存根，只允许对**单个模块**加 `ignore_missing_imports`，不得放宽全局 strict。
-2. `asyncpg` 的类型标注完备性，同上处置。
-3. GitHub Actions service container 从 job 容器经 `127.0.0.1:5432` 可达。这是标准行为，但属于「未经本项目验证的第三方行为」，与 §5.2 打回的那条属同一类，因此列为 T9 的显式验收项而非假设。
+1. **SQLAlchemy 2.0 Core 在 `mypy strict` 下的类型完备性——已验证，通过。** `sqlalchemy` 2.0.52 自带 `py.typed`。探针覆盖 `Table` / `Column` / `update().where().values().returning()` / `select().order_by().limit()` / `AsyncEngine.begin()`，`mypy --strict --no-incremental` 零告警。**无需任何 override，全局 strict 完好。** `alembic` 1.19.1 同样自带 `py.typed`。
+2. **`asyncpg` 的类型标注完备性——已验证，结论与计划的预设退路不同。** `asyncpg` 0.30.0 **不带 `py.typed`**；直接 `import asyncpg` 会在 strict 下报 `import-untyped`。
+
+   V1 给的退路是"对单个模块加 `ignore_missing_imports`"。**这条退路不必走，因此不走**：驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载，业务代码从不需要它的任何符号。**改为禁止 `src/` 直接 import `asyncpg`**——不 import 就不产生缺失存根，也就不需要放宽任何检查。
+
+   代价是这条禁令必须被机制而非注释持有，且需要一个撤销条件。`tests/security/test_dependency_baseline.py` 同时承担两者：AST 扫描 `src/` 禁止该 import，另一条反向断言钉住"asyncpg 当前没有 `py.typed`"——上游一旦补上，该断言转红，正是重新评估禁令的时刻。
+3. GitHub Actions service container 从 job 容器经 `127.0.0.1:5432` 可达。**仍未验证。** 这是标准行为，但属于「未经本项目验证的第三方行为」，与 §5.2 打回的那条属同一类，因此列为 T9 的显式验收项而非假设。
 
 ---
 
@@ -393,9 +397,20 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 每个任务一个提交，可独立拒绝。
 
-### T0：依赖与实证基线
+### T0：依赖与实证基线 —— **已完成**
 
-新增三个依赖并 `uv lock`；落成 §5.3 三项实证的可执行断言（SQLAlchemy / asyncpg 在 mypy strict 下的类型完备性）；确认 `deps-audit` 的既有导出路径覆盖新依赖。**不写任何业务代码。**
+新增三个依赖并 `uv lock`；落成 §5.3 前两项实证的可执行断言；确认 `deps-audit` 的既有导出路径覆盖新依赖。**不写任何业务代码。**
+
+实际落点是 `tests/security/test_dependency_baseline.py`（7 条，全部 `security` marker）。它比"跑一次 mypy 探针"覆盖更宽，因为探针只证明**当下**通过，挡不住**以后**的放宽：
+
+- 生产依赖名集合**恰为五项**。用集合相等表达，而不是 §3「明确不加」那张禁用清单——禁用清单挡不住清单外的新依赖。
+- M5+ 的基础设施依赖不得从 `dev` 这条侧门进来。
+- `sqlalchemy` / `alembic` 必须自带 `py.typed`（撤回即转红）。
+- `asyncpg` 当前**没有** `py.typed`（上游补上即转红，见 §5.3.2）。
+- `src/` 不得直接 import `asyncpg`（AST 扫描）。
+- `[tool.mypy]` 的 `strict` 恒为真，且不得出现全局 `ignore_missing_imports` / `follow_imports`。
+
+**TDD 反证（已执行，先红后绿）**：向 `[project].dependencies` 偷加 `redis` → 集合相等用例转红；向 `persistence/store.py` 加一行 `import asyncpg` → import 禁令用例转红，且 `mypy src` 同时报 `import-untyped`（证明该禁令确实在挡真实的类型检查退化）。两次还原后全绿。
 
 ### T1：抽出共享判定纯函数（零行为重构）
 
