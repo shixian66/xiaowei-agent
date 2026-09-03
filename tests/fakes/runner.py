@@ -214,10 +214,16 @@ class RunnerHarness:
             self.task_id, plan=self.plan, target=self.target, context=self.context
         )
 
-    async def resume(self) -> Any:
+    async def resume(
+        self, external_input: Any = None, *, approval: Any = None
+    ) -> Any:
         self.recomputed_fingerprints += 1
         return await self.runner.resume(
-            self.task_id, context=self.context, target=self.target
+            self.task_id,
+            external_input,
+            context=self.context,
+            target=self.target,
+            approval=approval,
         )
 
     async def drive_to(self, status: TaskStatus) -> None:

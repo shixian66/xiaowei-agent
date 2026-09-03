@@ -25,7 +25,7 @@
 | M2 状态 | **已验收通过并归档**。PR #3 以 fast-forward 合入契约内核（合并对象 `527cd7fc0a85570104647d89da5694fef0bcbbca`）；PR #4 以 fast-forward 合入拒绝路径泄漏补修（最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e`）。归档见 [docs/handoff/archive/2026-09-02-M2-contract-kernel.md](docs/handoff/archive/2026-09-02-M2-contract-kernel.md) |
 | M2 详细计划 | [docs/plans/M2-contracts-kernel.md](docs/plans/M2-contracts-kernel.md) V2.3，经多轮 Codex 审核后获批开工（已带入 `main`） |
 | M3 详细计划 | [docs/plans/M3-starrocks-slow-query.md](docs/plans/M3-starrocks-slow-query.md) V3，经两轮 Codex 审核批准 |
-| M3 状态 | **实现完毕、未合并、未验收**。分支 `claude/m3-starrocks-slow-query`，T0-T14 共 15 个 TDD 提交。验收报告见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md) |
+| M3 状态 | **实现完毕、未合并、首轮深档验收已打回并修复、待复验**。分支 `claude/m3-starrocks-slow-query`，T0-T14 逐任务 TDD 提交（**提交数以 `git log --oneline main..HEAD` 为准，本文件不维护会随修订漂移的计数**）。验收报告见 [docs/handoff/M3-acceptance-report.md](docs/handoff/M3-acceptance-report.md) |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -107,7 +107,7 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 3. ~~M2 详细计划编写与审批~~ **已完成**：经多轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
 4. ~~M2 实现与验收~~ **已完成**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地；合并后拒绝路径泄漏补修已在 PR #4 合入并通过复审。
 5. ~~M3 详细计划编写与审批~~ **已完成**：V3 经两轮 Codex 审核批准。
-6. ~~M3 实现~~ **已完成，待验收**：T0-T14 共 15 个 TDD 提交在 `claude/m3-starrocks-slow-query`。
+6. ~~M3 实现~~ **已完成，首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合）并已按根因修复，待复验**：分支 `claude/m3-starrocks-slow-query`。
 7. **下一步**：Codex 按精确 SHA 做深档验收（真实 diff、调用链、安全绕过、测试充分性）。通过后由授权人员合并，并把逐条提交历史归档到 `docs/handoff/archive/`。
 8. M4 实现 PostgreSQL TaskStore 的并发、恢复与终态保护；M5 完成 API/CLI/Worker/Compose。
 9. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
@@ -157,6 +157,8 @@ M0 的 18 个收口提交清单、五轮审查基点与差异统计已归档至
 - 不要在 `evidence/` 里加 `async` 或对 `contracts` 之外的内部依赖；不要让 `reflection/` / `rendering/` 够到 tools、存储或治理组件。
 - 不要在被引用步骤执行失败时仍然执行可选分支：`EVIDENCE_ROW_COUNT_BELOW` 无法区分"取到零行"与"根本没取到"，而两者含义相反。
 - 不要删除或覆盖用户未提交文件；不要运行破坏性命令。发现漂移或异常时停止并报告，不自动回滚。
+- **不要把 `WorkflowRunner` 改回 `start(task_id)` 的窄签名。** 窄签名与 Runner 自身的漂移检测职责不相容：`target` 与 `policy_revision` 的语义是"现在的值"，从存储读会让检查恒真。唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类——那正是首轮深档验收打回的阻断项。理由见 ARCHITECTURE §5.6 与 `runners/runner.py` 的 docstring。
+- **不要用 `type: ignore` 或 `getattr(obj, "attr", default)` 处理模块边界上的类型不匹配。** 两者都会把"契约与实现矛盾"静音成全绿，由 `tests/security/test_contract_edges.py` 承重。类型对不上时改契约或改实现，不要改静音手段。
 
 ## 8. 验证记录
 

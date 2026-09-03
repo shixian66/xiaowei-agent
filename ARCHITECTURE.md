@@ -202,17 +202,32 @@ Registry 是声明和版本索引，不是“关键词总表”，也不是执�
 
 Runner 是任务生命周期的宿主，不拥有领域安全规则。它按计划步骤推进、持久化游标、处理暂停/恢复、租约、重试和终态。
 
-稳定接口至少包括：
+稳定接口：
 
 ```python
 class WorkflowRunner(Protocol):
-    async def start(self, task_id: str) -> TaskOutcome: ...
+    async def start(
+        self,
+        task_id: str,
+        *,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+    ) -> TaskOutcome: ...
     async def resume(
         self,
         task_id: str,
         external_input: ExternalInput | None = None,
+        *,
+        context: RequestContext,
+        target: ResolvedTarget,
+        approval: ApprovalRequest | None = None,
     ) -> TaskOutcome: ...
 ```
+
+`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要一个活的对照物**：判断"暂停期间 policy 或目标是否变了"，必须拿调用方当下重新解析出的目标与 `policy_revision`，去比对 `PlanStore` 里存的那份。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。这两项按定义不可持久化，它们的语义就是"现在的值"。又因为 Runner 不拥有领域安全规则，它不能自己去重解析，只能由调用方传入。
+
+M2 曾把接口写成 `start(task_id)` / `resume(task_id, external_input)`。那个形状隐含"只要 task_id 就能推进任务"，与上一段的职责不相容；M3 落地真实 Runner 时据此修正了契约。**不要把它改回窄签名**：唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类，那会让 Runtime→Runner 这条边在类型层完全失去契约。
 
 Runner 在每个步骤执行前调用统一的 `StepAdmission`：先做 `ToolPolicy`，需要 SQL 时做 `SQLGuard`，副作用步骤再调用 `ApprovalGate`，通过后才把 `ToolCall` 交给 `ToolGateway`。因此审批既不是入口层总开关，也不是每个 runner 各自复制的一套安全逻辑。
 

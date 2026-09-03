@@ -11,6 +11,10 @@ fake 实现拉进生产导入链（``tests/security/test_fake_isolation.py`` 断
 
 M3 补齐了五个此前只有形状、没有实现的 Protocol 锚点：``CapabilityRegistry``、
 ``CapabilityResolver``、``TraceSink``、``PlanStore``、``EvidenceLedger``。
+
+``WorkflowRunner`` 锚定**两个**实现：fake 的 ``ScriptedRunner`` 与真实的
+``DeterministicStepRunner``。只锚 fake 是不够的——真实 Runner 才是生产调用路径，
+它一旦偏离契约，调用方要么改签名要么绕过 Protocol，而后者不会有任何静态检查失败。
 """
 
 from typing import TYPE_CHECKING
@@ -29,6 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.store import Clock, TaskStore
+    from xiaowei_agent.runners.deterministic import DeterministicStepRunner
     from xiaowei_agent.runners.fake import ScriptedRunner
     from xiaowei_agent.runners.runner import WorkflowRunner
     from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
@@ -51,3 +56,12 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         plans: PlanStore = InMemoryPlanStore()
         ledger: EvidenceLedger = InMemoryEvidenceLedger()
         _ = (gateway, runner, registry, resolver, sink, plans, ledger)
+
+    def _real_runner_anchor(step_runner: "DeterministicStepRunner") -> None:
+        """真实 Runner 必须**就是**一个 ``WorkflowRunner``。
+
+        取参数而不在此构造：``DeterministicStepRunner`` 需要八个协作者，构造它会把
+        一堆无关装配拖进锚点文件；而结构兼容性只需要一次赋值就能被 mypy 检查。
+        """
+        anchored: WorkflowRunner = step_runner
+        _ = anchored

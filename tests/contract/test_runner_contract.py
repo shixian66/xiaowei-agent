@@ -4,10 +4,16 @@ import inspect
 from pathlib import Path
 
 import pytest
+from tests.fakes.admission import CONTEXT
+from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 
 from xiaowei_agent.contracts import TaskStatus
 from xiaowei_agent.runners.fake import ScriptedRunner, TerminalOrLeasedTaskError
 from xiaowei_agent.runners.runner import WorkflowRunner
+
+# ``WorkflowRunner`` 的活输入（见 ARCHITECTURE §5.6）。ScriptedRunner 不消费它们，
+# 但契约要求它们被传入——测试按契约调用，不按实现走捷径。
+_LIVE = {"plan": FIXTURE_PLAN, "target": FIXTURE_TARGET, "context": CONTEXT}
 
 
 def test_scripted_runner_satisfies_the_workflow_runner_protocol(store) -> None:
@@ -17,7 +23,7 @@ def test_scripted_runner_satisfies_the_workflow_runner_protocol(store) -> None:
 
 async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
-    outcome = await runner.start(task.task_id)
+    outcome = await runner.start(task.task_id, **_LIVE)
     assert outcome.status is TaskStatus.SUCCEEDED
     final = await store.get(task.task_id)
     assert final.version == 3  # created→planning→running→succeeded
@@ -26,10 +32,10 @@ async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
 async def test_resume_on_a_terminal_task_does_not_overwrite_it(store, task) -> None:
     """终态保护由存储层承重；Runner 只是拿不到租约而已。"""
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
-    await runner.start(task.task_id)
+    await runner.start(task.task_id, **_LIVE)
     before = await store.get(task.task_id)
     with pytest.raises(TerminalOrLeasedTaskError):
-        await runner.resume(task.task_id)
+        await runner.resume(task.task_id, context=CONTEXT, target=FIXTURE_TARGET)
     after = await store.get(task.task_id)
     assert after.version == before.version
     assert after.status is TaskStatus.SUCCEEDED
@@ -54,7 +60,7 @@ def test_runner_rejects_a_blank_or_padded_owner(store, bad_owner: str) -> None:
 async def test_runner_holds_the_lease_under_its_own_owner(store, task) -> None:
     """owner 必须真的被用于取租约。"""
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w-alpha")
-    await runner.start(task.task_id)
+    await runner.start(task.task_id, **_LIVE)
     final = await store.get(task.task_id)
     assert final.lease_owner == "w-alpha"
 
@@ -64,7 +70,7 @@ async def test_two_runners_cannot_drive_the_same_task_concurrently(store, task) 
     assert await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w2")
     with pytest.raises(TerminalOrLeasedTaskError):
-        await runner.start(task.task_id)
+        await runner.start(task.task_id, **_LIVE)
 
 
 def test_runner_never_imports_a_gateway_or_adapter() -> None:

@@ -83,6 +83,42 @@ def test_store_and_runner_keep_their_protocol_keyword_arguments() -> None:
         ), method
 
 
+def test_the_real_runner_keeps_the_protocol_signature() -> None:
+    """**真实** Runner 必须与契约逐参数一致，不只是 fake。
+
+    只校 fake 是不够的：生产调用路径走的是 ``DeterministicStepRunner``。它一旦偏离
+    契约，调用方要么跟着改签名、要么绕过 Protocol 直接调具体类——M3 一度正是后者
+    （Runtime 把 runner 标成 ``object`` 加 ``type: ignore``），而那样做不会让任何
+    静态检查失败。
+    """
+    from xiaowei_agent.runners.deterministic import DeterministicStepRunner
+
+    for method in ("start", "resume"):
+        assert inspect.signature(
+            getattr(DeterministicStepRunner, method)
+        ) == inspect.signature(getattr(WorkflowRunner, method)), method
+
+
+def test_the_signature_check_rejects_the_old_narrow_runner() -> None:
+    """反例：M2 那个窄签名必须**不**满足当前契约。
+
+    没有这条，上面两条可能只是恰好都为真而检查本身没有分辨力。
+    """
+    from xiaowei_agent.contracts import ExternalInput, TaskOutcome
+
+    class NarrowRunner:
+        async def start(self, task_id: str) -> TaskOutcome: ...
+
+        async def resume(
+            self, task_id: str, external_input: ExternalInput | None = None
+        ) -> TaskOutcome: ...
+
+    assert _keyword_params(NarrowRunner.start) != _keyword_params(WorkflowRunner.start)
+    assert _keyword_params(NarrowRunner.resume) != _keyword_params(
+        WorkflowRunner.resume
+    )
+
+
 def test_protocols_without_implementations_are_documented_as_such() -> None:
     """无实现锚点的 Protocol 必须是明确列举的，而不是被遗忘的。"""
     from xiaowei_agent.capabilities import CapabilityRegistry, CapabilityResolver

@@ -10,7 +10,11 @@ from typing import Final
 from xiaowei_agent.contracts import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
+    ApprovalRequest,
+    ExecutionPlan,
     ExternalInput,
+    RequestContext,
+    ResolvedTarget,
     TaskOutcome,
     TaskStatus,
 )
@@ -54,11 +58,32 @@ class ScriptedRunner:
         self._reason = terminal_reason
         self._owner = owner
 
-    async def start(self, task_id: str) -> TaskOutcome:
+    async def start(
+        self,
+        task_id: str,
+        *,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+    ) -> TaskOutcome:
+        """按脚本走到终态。
+
+        ``plan`` / ``target`` / ``context`` **刻意不被消费**：本 fake 不执行任何
+        步骤，因此没有计划可推进、没有目标可访问、也没有漂移可检测。它接收这三项
+        只是为了满足 ``WorkflowRunner``——一个不实现契约的测试替身，证明不了契约。
+        与之相对，真实 Runner 消费它们全部；下面 ``resume`` 的 ``external_input``
+        同理由 ``DeterministicStepRunner`` 承担实际校验。
+        """
         return await self._drive(task_id, path=(TaskStatus.PLANNING, TaskStatus.RUNNING))
 
     async def resume(
-        self, task_id: str, external_input: ExternalInput | None = None
+        self,
+        task_id: str,
+        external_input: ExternalInput | None = None,
+        *,
+        context: RequestContext,
+        target: ResolvedTarget,
+        approval: ApprovalRequest | None = None,
     ) -> TaskOutcome:
         return await self._drive(task_id, path=(TaskStatus.RUNNING,))
 

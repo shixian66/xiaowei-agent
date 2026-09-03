@@ -29,6 +29,7 @@ from xiaowei_agent.contracts import (
     EvidenceEnvelope,
     ExecutionPlan,
     ExternalInput,
+    ExternalInputKind,
     LeaseGrant,
     PipelineStage,
     PlanStep,
@@ -49,7 +50,11 @@ from xiaowei_agent.contracts import (
     TraceEvent,
 )
 from xiaowei_agent.evidence import build_evidence
-from xiaowei_agent.governance.approval import ApprovalGate, ApprovalRequiredError
+from xiaowei_agent.governance.approval import (
+    ApprovalGate,
+    ApprovalRequiredError,
+    approval_ref,
+)
 from xiaowei_agent.governance.step_admission import admit_step
 from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
@@ -224,9 +229,11 @@ class DeterministicStepRunner:
 
         不信任存储里"自称"的指纹——存一份自称的 hash 只会制造可被篡改的第二真源。
 
-        :raises DriftError: 计划、目标或 policy revision 任一漂移。
+        :raises DriftError: 计划、目标、policy revision 任一漂移，或恢复输入与
+            实际用于准入的审批不一致。
         :raises WorkflowPaused: 仍然缺少有效审批。
         """
+        self._verify_external_input(external_input, approval=approval)
         stored = await self._plans.load(task_id=task_id)
         plan = stored.plan
         self._verify_no_drift(
@@ -256,6 +263,32 @@ class DeterministicStepRunner:
         )
 
     # --- 漂移检测 -----------------------------------------------------------
+
+    def _verify_external_input(
+        self, external_input: ExternalInput | None, *, approval: ApprovalRequest | None
+    ) -> None:
+        """恢复输入必须与真正参与准入的审批指向同一个 ref。
+
+        ``ExternalInput`` 是 M2 为 resume 定义的跨边界输入，``approval`` 是实际交给
+        ``ApprovalGate`` 的审批事实。两者是**同一件事的两个表述**：前者是调用方声称
+        "这张审批已批"，后者是那张审批本身。收下 ref 却不核对，等于让调用方可以拿
+        A 步骤的 ref 恢复 B 步骤——ref 不再是任何东西的凭据，只是一段被忽略的文本。
+
+        ``USER_SUPPLEMENT`` 直接放行且**不读取 ``user_text``**：它是不可信外部文本，
+        按 ARCHITECTURE 的边界不得影响 policy、目标、权限、审批状态或执行计划。
+        "不消费"在这里是正确行为，因此显式写出来，而不是让它和上面那条一起沉默。
+        """
+        if external_input is None:
+            return
+        if external_input.kind is not ExternalInputKind.APPROVAL_DECISION:
+            return
+        if approval is None:
+            raise DriftError("resume carries an approval decision but no approval")
+        expected = approval_ref(
+            task_id=approval.task_id, step_id=approval.step_id
+        )
+        if external_input.approval_ref != expected:
+            raise DriftError("approval_ref does not match the supplied approval")
 
     def _verify_no_drift(
         self,
@@ -551,9 +584,9 @@ class DeterministicStepRunner:
         )
         # 在 raise 之外拼装：拒绝路径的 raise 语句里不得出现任何插值，哪怕取值
         # 本身安全——这条不变量靠"语句里没有插值"来机械保证，不靠逐个判断。
-        approval_ref = f"{task_id}:{step_id}"
+        paused_ref = approval_ref(task_id=task_id, step_id=step_id)
         raise WorkflowPaused(
-            task_id=task_id, step_id=step_id, approval_ref=approval_ref
+            task_id=task_id, step_id=step_id, approval_ref=paused_ref
         )
 
     async def _outcome(

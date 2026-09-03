@@ -34,15 +34,19 @@ from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityReso
 from xiaowei_agent.capabilities.specs import OP_LIST, SLOW_QUERY_SURFACE
 from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_target
 from xiaowei_agent.contracts import (
+    AnswerabilityVerdict,
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
+    ExecutionPlan,
     IntentDraft,
     PipelineStage,
     RenderPayload,
     RequestContext,
     RequestEnvelope,
+    ResolvedTarget,
     StageOutcome,
+    TaskOutcome,
     TaskRecord,
     TaskStatus,
     TraceEvent,
@@ -60,7 +64,7 @@ from xiaowei_agent.planning.starrocks.params import (
 )
 from xiaowei_agent.reflection.answerability import assess, terminal_status_for
 from xiaowei_agent.rendering.slow_query import render, render_pending
-from xiaowei_agent.runners.runner import WorkflowPaused
+from xiaowei_agent.runners.runner import WorkflowPaused, WorkflowRunner
 
 RENDER_REF: Final[None] = None
 """M3 不持久化 ``RenderPayload``。
@@ -102,7 +106,7 @@ class XiaoweiRuntime:
         snapshot: CapabilitySnapshot,
         task_store: TaskStore,
         ledger: EvidenceLedger,
-        runner: object,
+        runner: WorkflowRunner,
         sink: TraceSink,
         clock: Clock,
     ) -> None:
@@ -170,7 +174,7 @@ class XiaoweiRuntime:
             # 也会让第二次的回答与第一次不同。
             return await self._render_recorded(record=record, context=context)
         try:
-            outcome = await self._runner.start(  # type: ignore[attr-defined]
+            outcome = await self._runner.start(
                 record.task_id, plan=plan, target=target, context=context
             )
         except WorkflowPaused as paused:
@@ -236,7 +240,7 @@ class XiaoweiRuntime:
 
     def _plan_inputs(
         self, *, draft: IntentDraft, context: RequestContext, as_of: _dt.datetime
-    ) -> tuple[object, SlowQueryParams]:
+    ) -> tuple[ResolvedTarget, SlowQueryParams]:
         try:
             target = resolve_target(context=context, draft=draft)
             start, end = normalise_window(
@@ -268,13 +272,13 @@ class XiaoweiRuntime:
         *,
         candidate: Candidate,
         params: SlowQueryParams,
-        target: object,
+        target: ResolvedTarget,
         context: RequestContext,
-    ) -> object:
+    ) -> ExecutionPlan:
         plan = compile_plan(
             candidate=candidate,
             params=params,
-            target=target,  # type: ignore[arg-type]
+            target=target,
             context=context,
             snapshot=self._snapshot,
             surface=SLOW_QUERY_SURFACE,
@@ -285,7 +289,7 @@ class XiaoweiRuntime:
         return plan
 
     async def _finish(
-        self, *, record: TaskRecord, outcome: object, context: RequestContext
+        self, *, record: TaskRecord, outcome: TaskOutcome, context: RequestContext
     ) -> RenderPayload:
         """读回证据、判定终态、写 TaskStore、投影。"""
         task_id = record.task_id
@@ -297,7 +301,7 @@ class XiaoweiRuntime:
         # REFLECTION 只在**执行本身没出问题、却仍然证据不足**时记为 REJECTED。
         # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
         # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
-        executed_cleanly = getattr(outcome, "status", None) is TaskStatus.SUCCEEDED
+        executed_cleanly = outcome.status is TaskStatus.SUCCEEDED
         self._emit(
             stage=PipelineStage.REFLECTION,
             outcome=StageOutcome.OK
@@ -314,7 +318,7 @@ class XiaoweiRuntime:
                 expected_version=current.version,
                 to_status=status,
                 fencing_token=current.fencing_token,
-                terminal_reason=getattr(outcome, "terminal_reason", None),
+                terminal_reason=outcome.terminal_reason,
             )
             # 采纳存储层 winner：终态由存储保护，不由调用方自觉。
             status = result.winner.status
@@ -347,16 +351,18 @@ def _window_minutes(draft: IntentDraft) -> int:
     return int(raw)
 
 
-def _terminal_status(*, outcome: object, verdict: object) -> TaskStatus:
+def _terminal_status(
+    *, outcome: TaskOutcome, verdict: AnswerabilityVerdict
+) -> TaskStatus:
     """把执行层结论与可答性结论合成终态。
 
     执行层已经判定失败（例如预算耗尽）时，**不因为"证据看起来够"而升级为成功**：
     两个结论取更保守的那个。
     """
-    executed = getattr(outcome, "status", TaskStatus.INDETERMINATE)
+    executed = outcome.status
     if executed is TaskStatus.FAILED:
         return TaskStatus.FAILED
-    suggested = terminal_status_for(verdict)  # type: ignore[arg-type]
+    suggested = terminal_status_for(verdict)
     if executed is TaskStatus.SUCCEEDED and suggested is TaskStatus.SUCCEEDED:
         return TaskStatus.SUCCEEDED
     return TaskStatus.INDETERMINATE

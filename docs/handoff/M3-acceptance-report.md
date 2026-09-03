@@ -2,8 +2,13 @@
 
 > 按 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §9 的四段格式输出。
 >
-> **验收对象**：`7b25621763b92d9cb96fe926574d11918e25d01f`
-> （分支 `claude/m3-starrocks-slow-query`，相对 `main = 4e3e30941f9102dd814283f3e3c956f5e24bc699`）
+> **验收对象**：分支 `claude/m3-starrocks-slow-query` 的 HEAD，
+> 相对 `main = 4e3e30941f9102dd814283f3e3c956f5e24bc699`。
+>
+> **精确 SHA 由交接时的 `git rev-parse HEAD` 提供，不写在本文件内。**
+> 上一版把它写死成 `7b25621`，而本文件自身的提交必然在那之后——报告永远落后它所
+> 描述的对象一个提交，验收方拿到的 SHA 与报告里写的对不上。这与 AGENT_HANDOFF.md
+> 「本文件所在提交的 SHA 不写在文件内」是同一条纪律，此处补齐。
 >
 > **状态：已实现、未合并、未验收。** 本报告是提交给 Codex 深档审查的证据，不是验收结论。
 > 能力状态最强为 `tests`——**不是** `deployed SHA`、**不是** `canary`、**不是** `user-accepted`。
@@ -18,19 +23,20 @@
 `sqlglot` 锁定 **30.17.0**。在 `7b25621` 上原样执行 [ADR-008](../adr/ADR-008-engineering-and-test-baseline.md) 的四条命令：
 
 ```text
-python -m pytest -q             → 1213 passed, 3 warnings
-python -m pytest -m security -q → 809 passed, 404 deselected, 3 warnings
+python -m pytest -q             → 1229 passed, 3 warnings
+python -m pytest -m security -q → 823 passed, 406 deselected, 3 warnings
 ruff check .                    → All checks passed!
 mypy src                        → Success: no issues found in 74 source files
 ```
 
-对照 M2 验收对象（`319253a`）的 640 / 499：全量 +573，安全 gate +310。
+对照 M2 验收对象（`319253a`）的 640 / 499：全量 +589，安全 gate +324。
+（首轮送审时为 1213 / 809；差额来自第 5 节所述的契约收口与其证明测试。）
 
 补充证据：
 
 ```text
 git diff --check main..HEAD                        → 无输出（diff 干净）
-git diff --stat main..HEAD                         → 80 files changed, 11186 insertions(+), 29 deletions(-)
+git diff --stat main..HEAD                         → 见交接时实跑；本文件不维护会随修订漂移的数字
 git diff --stat main..HEAD -- .github/workflows/ci.yml → 无输出（ci.yml 未改）
 grep _E1_EXECUTION_ENABLED src/xiaowei_agent/tools/gateway.py
                                                    → _E1_EXECUTION_ENABLED: Final[bool] = False
@@ -246,13 +252,62 @@ tests/evals/test_l0_security.py::test_a36_count_without_scope_filters_is_refused
 | 9 | T11 只交付 Runner 侧四个阶段；九阶段端到端断言在 T12 | 另五个阶段由 Runtime 发射，而 Runtime 属 T12 |
 | 10 | 九阶段**非严格线性**：LIFECYCLE 在两端各出现一次 | 任务状态迁移确实发生在执行前（→RUNNING）与执行后（→终态）。已改为断言八个单次阶段保序 + LIFECYCLE 括住执行区间 |
 | 11 | 未单独创建 `tests/unit/test_error_attribution.py` | 归因断言与阶段顺序断言看同一批事件，拆两个文件会让同一组夹具各写一份 |
+| 12 | **`WorkflowRunner` Protocol 由窄签名改为含活输入的签名**（修 M2 契约） | 见下方「首轮打回与修复」 |
+
+### 首轮 Codex 深档验收的打回与修复
+
+首轮送审对象被独立 Codex 判为**打回**，阻断项一条：真实 Runner 未实现
+`WorkflowRunner` Protocol，`XiaoweiRuntime` 把 runner 标成 `object` 并用
+`type: ignore[attr-defined]` 调它——Runtime→Runner 这条边在类型层完全没有契约，
+而 `mypy src` 依然全绿。
+
+**根因**（比"少更新了一处签名"更深一层）：M2 把接口定为 `start(task_id)`，隐含
+"Runner 只要 task_id 就能推进任务"。而 ARCHITECTURE §5.6 同时要求 Runner 在恢复时
+做漂移检测——判断"暂停期间 policy 或目标是否变了"，必须拿调用方**当下重新解析**出的
+`target` 与 `policy_revision` 去比对存储里的那份。这两项按定义不可持久化；若两边都
+从存储读，比的是同一个值，检查恒真。又因 Runner 不拥有领域安全规则，它不能自己去
+重解析。**因此窄签名与 Runner 自身的职责不相容，M2 契约是错的**，`object` +
+`type: ignore` 只是这个矛盾被静音后的表现。按 AGENTS.md「发现 M2 契约错误时先修
+M2」处置：修契约，不打兼容补丁。
+
+沿同一路径主动排查后一并修复的同类问题（均非 Codex 指出）：
+
+| 位置 | 问题 | 处置 |
+| --- | --- | --- |
+| `application/runtime.py` 另 6 处 | `target` / `plan` / `outcome` / `verdict` 同样被擦成 `object`，再用 `type: ignore[arg-type]` 或 `getattr(obj, "attr", default)` 兜底 | 全部改为真实契约类型；`src/` 内 `type: ignore` 归零 |
+| `_terminal_status` | `getattr(outcome, "status", INDETERMINATE)`——outcome 形状变了会**静默降级**为 indeterminate 而非报错，是对自己人契约的 fail-soft | 改为直接属性访问 |
+| `runners/deterministic.py:resume` | `external_input` 收下后**从不读取**：M2 为恢复定义的跨边界输入是一段被忽略的文本，实际授权走并行的 `approval` 参数——两条通道、一条静默 | 新增 `_verify_external_input`：ref 与实际审批不一致即拒绝 |
+| 审批 ref 格式 | `deterministic.py` 与 `approval.py` **各写一遍** `f"{task_id}:{step_id}"`。任一处改了分隔符，暂停发出的 ref 就匹配不上恢复校验的 ref，而两处各自"自洽"，无测试会自然失败 | 抽出唯一拼装点 `approval.approval_ref()` |
+
+证明测试（含反例与边界，均已做 TDD 反证：撤掉保护转红、还原转绿）：
+
+| 测试 | 承重内容 |
+| --- | --- |
+| `test_the_real_runner_keeps_the_protocol_signature` | 真实 Runner 逐参数等于契约，不只校 fake |
+| `test_the_signature_check_rejects_the_old_narrow_runner` | **反例**：M2 窄签名必须不满足当前契约——否则上一条可能只是恰好为真 |
+| `test_no_module_silences_a_type_error` | `src/` 内不得出现 `type: ignore`；用 `tokenize` 扫真实注释，避免被 docstring 里的说明自己触发 |
+| `test_the_runtime_declares_its_runner_by_protocol` | 正面断言这条边**声明了契约**——只禁静音手段的话，标成 `Any` 同样能全绿 |
+| `test_the_application_layer_does_not_guess_collaborator_shapes` | 应用层不得用 `getattr` 三参兜底读协作者属性 |
+| 上述三条各自的 detector 自检 | 检测器先证明自己有效，再用它断言代码 |
+| `test_resume_rejects_an_approval_ref_for_another_step` | 拿 B 步骤的 ref 恢复 A 步骤必须被拒，且 Gateway 调用次数为 0 |
+| `test_resume_rejects_an_approval_decision_without_an_approval` | 声称"已批"却拿不出审批事实，不得当作"无外部输入"放行 |
+| `test_a_matching_approval_ref_passes_the_external_input_check` | **边界**：匹配的 ref 必须通过——钉住它没退化成无差别拒绝 |
+| `test_user_supplement_cannot_authorise_a_resume` | 不可信外部文本不构成恢复授权 |
+| `test_no_module_spells_the_approval_ref_by_hand` | AST 扫 f-string（非文本），禁止第二处拼装 ref |
+
+一并采纳的非阻断建议：`tools.starrocks_fake` 纳入 `_FAKE_MODULES`；本报告自引 SHA
+的纪律问题按上方页首说明修正；AGENT_HANDOFF 的提交数表述改为不维护会漂移的计数。
+
+**未采纳**：Codex 给的修复方案二（保持窄接口、把 plan/target/context 经存储传入）。
+理由如上——`target` 与 `policy_revision` 的语义就是"现在的值"，从存储读会让漂移检测
+恒真，等于把一条安全检查静默改成空操作。
 
 ---
 
 ## 6. 下一步
 
-1. **Codex 按 `7b25621763b92d9cb96fe926574d11918e25d01f` 做深档验收**：真实 diff 逐行、
-   调用链、安全绕过面、测试充分性，以及本报告 §5 的 11 项偏差是否可接受。
+1. **Codex 按交接时提供的精确 SHA 做深档验收**：真实 diff 逐行、调用链、安全绕过面、
+   测试充分性，以及本报告 §5 的 12 项偏差与「首轮打回与修复」一节是否可接受。
 2. 验收通过后由**授权人员**合并（不由本分支自行合并），并把 T0–T14 的逐条提交历史
    归档到 `docs/handoff/archive/`。
 3. 之后进入 M4：PostgreSQL TaskStore 的并发、恢复与终态保护。

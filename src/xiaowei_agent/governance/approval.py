@@ -18,6 +18,18 @@ from xiaowei_agent.governance.binding import BindingError, verify_approval_bindi
 
 _APPROVAL_REF_SEPARATOR: Final[str] = ":"
 
+
+def approval_ref(*, task_id: str, step_id: str) -> str:
+    """审批引用的**唯一**拼装点。
+
+    暂停时交给调用方的 ref、恢复时用来核对 ``ExternalInput.approval_ref`` 的 ref、
+    以及 gate 通过后返回的 ref 必须逐字节相同——它们本就是同一个标识。分散在几处
+    各写一遍 f-string，任何一处改了分隔符，暂停发出的 ref 就再也匹配不上恢复时
+    校验的 ref，而这不会有任何测试自然失败：几处各自都"自洽"。
+    """
+    return f"{task_id}{_APPROVAL_REF_SEPARATOR}{step_id}"
+
+
 class ApprovalRequiredError(RuntimeError):
     """步骤需要审批而当前没有有效审批。
 
@@ -81,4 +93,4 @@ class NeverGrantingApprovalGate:
                 BindingRejection.PLAN_DRIFT, "approval belongs to another task or step"
             )
         verify_approval_binding(approval=approval, plan=plan, target=target, now=now)
-        return f"{approval.task_id}{_APPROVAL_REF_SEPARATOR}{approval.step_id}"
+        return approval_ref(task_id=approval.task_id, step_id=approval.step_id)

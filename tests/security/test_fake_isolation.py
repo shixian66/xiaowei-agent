@@ -13,7 +13,12 @@ import pytest
 pytestmark = pytest.mark.security
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
-_FAKE_MODULES = ("tools.fake", "persistence.fake", "runners.fake")
+_FAKE_MODULES = (
+    "tools.fake",
+    "tools.starrocks_fake",
+    "persistence.fake",
+    "runners.fake",
+)
 
 
 @pytest.mark.parametrize("name", _FAKE_MODULES)
