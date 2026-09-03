@@ -503,9 +503,30 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 **仍未验证（需要真实 PostgreSQL）**：S2 禁令的反证（把 UPDATE 的 `WHERE version` 改成事务内读到的值，并发用例必须转红）——它需要多连接并发才能表达，推到 T6；`ON CONFLICT DO NOTHING` 的并发幂等创建、`FOR UPDATE` 的实际串行化、序列的单调性。**T4 交付的是代码与签名一致性，不是运行时行为证据。**
 
-### T5：integration 基建与 PostgreSQL 绑定
+### T5：integration 基建与 PostgreSQL 绑定 —— **已完成（基建已实证，绑定行为待真实库）**
 
-`tests/integration/` + conftest（§9.2 marker、§9.3 stash、§9.4 元测试）；把 T2 的套件与两个安全测试文件重绑到 PostgreSQL；补 §9.2 的三条安全测试。复查 T2 的集合相等元测试确实承重。
+`tests/integration/` + conftest（§9.2 marker、§9.3 stash、§9.4 元测试）；把 T2 的套件重绑到 PostgreSQL；补 §9.2 的三条安全测试。
+
+**socket 放行的三条断言已实证，不只是写下来。** 用一个指向不存在库的 DSN 跑真实 pytest（`postgresql+asyncpg://postgres@127.0.0.1:5432/nonexistent`），得到：
+
+| 断言 | 实测 |
+| --- | --- |
+| DSN 生效、marker 按目录加上 | integration 用例报 `ConnectionRefusedError`（**不是** `SocketBlockedError`）——放行确实生效，且连接被真的尝试了 |
+| 目录外仍被拦 | 同一次运行里 `test_no_network.py` 与三条边界用例全绿 |
+| integration 内连非 DSN host 被拦 | 连 `192.0.2.1`（RFC 5737 TEST-NET-1）抛 `SocketConnectBlockedError` |
+| DSN 已设置时 integration skip 数为 0 | 同一次运行 **0 skipped** |
+
+这同时证实了 §5.2 那条被打回的设计现在是对的：`pytest_configure` 在子目录 conftest 里确实会触发（historic hook），`allow_hosts` marker 只作用于本目录 item，`disable_socket()` 对其余用例照常执行。
+
+**schema 由 Alembic 建，不由 `create_all` 建**：用 `create_all` 会让集成测试跑在一套没人迁移过的表上，迁移写错了照样全绿，而生产只会拿到迁移建出来的那套。
+
+**隔离用 TRUNCATE，不用事务回滚**：M4 有需要**真实提交**的并发场景，把整条用例包进未提交事务会让"另一个连接看得到吗"这类断言全部失真。
+
+**T2 要求的复查已执行**，三项均转红：删掉一个 postgres 绑定的登记 → 2 红；整个删掉一个 postgres 绑定模块 → 2 红；postgres 绑定挂错分组 → 1 红。「两个绑定用例名集合相等」自此不再是平凡真。
+
+`unexpected_integration_skips` 写成纯函数并单独测试（`tests/contract/test_integration_gate.py`），因此这条 gate 不必靠"某次 CI 恰好出问题"来验证。
+
+**仍未验证**：60 条 PostgreSQL 绑定用例与 4 条迁移路径用例**一次都没跑过**——本机无 PostgreSQL、无容器运行时。T5 交付的是基建与放行窄度的证据，**不是** PostgreSQL 行为的证据。
 
 ### T6：并发与崩溃恢复故障注入
 

@@ -25,14 +25,20 @@ _TESTS_ROOT = Path(__file__).resolve().parents[1]
 
 # 绑定登记表：模块路径 → 它绑定的分组与实现种类。
 #
-# T5 为每一组追加 ``postgres`` 绑定。届时 ``test_every_group_is_bound_by_the_same_kinds``
-# 从"三组都只有 memory"变成"三组都有 memory + postgres"，
-# ``test_binding_exposes_exactly_its_group`` 才第一次真正比较两个实现的用例名集合。
-# **T5 必须复查这两条确实会因缺绑定而转红**（M4 计划 §10 T2）。
+# T5 已为每一组接上 ``postgres`` 绑定，因此
+# ``test_every_group_is_bound_by_the_same_kinds`` 与
+# ``test_binding_exposes_exactly_its_group`` 从平凡真变成**真正在比较两个实现**。
+# 两条在 T5 都复查过确实会因缺绑定而转红。
 _BINDINGS: dict[str, tuple[str, str]] = {
     "tests.contract.test_task_store_contract": ("contract", "memory"),
     "tests.security.test_lease_fencing": ("lease_fencing", "memory"),
     "tests.security.test_terminal_protection": ("terminal_protection", "memory"),
+    "tests.integration.test_task_store_contract_postgres": ("contract", "postgres"),
+    "tests.integration.test_lease_fencing_postgres": ("lease_fencing", "postgres"),
+    "tests.integration.test_terminal_protection_postgres": (
+        "terminal_protection",
+        "postgres",
+    ),
 }
 
 
