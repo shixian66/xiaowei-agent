@@ -432,9 +432,28 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 补测试后复跑这两项变异，均转红。
 
-### T2：契约套件双绑定化
+### T2：契约套件双绑定化 —— **已完成**
 
-按 §9.5 重构为共享套件 + 绑定；此时只绑定 InMemory（PostgreSQL 绑定在 T5 接入）。加入「两个绑定用例名集合相等」的元测试——此时它断言的是"一个绑定"的平凡情况，T5 接入第二个绑定后才真正承重，因此**元测试必须在 T5 复查一次**，确认它当时确实会因缺用例而转红。
+按 §9.5 重构为共享套件 + 绑定；此时只绑定 InMemory（PostgreSQL 绑定在 T5 接入）。
+
+**落点**：`tests/suites/task_store.py`（不匹配 `test_*.py`，因此自身不被收集）持有 34 条行为用例，分三组 `CONTRACT_CASES` / `LEASE_FENCING_CASES` / `TERMINAL_PROTECTION_CASES`；三个既有文件退化为绑定，各自调用 `bind(globals(), <组>)`。marker 在收集期按模块读取、不写回函数对象，因此同一个函数在 `tests/security/` 带 `security`、在 `tests/contract/` 不带，互不影响。
+
+**纯搬运的证据**：重构前后 `pytest --collect-only` 对这三个文件给出的 **48 个用例 ID 逐条相同**。
+
+`test_terminal_protection.py` 只搬走两条**存储层**用例；终态集合、迁移表、`TaskOutcome` 终态约束这几条与存储无关，留在原地——绑到 PostgreSQL 上只会重复跑一遍同样的纯函数断言。
+
+**抽取换来三条新的静默失效路径**，形态都是"看起来写了测试、实际一次没跑"，且全部现有用例照常全绿。`tests/contract/test_task_store_bindings.py` 逐条承重：
+
+| 失效路径 | 断言 | 反证 |
+| --- | --- | --- |
+| 用例漏进分组 | 分组并集 == 套件里定义的全部 `test_*`，且分组互不重叠 | 加一条不进组的用例 → 1 红 |
+| 绑定漏挂分组 / 局部覆盖 | 每一组必须被**同一批实现**绑定 | 只把一组改成 `postgres` → 1 红 |
+| 元测试不知道新绑定 | AST 扫描 `tests/` 下所有 `bind(...)` 调用，与登记表比对 | 从登记表删一个绑定 → 3 红 |
+| 绑定挂错分组 | 每个绑定暴露的套件用例恰为它登记的那一组 | `CONTRACT_CASES[:-1]` → 1 红 |
+
+第三条用 AST 扫描而不是靠人记得登记，理由与 `test_module_layering.py::test_every_existing_package_is_registered` 相同。
+
+**「两个绑定用例名集合相等」目前是平凡真**（每组只有 memory 一个绑定）。写成"逐个绑定对齐分组"而不是"两两比较"，是为了让失败信息直接指出哪个绑定少了哪条。**T5 接入 postgres 绑定后必须复查这两条确实会因缺绑定而转红**。
 
 ### T3：schema 与 Alembic migration
 
