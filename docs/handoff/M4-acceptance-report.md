@@ -2,9 +2,9 @@
 
 > 按 DEVELOPMENT_PLAN §9 的四段格式：已验证 / 只读推理 / 未覆盖 / 残余风险。
 >
-> **本报告为第二版**：第一版的受审对象 `797a210` 已被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）。三条阻断项中的两条已按根因修复（见 §2.4），**第三条「`integration` job 从未运行」在本报告出具时仍未解**——它的处置是开 PR，而 PR 尚未开。
+> **本报告为第三版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上了 T10 与 T11，但三条阻断项里的第三条仍未解。
 >
-> **这份报告最重要的一句话仍在「未覆盖」一节**：本机没有 PostgreSQL，也没有容器运行时，因此 **104 条 integration 用例一次都没跑过**。M4 的三条核心判定标准（并发裁决、并发幂等创建、崩溃无中间态）**目前没有任何运行时证据**。
+> **第三版最重要的事实**：`integration` job 已于 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6) 的 run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) **第一次真实运行**——`4 failed, 1422 passed`，**0 skipped**。104 条用例确实全跑了，并且**当场抓出四条本机看不见的缺陷**（§2.7）。修复已落地，**但修复后的复跑尚未完成**，因此 M4 的三条核心判定标准现在的状态是「跑过一次、四条红、已修、待复跑」，不再是「零运行时证据」，也还不是「已验证」。
 
 ## 1. 受审对象
 
@@ -14,7 +14,10 @@
 | 基线 | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945` |
 | 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.4 |
 | 提交 | V1.2 计划修正 + T0–T9 各一个提交（HEAD = `797a210`） |
-| **T10 + T11（本轮）** | **尚未提交**，改动在工作区。受审 SHA 待提交后回填 |
+| T10 + T11 | `4ef3701`，已推送 |
+| **T12（本轮）** | **尚未提交**，改动在工作区。受审 SHA 待提交后回填 |
+| PR | [#6](https://github.com/shixian66/xiaowei-agent/pull/6) |
+| CI run（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775)：六个 job success，`integration` **failure**（4 failed, 1422 passed, 0 skipped） |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
 每个任务一个提交，可独立拒绝。**T10 尚未落成提交**，因此本报告的「已验证」一节描述的是「`797a210` + 工作区未提交改动」这个组合，不是任何一个已存在的 SHA。
@@ -25,16 +28,16 @@
 
 **ADR-008 四条命令**（无 `PYTEST_POSTGRES_DSN`）：
 
-| 命令 | `797a210`（首轮） | 含 T10 + T11（本轮） |
+| 命令 | `797a210`（首轮） | 含 T10–T12（本轮） |
 | --- | --- | --- |
-| `python -m pytest -q` | `1298 passed, 86 skipped` | `1322 passed, 104 skipped` |
-| `python -m pytest -m security -q` | `855 passed, 51 skipped, 478 deselected` | `861 passed, 60 skipped, 505 deselected` |
+| `python -m pytest -q` | `1298 passed, 86 skipped` | `1326 passed, 104 skipped` |
+| `python -m pytest -m security -q` | `855 passed, 51 skipped, 478 deselected` | `861 passed, 60 skipped, 509 deselected` |
 | `ruff check .` | `All checks passed!` | `All checks passed!` |
 | `mypy src` | `Success: no issues found in 80 source files` | `Success: no issues found in 80 source files` |
 
 基线是 `main` 上的 `1229 passed` / `823 passed, 406 deselected` / 74 源文件。
 
-T10 与 T11 合计带来的 `+24 passed / +18 skipped`，逐项对得上（数字为 pytest 收集到的**用例项**，不是函数数）：
+T10–T12 合计带来的 `+28 passed / +18 skipped`，逐项对得上（数字为 pytest 收集到的**用例项**，不是函数数）：
 
 | 来源 | passed | skipped |
 | --- | --- | --- |
@@ -46,7 +49,8 @@ T10 与 T11 合计带来的 `+24 passed / +18 skipped`，逐项对得上（数�
 | `tests/integration/test_audit_and_approval_ledgers.py` | — | +9 |
 | 删除恒绿的 `test_schema_module_declares_no_credentials` | −1 | — |
 | **T11**：`tests/contract/test_integration_gate.py` 的四条 gate 触发条件用例 | +4 | — |
-| **合计** | **+24** | **+18** |
+| **T12**：`tests/contract/test_contract_enum_references.py` | +4 | — |
+| **合计** | **+28** | **+18** |
 
 **deps-audit job 的实际命令**是两步：`uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt`，再 `pip-audit --strict -r requirements-audit.txt`。本轮复跑：exit 0，`No known vulnerabilities found`。
 
@@ -159,24 +163,50 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 **这条不替代 `integration` 真的跑起来**：它保证的是「job 一旦跑，就不可能在零证据的情况下变绿」，不是「job 已经跑过」。阻断项 3 仍然只能靠 PR 上的真实 CI 解。
 
+### 2.7 T12：`integration` 首次真实运行抓到的四条
+
+run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775)：`4 failed, 1422 passed`，**0 skipped**。**0 skip 本身就是 §2.6 那条 gate 的第一份运行时证据**——它证明的不是"没出错"，而是"104 条确实全跑了"。
+
+四条失败分属两类根因，共同前提是同一件事：integration 用例在本机永远 skipped，而 ADR-008 的 `mypy src` **不覆盖 `tests`**，因此这一整类代码此前既没有静态检查也没有运行时检查。
+
+| 类 | 失败用例 | 根因 |
+| --- | --- | --- |
+| A | `test_promoted_columns_agree_with_the_stored_payload`、`test_audit_payload_survives_a_real_round_trip`、`test_a_denied_step_leaves_an_audit_row_without_any_evidence` | `StageOutcome.DENIED` / `StageOutcome.ERROR` **是伪造的成员**，闭集只有 `OK / REJECTED / FAILED / SKIPPED` |
+| B | `test_a_killed_backend_leaves_no_intermediate_state` | `victim.begin()` 排在 `execute("SELECT pg_backend_pid()")` **之后**，而 SQLAlchemy 2.0 在首次 `execute` 时 autobegin，再调 `begin()` 必抛 `InvalidRequestError`。**这条用例从写出来那天起就不可能跑通**，而它是判定标准 4 的唯一证据来源 |
+
+**A 的处置不止于改那三行**：新增 `tests/contract/test_contract_enum_references.py`，按 AST 扫 `src` 与 `tests` 的全部 `.py`，断言每一处 `<Enum>.<NAME>` 引用真实存在；枚举清单**从 `xiaowei_agent.contracts` 派生**而非硬编码。反空洞断言按树分别计数——只扫到 `src` 同样能让主断言全绿，而出问题的那一半全在 `tests` 里。
+
+**B 不加机械检查**：全仓库同类形状只此一处（其余 `.begin()` 都作用在 engine 上），且它现在有真实的行为反证——`integration` 每个 PR 都会跑。为一个已被真实运行覆盖的问题再造一条脆弱的 AST 规则，是把护栏堆在已经承重的地方。
+
+**变异反证**：两项，全部先红后绿。
+
+| 变异 | 转红 |
+| --- | --- |
+| 放回真实出过事的 `StageOutcome.DENIED` | 1 |
+| 枚举扫描范围缩回只有 `src` | 1 |
+
+**这四条修复尚未在 CI 上复跑。** 在复跑绿之前，判定标准 2、3、4 的状态是「跑过一次、四条红、已修、待验证」。
+
 ## 3. 只读推理
 
-以下结论来自阅读源码与离线编译，**没有在真实 PostgreSQL 上执行过**：
+第一版这一节列了六条「读源码 + 离线编译推出来、没在真实 PostgreSQL 上跑过」的结论。run `33828598775` 之后其中大部分**不再是推理**——它们被 1422 条通过的用例真的执行了。逐条改判：
 
-1. 计划里的 SQL 形状（`SELECT ... FOR UPDATE` + `WHERE version = :expected_version` + `RETURNING`）能在 PostgreSQL 上产生预期的串行化与 CAS 语义。
-2. `ON CONFLICT DO NOTHING` 能让并发幂等创建收敛到一行。
-3. `pg_advisory_xact_lock(hashtext(task_id))` 能让两张 append-only 表的 `MAX(seq)+1` 分配免于竞争。
-4. `pg_terminate_backend` 能模拟一次真实崩溃且不留中间态。
-5. Alembic 迁移在空库与有数据的库上都能执行。
-6. GitHub Actions 的 service container 从 job 容器经 `127.0.0.1:5432` 可达（计划 §5.3 第 3 项）。
-7. **（T10 新增）** `INSERT ... VALUES(seq = (SELECT COALESCE(MAX(seq),0)+1 WHERE task_id = :id)) ... RETURNING seq` 能在 PostgreSQL 上返回数据库本次真正分配到的序号，且在 `pg_advisory_xact_lock` 之下不会有两个事务算出同一个 `seq`。
-8. **（T10 新增）** `task_audit_events` 的提升列（`stage` / `outcome` / `occurred_at`）与整条 JSONB 载荷在真实写入后仍互相一致。
+| # | 结论 | 现状 |
+| --- | --- | --- |
+| 1 | `SELECT ... FOR UPDATE` + `WHERE version` + `RETURNING` 产生预期的串行化与 CAS 语义 | **已由首次运行证实**（`test_exactly_one_writer_wins_a_concurrent_cas` 等通过） |
+| 2 | `ON CONFLICT DO NOTHING` 让并发幂等创建收敛到一行 | **已由首次运行证实** |
+| 3 | `pg_advisory_xact_lock(hashtext(task_id))` 让 `MAX(seq)+1` 分配免于竞争 | **已由首次运行证实**（两条并发台账写入用例通过） |
+| 4 | `pg_terminate_backend` 能模拟一次真实崩溃且不留中间态 | **仍未验证**：该用例因 `begin()` 顺序错误在到达断言前就抛异常（§2.7 B），修复后待复跑 |
+| 5 | Alembic 迁移在空库与有数据的库上都能执行 | **已由首次运行证实**（4 条迁移路径用例通过） |
+| 6 | GitHub Actions 的 service container 经 `127.0.0.1:5432` 可达 | **已由首次运行证实** |
+| 7 | `INSERT ... RETURNING seq` 返回数据库真正分配到的序号 | **已由首次运行证实** |
+| 8 | 提升列与整条 JSONB 载荷在真实写入后仍互相一致 | **仍未验证**：该用例因伪造枚举成员在构造事件时就失败（§2.7 A），修复后待复跑 |
 
-其中 1–5、7–8 的 DDL 与语句形状经 SQLAlchemy 离线编译为 PostgreSQL 方言并与迁移逐表比对通过，但**编译通过不等于执行正确**。
+**「编译通过不等于执行正确」这句话在这次拿到了代价**：4 与 8 恰好是两条**从未真正执行过断言**的用例，而 4 是判定标准 4 的唯一证据来源。
 
 ## 4. 未覆盖
 
-**104 条 integration 用例一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
+**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。它们已在 CI 上跑过一次（run `33828598775`，0 skipped，4 failed），但**修复后的复跑尚未完成**。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
 
 | 来源 | 条数 |
 | --- | --- |
@@ -196,10 +226,10 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 其余未覆盖项：
 
-- **`integration` job 从未运行**——这是首轮验收的阻断项 3，**至今未解**。service 可达性、镜像可拉取、迁移在 CI 上的执行全部未验证。
+- **`integration` 的复跑未完成**。首轮验收的阻断项 3（job 从未运行）**已解**——run `33828598775` 证实 service 可达、镜像可拉取、迁移能在 CI 上执行。但那一次是 **failure**，§2.7 的四条修复尚未验证。
 - **service 镜像未钉 digest**（`postgres:16.10`）。digest 只能联网解析，本次改动在离线环境完成；编一个未经核对的 digest 比用版本 tag 更糟。
 - **审批读回没有 Protocol 路径**（§14.4 拍板）：存储保真只有 integration 测试直接读表这一条证据，而它也没跑过。
-- **`record_approval` 与 `record_audit_event` 的并发行为**未验证：`_next_seq` 的 `MAX(seq)+1` 靠 advisory lock 串行化，而 advisory lock 在真实并发下是否真的挡住了同号分配，只有 integration 的两条并发用例能回答（§2.5 最后一项）。
+- ~~`record_approval` 与 `record_audit_event` 的并发行为未验证~~ **已验证**：两条并发用例在 run `33828598775` 上通过，advisory lock 确实挡住了同号分配。
 - 未做性能、容量、连接池调优的任何验证。
 
 ## 5. 残余风险
@@ -207,8 +237,9 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 | 风险 | 性质 | 处置 |
 | --- | --- | --- |
 | **M4 的核心判定标准没有运行时证据** | 阻断验收 | `integration` job 未绿即不通过（§14.2）。这是本次交付最重要的一条 |
-| **首轮阻断项 3 未解**：`integration` job 仍未运行 | 阻断验收 | 处置是开 PR 让 `pull_request` 事件在 exact HEAD 上跑满七个 job。**PR 尚未开**，第二轮验收若在此之前进行，会被同一条原样打回 |
-| **T10 尚未落成提交** | 中 | 本报告「已验证」一节描述的是「`797a210` + 工作区未提交改动」，不是任何已存在的 SHA。提交后须回填受审 SHA 并复跑四条命令 |
+| **`integration` 的复跑未完成** | 阻断验收 | 首次运行是 failure（4 failed），修复已落地但未复跑。**复跑绿且 0 skip 之前不可合并** |
+| **T12 尚未落成提交** | 中 | 本报告「已验证」一节描述的是「`4ef3701` + 工作区未提交改动」。提交后须回填受审 SHA 与新的 CI run 链接 |
+| **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
 | service 镜像用可变 tag | 中 | 已有断言挡住 `latest`；首次 CI 绿灯后钉 digest |
 | 纯函数里的 bug 会让两个实现同时通过 | 中 | 共享判定消除的是分叉不是判错；由 §2.1 的变异反证承重 |
@@ -217,4 +248,4 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 ## 6. 能力状态
 
-M4 完成后 TaskStore 的最强证据仍是 **`tests`**——而且是**不完整的 `tests`**：内存实现全绿，PostgreSQL 实现零运行。**非部署、非 canary、非用户验收。**
+M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**跑过一次真实 PostgreSQL、抓出四条缺陷、已修待复跑的 `tests`**，不再是「PostgreSQL 实现零运行」。**非部署、非 canary、非用户验收。**

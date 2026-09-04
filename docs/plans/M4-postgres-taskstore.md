@@ -1,8 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.4）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.5）
 
 > 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。
 >
 > 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -637,6 +637,25 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 | service 端口映射改成 `55432:5432` | 2 |
 | 删掉 `integration` job 的 pytest 步骤 | 4 |
 
+### T12：`integration` 首次真实运行暴露的两类缺陷 —— **已完成**
+
+PR #6 的 CI run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) 是 `integration` job 的**第一次真实运行**：`4 failed, 1422 passed`，**0 skipped**。0 skip 说明 §10 T11 的 gate 生效——104 条用例确实全部跑了。四条失败分属两类根因，两类的**共同前提**是同一件事：integration 用例在本机永远是 skipped，而 ADR-008 的 `mypy src` 不覆盖 `tests`，因此这一整类代码此前**既没有静态检查也没有运行时检查**。
+
+**A. 伪造的枚举成员（3 条）。** 用例写了 `StageOutcome.DENIED` 与 `StageOutcome.ERROR`，而该闭集只有 `OK / REJECTED / FAILED / SKIPPED`。修正为 `REJECTED` 与 `FAILED`（与 `runners/deterministic.py` 在 ADMISSION 拒绝、GATEWAY 出错时的用法一致），并同步 `row["outcome"] == "denied"` 这条字面量断言。
+
+处置不止于改这三行：新增 `tests/contract/test_contract_enum_references.py`，按 AST 扫 `src` 与 `tests` 全部 `.py`，断言每一处 `<Enum>.<NAME>` 引用的成员真实存在。**枚举清单从 `xiaowei_agent.contracts` 派生而不是硬编码**，新增枚举自动纳入——理由与 `test_row_mapping.py` 从 `ALL_TABLES` 扫 JSONB 列相同。判定写成纯函数，因此能在不往仓库里真放一处错误引用的前提下测它自己。反空洞断言**按树分别计数**：只扫到 `src` 同样能让主断言全绿，而出问题的那一半全在 `tests` 里。
+
+**B. `begin()` 排在第一个 `execute()` 之后（1 条）。** `test_a_killed_backend_leaves_no_intermediate_state` 先 `execute("SELECT pg_backend_pid()")` 再 `victim.begin()`。SQLAlchemy 2.0 的 connection 在首次 `execute` 时 **autobegin**，之后再调 `begin()` 必然抛 `InvalidRequestError`。**这条用例从写出来那天起就不可能跑通**，而它正是判定标准 4 的唯一证据来源。处置是把 `begin()` 移到取 pid 之前。
+
+同类排查：全仓库 `tests/integration/` 里其余 `.begin()` 全部作用在 engine 上（`clean_database.begin()`），不存在同一形状。**B 类不加机械检查**——它现在有真实的行为反证（integration 每个 PR 都会跑），为一个已经被真实运行覆盖的问题再造一条脆弱的 AST 规则，是把护栏堆在已经承重的地方。
+
+**变异反证**：两项，全部先红后绿。
+
+| 变异 | 转红 |
+| --- | --- |
+| 放回真实出过事的 `StageOutcome.DENIED` | 1 |
+| 枚举扫描范围缩回只有 `src`（即漏掉出问题的那一半） | 1 |
+
 ## 11. CI 变更清单
 
 新增一个 `integration` job：PostgreSQL service container（`POSTGRES_HOST_AUTH_METHOD=trust`，无凭证）、`PYTEST_POSTGRES_DSN` 环境变量、执行 `python -m pytest -q`。
@@ -770,6 +789,6 @@ M4 明确不做：
 | Codex 首轮验收（`797a210`） | **打回**，三条阻断项 + 一条非阻断。逐条根因与处置见 §10 T10；审计事件的拍板见 §14.5。修订记为 V1.3——它追加了一个任务和一条 Protocol 方法，**不是纯文档修正**，与 V1.2 的性质不同 |
 | 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（任务生命周期方法数已由"五个"改为"六个"）。**Protocol 方法总数**是另一套数：T4 结束时七个，T10 追加 `record_audit_event` 后八个，唯一真源是 `tests/contract/test_protocol_conformance.py` 的哨兵常量 |
 | 与真源冲突 | 无已知冲突。§7.2 与 ADR-009 一致；§4 与 §8.5 的 E1 口径与 ADR-007 D7 一致；§12.1 与 ADR-008 一致；§13 的"不引入 Compose"与 ADR-007 D8 的 M5 时点一致 |
-| 范围 | 单一里程碑，T0–T9 + 首轮验收打回的 T10 + 第二轮复审自查的 T11，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
+| 范围 | 单一里程碑，T0–T9 + 首轮验收打回的 T10 + 第二轮复审自查的 T11 + 首次真实运行 integration 暴露的 T12，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
 | 歧义 | 无。§14.2 的"必需 gate"已显式区分「验收硬门槛」与「GitHub required status check」，避免重复 M1 那类误述 |
 | 是否降低了既有安全边界 | 否。新增的网络放行经三条测试证明窄度；CI 不引入任何凭证；既有六个 gate 与全部安全测试保持不变 |

@@ -55,14 +55,14 @@ async def test_promoted_columns_agree_with_the_stored_payload(
 ) -> None:
     """提升列不是第二份真相，是载荷的投影。两者不一致时按列查询会给出错误答案。"""
     event = make_event(
-        stage=PipelineStage.ADMISSION, outcome=StageOutcome.DENIED, task_id=_TASK
+        stage=PipelineStage.ADMISSION, outcome=StageOutcome.REJECTED, task_id=_TASK
     )
     await store.record_audit_event(event=event)
 
     (row,) = await _rows(clean_database, TASK_AUDIT_EVENTS)
     payload = load_contract(TraceEvent, row["event"])
     assert row["stage"] == payload.stage.value == "admission"
-    assert row["outcome"] == payload.outcome.value == "denied"
+    assert row["outcome"] == payload.outcome.value == "rejected"
     assert row["occurred_at"] == payload.occurred_at
 
 
@@ -72,7 +72,7 @@ async def test_audit_payload_survives_a_real_round_trip(
     """整条事件必须原样回来，包括脱敏后的 ``detail`` 与感知时区的时间戳。"""
     event = make_event(
         stage=PipelineStage.GATEWAY,
-        outcome=StageOutcome.ERROR,
+        outcome=StageOutcome.FAILED,
         task_id=_TASK,
         detail={"reason": "tool refused"},
     )
@@ -94,7 +94,7 @@ async def test_a_denied_step_leaves_an_audit_row_without_any_evidence(
     """
     await store.record_audit_event(
         event=make_event(
-            stage=PipelineStage.ADMISSION, outcome=StageOutcome.DENIED, task_id=_TASK
+            stage=PipelineStage.ADMISSION, outcome=StageOutcome.REJECTED, task_id=_TASK
         )
     )
     assert len(await _rows(clean_database, TASK_AUDIT_EVENTS)) == 1

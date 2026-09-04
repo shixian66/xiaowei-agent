@@ -31,10 +31,11 @@
 | M3 工作分支 | `claude/m3-starrocks-slow-query` 已合入 `main`，保留备查 |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
 | M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.2，经 Codex 复审批准开工 |
-| M4 状态 | **首轮验收被打回，修复完成待复审，未合入**。受审 SHA `797a210` 被 Codex 打回三条阻断项 + 一条非阻断（`alembic.ini` 依赖 locale、审计事件只有表没有实现、`integration` job 从未运行、`tests/conftest.py` 推荐被禁的 `socket_enabled`）。逐条根因与处置见计划 §10 T10。T0–T9 各一个提交已在 `claude/m4-postgres-taskstore`，**T10 与 T11 的修复尚在工作区未提交**。T11 是第二轮复审自查发现的：`integration` gate 的触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键这两份独立拷贝）此前没有任何东西钉住，改任一侧会让七个 job 全绿而零 integration 证据；已加四条测试钉死两侧，**不改 `ci.yml`**。**关键限制不变**：本机无 PostgreSQL 也无容器运行时，因此 **104 条 integration 用例一次都没跑过**——判定标准 2（并发裁决）、3（并发幂等创建）、4（崩溃无中间态）以及两个 adapter 的行为**目前没有任何运行时证据**，要等 CI 的 `integration` job |
+| M4 状态 | **首轮验收被打回，修复完成待复审，未合入**。受审 SHA `797a210` 被 Codex 打回三条阻断项 + 一条非阻断（`alembic.ini` 依赖 locale、审计事件只有表没有实现、`integration` job 从未运行、`tests/conftest.py` 推荐被禁的 `socket_enabled`）。逐条根因与处置见计划 §10 T10。T0–T9 各一个提交已在 `claude/m4-postgres-taskstore`，T10 与 T11 已提交为 `4ef3701` 并推送，PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6) 已开。**`integration` job 已于 run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) 第一次真实运行**：六个 job success，`integration` failure（`4 failed, 1422 passed, **0 skipped**`）。0 skip 证明 T11 的 gate 生效；四条失败是本机看不见的真实缺陷（伪造的 `StageOutcome` 成员 ×3、`begin()` 排在首个 `execute()` 之后 ×1），处置见计划 §10 T12，**修复尚在工作区未提交，复跑未完成**。T11 是第二轮复审自查发现的：`integration` gate 的触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键这两份独立拷贝）此前没有任何东西钉住，改任一侧会让七个 job 全绿而零 integration 证据；已加四条测试钉死两侧，**不改 `ci.yml`**。**关键限制不变**：本机无 PostgreSQL 也无容器运行时，因此 **104 条 integration 用例一次都没跑过**——判定标准 2（并发裁决）、3（并发幂等创建）、4（崩溃无中间态）以及两个 adapter 的行为**目前没有任何运行时证据**，要等 CI 的 `integration` job |
 | M4 CI 变更 | 新增第七个 job `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。该 job 是 M4 验收硬门槛（未绿即不通过），**但不是 GitHub 强制的 required status check**——分支保护仍不可用 |
 | M4 待办（需联网） | service 镜像目前钉在 `postgres:16.10` 版本 tag，**尚未钉 digest**。首次 CI 绿灯后用 `docker buildx imagetools inspect postgres:16.10` 取回 digest 钉死，并同步 `_WORKFLOW_SHA256` |
-| M4 阻断项 3 的处置 | `integration` job 从未运行的根因不是代码：工作流只在 `push: main` / `pull_request: main` 触发，而该分支没有 PR。**不改触发条件**（给所有分支加 `push` 会让每个 PR 跑两遍 CI）。处置是开 PR，让 `pull_request` 事件在 exact HEAD 上跑满七个 job。**此步尚未执行** |
+| M4 阻断项 3 | **已解**。根因不是代码：工作流只在 `push: main` / `pull_request: main` 触发，而该分支没有 PR。**未改触发条件**（给所有分支加 `push` 会让每个 PR 跑两遍 CI），处置是开 PR #6，`pull_request` 事件随即在 exact HEAD 上跑满七个 job |
+| M4 合并门槛 | `integration` **绿且 0 skip**。0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 自己承重，不靠人看日志；触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死 |
 | 下一里程碑 | **M5**：API + Worker + Compose（M4 验收通过后） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -202,6 +203,7 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未用户验收。
+- **不要把「integration 跑过一次」当成「判定标准 2/3/4 已验证」**：那一次是 failure，判定标准 4 的唯一证据来源（`test_a_killed_backend_leaves_no_intermediate_state`）恰好是失败的四条之一，它在到达任何断言之前就抛了异常。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
 - `tests/integration/`、`docker-compose.yml`、API、Worker、数据库迁移仍不存在。

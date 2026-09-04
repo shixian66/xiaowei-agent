@@ -153,8 +153,12 @@ async def test_a_killed_backend_leaves_no_intermediate_state(
     before = await store.get(task.task_id)
     victim = await clean_database.connect()
     try:
-        pid = (await victim.execute(sa.text("SELECT pg_backend_pid()"))).scalar_one()
+        # ``begin()`` 必须排在**第一个** execute 之前：SQLAlchemy 2.0 的 connection
+        # 在首次 execute 时 autobegin，之后再调用 begin() 会抛 InvalidRequestError。
+        # 这条用例此前把取 pid 排在前面，因此从写出来那天起就不可能跑通——本机没有
+        # PostgreSQL，它一直是 skipped，直到第一次真跑 integration 才暴露。
         transaction = await victim.begin()
+        pid = (await victim.execute(sa.text("SELECT pg_backend_pid()"))).scalar_one()
         await victim.execute(
             sa.text(
                 "UPDATE tasks SET status = 'planning', version = version + 1"
