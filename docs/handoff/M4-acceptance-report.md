@@ -2,9 +2,11 @@
 
 > 按 DEVELOPMENT_PLAN §9 的四段格式：已验证 / 只读推理 / 未覆盖 / 残余风险。
 >
-> **本报告为第三版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上了 T10 与 T11，但三条阻断项里的第三条仍未解。
+> **本报告为第四版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
 >
-> **第三版最重要的事实**：`integration` job 已于 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6) 的 run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) **第一次真实运行**——`4 failed, 1422 passed`，**0 skipped**。104 条用例确实全跑了，并且**当场抓出四条本机看不见的缺陷**（§2.7）。修复已落地，**但修复后的复跑尚未完成**，因此 M4 的三条核心判定标准现在的状态是「跑过一次、四条红、已修、待复跑」，不再是「零运行时证据」，也还不是「已验证」。
+> **第四版最重要的事实**：`integration` job 已在 `d26d3d3` 上**复跑通过**——run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416)，**七个 job 全绿**，integration 步骤输出 `1430 passed`，**0 failed、0 skipped**。`1430 = 本机 1326 passed + 104 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过。
+>
+> M4 的三条核心判定标准（并发裁决、并发幂等创建、崩溃无中间态）**至此首次拥有运行时证据**。仍未做的事见 §4 与 §5——尤其 service 镜像仍钉在版本 tag 而非 digest。
 
 ## 1. 受审对象
 
@@ -15,9 +17,10 @@
 | 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.4 |
 | 提交 | V1.2 计划修正 + T0–T9 各一个提交（HEAD = `797a210`） |
 | T10 + T11 | `4ef3701`，已推送 |
-| **T12（本轮）** | **尚未提交**，改动在工作区。受审 SHA 待提交后回填 |
+| T12 | `d26d3d3` |
 | PR | [#6](https://github.com/shixian66/xiaowei-agent/pull/6) |
-| CI run（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775)：六个 job success，`integration` **failure**（4 failed, 1422 passed, 0 skipped） |
+| CI run #1（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：六个 job success，`integration` **failure**（`4 failed, 1422 passed, 0 skipped`） |
+| CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
 每个任务一个提交，可独立拒绝。**T10 尚未落成提交**，因此本报告的「已验证」一节描述的是「`797a210` + 工作区未提交改动」这个组合，不是任何一个已存在的 SHA。
@@ -185,7 +188,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 | 放回真实出过事的 `StageOutcome.DENIED` | 1 |
 | 枚举扫描范围缩回只有 `src` | 1 |
 
-**这四条修复尚未在 CI 上复跑。** 在复跑绿之前，判定标准 2、3、4 的状态是「跑过一次、四条红、已修、待验证」。
+**复跑已完成**：run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`，integration `1430 passed`、0 failed、0 skipped。四条全部转绿，判定标准 2、3、4 至此有运行时证据。
 
 ## 3. 只读推理
 
@@ -196,17 +199,17 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 | 1 | `SELECT ... FOR UPDATE` + `WHERE version` + `RETURNING` 产生预期的串行化与 CAS 语义 | **已由首次运行证实**（`test_exactly_one_writer_wins_a_concurrent_cas` 等通过） |
 | 2 | `ON CONFLICT DO NOTHING` 让并发幂等创建收敛到一行 | **已由首次运行证实** |
 | 3 | `pg_advisory_xact_lock(hashtext(task_id))` 让 `MAX(seq)+1` 分配免于竞争 | **已由首次运行证实**（两条并发台账写入用例通过） |
-| 4 | `pg_terminate_backend` 能模拟一次真实崩溃且不留中间态 | **仍未验证**：该用例因 `begin()` 顺序错误在到达断言前就抛异常（§2.7 B），修复后待复跑 |
+| 4 | `pg_terminate_backend` 能模拟一次真实崩溃且不留中间态 | **已证实**（run `33829057416`）。它是全部八条里**最后**拿到证据的一条——修复前它从未执行过任何断言 |
 | 5 | Alembic 迁移在空库与有数据的库上都能执行 | **已由首次运行证实**（4 条迁移路径用例通过） |
 | 6 | GitHub Actions 的 service container 经 `127.0.0.1:5432` 可达 | **已由首次运行证实** |
 | 7 | `INSERT ... RETURNING seq` 返回数据库真正分配到的序号 | **已由首次运行证实** |
-| 8 | 提升列与整条 JSONB 载荷在真实写入后仍互相一致 | **仍未验证**：该用例因伪造枚举成员在构造事件时就失败（§2.7 A），修复后待复跑 |
+| 8 | 提升列与整条 JSONB 载荷在真实写入后仍互相一致 | **已证实**（run `33829057416`） |
 
-**「编译通过不等于执行正确」这句话在这次拿到了代价**：4 与 8 恰好是两条**从未真正执行过断言**的用例，而 4 是判定标准 4 的唯一证据来源。
+**八条现在全部由真实执行证实。** 但「编译通过不等于执行正确」这句话在这次拿到了代价：4 与 8 恰好是两条**从未真正执行过断言**的用例，而 4 是判定标准 4 的唯一证据来源——它们在两次运行之间才被发现并修好。
 
 ## 4. 未覆盖
 
-**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。它们已在 CI 上跑过一次（run `33828598775`，0 skipped，4 failed），但**修复后的复跑尚未完成**。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
+**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。**它们已在 CI 上全部跑过并通过**（run `33829057416`，`1430 passed`、0 skipped）——本节保留这张分布表，是为了记录「本机看不到什么」这个长期事实，不再是未覆盖项。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
 
 | 来源 | 条数 |
 | --- | --- |
@@ -226,7 +229,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 其余未覆盖项：
 
-- **`integration` 的复跑未完成**。首轮验收的阻断项 3（job 从未运行）**已解**——run `33828598775` 证实 service 可达、镜像可拉取、迁移能在 CI 上执行。但那一次是 **failure**，§2.7 的四条修复尚未验证。
+- ~~`integration` job 从未运行~~ **已解**：run `33828598775` 证实 service 可达、镜像可拉取、迁移能在 CI 上执行；run `33829057416` 全绿。
 - **service 镜像未钉 digest**（`postgres:16.10`）。digest 只能联网解析，本次改动在离线环境完成；编一个未经核对的 digest 比用版本 tag 更糟。
 - **审批读回没有 Protocol 路径**（§14.4 拍板）：存储保真只有 integration 测试直接读表这一条证据，而它也没跑过。
 - ~~`record_approval` 与 `record_audit_event` 的并发行为未验证~~ **已验证**：两条并发用例在 run `33828598775` 上通过，advisory lock 确实挡住了同号分配。
@@ -236,9 +239,8 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 | 风险 | 性质 | 处置 |
 | --- | --- | --- |
-| **M4 的核心判定标准没有运行时证据** | 阻断验收 | `integration` job 未绿即不通过（§14.2）。这是本次交付最重要的一条 |
-| **`integration` 的复跑未完成** | 阻断验收 | 首次运行是 failure（4 failed），修复已落地但未复跑。**复跑绿且 0 skip 之前不可合并** |
-| **T12 尚未落成提交** | 中 | 本报告「已验证」一节描述的是「`4ef3701` + 工作区未提交改动」。提交后须回填受审 SHA 与新的 CI run 链接 |
+| ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | run `33829057416` 上 `1430 passed`、0 skipped。这曾是本次交付最重要的一条 |
+| **本报告所在提交本身没有 CI 结果** | 低 | run `33829057416` 跑的是 `d26d3d3`；本次回填是**纯文档提交**，其自身的 CI 结果见 PR #6 的最后一次运行。差异可用 `git diff --stat d26d3d3..HEAD` 核验：只有文档 |
 | **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
 | service 镜像用可变 tag | 中 | 已有断言挡住 `latest`；首次 CI 绿灯后钉 digest |
@@ -248,4 +250,6 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 ## 6. 能力状态
 
-M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**跑过一次真实 PostgreSQL、抓出四条缺陷、已修待复跑的 `tests`**，不再是「PostgreSQL 实现零运行」。**非部署、非 canary、非用户验收。**
+M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**在真实 PostgreSQL 上全绿的 `tests`**（run `33829057416`，`1430 passed`、0 skipped），不再是「PostgreSQL 实现零运行」。
+
+**这依然只是 `tests`。非部署、非 canary、非用户验收。** 一次 CI 上的 PostgreSQL service container 跑绿，不能推出任何关于生产数据库、真实负载、连接池或运维环境的结论。
