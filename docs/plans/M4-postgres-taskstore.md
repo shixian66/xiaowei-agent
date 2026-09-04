@@ -1,8 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.6）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.7）
 
-> 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
+> 状态：**已批准并实施完毕，待最终验收**。V1–V1.2 经项目负责人与 Codex 审核批准开工（依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11）；T0–T13 已全部落地并推送至 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6)。本文件自 V1.3 起同时充当**实施与复审记录**，§10 各任务段按完成时的事实书写。
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。**V1.7 是纯文档修正**：文首状态行由「待审核草案」改为实际状态；§10 T5 / T6 / T9 三段仍用现在时写着「一次都没跑过」「镜像用版本 tag」，改为标明那是**交付当时**的事实并注明此后已被哪一任务解除。**V1.7 不改变任何设计决策、任务拆分或判定标准。**
 >
 > 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -528,7 +528,8 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 `unexpected_integration_skips` 写成纯函数并单独测试（`tests/contract/test_integration_gate.py`），因此这条 gate 不必靠"某次 CI 恰好出问题"来验证。
 
-**仍未验证**：60 条 PostgreSQL 绑定用例与 4 条迁移路径用例**一次都没跑过**——本机无 PostgreSQL、无容器运行时。T5 交付的是基建与放行窄度的证据，**不是** PostgreSQL 行为的证据。
+**T5 交付时未验证**：全部 PostgreSQL 绑定用例与迁移路径用例当时**一次都没跑过**——本机无 PostgreSQL、无容器运行时。T5 交付的是基建与放行窄度的证据，**不是** PostgreSQL 行为的证据。
+**此状态已由 T10–T13 期间的 CI 解除**：`integration` 已在 PR #6 上真实运行并全绿，逐条分布与结果见[验收报告](../handoff/M4-acceptance-report.md) §4 与 §2.7。
 
 ### T6：并发与崩溃恢复故障注入 —— **已写，本机无法运行**
 
@@ -544,7 +545,8 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 **崩溃注入用 `pg_terminate_backend` 真的杀后端进程**，而不是客户端 rollback：后者证明的是"我们记得回滚"，前者证明的是"我们不回滚也不会留下中间态"。生产里进程是被 OOM killer 和 pod 驱逐杀掉的，没人记得回滚。
 
-**本机无 PostgreSQL、无容器运行时，这 6 条用例一次都没跑过。** 判定标准 2 / 3 / 4 的证据要到 CI 的 integration job 才产生。
+**T6 交付时**：本机无 PostgreSQL、无容器运行时，这 6 条用例一次都没跑过，判定标准 2 / 3 / 4 的证据要到 CI 的 integration job 才产生。
+**此后已产生**：其中崩溃注入那条在 `integration` 首次运行时暴露出 `begin()` 顺序错误（§10 T12），修复后连同其余 5 条一并通过。
 
 ### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter —— **已完成（行为待真实库）**
 
@@ -576,7 +578,8 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 §11 的六项同步全部完成，另新增四条断言（`services` 闭集、镜像版本钉死、env 取值无凭证、integration 不引入第五条命令）。
 
-**镜像用版本 tag 而不是 digest，这是一处对计划的偏离，理由是不编造未经核对的事实**：digest 只能联网解析，本次改动在离线环境完成。写一个没核对过的 digest 比用 `postgres:16.10` 更糟——前者看起来更严格，实际指向未知内容。已在 `ci.yml` 注释与 `AGENT_HANDOFF.md` 记为需联网的待办，并配了一条"镜像不得是可变 tag"的断言先挡住 `latest`。
+**T9 交付时镜像用版本 tag 而不是 digest，这是一处对计划的偏离，理由是不编造未经核对的事实**：digest 只能联网解析，而当时的改动在离线环境完成。写一个没核对过的 digest 比用 `postgres:16.10` 更糟——前者看起来更严格，实际指向未知内容。当时记为需联网的待办，并配了一条断言先挡住 `latest`。
+**此偏离已由 §10 T13 收口**：CI 绿灯后从 run `33829385450` 的 `Initialize containers` 输出取回 digest 钉死，并把那条断言从"带冒号或带 `@sha256`"（一个裸 tag 也能通过）收紧为完整的 `name:tag@sha256:<64>` 形状。
 
 **§5.3 第 3 项（service container 从 job 容器经 `127.0.0.1:5432` 可达）仍未验证**——它只能由首次 CI 运行产生证据。
 

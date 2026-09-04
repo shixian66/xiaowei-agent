@@ -4,11 +4,13 @@
 >
 > **本报告为第四版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
 >
-> **本报告为第五版**，在第四版之上记入 Codex 第二轮复审打回的 P1（§2.8）。
+> **本报告为第六版**。第五版记入 Codex 第二轮复审打回的 P1（§2.8）；**第六版是纯文档修正**，清掉第三轮复审指出的五处已成假话的事实，并把「最新一次 run」这种必然过期的写法统一改为「某任务的验证 run」+ 指向 `gh pr checks 6`。
 >
-> **最新事实**：run [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`，**七个 job 全绿**，integration 步骤输出 `1442 passed`，**0 failed、0 skipped**（`1442 = 本机 1337 passed + 105 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过）。同一 run 的 `Initialize containers` 显示拉取的 digest 正是钉死的那个。
+> **T13 修复验证 run**：[`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`，**七个 job 全绿**，integration 步骤输出 `1442 passed`，**0 failed、0 skipped**（`1442 = 本机 1337 passed + 105 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过）。同一 run 的 `Initialize containers` 显示拉取的 digest 正是钉死的那个。
 >
-> M4 的三条核心判定标准（并发裁决、并发幂等创建、崩溃无中间态）**至此首次拥有运行时证据**。仍未做的事见 §4 与 §5——尤其 service 镜像仍钉在版本 tag 而非 digest。
+> **本文件不记录「当前 HEAD 的 run」**：每次推送都产生新的 HEAD 和新的 run，写死一个就必然过期。**当前 HEAD 的 exact run 以 `gh pr checks 6` 为准。**
+>
+> M4 的三条核心判定标准（并发裁决、并发幂等创建、崩溃无中间态）**至此拥有运行时证据**。仍未做的事见 §4 与 §5。
 
 ## 1. 受审对象
 
@@ -16,7 +18,7 @@
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore` |
 | 基线 | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945` |
-| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.6 |
+| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.7 |
 | T0–T9 | 各一个提交，末条为 `797a210`——**那是首轮受审对象，不是当前 HEAD** |
 | T10 + T11 | `4ef3701`，已推送 |
 | T12 | `d26d3d3` |
@@ -152,7 +154,7 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 | `tests/conftest.py` 散文重新推荐 `socket_enabled` | 1 红 |
 | `_next_seq` 去掉 `.where(task_id == ...)` 作用域 | **全绿** |
 
-**最后一项全绿是预期内的，不是新的覆盖缺口**：`_next_seq` 的 `task_id` 作用域由绑到 PostgreSQL 的那两条共享套件用例（`test_approval_seq_is_scoped_per_task`、`test_audit_seq_is_scoped_per_task`）承重，而 integration 从未运行。它落在 §5 已记的头号残余风险里，与 §2.2 的 S2 不同——S2 是**即使有数据库也没有任何用例能转红**，这一项是**有数据库就能转红，只是还没跑过**。
+**最后一项全绿是预期内的，不是新的覆盖缺口**：`_next_seq` 的 `task_id` 作用域由绑到 PostgreSQL 的那两条共享套件用例（`test_approval_seq_is_scoped_per_task`、`test_audit_seq_is_scoped_per_task`）承重，**写下这段时 integration 尚未运行过**，因此当时它只是一条推断。此后 integration 已真实跑过、这两条通过（§2.7、§2.8），推断变成了证据。与 §2.2 的 S2 不同——S2 是**即使有数据库也没有任何用例能转红**。
 
 ### 2.6 T11：`integration` gate 的触发条件本身没有承重（第二轮复审自查）
 
@@ -243,7 +245,7 @@ T13 的修复已在 run [`33830881090`](https://github.com/shixian66/xiaowei-age
 
 ## 4. 未覆盖
 
-**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。**它们已在 CI 上全部跑过并通过**（最新一次 run `33830881090`，`1442 passed`、0 skipped）——本节保留这张分布表，是为了记录「本机看不到什么」这个长期事实，不再是未覆盖项。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
+**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。**它们已在 CI 上全部跑过并通过**（T13 修复验证 run `33830881090`，`1442 passed`、0 skipped）——本节保留这张分布表，是为了记录「本机看不到什么」这个长期事实，不再是未覆盖项。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
 
 | 来源 | 条数 |
 | --- | --- |
@@ -264,8 +266,8 @@ T13 的修复已在 run [`33830881090`](https://github.com/shixian66/xiaowei-age
 其余未覆盖项：
 
 - ~~`integration` job 从未运行~~ **已解**：run `33828598775` 证实 service 可达、镜像可拉取、迁移能在 CI 上执行；run `33829057416` 全绿。
-- **service 镜像未钉 digest**（`postgres:16.10`）。digest 只能联网解析，本次改动在离线环境完成；编一个未经核对的 digest 比用版本 tag 更糟。
-- **审批读回没有 Protocol 路径**（§14.4 拍板）：存储保真只有 integration 测试直接读表这一条证据，而它也没跑过。
+- ~~service 镜像未钉 digest~~ **已解**（T13）：已钉 `postgres:16.10@sha256:21f6013…c3c1`，digest 取自 run `33829385450` 的 `Initialize containers` 输出，并已在 run `33830881090` 上确认生效。
+- **审批读回没有 Protocol 路径**（§14.4 拍板）：存储保真**已由 integration 直接读表验证**（用例已在 CI 上跑过并通过），但仓库里**没有任何 Protocol 消费路径**——按 §14.4 接受，读路径归 M8。
 - ~~`record_approval` 与 `record_audit_event` 的并发行为未验证~~ **已验证**：两条并发用例在 run `33828598775` 上通过，advisory lock 确实挡住了同号分配。
 - 未做性能、容量、连接池调优的任何验证。
 
@@ -273,7 +275,7 @@ T13 的修复已在 run [`33830881090`](https://github.com/shixian66/xiaowei-age
 
 | 风险 | 性质 | 处置 |
 | --- | --- | --- |
-| ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | 最新一次 run `33830881090` 上 `1442 passed`、0 skipped。这曾是本次交付最重要的一条 |
+| ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | T13 修复验证 run `33830881090` 上 `1442 passed`、0 skipped。这曾是本次交付最重要的一条 |
 | **报告无法在自身提交内写下自己的 SHA** | 低 | 这是自指，不是覆盖缺口：每次推送都会在 exact HEAD 上跑满七个 job，所以受审 SHA 总有对应的 run。核验方式是 `gh pr checks 6`，不是相信本表里的某个固定 SHA |
 | **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
@@ -284,6 +286,6 @@ T13 的修复已在 run [`33830881090`](https://github.com/shixian66/xiaowei-age
 
 ## 6. 能力状态
 
-M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**在真实 PostgreSQL 上全绿的 `tests`**（最新一次 run `33830881090`，`1442 passed`、0 skipped），不再是「PostgreSQL 实现零运行」。
+M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**在真实 PostgreSQL 上全绿的 `tests`**（T13 修复验证 run `33830881090`，`1442 passed`、0 skipped），不再是「PostgreSQL 实现零运行」。
 
 **这依然只是 `tests`。非部署、非 canary、非用户验收。** 一次 CI 上的 PostgreSQL service container 跑绿，不能推出任何关于生产数据库、真实负载、连接池或运维环境的结论。
