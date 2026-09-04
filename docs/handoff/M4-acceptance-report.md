@@ -4,7 +4,9 @@
 >
 > **本报告为第四版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
 >
-> **第四版最重要的事实**：`integration` job 已在 `d26d3d3` 上**复跑通过**——run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416)，**七个 job 全绿**，integration 步骤输出 `1430 passed`，**0 failed、0 skipped**。`1430 = 本机 1326 passed + 104 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过。
+> **本报告为第五版**，在第四版之上记入 Codex 第二轮复审打回的 P1（§2.8）。
+>
+> **最新事实**：run [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`，**七个 job 全绿**，integration 步骤输出 `1442 passed`，**0 failed、0 skipped**（`1442 = 本机 1337 passed + 105 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过）。同一 run 的 `Initialize containers` 显示拉取的 digest 正是钉死的那个。
 >
 > M4 的三条核心判定标准（并发裁决、并发幂等创建、崩溃无中间态）**至此首次拥有运行时证据**。仍未做的事见 §4 与 §5——尤其 service 镜像仍钉在版本 tag 而非 digest。
 
@@ -23,6 +25,7 @@
 | CI run #1（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：六个 job success，`integration` **failure**（`4 failed, 1422 passed, 0 skipped`） |
 | CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
 | CI run #3（文档回填后） | [`33829259436`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829259436) @ `4792fee`：**七个 job 全绿**，integration `1430 passed` |
+| CI run #4（T13 后） | [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`：**七个 job 全绿**，integration `1442 passed`（0 failed、0 skipped），且 digest 已生效 |
 | 受审对象 | **PR #6 的 HEAD**。`pull_request` 事件在每次推送后都会在 exact HEAD 上跑满七个 job，因此受审 SHA 永远有它自己的运行结果；最近一次见 `gh pr checks 6` |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
@@ -206,6 +209,8 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 **digest**：计划一直写「首次 CI 绿灯后钉 digest」，绿灯已在 run `33829385450` 拿到，digest 取自该 run 的 `Initialize containers` 输出，**不是编的**。护栏同步收紧——原先只要求「带冒号或带 `@sha256`」，一个裸 tag 也能通过。
 
+T13 的修复已在 run [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) 上验证：七个 job 全绿，integration `1442 passed`。
+
 **变异反证**：六项，全部先红后绿。
 
 | 变异 | 转红 |
@@ -238,7 +243,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 ## 4. 未覆盖
 
-**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。**它们已在 CI 上全部跑过并通过**（run `33829057416`，`1430 passed`、0 skipped）——本节保留这张分布表，是为了记录「本机看不到什么」这个长期事实，不再是未覆盖项。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
+**104 条 integration 用例在本机一次都没跑过**（T10 前是 86 条）：本机无 PostgreSQL、无 Docker/Podman、5432 未监听。**它们已在 CI 上全部跑过并通过**（最新一次 run `33830881090`，`1442 passed`、0 skipped）——本节保留这张分布表，是为了记录「本机看不到什么」这个长期事实，不再是未覆盖项。按 `pytest tests/integration -q -rs` 的实测分布，104 条**穷尽**如下：
 
 | 来源 | 条数 |
 | --- | --- |
@@ -268,7 +273,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 | 风险 | 性质 | 处置 |
 | --- | --- | --- |
-| ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | run `33829057416` 上 `1430 passed`、0 skipped。这曾是本次交付最重要的一条 |
+| ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | 最新一次 run `33830881090` 上 `1442 passed`、0 skipped。这曾是本次交付最重要的一条 |
 | **报告无法在自身提交内写下自己的 SHA** | 低 | 这是自指，不是覆盖缺口：每次推送都会在 exact HEAD 上跑满七个 job，所以受审 SHA 总有对应的 run。核验方式是 `gh pr checks 6`，不是相信本表里的某个固定 SHA |
 | **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
@@ -279,6 +284,6 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 ## 6. 能力状态
 
-M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**在真实 PostgreSQL 上全绿的 `tests`**（run `33829057416`，`1430 passed`、0 skipped），不再是「PostgreSQL 实现零运行」。
+M4 完成后 TaskStore 的最强证据仍是 **`tests`**——现在是**在真实 PostgreSQL 上全绿的 `tests`**（最新一次 run `33830881090`，`1442 passed`、0 skipped），不再是「PostgreSQL 实现零运行」。
 
 **这依然只是 `tests`。非部署、非 canary、非用户验收。** 一次 CI 上的 PostgreSQL service container 跑绿，不能推出任何关于生产数据库、真实负载、连接池或运维环境的结论。
