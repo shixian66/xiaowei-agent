@@ -36,7 +36,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "223fc27e133886a09fe00c86c865aa4c6a71be9f409cbb744d7d86c1cfa366d9"
+_WORKFLOW_SHA256 = "20d52f0191c40eaf28e33320ccc2d509c327f1d590e82600ce97369c82087433"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -259,16 +259,27 @@ def test_services_are_a_closed_set() -> None:
     assert _TEXT.count("    services:\n") == 1
     assert _TEXT.count("      postgres:\n") == 1
     images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT)
-    assert images == ["postgres:16.10"], images
+    assert images == [
+        "postgres:16.10@sha256:"
+        "21f6013073bc6b92830a2129570e2f5ec42a6c734b5a985a41e83aa58f54c3c1"
+    ], images
     # service 的 env 恰为一项，且是"无凭证"那一项。
     assert _TEXT.count("POSTGRES_HOST_AUTH_METHOD: trust") == 1
 
 
-def test_service_images_are_version_pinned() -> None:
-    """镜像不得用可变 tag。``latest`` / 裸镜像名会让 CI 的运行内容随时改变。"""
-    for image in re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT):
-        assert ":" in image or "@sha256:" in image, image
-        assert not image.endswith(":latest"), image
+def test_service_images_are_digest_pinned() -> None:
+    """镜像必须钉 **digest**，不是钉 tag。
+
+    此前这条只要求"带冒号或带 @sha256"，于是一个裸 tag 也能通过——而版本 tag 是
+    可变的：同一个 ``postgres:16.10`` 在两次 CI 之间可以指向不同镜像，"CI 绿过"
+    就不再指向一个确定的运行内容。计划写的是「首次 CI 绿灯后钉 digest」，绿灯已经
+    拿到（run 33829385450），因此这条现在按真正的不变量断言。
+    """
+    images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT)
+    assert images, "没有扫到任何 service 镜像——这条检查就没有对象"
+    for image in images:
+        assert re.fullmatch(r"[^\s@:]+:[^\s@]+@sha256:[0-9a-f]{64}", image), image
+        assert not image.startswith("postgres:latest"), image
 
 
 def test_the_integration_job_runs_no_extra_command() -> None:

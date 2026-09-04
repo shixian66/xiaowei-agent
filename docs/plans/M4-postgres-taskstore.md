@@ -1,8 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.5）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.6）
 
 > 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。
 >
 > 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -484,6 +484,8 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5 的 `list_stale_leases`）。此处的「五 / 六」只数任务生命周期方法，不含 `record_approval`；**Protocol 的方法总数在 T4 结束时是七个**（`tests/contract/test_protocol_conformance.py` 的哨兵即为 7），T10 追加 `record_audit_event` 后为八个（§14.5）。CAS 与租约按 §8.3 形状；入参 DTO 在开事务前构造。
 
+**T4 当时写下的「SQL 谓词只被允许更宽」这条规则后来被证伪**（§10 T13）：有 `LIMIT` 时更宽的谓词会让名额被将要丢弃的行吃掉，谓词必须与 `is_stale_lease` 逐条等价。
+
 `list_stale_leases` 同时要在 `InMemoryTaskStore` 上实现，并进入 §9.5 的共享套件——两个绑定的用例名集合相等这条元测试，正是用来保证它不会只落到一个实现上。追加 Protocol 方法还会触及 `persistence/__init__.py` 的导出与 `tests/contract/test_protocol_conformance.py` 的一致性锚点，两处都在本任务内更新。
 
 **已执行的反证**：
@@ -656,6 +658,41 @@ PR #6 的 CI run [`33828598775`](https://github.com/shixian66/xiaowei-agent/acti
 | 放回真实出过事的 `StageOutcome.DENIED` | 1 |
 | 枚举扫描范围缩回只有 `src`（即漏掉出问题的那一半） | 1 |
 
+### T13：`list_stale_leases` 先 `LIMIT` 后过滤，与一轮文档事实漂移 —— **已完成**
+
+Codex 第二轮复审打回一条 P1 + 一条文档项。
+
+**1. 先 `LIMIT` 后过滤会漏报（P1）。** `PostgresTaskStore.list_stale_leases` 的 SQL 谓词只有「曾被租出 + 已过期」，把「未终态」留给 Python 侧的 `is_stale_lease`，依据是 §10 T4 写下的那条规则——「SQL 谓词只被允许**更宽**」。
+
+**那条规则在有 `LIMIT` 的前提下不成立。** 更宽的谓词会让 `LIMIT` 被将要被丢弃的行吃掉。
+
+**影响比「偶尔漏几条」严重得多**：`apply_transition` **有意不清租约字段**（清空会重开 fencing 的缺口，见 `is_stale_lease` 的 docstring），因此**每一个正常结束的任务都永久命中那个更宽的谓词**，并且按 `lease_expires_at` 升序**排在最前**。终态任务只增不减，于是 `list_stale_leases` 的返回量会随系统运行**单调衰减到零**——这是长期运行的稳态，不是边界情况。而内存实现是「先过滤、再排序、再截断」，**两个实现已经分叉**，正是本里程碑抽共享纯函数要消除的那一类。
+
+处置是让谓词与 `is_stale_lease` **逐条等价**，不是「多取一些再截断」——多取多少才够没有答案，终态任务的数量没有上界。查询抽成模块级的 `stale_lease_statement(*, now, limit)`，因此能离线编译、离线检验。三处细节：
+
+- **终态集合从 `TERMINAL_STATUSES` 派生**，不在查询里重列：新增终态时查询自动跟上；
+- 租约条件写成 `NOT (owner IS NOT NULL AND expires IS NOT NULL AND expires > now)` 而不是简写的 `expires <= now`——后者在 `expires IS NULL` 时求值为 NULL 而非 TRUE，会**收窄**谓词，那正是被禁的方向；
+- Python 侧的 `is_stale_lease` 过滤**保留**：它是两个实现共用的权威判定，等价之后在正常数据上是空操作，但 SQL 一旦漂移它仍是兜底。
+
+**2. 文档事实漂移。** 验收报告写着「计划 V1.4」（实际 V1.5）、「HEAD = `797a210`」、「T10 尚未落成提交」、「PR 尚未开」；`AGENT_HANDOFF.md` 的「下一步：M4…开工前先写详细计划」与「`tests/integration/`、数据库迁移仍不存在」也是旧口径；README 同处两条同类。
+
+根因不是笔误，是**只改了正在编辑的那一处，没有扫描同一事实的其余副本**。逐处修正之外，新增 `tests/contract/test_doc_fact_binding.py` 把「报告引用的计划版本」与「计划标题里的版本」钉在一起——这一类**能机械判定**的事实不该再靠人记得同步。散文是否过期没法自动判，那部分仍靠复审。
+
+**3. 顺带钉死 service 镜像 digest。** 计划一直写着「首次 CI 绿灯后钉 digest」，绿灯已在 run `33829385450` 拿到，digest 取自该 run 的 `Initialize containers` 步骤输出（`sha256:21f6013…c3c1`），**不是编的**。同时把那条护栏收紧：`test_service_images_are_version_pinned` 原本只要求「带冒号或带 `@sha256`」，一个裸 tag 也能通过；改名为 `test_service_images_are_digest_pinned` 并按真正的不变量断言完整的 `name:tag@sha256:<64>` 形状。`_WORKFLOW_SHA256` 已同步更新——那条门槛的设计目的就是强制人工审查本次 `ci.yml` 改动。
+
+**变异反证**：六项，全部先红后绿。
+
+| 变异 | 转红 |
+| --- | --- |
+| 谓词退回原来的「更宽」写法（即原 bug） | 3 |
+| 终态集合漏掉一个成员（`canceled`） | 2 |
+| **内存实现**改成同样的「先截断再过滤」 | 1 |
+| 报告引用的计划版本与计划头部不一致 | 1 |
+| service 镜像退回裸版本 tag | 3 |
+| digest 改一个字符 | 2 |
+
+第三项只打红**一条**——就是新加的 `test_a_terminal_task_cannot_crowd_out_a_stale_one`。这同时说明：新用例精确命中这个 bug 形状，而**此前没有任何用例能抓到它**，这正是 PostgreSQL 实现能带着它通过前四轮审查的原因。
+
 ## 11. CI 变更清单
 
 新增一个 `integration` job：PostgreSQL service container（`POSTGRES_HOST_AUTH_METHOD=trust`，无凭证）、`PYTEST_POSTGRES_DSN` 环境变量、执行 `python -m pytest -q`。
@@ -789,6 +826,6 @@ M4 明确不做：
 | Codex 首轮验收（`797a210`） | **打回**，三条阻断项 + 一条非阻断。逐条根因与处置见 §10 T10；审计事件的拍板见 §14.5。修订记为 V1.3——它追加了一个任务和一条 Protocol 方法，**不是纯文档修正**，与 V1.2 的性质不同 |
 | 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（任务生命周期方法数已由"五个"改为"六个"）。**Protocol 方法总数**是另一套数：T4 结束时七个，T10 追加 `record_audit_event` 后八个，唯一真源是 `tests/contract/test_protocol_conformance.py` 的哨兵常量 |
 | 与真源冲突 | 无已知冲突。§7.2 与 ADR-009 一致；§4 与 §8.5 的 E1 口径与 ADR-007 D7 一致；§12.1 与 ADR-008 一致；§13 的"不引入 Compose"与 ADR-007 D8 的 M5 时点一致 |
-| 范围 | 单一里程碑，T0–T9 + 首轮验收打回的 T10 + 第二轮复审自查的 T11 + 首次真实运行 integration 暴露的 T12，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
+| 范围 | 单一里程碑，T0–T9 + T10（首轮验收打回）+ T11（复审自查）+ T12（首次真跑 integration 暴露）+ T13（第二轮复审打回），可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
 | 歧义 | 无。§14.2 的"必需 gate"已显式区分「验收硬门槛」与「GitHub required status check」，避免重复 M1 那类误述 |
 | 是否降低了既有安全边界 | 否。新增的网络放行经三条测试证明窄度；CI 不引入任何凭证；既有六个 gate 与全部安全测试保持不变 |

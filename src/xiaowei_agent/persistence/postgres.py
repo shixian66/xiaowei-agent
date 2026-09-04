@@ -34,6 +34,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei_agent.contracts import (
+    TERMINAL_STATUSES,
     ApprovalRequest,
     EvidenceEnvelope,
     ExecutionPlan,
@@ -124,6 +125,47 @@ def _next_seq(table: sa.Table, task_id: str) -> sa.ScalarSelect[int]:
     )
 
 
+def stale_lease_statement(*, now: _dt.datetime, limit: int) -> sa.Select[Any]:
+    """``list_stale_leases`` 的查询。**谓词必须与 ``is_stale_lease`` 逐条等价。**
+
+    此前这里的谓词只有"曾被租出 + 已过期"，把"未终态"留给 Python 侧过滤，依据是
+    「SQL 谓词只被允许更宽」。**那条规则在有 ``LIMIT`` 的前提下不成立**：更宽的谓词
+    会让 ``LIMIT`` 被将要被丢弃的行吃掉，于是真正需要恢复的任务被挤出窗口。
+
+    这不是罕见边界。``apply_transition`` **有意不清租约字段**（清空会重开 fencing 的
+    缺口，见 ``is_stale_lease``），因此**每一个正常结束的任务都永久命中"曾被租出 +
+    已过期"**，并且按 ``lease_expires_at`` 升序排在最前。它们只增不减，于是
+    ``list_stale_leases`` 的返回量会随系统运行**单调衰减到零**——这是长期运行的稳态，
+    不是边界情况。内存实现是"先过滤、再排序、再截断"，因此两个实现已经分叉。
+
+    修法是让谓词等价，而不是"多取一些再截断"：多取多少才够是没有答案的，终态任务
+    的数量没有上界。
+
+    **终态集合从 ``TERMINAL_STATUSES`` 派生**，不在这里重列：新增一个终态时，这条
+    查询自动跟上。理由与 ``test_row_mapping.py`` 从 ``ALL_TABLES`` 扫 JSONB 列相同。
+
+    三个租约字段的判定写成 ``NOT (owner IS NOT NULL AND expires IS NOT NULL AND
+    expires > now)``，而不是简写成 ``expires <= now``：后者在 ``expires IS NULL`` 时
+    求值为 NULL 而非 TRUE，会**收窄**谓词——那正是被禁的方向。写成前者之后，SQL 与
+    ``lease_is_live`` 的取反逐字对应，且不依赖"三字段同置同清"这条不变量成立。
+    """
+    lease_is_live_sql = sa.and_(
+        TASKS.c.lease_owner.is_not(None),
+        TASKS.c.lease_expires_at.is_not(None),
+        TASKS.c.lease_expires_at > now,
+    )
+    return (
+        sa.select(TASKS)
+        .where(
+            TASKS.c.fencing_token.is_not(None),
+            sa.not_(lease_is_live_sql),
+            TASKS.c.status.not_in(sorted(status.value for status in TERMINAL_STATUSES)),
+        )
+        .order_by(TASKS.c.lease_expires_at, TASKS.c.task_id)
+        .limit(limit)
+    )
+
+
 def _as_row(mapping: Mapping[Any, Any]) -> dict[str, Any]:
     """``RowMapping`` → 普通 ``dict``，**按 schema 的列名逐个取**。
 
@@ -167,22 +209,13 @@ class PostgresTaskStore:
     async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
         """曾被租出、租约已过期、未终态。**不加锁、不改状态。**
 
-        过滤条件在 SQL 里表达一次、在 ``is_stale_lease`` 里再表达一次，看似重复，
-        实则各有分工：SQL 那份让数据库能用索引先砍掉绝大多数行，Python 那份是权威
-        判定——两个实现共用它，因此"什么算 stale"只有一个答案。SQL 谓词只被允许
-        **更宽**，收窄会让两个实现给出不同的结果集。
+        SQL 谓词与 ``is_stale_lease`` 逐条等价，理由见 :func:`stale_lease_statement`。
+        Python 侧仍再过滤一次：那是两个实现共用的权威判定，"什么算 stale"只能有一个
+        答案。等价之后这一步在正常数据上是空操作，但它是 SQL 一旦漂移时的兜底。
         """
         query = StaleLeaseQuery(limit=limit)
         now = self._clock()
-        statement = (
-            sa.select(TASKS)
-            .where(
-                TASKS.c.fencing_token.is_not(None),
-                TASKS.c.lease_expires_at <= now,
-            )
-            .order_by(TASKS.c.lease_expires_at, TASKS.c.task_id)
-            .limit(query.limit)
-        )
+        statement = stale_lease_statement(now=now, limit=query.limit)
         async with self._engine.connect() as connection:
             rows = (await connection.execute(statement)).mappings().all()
         records = [row_to_record(_as_row(row)) for row in rows]

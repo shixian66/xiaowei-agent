@@ -33,7 +33,7 @@
 | M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.2，经 Codex 复审批准开工 |
 | M4 状态 | **CI 七项全绿，待 Codex 按最终 SHA 复审，未合入**。受审 SHA `797a210` 被 Codex 打回三条阻断项 + 一条非阻断（`alembic.ini` 依赖 locale、审计事件只有表没有实现、`integration` job 从未运行、`tests/conftest.py` 推荐被禁的 `socket_enabled`）。逐条根因与处置见计划 §10 T10。T0–T9 各一个提交已在 `claude/m4-postgres-taskstore`，T10–T12 已提交并推送（`4ef3701`、`d26d3d3`），PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6)。**`integration` job 首次真实运行**是 run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：`4 failed, 1422 passed, 0 skipped`。0 skip 证明 T11 的 gate 生效；四条失败是本机看不见的真实缺陷（伪造的 `StageOutcome` 成员 ×3、`begin()` 排在首个 `execute()` 之后 ×1，后者是判定标准 4 的唯一证据来源且从写出来那天起就不可能跑通），处置见计划 §10 T12。**复跑 run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3` 七个 job 全绿**，integration `1430 passed`、0 failed、0 skipped（`1430 = 本机 1326 passed + 104 skipped`）。T11 是第二轮复审自查发现的：`integration` gate 的触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键这两份独立拷贝）此前没有任何东西钉住，改任一侧会让七个 job 全绿而零 integration 证据；已加四条测试钉死两侧，**不改 `ci.yml`**。**本机限制不变**（无 PostgreSQL 也无容器运行时，104 条 integration 用例在本机永远 skipped），但判定标准 2（并发裁决）、3（并发幂等创建）、4（崩溃无中间态）与两个 adapter 的行为**已在 CI 上取得运行时证据** |
 | M4 CI 变更 | 新增第七个 job `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。该 job 是 M4 验收硬门槛（未绿即不通过），**但不是 GitHub 强制的 required status check**——分支保护仍不可用 |
-| M4 待办（需联网） | service 镜像目前钉在 `postgres:16.10` 版本 tag，**尚未钉 digest**。首次 CI 绿灯后用 `docker buildx imagetools inspect postgres:16.10` 取回 digest 钉死，并同步 `_WORKFLOW_SHA256` |
+| M4 service 镜像 | **已钉 digest**：`postgres:16.10@sha256:21f6013…c3c1`，取自 run `33829385450` 的 `Initialize containers` 输出。护栏同步收紧为断言完整的 `name:tag@sha256:<64>` 形状（此前一个裸 tag 也能通过），`_WORKFLOW_SHA256` 已更新 |
 | M4 阻断项 3 | **已解**。根因不是代码：工作流只在 `push: main` / `pull_request: main` 触发，而该分支没有 PR。**未改触发条件**（给所有分支加 `push` 会让每个 PR 跑两遍 CI），处置是开 PR #6，`pull_request` 事件随即在 exact HEAD 上跑满七个 job |
 | M4 合并门槛 | `integration` **绿且 0 skip**。0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 自己承重，不靠人看日志；触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死 |
 | 下一里程碑 | **M5**：API + Worker + Compose（M4 验收通过后） |
@@ -124,9 +124,10 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 4. ~~M2 实现与验收~~ **已完成**：contracts、`ExternalContent`、`AdapterResponse`、error model、TaskStore CAS/lease/fencing 交互形状、fake ToolGateway 与 fake TaskStore 均已落地；合并后拒绝路径泄漏补修已在 PR #4 合入并通过复审。
 5. ~~M3 详细计划编写与审批~~ **已完成**：V3 经两轮 Codex 审核批准。
 6. ~~M3 实现与验收~~ **已完成**：首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过；以 `--ff-only` 合入 `main`（`64d295c`），CI run `33708913738` 六项全绿，逐条提交历史已归档。
-7. **下一步：M4** 实现 PostgreSQL TaskStore 的并发、恢复与终态保护，并验证 M3 留下的 `PlanStore` / `EvidenceLedger` 两个 port 是否真的只需换实现。开工前先写详细计划并送审，不直接改代码。
-8. M5 完成 API/CLI/Worker/Compose。
-9. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
+7. ~~M4 详细计划编写与审批~~ **已完成**：V1–V1.2 经 Codex 审核批准开工。
+8. **进行中：M4 实现与验收**。PostgreSQL TaskStore 的并发、恢复与终态保护已落地，M3 留下的 `PlanStore` / `EvidenceLedger` 两个 port 确认只需换实现。首轮验收被打回四项（`797a210`），复审又查出两轮问题，逐条见计划 §10 T10–T13。**CI 七项全绿，待 Codex 按最终 SHA 复审，未合入。**
+9. M5 完成 API/CLI/Worker/Compose。
+10. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
 
@@ -207,7 +208,7 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 - **不要因为 integration 现在全绿就放松那两条 gate**：0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 承重，触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死。删掉任一条，下一次「全绿」就可能是零证据的全绿——run `33828598775` 之前正是这个状态。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- `tests/integration/`、`docker-compose.yml`、API、Worker、数据库迁移仍不存在。
+- ~~`tests/integration/` 与数据库迁移不存在~~：M4 已建立 `tests/integration/`（104 条，CI 上全绿）与 Alembic 迁移（`alembic upgrade head` 在 CI 上真实执行过）。**`docker-compose.yml`、API、Worker 仍不存在**——它们属 M5。
 - **`StepConditionKind` 四个成员 M3 只消费了两个**：`ALWAYS` 与 `EVIDENCE_ROW_COUNT_BELOW` 已被真实闭环消费；`EVIDENCE_FIELD_ABSENT` 与 `PRIOR_STEP_RESULT_IS` **未被消费、未被验证**，不要误以为四个都已验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。

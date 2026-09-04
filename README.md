@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：已具备工程基线与 CI、M2 契约内核，以及 M3 的**第一条只读垂直闭环**——`starrocks.slow_query.diagnose` 可以从结构化意图走完 Resolver → PlanCompiler → StepAdmission → ToolGateway → Evidence → Answerability → RenderPayload，**全部使用 fake/recording 数据**。**尚未**具备可运行的 API、Worker、数据库迁移或容器镜像；**未连接任何真实系统**，能力状态最强为 `tests`（非部署、非 canary、非用户验收）。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：已具备工程基线与 CI、M2 契约内核，以及 M3 的**第一条只读垂直闭环**——`starrocks.slow_query.diagnose` 可以从结构化意图走完 Resolver → PlanCompiler → StepAdmission → ToolGateway → Evidence → Answerability → RenderPayload，**全部使用 fake/recording 数据**。M4 已落地 PostgreSQL TaskStore、Alembic 迁移与 integration 测试（CI 上 `1430 passed`、0 skipped）。**尚未**具备可运行的 API、Worker 或容器镜像；**未连接任何真实系统**，能力状态最强为 `tests`（非部署、非 canary、非用户验收）。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -190,7 +190,7 @@ python -m pytest -q
 
 ### 尚未完成
 
-Docker Compose、API 和 Worker 属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**。M4 的 PostgreSQL 实现使跨进程原子性与崩溃恢复**可被证明**，但证据只在 integration job 跑过之后才存在。
+Docker Compose、API 和 Worker 属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**。M4 的 PostgreSQL 实现使跨进程原子性与崩溃恢复**可被证明**，且证据已经存在：`integration` job 在 CI 上跑过并全绿。但那是 CI 里的 service container，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
 
 M3 **没有**：真实 StarRocks 连接、真实模型 API 调用、任何 E1（写）能力、API/CLI/Worker 入口、`tests/integration/`。`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

@@ -14,10 +14,11 @@
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore` |
 | 基线 | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945` |
-| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.4 |
-| 提交 | V1.2 计划修正 + T0–T9 各一个提交（HEAD = `797a210`） |
+| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.6 |
+| T0–T9 | 各一个提交，末条为 `797a210`——**那是首轮受审对象，不是当前 HEAD** |
 | T10 + T11 | `4ef3701`，已推送 |
 | T12 | `d26d3d3` |
+| T13 | 本轮提交；SHA 即 PR #6 的 HEAD，见下一行 |
 | PR | [#6](https://github.com/shixian66/xiaowei-agent/pull/6) |
 | CI run #1（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：六个 job success，`integration` **failure**（`4 failed, 1422 passed, 0 skipped`） |
 | CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
@@ -25,7 +26,7 @@
 | 受审对象 | **PR #6 的 HEAD**。`pull_request` 事件在每次推送后都会在 exact HEAD 上跑满七个 job，因此受审 SHA 永远有它自己的运行结果；最近一次见 `gh pr checks 6` |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
-每个任务一个提交，可独立拒绝。**T10 尚未落成提交**，因此本报告的「已验证」一节描述的是「`797a210` + 工作区未提交改动」这个组合，不是任何一个已存在的 SHA。
+每个任务一个提交，可独立拒绝。**T10–T13 均已落成提交并推送**，「已验证」一节描述的是分支上真实存在的 SHA，不再是「某个提交 + 工作区未提交改动」的组合。
 
 ## 2. 已验证
 
@@ -33,16 +34,16 @@
 
 **ADR-008 四条命令**（无 `PYTEST_POSTGRES_DSN`）：
 
-| 命令 | `797a210`（首轮） | 含 T10–T12（本轮） |
+| 命令 | `797a210`（首轮） | 含 T10–T13（本轮） |
 | --- | --- | --- |
-| `python -m pytest -q` | `1298 passed, 86 skipped` | `1326 passed, 104 skipped` |
-| `python -m pytest -m security -q` | `855 passed, 51 skipped, 478 deselected` | `861 passed, 60 skipped, 509 deselected` |
+| `python -m pytest -q` | `1298 passed, 86 skipped` | `1337 passed, 105 skipped` |
+| `python -m pytest -m security -q` | `855 passed, 51 skipped, 478 deselected` | `862 passed, 61 skipped, 519 deselected` |
 | `ruff check .` | `All checks passed!` | `All checks passed!` |
 | `mypy src` | `Success: no issues found in 80 source files` | `Success: no issues found in 80 source files` |
 
 基线是 `main` 上的 `1229 passed` / `823 passed, 406 deselected` / 74 源文件。
 
-T10–T12 合计带来的 `+28 passed / +18 skipped`，逐项对得上（数字为 pytest 收集到的**用例项**，不是函数数）：
+T10–T13 合计带来的 `+39 passed / +19 skipped`，逐项对得上（数字为 pytest 收集到的**用例项**，不是函数数）：
 
 | 来源 | passed | skipped |
 | --- | --- | --- |
@@ -55,7 +56,8 @@ T10–T12 合计带来的 `+28 passed / +18 skipped`，逐项对得上（数字�
 | 删除恒绿的 `test_schema_module_declares_no_credentials` | −1 | — |
 | **T11**：`tests/contract/test_integration_gate.py` 的四条 gate 触发条件用例 | +4 | — |
 | **T12**：`tests/contract/test_contract_enum_references.py` | +4 | — |
-| **合计** | **+28** | **+18** |
+| **T13**：`test_stale_lease_query.py` 7 条 + `test_doc_fact_binding.py` 3 条 + 共享套件 1 条（两个绑定） | +11 | +1 |
+| **合计** | **+39** | **+19** |
 
 **deps-audit job 的实际命令**是两步：`uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt`，再 `pip-audit --strict -r requirements-audit.txt`。本轮复跑：exit 0，`No known vulnerabilities found`。
 
@@ -126,7 +128,7 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 | --- | --- | --- | --- |
 | 1 | `alembic.ini` 依赖 locale（P1） | Alembic 用 `ConfigParser.read(..., encoding="locale")` 读它，`"locale"` 由**进程环境**解析且无选项可覆盖；ini 里的中文注释在 `LC_ALL=C` 下直接 `UnicodeDecodeError`。同一条读取路径也是 `alembic upgrade head` 的路径 | **已解**：ini 改 ASCII-only，散文移进 `env.py`；新增 `tests/contract/test_config_encoding.py` 按目录扫而非按文件名硬编码 |
 | 2 | 审计事件只有表没有实现（P1） | 漏读交付物。`task_audit_events` 建了表，Protocol、两个实现、用例、写入方全都不存在 | **已解**：`record_audit_event` 进 Protocol，两个实现落地，9 条共享套件用例 + 1 个 AST 守卫模块 + 9 条 integration 用例；JSONB 覆盖完整性改为由 `ALL_TABLES` 决定 |
-| 3 | `integration` job 从未运行（P1） | 工作流只在 `push: main` / `pull_request: main` 触发，而本分支没有 PR | **未解**。处置是开 PR 让 `pull_request` 在 exact HEAD 上跑满七个 job，**PR 尚未开** |
+| 3 | `integration` job 从未运行（P1） | 工作流只在 `push: main` / `pull_request: main` 触发，而本分支没有 PR | **已解**。**未改触发条件**（给所有分支加 `push` 会让每个 PR 跑两遍 CI），处置是开 PR #6，`pull_request` 随即在 exact HEAD 上跑满七个 job |
 | 4 | `tests/conftest.py` 推荐被禁的 `socket_enabled`（P2） | 禁令此前只用 AST 扫代码，散文不受约束——docstring 里既无 `ast.Name` 也无 `ast.Attribute` | **已解**：禁令扩到原文扫描，只豁免解释禁令本身的两个文件，并加一条反空洞断言 |
 
 顺带修掉的一条**恒绿**用例：`test_schema_module_declares_no_credentials` 遍历"以 `sqlalchemy.url` 开头的行"，而 ini 里根本没有那个键，循环体一次都没执行——把 DSN 写进**别的**键照样通过。替换成扫描全部选项值并断言确实扫过东西。
@@ -192,6 +194,31 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 
 **复跑已完成**：run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`，integration `1430 passed`、0 failed、0 skipped。四条全部转绿，判定标准 2、3、4 至此有运行时证据。
 
+### 2.8 T13：Codex 第二轮复审打回的 P1 与文档漂移
+
+**P1：`list_stale_leases` 先 `LIMIT` 后过滤。** SQL 谓词只有「曾被租出 + 已过期」，把「未终态」留给 Python 侧，依据是 T4 写下的规则——「SQL 谓词只被允许**更宽**」。**那条规则在有 `LIMIT` 的前提下不成立**：更宽的谓词会让 `LIMIT` 被将要丢弃的行吃掉。
+
+影响不是「偶尔漏几条」。`apply_transition` **有意不清租约字段**，因此每一个正常结束的任务都永久命中那个更宽的谓词并按过期时间**排在最前**；终态任务只增不减，于是返回量随系统运行**单调衰减到零**——长期运行的稳态，不是边界情况。内存实现是「先过滤、再排序、再截断」，**两个实现已经分叉**。
+
+处置是让谓词与 `is_stale_lease` **逐条等价**（不是「多取一些再截断」——终态任务数量没有上界，多取多少才够没有答案），查询抽成可离线编译的 `stale_lease_statement`，终态集合从 `TERMINAL_STATUSES` 派生。计划 §10 T4 里那条被证伪的规则已就地更正，不留在原处。
+
+**文档漂移**：报告的计划版本、`HEAD = 797a210`、「T10 尚未落成提交」、「PR 尚未开」，以及 `AGENT_HANDOFF.md` 与 README 的四处旧口径。根因是**只改了正在编辑的那一处，没有扫描同一事实的其余副本**。逐处修正之外，新增 `tests/contract/test_doc_fact_binding.py` 把「报告引用的计划版本」与「计划标题里的版本」钉在一起。
+
+**digest**：计划一直写「首次 CI 绿灯后钉 digest」，绿灯已在 run `33829385450` 拿到，digest 取自该 run 的 `Initialize containers` 输出，**不是编的**。护栏同步收紧——原先只要求「带冒号或带 `@sha256`」，一个裸 tag 也能通过。
+
+**变异反证**：六项，全部先红后绿。
+
+| 变异 | 转红 |
+| --- | --- |
+| 谓词退回原来的「更宽」写法（即原 bug） | 3 |
+| 终态集合漏掉一个成员（`canceled`） | 2 |
+| **内存实现**改成同样的「先截断再过滤」 | 1 |
+| 报告引用的计划版本与计划头部不一致 | 1 |
+| service 镜像退回裸版本 tag | 3 |
+| digest 改一个字符 | 2 |
+
+第三项只打红**一条**——就是新加的 `test_a_terminal_task_cannot_crowd_out_a_stale_one`。这同时说明新用例精确命中该 bug 形状，而**此前没有任何用例能抓到它**，这正是它能通过前四轮审查的原因。
+
 ## 3. 只读推理
 
 第一版这一节列了六条「读源码 + 离线编译推出来、没在真实 PostgreSQL 上跑过」的结论。run `33828598775` 之后其中大部分**不再是推理**——它们被 1422 条通过的用例真的执行了。逐条改判：
@@ -245,7 +272,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 | **报告无法在自身提交内写下自己的 SHA** | 低 | 这是自指，不是覆盖缺口：每次推送都会在 exact HEAD 上跑满七个 job，所以受审 SHA 总有对应的 run。核验方式是 `gh pr checks 6`，不是相信本表里的某个固定 SHA |
 | **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
-| service 镜像用可变 tag | 中 | 已有断言挡住 `latest`；首次 CI 绿灯后钉 digest |
+| ~~service 镜像用可变 tag~~ | **已解除** | 已钉 `postgres:16.10@sha256:21f6013…c3c1`（取自 run `33829385450`），护栏按完整 digest 形状断言 |
 | 纯函数里的 bug 会让两个实现同时通过 | 中 | 共享判定消除的是分叉不是判错；由 §2.1 的变异反证承重 |
 | `integration` 不是 GitHub 强制的 required check | 中 | 分支保护仍不可用（private + Free，API 实证 403）；口径已写死为"验收硬门槛"而非"已强制" |
 | `hashtext` 是 PostgreSQL 未公开文档的内部函数 | 低 | 碰撞只让两个无关任务互相串行化，无害；函数消失会在 CI 立刻暴露 |

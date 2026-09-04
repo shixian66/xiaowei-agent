@@ -37,10 +37,11 @@ jobs:
     # 和一个 PYTEST_POSTGRES_DSN。ADR-008 的四条验证命令一字不改，不产生第五条。
     services:
       postgres:
-        # 钉到具体次版本。**尚未钉 digest**：digest 只能联网解析，本次改动在离线
-        # 环境完成，编一个未经核对的 digest 比用版本 tag 更糟。首次 CI 绿灯后用
-        # `docker buildx imagetools inspect postgres:16.10` 取回 digest 再钉死。
-        image: postgres:16.10
+        # 钉到 digest。版本 tag 是可变的——同一个 `postgres:16.10` 在两次 CI 之间
+        # 可以指向不同的镜像，那样"CI 绿过"就不再指向一个确定的运行内容。
+        # 这个 digest 不是编的：它取自 run 33829385450 的 `Initialize containers`
+        # 步骤输出，即本仓库真实拉取并跑绿过的那一个。
+        image: postgres:16.10@sha256:21f6013073bc6b92830a2129570e2f5ec42a6c734b5a985a41e83aa58f54c3c1
         env:
           # 无凭证：CI 不持有任何 secret，工作流里也不出现任何密码形状的字面量。
           # trust 只对这个一次性的、只在 job 内可达的容器生效。

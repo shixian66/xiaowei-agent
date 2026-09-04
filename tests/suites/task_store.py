@@ -557,6 +557,46 @@ async def test_stale_leases_respect_the_limit(store, context, clock) -> None:
     assert len(await store.list_stale_leases(limit=1)) == 1
 
 
+async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, clock) -> None:
+    """**终态任务不得占用 limit 名额。**
+
+    终态任务的租约字段按设计**不清空**（清空会重开 fencing 的缺口），因此它永久满足
+    "曾被租出 + 已过期"，并且按过期时间升序排在最前。若实现先按这个较宽的条件
+    ``LIMIT``、再在内存里排除终态，真正需要恢复的任务就会被挤出窗口——而且终态任务
+    只增不减，**返回量会随系统运行单调衰减到零**。
+
+    上面几条用例挡不住它：它们要么只有一个任务，要么 ``limit`` 大到窗口装得下全部。
+    这条把"更早过期的终态"与"较晚过期的非终态"放在一起并把 ``limit`` 收到 1。
+    """
+    finished, grant = await _leased_task(store, context, "idem-finished", "w1")
+    clock.advance(seconds=5)
+    pending, _ = await _leased_task(store, context, "idem-pending", "w2")
+
+    current = await store.get(finished.task_id)
+    done = await store.transition(
+        task_id=finished.task_id,
+        expected_version=current.version,
+        to_status=TaskStatus.CANCELED,
+        fencing_token=grant.fencing_token,
+    )
+    assert done.applied is True
+    clock.advance(seconds=31)
+
+    # 前提必须成立，否则这条用例什么也没测：终态任务仍带着租约字段，且**更早过期**。
+    settled = await store.get(finished.task_id)
+    waiting = await store.get(pending.task_id)
+    assert settled.status in TERMINAL_STATUSES
+    assert settled.fencing_token is not None
+    assert settled.lease_expires_at is not None
+    assert waiting.lease_expires_at is not None
+    assert settled.lease_expires_at < waiting.lease_expires_at, (
+        "前提不成立：终态任务应当更早过期，否则它排不到前面，挤不掉任何东西"
+    )
+
+    assert [r.task_id for r in await store.list_stale_leases(limit=1)] == [pending.task_id]
+    assert [r.task_id for r in await store.list_stale_leases(limit=10)] == [pending.task_id]
+
+
 async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
     """**只发现，不接管。** 列出之后记录必须逐字段不变，租约仍属原主。
 
@@ -774,6 +814,7 @@ LEASE_FENCING_CASES = (
     test_stale_leases_are_ordered_by_expiry_then_task_id,
     test_stale_leases_with_the_same_expiry_are_ordered_by_task_id,
     test_stale_leases_respect_the_limit,
+    test_a_terminal_task_cannot_crowd_out_a_stale_one,
     test_listing_stale_leases_claims_nothing,
     test_list_stale_leases_rejects_a_bad_limit,
 )
