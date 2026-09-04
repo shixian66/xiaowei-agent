@@ -21,6 +21,8 @@
 | PR | [#6](https://github.com/shixian66/xiaowei-agent/pull/6) |
 | CI run #1（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：六个 job success，`integration` **failure**（`4 failed, 1422 passed, 0 skipped`） |
 | CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
+| CI run #3（文档回填后） | [`33829259436`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829259436) @ `4792fee`：**七个 job 全绿**，integration `1430 passed` |
+| 受审对象 | **PR #6 的 HEAD**。`pull_request` 事件在每次推送后都会在 exact HEAD 上跑满七个 job，因此受审 SHA 永远有它自己的运行结果；最近一次见 `gh pr checks 6` |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
 每个任务一个提交，可独立拒绝。**T10 尚未落成提交**，因此本报告的「已验证」一节描述的是「`797a210` + 工作区未提交改动」这个组合，不是任何一个已存在的 SHA。
@@ -240,7 +242,7 @@ run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/3382
 | 风险 | 性质 | 处置 |
 | --- | --- | --- |
 | ~~M4 的核心判定标准没有运行时证据~~ | **已解除** | run `33829057416` 上 `1430 passed`、0 skipped。这曾是本次交付最重要的一条 |
-| **本报告所在提交本身没有 CI 结果** | 低 | run `33829057416` 跑的是 `d26d3d3`；本次回填是**纯文档提交**，其自身的 CI 结果见 PR #6 的最后一次运行。差异可用 `git diff --stat d26d3d3..HEAD` 核验：只有文档 |
+| **报告无法在自身提交内写下自己的 SHA** | 低 | 这是自指，不是覆盖缺口：每次推送都会在 exact HEAD 上跑满七个 job，所以受审 SHA 总有对应的 run。核验方式是 `gh pr checks 6`，不是相信本表里的某个固定 SHA |
 | **integration 用例本身此前无任何验证** | 已收窄 | `mypy src` 不覆盖 `tests`，本机又全部 skipped——伪造枚举成员和跑不通的事务顺序因此各躺了一轮。枚举那一类已由 §2.7 的 AST 扫描覆盖；其余类别现在靠「每个 PR 真跑 integration」承重 |
 | PostgreSQL 侧实现可能在真实库上失败 | 高 | 每个方法的判定逻辑与内存实现共用纯函数，失败面收窄到"SQL 写法"；但收窄不等于消除 |
 | service 镜像用可变 tag | 中 | 已有断言挡住 `latest`；首次 CI 绿灯后钉 digest |
