@@ -4,7 +4,7 @@
 >
 > **本报告为第四版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
 >
-> **本报告为第六版**。第五版记入 Codex 第二轮复审打回的 P1（§2.8）；**第六版是纯文档修正**，清掉第三轮复审指出的五处已成假话的事实，并把「最新一次 run」这种必然过期的写法统一改为「某任务的验证 run」+ 指向 `gh pr checks 6`。
+> **本报告为第七版（终版）**。M4 已合入 `main`，本报告不再更新——后续以 [归档](archive/2026-09-04-M4-postgres-taskstore.md) 为准。第五版记入 Codex 第二轮复审打回的 P1（§2.8）；**第六版是纯文档修正**，清掉第三轮复审指出的五处已成假话的事实，并把「最新一次 run」这种必然过期的写法统一改为「某任务的验证 run」+ 指向 `gh pr checks 6`。
 >
 > **T13 修复验证 run**：[`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`，**七个 job 全绿**，integration 步骤输出 `1442 passed`，**0 failed、0 skipped**（`1442 = 本机 1337 passed + 105 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过）。同一 run 的 `Initialize containers` 显示拉取的 digest 正是钉死的那个。
 >
@@ -17,8 +17,8 @@
 | 项 | 值 |
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore` |
-| 基线 | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945` |
-| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.7 |
+| 基线 | M4 切出时的 `main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。**M4 已合入，`main` 现已前进**——当前值请用 `git rev-parse main` 查询 |
+| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.8 |
 | T0–T9 | 各一个提交，末条为 `797a210`——**那是首轮受审对象，不是当前 HEAD** |
 | T10 + T11 | `4ef3701`，已推送 |
 | T12 | `d26d3d3` |
@@ -29,7 +29,8 @@
 | CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
 | CI run #3（文档回填后） | [`33829259436`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829259436) @ `4792fee`：**七个 job 全绿**，integration `1430 passed` |
 | CI run #4（T13 后） | [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`：**七个 job 全绿**，integration `1442 passed`（0 failed、0 skipped），且 digest 已生效 |
-| 受审对象 | **PR #6 的 HEAD**。`pull_request` 事件在每次推送后都会在 exact HEAD 上跑满七个 job，因此受审 SHA 永远有它自己的运行结果；最近一次见 `gh pr checks 6` |
+| 最终验收对象 | `714df07e8064154d6b576376fac23f8f569ae480`，已以 `--ff-only` 合入 `main`（PR #6 `MERGED`，无合并提交）。合并后 `main` 上独立 run [`33842205710`](https://github.com/shixian66/xiaowei-agent/actions/runs/33842205710) 七个 job 全绿，integration `1442 passed`、0 skipped |
+| 受审对象（合并前的口径） | **PR #6 的 HEAD**。`pull_request` 事件在每次推送后都会在 exact HEAD 上跑满七个 job，因此受审 SHA 永远有它自己的运行结果；最近一次见 `gh pr checks 6` |
 | 首轮验收 | Codex 于 `797a210` **打回**：三条阻断项 + 一条非阻断 |
 
 每个任务一个提交，可独立拒绝。**T10–T13 均已落成提交并推送**，「已验证」一节描述的是分支上真实存在的 SHA，不再是「某个提交 + 工作区未提交改动」的组合。

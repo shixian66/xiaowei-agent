@@ -30,12 +30,13 @@
 | M3 合并后 CI | `main` 上 run [`33708913738`](https://github.com/shixian66/xiaowei-agent/actions/runs/33708913738)，六个 gate 全绿（lint、types、secret-scan、tests、deps-audit、security-gate） |
 | M3 工作分支 | `claude/m3-starrocks-slow-query` 已合入 `main`，保留备查 |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
-| M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.2，经 Codex 复审批准开工 |
-| M4 状态 | **CI 七项全绿，待 Codex 按最终 SHA 复审，未合入**。受审 SHA `797a210` 被 Codex 打回三条阻断项 + 一条非阻断（`alembic.ini` 依赖 locale、审计事件只有表没有实现、`integration` job 从未运行、`tests/conftest.py` 推荐被禁的 `socket_enabled`）。逐条根因与处置见计划 §10 T10。T0–T9 各一个提交已在 `claude/m4-postgres-taskstore`，T10–T13 已提交并推送（`4ef3701`、`d26d3d3`、`f59dc71`），PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6)。**`integration` job 首次真实运行**是 run [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：`4 failed, 1422 passed, 0 skipped`。0 skip 证明 T11 的 gate 生效；四条失败是本机看不见的真实缺陷（伪造的 `StageOutcome` 成员 ×3、`begin()` 排在首个 `execute()` 之后 ×1，后者是判定标准 4 的唯一证据来源且从写出来那天起就不可能跑通），处置见计划 §10 T12。**复跑 run [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3` 七个 job 全绿**，integration `1430 passed`、0 failed、0 skipped（`1430 = 本机 1326 passed + 104 skipped`）。T11 是第二轮复审自查发现的：`integration` gate 的触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键这两份独立拷贝）此前没有任何东西钉住，改任一侧会让七个 job 全绿而零 integration 证据；已加四条测试钉死两侧，**不改 `ci.yml`**。T13 是 Codex 第二轮复审打回的：`list_stale_leases` 先 `LIMIT` 后过滤，而终态任务的租约字段按设计不清空，因此每个正常结束的任务都永久占据窗口最前——**返回量会随系统运行单调衰减到零**，且内存实现与 PostgreSQL 实现已分叉。**T13 修复验证 run** [`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`：七个 job 全绿，integration `1442 passed`、0 skipped。**本文件不记录「当前 HEAD 的 run」**——每次推送都产生新的 HEAD 和新的 run，写死一个就必然过期；**当前 HEAD 的 exact run 以 `gh pr checks 6` 为准**。**本机限制不变**（无 PostgreSQL 也无容器运行时，105 条 integration 用例在本机永远 skipped），但判定标准 2（并发裁决）、3（并发幂等创建）、4（崩溃无中间态）与两个 adapter 的行为**已在 CI 上取得运行时证据** |
-| M4 CI 变更 | 新增第七个 job `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。该 job 是 M4 验收硬门槛（未绿即不通过），**但不是 GitHub 强制的 required status check**——分支保护仍不可用 |
-| M4 service 镜像 | **已钉 digest**：`postgres:16.10@sha256:21f6013…c3c1`，取自 run `33829385450` 的 `Initialize containers` 输出。护栏同步收紧为断言完整的 `name:tag@sha256:<64>` 形状（此前一个裸 tag 也能通过），`_WORKFLOW_SHA256` 已更新 |
-| M4 阻断项 3 | **已解**。根因不是代码：工作流只在 `push: main` / `pull_request: main` 触发，而该分支没有 PR。**未改触发条件**（给所有分支加 `push` 会让每个 PR 跑两遍 CI），处置是开 PR #6，`pull_request` 事件随即在 exact HEAD 上跑满七个 job |
-| M4 合并门槛 | `integration` **绿且 0 skip**。0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 自己承重，不靠人看日志；触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死 |
+| M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.7，经 Codex 审核批准开工（V1–V1.2），实施期间随打回追加至 V1.7 |
+| M4 状态 | **已验收通过并归档**。**首轮验收打回三条阻断 + 一条非阻断，此后又被打回三轮**，共四轮；其中三轮的阻断项是本机结构性看不见的东西（`integration` 从未运行、伪造的枚举成员、跑不通的事务顺序、stale 查询先 `LIMIT` 后过滤）。以 `--ff-only` 合入 `main`，**无合并提交**，21 个受审提交原样保留。归档见 [docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md](docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md)，验收报告见 [docs/handoff/M4-acceptance-report.md](docs/handoff/M4-acceptance-report.md) |
+| M4 合入基线 SHA | `714df07e8064154d6b576376fac23f8f569ae480`（最终验收对象，与合入对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询** |
+| M4 合并后 CI | `main` 上 run [`33842205710`](https://github.com/shixian66/xiaowei-agent/actions/runs/33842205710)，**七个** job 全绿（既有六个 + `integration`）；integration `1442 passed`、**0 skipped** |
+| M4 工作分支 | `claude/m4-postgres-taskstore` 已合入 `main`，保留备查 |
+| M4 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`**。跑绿的是 CI 里一次性的 PostgreSQL service container |
+| CI 第七个 job | `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。镜像已钉 digest（`postgres:16.10@sha256:21f6013…c3c1`）。该 job **不是** GitHub 强制的 required status check——分支保护仍不可用 |
 | 下一里程碑 | **M5**：API + Worker + Compose（M4 验收通过后） |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -125,8 +126,8 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 5. ~~M3 详细计划编写与审批~~ **已完成**：V3 经两轮 Codex 审核批准。
 6. ~~M3 实现与验收~~ **已完成**：首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过；以 `--ff-only` 合入 `main`（`64d295c`），CI run `33708913738` 六项全绿，逐条提交历史已归档。
 7. ~~M4 详细计划编写与审批~~ **已完成**：V1–V1.2 经 Codex 审核批准开工。
-8. **进行中：M4 实现与验收**。PostgreSQL TaskStore 的并发、恢复与终态保护已落地，M3 留下的 `PlanStore` / `EvidenceLedger` 两个 port 确认只需换实现。首轮验收被打回四项（`797a210`），复审又查出两轮问题，逐条见计划 §10 T10–T13。**CI 七项全绿，待 Codex 按最终 SHA 复审，未合入。**
-9. M5 完成 API/CLI/Worker/Compose。
+8. ~~M4 实现与验收~~ **已完成**：四轮打回后以 `--ff-only` 合入 `main`（`714df07`），CI run `33842205710` 七项全绿，逐条提交历史已归档。
+9. **下一步：M5** 完成 API/CLI/Worker/Compose。**落 Worker 时必须同时把 `TraceSink` 接到 `record_audit_event`**，否则「审计事件」这条交付物在 M5 结束时仍只有测试级证据。
 10. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
@@ -144,6 +145,11 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 未拍板前的安全默认值：单租户开发、只读、fake adapter、无真实生产连接、无真实模型调用、无 LangGraph、无向量数据库、**任何环境均无 E1 操作**（系统内部持久化、本地 migration 和测试产物本身不构成 E1，但其基础设施许可仍受 ADR-007 D8 时点约束）。
 
 ## 7. 不要盲改
+
+- **不要把「CI 上的 PostgreSQL service container 跑绿」当成生产就绪**：它不能推出任何关于生产数据库、真实负载、连接池或运维环境的结论。M4 的能力状态仍是 `tests`。
+- **不要因为 integration 现在全绿就放松那两条 gate**：0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 承重，触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死。删掉任一条，下一次「全绿」就可能是零证据的全绿——run `33828598775` 之前正是这个状态。
+- **不要把 `list_stale_leases` 的 SQL 谓词改宽**：有 `LIMIT` 时它必须与 `is_stale_lease` 逐条等价，否则终态任务会占满窗口、返回量随运行单调衰减到零。理由见 `postgres.stale_lease_statement` 的 docstring。
+- **不要在终态迁移时清空租约字段**：`fencing_token IS NOT NULL` 是「曾被租出」的判据，清空它会重开 fencing 缺口。终态由 `is_stale_lease` 单独挡。
 
 - 不要把 API、飞书或 CLI 变成第二个 Runtime。
 - 不要新增关键词总表或独立候选生成器；先检查 Resolver 和 capability snapshot。
@@ -204,11 +210,9 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未用户验收。
-- **不要把「CI 上的 PostgreSQL service container 跑绿」当成生产就绪**：它不能推出任何关于生产数据库、真实负载、连接池或运维环境的结论。M4 的能力状态仍是 `tests`。
-- **不要因为 integration 现在全绿就放松那两条 gate**：0 skip 由 `tests/integration/conftest.py::pytest_sessionfinish` 承重，触发条件（`DSN_ENV_VAR` 与 `ci.yml` env 键两侧同名）由 `tests/contract/test_integration_gate.py` 钉死。删掉任一条，下一次「全绿」就可能是零证据的全绿——run `33828598775` 之前正是这个状态。
 - 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- ~~`tests/integration/` 与数据库迁移不存在~~：M4 已建立 `tests/integration/`（104 条，CI 上全绿）与 Alembic 迁移（`alembic upgrade head` 在 CI 上真实执行过）。**`docker-compose.yml`、API、Worker 仍不存在**——它们属 M5。
+- ~~`tests/integration/` 与数据库迁移不存在~~：M4 已建立 `tests/integration/`（105 条，CI 上全绿）与 Alembic 迁移（`alembic upgrade head` 在 CI 上真实执行过）。**`docker-compose.yml`、API、Worker 仍不存在**——它们属 M5。
 - **`StepConditionKind` 四个成员 M3 只消费了两个**：`ALWAYS` 与 `EVIDENCE_ROW_COUNT_BELOW` 已被真实闭环消费；`EVIDENCE_FIELD_ABSENT` 与 `PRIOR_STEP_RESULT_IS` **未被消费、未被验证**，不要误以为四个都已验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。

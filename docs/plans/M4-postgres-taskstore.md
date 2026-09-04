@@ -1,10 +1,10 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.7）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.8）
 
-> 状态：**已批准并实施完毕，待最终验收**。V1–V1.2 经项目负责人与 Codex 审核批准开工（依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11）；T0–T13 已全部落地并推送至 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6)。本文件自 V1.3 起同时充当**实施与复审记录**，§10 各任务段按完成时的事实书写。
+> 状态：**已验收通过并合入 `main`**（`714df07`，21 个受审提交以 `--ff-only` 原样保留）。归档见 [docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md](../handoff/archive/2026-09-04-M4-postgres-taskstore.md)。V1–V1.2 经项目负责人与 Codex 审核批准开工（依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11）；T0–T13 已全部落地，经 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6) 合入。本文件自 V1.3 起同时充当**实施与复审记录**，§10 各任务段按完成时的事实书写。
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。**V1.7 是纯文档修正**：文首状态行由「待审核草案」改为实际状态；§10 T5 / T6 / T9 三段仍用现在时写着「一次都没跑过」「镜像用版本 tag」，改为标明那是**交付当时**的事实并注明此后已被哪一任务解除。**V1.7 不改变任何设计决策、任务拆分或判定标准。**
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。**V1.7 是纯文档修正**：文首状态行由「待审核草案」改为实际状态；§10 T5 / T6 / T9 三段仍用现在时写着「一次都没跑过」「镜像用版本 tag」，改为标明那是**交付当时**的事实并注明此后已被哪一任务解除。**V1.7 不改变任何设计决策、任务拆分或判定标准。****V1.8 是合并后的交接收口**：状态行改为已合入并指向归档；三处「基线 = `main` = `origin/main`」在合并后已成假话，改为标明那是成稿时的值。**V1.8 同样不改变任何设计决策、任务拆分或判定标准。**
 >
-> 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
+> 依据基线：本计划成稿时的 `main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。**M4 已合入，该值不再等于 `main` 的当前 HEAD**（用 `git rev-parse main` 查询）。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
 ---
 
@@ -87,7 +87,7 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore`，自 `main` 切出，只含本计划文件的提交；工作区有两个未跟踪文件：`development-route-v3-proposal.md`、`legacy-capability-migration-matrix.md` |
 | 暂存范围 | **只允许本计划文件**。那两个未跟踪文件不属于 M4 范围，不得暂存、修改或删除（§12.3） |
-| SHA | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`；本分支 V1 = `b546aca2c63c0a708dcdbbf53e2157a232df8a79`，V1.1 = `c235ee8f0153931214900c52d20fbdfd091e0c11`，V1.2 = `5305dc4`；Codex 首轮验收对象 = `797a210` |
+| SHA | 成稿时的 `main` = `12b5b584da031bff7aa26ab5544d2122736d8945`（**已非当前 HEAD**）；本分支 V1 = `b546aca2c63c0a708dcdbbf53e2157a232df8a79`，V1.1 = `c235ee8f0153931214900c52d20fbdfd091e0c11`，V1.2 = `5305dc4`；Codex 首轮验收对象 = `797a210` |
 | M3 验收对象 | `64d295c8e4f38028527ec9a496262c7a660258b1`，已在祖先链 |
 
 ### 5.2 `pytest-socket` 行为实证
