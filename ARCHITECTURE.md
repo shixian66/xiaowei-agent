@@ -348,6 +348,12 @@ TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移
 
 **stale recovery 拆成「发现」与「接管」两半，只有前一半在 TaskStore 里**（M4）：`list_stale_leases(*, limit)` 是只读方法，返回「曾被租出、租约已过期、未终态」的任务，按 `(lease_expires_at, task_id)` 稳定排序。它不 claim、不调度、不判断审批是否应当恢复、不改变任何状态；接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。把两半合成一个方法会让 TaskStore 长出调度能力，而调度属 Worker。
 
+**审计事件由 TaskStore 承接写入，消费路径不在 M4**：`record_audit_event(*, event)` 是 append-only 写入，按 `(task_id, seq)` 编号并返回本次分配到的 `seq`。**证据表替代不了审计**——证据回答「看到了什么」，审计回答「系统做了什么、准入判成了什么」，一次被策略拒绝的调用不产生任何证据但必须留下审计。载荷是 M2 的 `TraceEvent`，其 `detail` 已在契约层做过键值双向脱敏并限长，持久化层不再脱敏第二次。
+
+`TraceEvent.task_id` 可为 `None`（任务创建之前就失败的请求），而 `task_audit_events.task_id` 是 `NOT NULL`；这道落差在入口显式拒绝（`UnscopedAuditEventError`），不交给数据库约束——交给约束会让两个实现抛出不同的异常。这类无任务归属的事件仍走 `TraceSink`。
+
+**生产者接线不在 M4**：`TraceSink.emit` 是同步的，`record_audit_event` 是异步的，把两者接起来需要改 M2 已定的 `TraceSink` 形状并波及整条 Runner 调用链。M4 交付的是**存储能力**（Protocol + 两个实现 + 用例），接线归 M5——Worker 那一层本就在异步边界上。审批记录的消费路径同理归 M8（见 M4 计划 §14.4）。
+
 **判定规则与存储实现分离**（M4）：拒绝顺序、fencing 闭合真值表、租约与续租条件由 `persistence/decisions.py` 的纯函数持有，内存实现与 PostgreSQL 实现逐字共用。这样消除的是「两个实现各自跑偏」——那类分叉不会被任何单实现的用例发现，因为每个实现都通过自己那份断言。代价是纯函数里的 bug 会让两个实现同时通过，因此由变异反证承重。
 
 建议的通用任务状态：

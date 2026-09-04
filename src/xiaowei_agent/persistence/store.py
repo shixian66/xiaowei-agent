@@ -32,6 +32,7 @@ from xiaowei_agent.contracts import (
     StrictStr,
     TaskRecord,
     TaskStatus,
+    TraceEvent,
     TransitionResult,
     content_digest,
 )
@@ -72,6 +73,19 @@ class ContextMismatchError(RuntimeError):
 
     Gateway 从信封解析出上下文，两者不一致意味着解析环节出错或被绕过；此时继续
     创建任务会让任务记在一个未经解析确认的租户/环境下。
+    """
+
+
+class UnscopedAuditEventError(ValueError):
+    """审计事件没有 ``task_id``，无处归档。
+
+    ``TraceEvent.task_id`` 是 ``StrictStr | None``：请求在任务被创建之前就失败时
+    （信封校验、租户解析），事件确实没有任务可挂。而 ``task_audit_events`` 的
+    ``task_id`` 是 ``NOT NULL``——**两边的可空性天生不一致**，落差必须在入口显式
+    处理，不能让它变成驱动层的 IntegrityError：那时错误指向连接层，看不出是调用方
+    交来了一条不属于任何任务的事件。
+
+    这类事件不是"丢弃就行"，只是不归 TaskStore 管——它们的去处是 ``TraceSink``。
     """
 
 
@@ -180,4 +194,27 @@ class TaskStore(Protocol):
         能力，而调度属 M5 的 Worker。
         """
 
-    async def record_approval(self, *, request: ApprovalRequest) -> None: ...
+    async def record_approval(self, *, request: ApprovalRequest) -> int:
+        """append-only 写入审批记录，返回本任务内分配到的 ``seq``（从 1 开始）。
+
+        **为什么写方法有返回值**：``seq`` 是"这条记录在本任务的审批历史里排第几"。
+        不返回它，两个实现就可以对序号给出完全不同的答案而没有任何断言能发现——
+        M4 之前正是如此：PostgreSQL 按 ``(task_id, seq)`` 编号，内存实现只往一个
+        扁平列表里 append，连 seq 的概念都没有。返回值让同一批用例能在两个实现上
+        逐条检查同一件事。
+
+        这不是"审批读回"（M4 §8.4 拍板不加读回 Protocol 方法）：它是本次写入自己的
+        回执，不查询任何既存记录，也不构成消费路径——消费路径仍归 M8。
+        """
+
+    async def record_audit_event(self, *, event: TraceEvent) -> int:
+        """append-only 写入审计事件，返回本任务内分配到的 ``seq``（从 1 开始）。
+
+        **证据表替代不了审计**：证据回答"看到了什么"，审计回答"系统做了什么、准入
+        判成了什么"。一次被策略拒绝的调用不产生任何证据，但必须留下审计。
+
+        载荷是 M2 的 ``TraceEvent``，其 ``detail`` 在契约层已做键值双向脱敏并限长，
+        因此这里不再脱敏一次——再写一份就等于给脱敏规则开了第二个可能漂移的副本。
+
+        :raises UnscopedAuditEventError: ``event.task_id`` 为 ``None``。
+        """

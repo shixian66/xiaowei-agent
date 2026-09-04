@@ -17,16 +17,22 @@ M4 计划 §10 T3 把往返测试拆成两组，理由是它们暴露的失败�
 import datetime as _dt
 
 import pytest
+from sqlalchemy.dialects.postgresql import JSONB
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
+from tests.fakes.sinks import make_event
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
     ApprovalState,
     Contract,
     EvidenceEnvelope,
+    ExecutionPlan,
     ExternalSource,
+    PipelineStage,
+    ResolvedTarget,
     TaskRecord,
     TaskStatus,
+    TraceEvent,
 )
 from xiaowei_agent.persistence.rows import (
     dump_contract,
@@ -34,6 +40,7 @@ from xiaowei_agent.persistence.rows import (
     record_to_row,
     row_to_record,
 )
+from xiaowei_agent.persistence.schema import ALL_TABLES
 
 _NOW = _dt.datetime(2026, 9, 3, 12, 34, 56, 789012, tzinfo=_dt.UTC)
 
@@ -76,12 +83,52 @@ _RECORD = TaskRecord(
 # --- 第一组：JSONB 表 ---------------------------------------------------------
 
 
+_AUDIT_EVENT = make_event(stage=PipelineStage.ADMISSION, detail={"reason": "denied"})
+
+# 每个 JSONB 列存的是哪个契约。**这张表本身由下面的元测试对着 schema 核**，因为
+# 它此前是靠人记得往参数列表里加一项的——``task_audit_events.event`` 就是这样漏掉的：
+# 表建了、载荷类型写在 schema 的 docstring 里，往返测试却一次没跑过它。
+_JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
+    ("task_plans", "plan"): FIXTURE_PLAN,
+    ("task_plans", "target"): FIXTURE_TARGET,
+    ("task_evidence", "envelope"): _EVIDENCE,
+    ("task_approvals", "request"): _APPROVAL,
+    ("task_audit_events", "event"): _AUDIT_EVENT,
+}
+
+_EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
+    ("task_plans", "plan"): ExecutionPlan,
+    ("task_plans", "target"): ResolvedTarget,
+    ("task_evidence", "envelope"): EvidenceEnvelope,
+    ("task_approvals", "request"): ApprovalRequest,
+    ("task_audit_events", "event"): TraceEvent,
+}
+
+
+def test_every_jsonb_column_has_a_round_trip_fixture() -> None:
+    """新增一个 JSONB 列却忘了给它样本时，往返测试照常全绿——覆盖缺口不可见。
+
+    因此覆盖完整性由 schema 决定，不由参数列表决定：从 ``ALL_TABLES`` 里把 JSONB
+    列扫出来，与登记表比对。理由与 ``test_suite_bindings.py`` 用 AST 扫绑定相同。
+    """
+    declared = {
+        (table.name, column.name)
+        for table in ALL_TABLES
+        for column in table.columns
+        if isinstance(column.type, JSONB)
+    }
+    assert declared == set(_JSONB_PAYLOADS)
+    assert declared == set(_EXPECTED_TYPES)
+
+
 @pytest.mark.parametrize(
-    "model",
-    [FIXTURE_PLAN, FIXTURE_TARGET, _EVIDENCE, _APPROVAL],
-    ids=["plan", "target", "evidence", "approval"],
+    ("column", "model"),
+    list(_JSONB_PAYLOADS.items()),
+    ids=[f"{table}.{column}" for table, column in _JSONB_PAYLOADS],
 )
-def test_jsonb_payload_round_trips(model: Contract) -> None:
+def test_jsonb_payload_round_trips(column: tuple[str, str], model: Contract) -> None:
+    """样本的类型也要对：登记表里放错契约，往返照样通过。"""
+    assert type(model) is _EXPECTED_TYPES[column]
     assert load_contract(type(model), dump_contract(model)) == model
 
 

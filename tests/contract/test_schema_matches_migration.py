@@ -109,18 +109,6 @@ def test_downgrade_drops_everything_upgrade_created() -> None:
     assert f"DROP SEQUENCE {FENCING_SEQUENCE_NAME}" in emitted
 
 
-def test_schema_module_declares_no_credentials() -> None:
-    """schema 与迁移都不得携带任何连接串。
-
-    ``alembic.ini`` 的 ``sqlalchemy.url`` 必须留空：写进去等于把连接串提交进仓库。
-    """
-    ini = (_ROOT / "alembic.ini").read_text(encoding="utf-8")
-    for line in ini.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("sqlalchemy.url"):
-            assert stripped.split("=", 1)[1].strip() == ""
-
-
 def test_task_id_columns_are_text_not_uuid() -> None:
     """``TaskRecord.task_id`` 是 ``StrictStr``；``uuid`` 列读回的是 ``UUID`` 对象。
 

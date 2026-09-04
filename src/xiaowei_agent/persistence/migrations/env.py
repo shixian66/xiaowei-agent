@@ -6,6 +6,14 @@
 **不读 ``.env``、不读 ``XIAOWEI_*``**。迁移的连接来源与 ``load_settings()`` 的应用
 配置来源互相隔离：把它们并到一处，改一边就会静默改变另一边的行为，而"迁移连到了
 哪个库"是这个项目里最不该靠推断的事。
+
+**为什么散文写在这里而不是 ``alembic.ini``**：Alembic 用
+``ConfigParser.read(..., encoding="locale")`` 读那个 ini（``alembic/util/compat.py``），
+``"locale"`` 由**进程环境**决定，不由仓库决定，且 Alembic 没有任何选项能覆盖它。
+于是 ini 里的一个非 ASCII 字节，会在 locale 编码不覆盖它的机器上直接让文件无法解码
+——不只是测试红，``alembic upgrade head`` 同样跑不起来。``.py`` 文件没有这个问题：
+PEP 263 规定源文件默认按 UTF-8 解码，与 locale 无关。因此 ini 保持 ASCII-only，
+解释性文字全部放在这里。该约束由 ``tests/contract/test_config_encoding.py`` 承重。
 """
 
 from alembic import context

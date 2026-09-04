@@ -9,6 +9,7 @@ from xiaowei_agent.persistence.store import (
     TaskNotFoundError,
     TaskStore,
     TransitionCommand,
+    UnscopedAuditEventError,
     request_dedup_digest,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "TaskNotFoundError",
     "TaskStore",
     "TransitionCommand",
+    "UnscopedAuditEventError",
     "request_dedup_digest",
 ]

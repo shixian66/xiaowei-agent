@@ -20,19 +20,45 @@ fixture 由绑定方所在目录的 conftest 提供。
 测试"，实际一次都没跑。这条由 ``tests/contract/test_task_store_bindings.py`` 承重。
 """
 
+import datetime as _dt
 from collections.abc import Callable, MutableMapping, Sequence
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 from tests.conftest import drive_to_terminal, make_envelope
+from tests.fakes.sinks import make_event
 
-from xiaowei_agent.contracts import TERMINAL_STATUSES, TaskStatus, TransitionRejection
+from xiaowei_agent.contracts import (
+    TERMINAL_STATUSES,
+    ApprovalRequest,
+    ApprovalState,
+    PipelineStage,
+    TaskStatus,
+    TransitionRejection,
+)
 from xiaowei_agent.persistence import (
     ContextMismatchError,
     IdempotencyConflictError,
     TaskNotFoundError,
+    UnscopedAuditEventError,
 )
+
+_APPROVAL_AT = _dt.datetime(2026, 9, 3, 12, 0, tzinfo=_dt.UTC)
+
+
+def make_approval(task_id: str, *, step_id: str = "s1") -> ApprovalRequest:
+    """一条形状合法的审批请求。内容与本组用例无关——被断言的只有 ``seq``。"""
+    return ApprovalRequest(
+        task_id=task_id,
+        step_id=step_id,
+        plan_hash="a" * 64,
+        target_fingerprint="b" * 64,
+        policy_revision="policy-2026-09-01",
+        subject="alice",
+        expires_at=_APPROVAL_AT,
+        state=ApprovalState.PENDING,
+    )
 
 
 def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]]) -> None:
@@ -579,6 +605,117 @@ async def test_terminal_protection_wins_over_version_mismatch(store, task) -> No
     assert result.rejection is TransitionRejection.TERMINAL_PROTECTED
 
 
+# --- append-only 台账：审批与审计 ---------------------------------------------
+#
+# 这两张表在 M4 之前是**只写不查**的：``record_approval`` 被 Runner 调用，但没有任何
+# 用例断言它真的落了盘，两个实现也可以对序号给出完全不同的答案而全绿；
+# ``record_audit_event`` 更是连方法都没有，只有一张空表。
+#
+# 断言对象是写入返回的 ``seq``，不是"读回来的内容"：读回属于消费路径（M8），而序号
+# 是本次写入自己的回执，两个实现必须给出同一个答案。
+
+
+async def test_first_approval_of_a_task_is_seq_one(store, task) -> None:
+    assert await store.record_approval(request=make_approval(task.task_id)) == 1
+
+
+async def test_approval_seq_increases_within_a_task(store, task) -> None:
+    """同一步骤可以被多次请求审批（超时后重新发起），第二次不得覆盖第一次。"""
+    seqs = [
+        await store.record_approval(request=make_approval(task.task_id)) for _ in range(3)
+    ]
+    assert seqs == [1, 2, 3]
+
+
+async def test_approval_seq_is_scoped_per_task(store, context) -> None:
+    """序号按任务分桶。用全局计数器同样能让上一条通过，但两个任务会共享号段。"""
+    first = await store.create_task(envelope=make_envelope(), context=context)
+    second = await store.create_task(
+        envelope=make_envelope(idempotency_key="idem-2"), context=context
+    )
+    assert await store.record_approval(request=make_approval(first.task_id)) == 1
+    assert await store.record_approval(request=make_approval(second.task_id)) == 1
+    assert await store.record_approval(request=make_approval(first.task_id)) == 2
+
+
+async def test_first_audit_event_of_a_task_is_seq_one(store, task) -> None:
+    event = make_event(stage=PipelineStage.ADMISSION, task_id=task.task_id)
+    assert await store.record_audit_event(event=event) == 1
+
+
+async def test_audit_seq_increases_within_a_task(store, task) -> None:
+    """append-only：同一任务的第二条事件不得覆盖第一条。
+
+    ``event_id`` 每次都不同，但序号不能由它派生——它是调用方给的，不是存储层分配的。
+    """
+    seqs = [
+        await store.record_audit_event(
+            event=make_event(
+                stage=PipelineStage.ADMISSION, task_id=task.task_id, event_id=f"e{n}"
+            )
+        )
+        for n in range(3)
+    ]
+    assert seqs == [1, 2, 3]
+
+
+async def test_audit_seq_is_scoped_per_task(store, context) -> None:
+    first = await store.create_task(envelope=make_envelope(), context=context)
+    second = await store.create_task(
+        envelope=make_envelope(idempotency_key="idem-2"), context=context
+    )
+    stage = PipelineStage.ADMISSION
+    assert await store.record_audit_event(
+        event=make_event(stage=stage, task_id=first.task_id)
+    ) == 1
+    assert await store.record_audit_event(
+        event=make_event(stage=stage, task_id=second.task_id)
+    ) == 1
+    assert await store.record_audit_event(
+        event=make_event(stage=stage, task_id=first.task_id)
+    ) == 2
+
+
+async def test_approval_and_audit_seq_are_independent(store, task) -> None:
+    """两张表各自编号。共用一个计数器时，前面几条按任务分桶的用例照样全绿。"""
+    assert await store.record_approval(request=make_approval(task.task_id)) == 1
+    assert await store.record_audit_event(
+        event=make_event(stage=PipelineStage.ADMISSION, task_id=task.task_id)
+    ) == 1
+    assert await store.record_approval(request=make_approval(task.task_id)) == 2
+
+
+async def test_audit_event_without_a_task_id_is_rejected(store) -> None:
+    """``TraceEvent.task_id`` 可为 ``None``，而审计表要求 NOT NULL。
+
+    落差必须在入口显式拒绝：交给数据库会变成一条指向连接层的 IntegrityError，
+    而内存实现根本不会报错——两个实现就此分叉。
+    """
+    event = make_event(stage=PipelineStage.INTENT, task_id=None)
+    with pytest.raises(UnscopedAuditEventError):
+        await store.record_audit_event(event=event)
+    # 拒绝之后编号必须照常从 1 开始：把这条并进来，是因为单独写一条"拒绝不消耗
+    # 序号"的用例**无法转红**——没有 task_id 就没有桶可污染，任何"先分配再校验"
+    # 的实现都只会往一个占位桶里写，从 Protocol 上完全观察不到。落盘层面的证据在
+    # tests/integration/test_audit_and_approval_ledgers.py 直接读表，调用顺序本身
+    # 由 tests/security/test_audit_ledger_guards.py 按 AST 钉死。
+    assert await store.record_audit_event(
+        event=make_event(stage=PipelineStage.ADMISSION, task_id="task-after-reject")
+    ) == 1
+
+
+async def test_audit_events_do_not_require_the_task_to_exist(store) -> None:
+    """台账**不校验任务存在性**，这是选择，不是疏漏。
+
+    代价是拼错的 task_id 会静默写进去。收益是审计写入不依赖任务行，因而不需要在
+    ``tasks`` 上取行锁——PostgreSQL 实现的 advisory lock 正是基于这一点（见
+    ``postgres._serialise_on_task``）。改成校验存在性会让两个实现都要引入
+    ``TaskNotFoundError`` 路径，且与 ``record_approval`` 的既有契约不一致。
+    """
+    event = make_event(stage=PipelineStage.ADMISSION, task_id="no-such-task")
+    assert await store.record_audit_event(event=event) == 1
+
+
 # --- 分组 ---------------------------------------------------------------------
 #
 # 分组决定用例落在哪个绑定模块，从而决定它带不带 ``security`` marker。分组之间不得
@@ -598,6 +735,15 @@ CONTRACT_CASES = (
     test_cas_failure_returns_the_storage_winner,
     test_illegal_transition_is_rejected,
     test_terminal_reason_is_cleared_when_a_transition_omits_it,
+    test_first_approval_of_a_task_is_seq_one,
+    test_approval_seq_increases_within_a_task,
+    test_approval_seq_is_scoped_per_task,
+    test_first_audit_event_of_a_task_is_seq_one,
+    test_audit_seq_increases_within_a_task,
+    test_audit_seq_is_scoped_per_task,
+    test_approval_and_audit_seq_are_independent,
+    test_audit_event_without_a_task_id_is_rejected,
+    test_audit_events_do_not_require_the_task_to_exist,
 )
 
 LEASE_FENCING_CASES = (

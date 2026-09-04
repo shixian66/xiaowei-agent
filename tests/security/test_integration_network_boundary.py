@@ -7,7 +7,7 @@ M4 给 ``tests/integration/`` 开了一个针对单个 host 的 socket 放行。
 1. 目录之外仍被拦（与 ``test_no_network.py`` 互补：那边断言"默认被拦"，这边断言
    "引入 integration 之后默认仍被拦"）。
 2. 放行配置必须是**逐 item 的 marker**，不能是全局开关。
-3. 仓库里不得出现裸用 ``socket_enabled``。
+3. 仓库里不得出现裸用 ``socket_enabled``，**连推荐它的散文都不行**。
 
 第 3 条针对的是 pytest-socket 0.8.1 的一个实测行为：``pytest_runtest_setup`` 命中
 ``socket_enabled`` 分支后**直接 return**，``allow_hosts`` 再也不会被解析，``connect``
@@ -67,6 +67,42 @@ def test_no_test_uses_the_bare_socket_enabled_fixture() -> None:
             }:
                 offenders.append(str(path.relative_to(_ROOT)))
     assert not offenders, f"裸用 socket_enabled 会让 allow_hosts 失效：{offenders}"
+
+
+_BAN_EXPLAINERS = frozenset(
+    {
+        "tests/security/test_integration_network_boundary.py",
+        "tests/integration/conftest.py",
+    }
+)
+"""唯一被许可提到 ``socket_enabled`` 的两个文件：一个是禁令本身，一个说明为何绕开它。"""
+
+
+def test_no_file_under_tests_even_recommends_the_banned_fixture() -> None:
+    """禁令此前只扫代码，散文不受约束——于是散文漂了。
+
+    ``tests/conftest.py`` 的模块 docstring 一度写着"未来需要放行时使用官方提供的
+    ``socket_enabled``"，而同一仓库的这个文件正禁止它。照做的人会写出一条被本文件
+    判红的用例，然后以为是护栏坏了。
+
+    AST 扫描看不到这种漂移：docstring 里没有 ``ast.Name`` 也没有 ``ast.Attribute``。
+    因此这里按**原文**扫，只豁免解释禁令本身的两个文件。
+    """
+    offenders = [
+        str(path.relative_to(_ROOT))
+        for path in (_ROOT / "tests").rglob("*.py")
+        if str(path.relative_to(_ROOT)) not in _BAN_EXPLAINERS
+        and "socket_enabled" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"这些文件提到了被禁的 socket_enabled：{offenders}"
+
+
+def test_the_ban_explainers_still_exist_and_still_explain() -> None:
+    """反空洞：豁免名单里的文件若被删或改名，上一条会平凡通过而禁令悄悄失去解释。"""
+    for relative in _BAN_EXPLAINERS:
+        path = _ROOT / relative
+        assert path.exists(), relative
+        assert "socket_enabled" in path.read_text(encoding="utf-8"), relative
 
 
 def test_the_allowlist_is_built_from_the_dsn_host_only() -> None:

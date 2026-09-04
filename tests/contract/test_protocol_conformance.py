@@ -101,7 +101,10 @@ def test_every_task_store_implementation_keeps_the_protocol_keyword_arguments(
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(TaskStore)
-    assert len(methods) == 7, f"TaskStore 的方法集变了：{methods}"
+    # 8：M4 之前是 7，``record_audit_event`` 是第八条。这个数字是刻意写死的
+    # 哨兵——加方法必须同时更新它，否则新方法只会被下面的循环"顺便"校一下签名，
+    # 而"契约又长大了一块"这件事不会有任何人被迫看到。
+    assert len(methods) == 8, f"TaskStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(TaskStore, method)

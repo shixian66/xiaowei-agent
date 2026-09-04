@@ -18,7 +18,7 @@
 import asyncio
 import datetime as _dt
 import uuid
-from typing import Final
+from typing import Final, TypeVar
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     TaskRecord,
     TaskStatus,
+    TraceEvent,
     TransitionResult,
 )
 from xiaowei_agent.persistence.decisions import (
@@ -46,8 +47,11 @@ from xiaowei_agent.persistence.store import (
     StaleLeaseQuery,
     TaskNotFoundError,
     TransitionCommand,
+    UnscopedAuditEventError,
     request_dedup_digest,
 )
+
+_EntryT = TypeVar("_EntryT")
 
 IS_FAKE: Final[bool] = True
 """供 tests/security/test_fake_isolation.py 断言；生产模块不得导入本模块。"""
@@ -58,7 +62,11 @@ class InMemoryTaskStore:
         self._clock = clock
         self._records: dict[str, TaskRecord] = {}
         self._by_key: dict[tuple[str, str, str], str] = {}
-        self._approvals: list[ApprovalRequest] = []
+        # 两张 append-only 台账都按 task_id 分桶，序号是桶内下标 + 1。
+        # 不用扁平 list：PostgreSQL 那边的主键是 ``(task_id, seq)``，扁平结构没有
+        # "本任务第几条"这个概念，两个实现会对同一次写入给出不同的序号。
+        self._approvals: dict[str, list[ApprovalRequest]] = {}
+        self._audit_events: dict[str, list[TraceEvent]] = {}
         self._next_token = 1
         self._lock = asyncio.Lock()
 
@@ -191,6 +199,27 @@ class InMemoryTaskStore:
             stale = [r for r in self._records.values() if is_stale_lease(r, now=now)]
         return tuple(sorted(stale, key=stale_lease_sort_key)[: query.limit])
 
-    async def record_approval(self, *, request: ApprovalRequest) -> None:
+    @staticmethod
+    def _append(
+        ledger: dict[str, list[_EntryT]], task_id: str, entry: _EntryT
+    ) -> int:
+        """append-only 追加，返回本任务内的 ``seq``（从 1 开始）。
+
+        两张台账逐字共用同一段分配逻辑，理由与判定纯函数相同：分成两份就会分叉，
+        而"审批序号和审计序号编号方式不一样"不会让任何用例失败。
+        """
+        bucket = ledger.setdefault(task_id, [])
+        bucket.append(entry)
+        return len(bucket)
+
+    async def record_approval(self, *, request: ApprovalRequest) -> int:
         async with self._lock:
-            self._approvals.append(request)
+            return self._append(self._approvals, request.task_id, request)
+
+    async def record_audit_event(self, *, event: TraceEvent) -> int:
+        # 先拒绝再上锁：不带 task_id 的事件连"记到哪个桶"都不成立，没有任何理由
+        # 让它进入临界区。
+        if event.task_id is None:
+            raise UnscopedAuditEventError("audit event has no task_id")
+        async with self._lock:
+            return self._append(self._audit_events, event.task_id, event)

@@ -96,9 +96,9 @@ class RecordingTaskStore(InMemoryTaskStore):
         self.transitions.append(dict(kwargs))
         return await super().transition(**kwargs)
 
-    async def record_approval(self, *, request: Any) -> None:
+    async def record_approval(self, *, request: Any) -> int:
         self.approvals.append(request)
-        await super().record_approval(request=request)
+        return await super().record_approval(request=request)
 
 
 class BlindEvidenceLedger(InMemoryEvidenceLedger):

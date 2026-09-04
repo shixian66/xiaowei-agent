@@ -43,6 +43,7 @@ from xiaowei_agent.contracts import (
     ResolvedTarget,
     TaskRecord,
     TaskStatus,
+    TraceEvent,
     TransitionResult,
 )
 from xiaowei_agent.persistence.decisions import (
@@ -72,6 +73,7 @@ from xiaowei_agent.persistence.rows import (
 from xiaowei_agent.persistence.schema import (
     FENCING_SEQUENCE,
     TASK_APPROVALS,
+    TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
     TASK_PLANS,
     TASKS,
@@ -84,6 +86,7 @@ from xiaowei_agent.persistence.store import (
     StaleLeaseQuery,
     TaskNotFoundError,
     TransitionCommand,
+    UnscopedAuditEventError,
     request_dedup_digest,
 )
 
@@ -102,6 +105,22 @@ async def _serialise_on_task(connection: AsyncConnection, task_id: str) -> None:
     """
     await connection.execute(
         sa.text("SELECT pg_advisory_xact_lock(hashtext(:task_id))"), {"task_id": task_id}
+    )
+
+
+def _next_seq(table: sa.Table, task_id: str) -> sa.ScalarSelect[int]:
+    """``MAX(seq) + 1``，作用域限定在单个 ``task_id`` 内。
+
+    两张 append-only 表共用这一份，理由与内存实现里的 ``_append`` 相同：编号规则
+    分成两份就会分叉，而"审批和审计的序号规则不一样"不会让任何用例失败。
+
+    读-改-写不是原子的，必须在 :func:`_serialise_on_task` 的 advisory lock 之下调用；
+    单独用它会让并发写入算出同一个 seq 并撞主键。
+    """
+    return (
+        sa.select(sa.func.coalesce(sa.func.max(table.c.seq), 0) + 1)
+        .where(table.c.task_id == task_id)
+        .scalar_subquery()
     )
 
 
@@ -334,22 +353,60 @@ class PostgresTaskStore:
             )
         return grant
 
-    async def record_approval(self, *, request: ApprovalRequest) -> None:
-        """append-only 写入。``seq`` 由 ``MAX(seq) + 1`` 分配，并发由 advisory lock 串行化。"""
+    async def record_approval(self, *, request: ApprovalRequest) -> int:
+        """append-only 写入。``seq`` 由 ``MAX(seq) + 1`` 分配，并发由 advisory lock 串行化。
+
+        ``RETURNING seq`` 取回数据库真正分配到的序号，而不是在 Python 侧再算一遍：
+        再算一遍就是空洞检查——两侧同源，比对恒真。
+        """
         async with self._engine.begin() as connection:
             await _serialise_on_task(connection, request.task_id)
-            next_seq = sa.select(
-                sa.func.coalesce(sa.func.max(TASK_APPROVALS.c.seq), 0) + 1
-            ).where(TASK_APPROVALS.c.task_id == request.task_id)
-            await connection.execute(
-                sa.insert(TASK_APPROVALS).values(
-                    task_id=request.task_id,
-                    step_id=request.step_id,
-                    seq=next_seq.scalar_subquery(),
-                    state=request.state.value,
-                    request=dump_contract(request),
+            seq = (
+                await connection.execute(
+                    sa.insert(TASK_APPROVALS)
+                    .values(
+                        task_id=request.task_id,
+                        step_id=request.step_id,
+                        seq=_next_seq(TASK_APPROVALS, request.task_id),
+                        state=request.state.value,
+                        request=dump_contract(request),
+                    )
+                    .returning(TASK_APPROVALS.c.seq)
                 )
-            )
+            ).scalar_one()
+        return int(seq)
+
+    async def record_audit_event(self, *, event: TraceEvent) -> int:
+        """append-only 写入审计事件。形状与 :meth:`record_approval` 逐字一致。
+
+        ``stage`` / ``outcome`` / ``occurred_at`` 从 JSONB 载荷里**提升成列**，是为了让
+        "某任务在某阶段发生过什么"不必每次都解 JSON，并为将来建索引留出可索引的投影。
+        **目前这三列上没有索引**（schema 与迁移里只有主键 ``(task_id, seq)``）：按 ``task_id``
+        过滤走主键，按 ``stage`` / ``outcome`` 过滤仍是顺序扫描。消费路径归 M8，届时按真实
+        查询形状再决定索引，现在建等于凭空猜。载荷本身整条存下，提升列只是它的投影，
+        不是另一份真相——一致性由 integration 的
+        ``test_promoted_columns_agree_with_the_stored_payload`` 承重。
+        """
+        if event.task_id is None:
+            raise UnscopedAuditEventError("audit event has no task_id")
+        task_id = event.task_id
+        async with self._engine.begin() as connection:
+            await _serialise_on_task(connection, task_id)
+            seq = (
+                await connection.execute(
+                    sa.insert(TASK_AUDIT_EVENTS)
+                    .values(
+                        task_id=task_id,
+                        seq=_next_seq(TASK_AUDIT_EVENTS, task_id),
+                        stage=event.stage.value,
+                        outcome=event.outcome.value,
+                        occurred_at=event.occurred_at,
+                        event=dump_contract(event),
+                    )
+                    .returning(TASK_AUDIT_EVENTS.c.seq)
+                )
+            ).scalar_one()
+        return int(seq)
 
 
 class PostgresPlanStore:

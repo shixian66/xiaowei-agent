@@ -14,11 +14,15 @@ def make_event(
     stage: PipelineStage,
     outcome: StageOutcome = StageOutcome.OK,
     detail: Mapping[str, str] | None = None,
+    task_id: str | None = "task-1",
+    event_id: str = "e1",
 ) -> TraceEvent:
+    """``task_id`` 可以显式传 ``None``：契约允许没有任务归属的事件（任务创建之前
+    就失败的请求），而审计表要求 NOT NULL，落差必须能被构造出来才能被测试。"""
     return TraceEvent(
-        event_id="e1",
+        event_id=event_id,
         trace_id="0" * 32,
-        task_id="task-1",
+        task_id=task_id,
         stage=stage,
         outcome=outcome,
         occurred_at=_AT,

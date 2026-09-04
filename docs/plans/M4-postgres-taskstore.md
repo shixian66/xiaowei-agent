@@ -1,8 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.2）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.4）
 
 > 状态：**待审核草案**。依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11，须经项目负责人与 Codex 审核批准后才能开工。**未批准不实现。**
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。**
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。
 >
 > 依据基线：`main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -87,7 +87,7 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore`，自 `main` 切出，只含本计划文件的提交；工作区有两个未跟踪文件：`development-route-v3-proposal.md`、`legacy-capability-migration-matrix.md` |
 | 暂存范围 | **只允许本计划文件**。那两个未跟踪文件不属于 M4 范围，不得暂存、修改或删除（§12.3） |
-| SHA | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`；本分支 V1 = `b546aca2c63c0a708dcdbbf53e2157a232df8a79`，V1.1 = `c235ee8f0153931214900c52d20fbdfd091e0c11` |
+| SHA | `main` = `origin/main` = `12b5b584da031bff7aa26ab5544d2122736d8945`；本分支 V1 = `b546aca2c63c0a708dcdbbf53e2157a232df8a79`，V1.1 = `c235ee8f0153931214900c52d20fbdfd091e0c11`，V1.2 = `5305dc4`；Codex 首轮验收对象 = `797a210` |
 | M3 验收对象 | `64d295c8e4f38028527ec9a496262c7a660258b1`，已在祖先链 |
 
 ### 5.2 `pytest-socket` 行为实证
@@ -482,7 +482,7 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 ### T4：`PostgresTaskStore` —— **已完成（真实库行为待 T5/T6）**
 
-engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5 的 `list_stale_leases`）。CAS 与租约按 §8.3 形状；入参 DTO 在开事务前构造。
+engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5 的 `list_stale_leases`）。此处的「五 / 六」只数任务生命周期方法，不含 `record_approval`；**Protocol 的方法总数在 T4 结束时是七个**（`tests/contract/test_protocol_conformance.py` 的哨兵即为 7），T10 追加 `record_audit_event` 后为八个（§14.5）。CAS 与租约按 §8.3 形状；入参 DTO 在开事务前构造。
 
 `list_stale_leases` 同时要在 `InMemoryTaskStore` 上实现，并进入 §9.5 的共享套件——两个绑定的用例名集合相等这条元测试，正是用来保证它不会只落到一个实现上。追加 Protocol 方法还会触及 `persistence/__init__.py` 的导出与 `tests/contract/test_protocol_conformance.py` 的一致性锚点，两处都在本任务内更新。
 
@@ -579,6 +579,63 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 **§5.3 第 3 项（service container 从 job 容器经 `127.0.0.1:5432` 可达）仍未验证**——它只能由首次 CI 运行产生证据。
 
 ---
+
+### T10：Codex 首轮验收打回的三项 —— **已完成**
+
+受审 SHA `797a210` 被 Codex 打回，三条阻断项 + 一条非阻断。逐条的根因、影响与处置：
+
+**1. `alembic.ini` 依赖 locale（P1）。** Alembic 用 `ConfigParser.read(..., encoding="locale")` 读它（`alembic/util/compat.py`），`"locale"` 由**进程环境**解析，Alembic 没有任何选项能覆盖它。于是 ini 里的中文注释在 `LC_ALL=C`（macOS 解析为 US-ASCII）的机器上直接 `UnicodeDecodeError`。
+
+影响比"测试红"更大：**同一条读取路径也是 `alembic upgrade head` 的路径**，一个 locale 不是 UTF-8 的运维环境根本跑不了迁移。CI 在 UTF-8 下永远看不到这个问题。
+
+处置：ini 改为 ASCII-only，散文移进 `env.py`（`.py` 按 PEP 263 默认 UTF-8，与 locale 无关）。同类排查覆盖了全部会被按 locale 读取的文件——仓库里只有 `alembic.ini` 一个；`script.py.mako` 由 Mako 读且其 lexer 默认 UTF-8（已实证 `LC_ALL=C` 下 `alembic revision` 正常），`pyproject.toml` / `.gitleaks.toml` / 工作流 YAML 的读取方都规定了 UTF-8，`src` 与 `tests` 里所有 `read_text` / `write_text` 均已显式带 `encoding=`。新增 `tests/contract/test_config_encoding.py` 按目录扫描而不是按文件名硬编码，将来新增 `setup.cfg` 之类同样受管。
+
+顺带发现并删除了一条**恒绿**的用例：`test_schema_module_declares_no_credentials` 遍历"以 `sqlalchemy.url` 开头的行"，而 ini 里根本没有那个键，循环体一次都没执行——把 DSN 写进**别的**键照样通过。替换成扫描全部选项值，并断言确实扫过东西。
+
+**2. 审计事件只有表，没有实现（P1）。** `task_audit_events` 建了表，但 Protocol、两个实现、任何用例、任何写入方全都不存在，而 DEVELOPMENT_PLAN §7 M4 的交付物与 ARCHITECTURE §7.3 都明文列了「审计事件」。**这是漏读交付物**，不是"integration 没跑"的副产品——是本计划第四次在同一处栽跟头（见 §6.3 P2）。
+
+沿同一条代码路径排查发现同类问题两处：`record_approval` 虽有 Protocol 与两个实现，但**没有任何用例断言它真的落了盘**；且两个实现的编号模型已经分叉——PostgreSQL 按 `(task_id, seq)` 编号，内存实现只往一个扁平 `list` 里 append，连 seq 的概念都没有。一并修掉。
+
+处置见 §14.5。新增 9 条共享套件用例（自动同时绑到内存与 PostgreSQL）、1 个 AST 守卫模块、9 条 integration 用例，并把 JSONB 载荷的覆盖完整性改为**由 schema 决定**：从 `ALL_TABLES` 扫出全部 JSONB 列与登记表比对，漏一列即红——这正是 `task_audit_events.event` 当初漏掉的地方。
+
+**3. `integration` job 从未运行（P1）。** 根因不是代码：工作流只在 `push: main` / `pull_request: main` 触发，而该分支没有 PR。**不改触发条件**——给所有分支加 `push` 触发会让每个 PR 跑两遍 CI，且那不是这条门槛缺的东西。处置是开 PR，让 `pull_request` 事件在 exact HEAD 上跑满七个 job。
+
+**4. `tests/conftest.py` 推荐了被禁的 `socket_enabled`（P2）。** 禁令此前只用 AST 扫代码，散文不受约束——docstring 里既没有 `ast.Name` 也没有 `ast.Attribute`，于是漂了。处置不是改掉那段话就完事，而是把禁令扩到原文扫描，只豁免解释禁令本身的两个文件，并加一条反空洞断言防止豁免名单里的文件被删后上一条平凡通过。
+
+**变异反证**：十项，全部先红后绿。其中一项（"守卫挪到分配之后"）**首轮为绿**——没有 `task_id` 就没有桶可污染，任何"先分配再校验"的实现从 Protocol 上都观察不到，那条用例**不可能转红**。按 §10 T8 对 S2 的同一处置：删掉不可证伪的用例，改用 AST 检查（`tests/security/test_audit_ledger_guards.py`，两个实现各一条），落盘层面的证据放进 integration 直接读表。
+
+### T11：`integration` gate 的**触发条件**本身没有承重 —— **已完成**
+
+复审第二轮自查发现，不由 Codex 打回。
+
+**根因**：`integration` job 能否证明任何东西，取决于 `PYTEST_POSTGRES_DSN` 这个**名字**在两处对得上——`tests/integration/conftest.py` 的 `DSN_ENV_VAR` 常量，和 `.github/workflows/ci.yml` 的 env 键。这是同一个字符串的两份独立拷贝，之前没有任何东西把它们钉在一起。
+
+**失效路径**：重命名 conftest 里的常量 → CI 读不到 DSN → 104 条 integration 用例全部跳过 → `unexpected_integration_skips` 因 `dsn` 为 `None` 老老实实返回空 → **七个 job 全绿，而一条 integration 用例都没跑**。M4 的验收硬门槛就此变成一句空话。
+
+**为什么既有护栏挡不住**：
+- `ci.yml` 的整文件 SHA-256 门槛（`test_workflow_policy.py`）挡的是工作流被改，而这条路径改的是 conftest，工作流一个字节没动；
+- env 白名单（`test_no_env_block_outside_declared_allowlist`）是集合包含判定，只挡「多出来的东西」，挡不住改名或删除——这正是 AGENT_HANDOFF 里已经写明的白名单局限；
+- 「DSN 已设置时不得有跳过」这条 gate（`unexpected_integration_skips`）本身是对的，但它的触发条件恰好就是被破坏的那个东西，**破坏它等于关掉它**。
+
+**处置**：在 `tests/contract/test_integration_gate.py` 追加四条，把两侧钉在一起，全部在默认路径上跑（不需要 PostgreSQL）：
+
+| 用例 | 挡住的失效 |
+| --- | --- |
+| `test_the_workflow_declares_the_exact_env_var_the_gate_reads` | 两侧改名（任一侧） |
+| `test_the_env_name_binding_is_discriminating` | 反空洞：确认上一条换成别的名字确实会失败 |
+| `test_the_workflow_dsn_points_at_the_declared_service_port` | DSN 的 host/port 与 service 发布端口对不上；顺带钉死 host 是回环地址（`allow_hosts` 只放行 DSN 解析出的这一个 host） |
+| `test_the_integration_job_actually_runs_the_suite` | env 与端口都对，但没有一步真的跑 pytest。与 `test_workflow_policy.py::test_the_integration_job_runs_no_extra_command` 互补：那条管「不多跑」，这条管「确实跑了」 |
+
+**不改 `ci.yml`**：本任务只加测试，因此 `_WORKFLOW_SHA256` 不变，不触发那条需要人工审查的门槛。
+
+**变异反证**：四项，全部先红后绿。
+
+| 变异 | 转红 |
+| --- | --- |
+| conftest 重命名 `DSN_ENV_VAR` | 2 |
+| `ci.yml` 改掉 env 名 | 4（含整文件 SHA 门槛） |
+| service 端口映射改成 `55432:5432` | 2 |
+| 删掉 `integration` job 的 pytest 步骤 | 4 |
 
 ## 11. CI 变更清单
 
@@ -681,6 +738,18 @@ M4 明确不做：
 
 ---
 
+### 14.5 审计事件：**M4 交付存储能力，生产者接线归 M5**
+
+`record_audit_event(*, event) -> int` 进 Protocol，两个实现都落地。返回的是本次写入分配到的 `seq`——**这不是"读回"**（§14.4 拍板不加读回 Protocol 方法仍然有效），是本次写入自己的回执，不查询任何既存记录。加它的理由是：不返回序号，两个实现就可以对同一次写入给出完全不同的答案而没有任何断言能发现，而 M4 之前正是这个状态。`record_approval` 一并改成返回 `seq`，理由同上。
+
+**不在 M4 接生产者**：`TraceSink.emit` 是同步的，`record_audit_event` 是异步的。把两者接起来要改 M2 已定的 `TraceSink` 形状，波及整条 Runner 调用链——那是一次架构改动，不是一次接线。M4 交付存储能力（Protocol + 两个实现 + 用例），接线归 M5：Worker 那一层本就在异步边界上。
+
+**代价与到期条件**：M4 结束时审计表在生产路径上仍然是空的。**M5 落 Worker 时必须同时把 TraceSink 接到 TaskStore**，否则"审计事件"这条交付物在 M5 结束时仍只有测试级证据。
+
+**边界**：`TraceEvent.task_id` 可为 `None` 而 `task_audit_events.task_id` 是 `NOT NULL`。落差在入口显式拒绝（`UnscopedAuditEventError`），不交给数据库约束——交给约束会让内存实现根本不报错、PostgreSQL 实现抛驱动层的 `IntegrityError`，调用方要按实现分别 except。台账**不校验任务存在性**（与 `record_approval` 一致），这是选择：校验会让写入依赖 `tasks` 行锁，而 advisory lock 的整个设计前提就是不依赖任何行。
+
+---
+
 ## 15. 验收报告格式
 
 按 DEVELOPMENT_PLAN §9 输出四段：**已验证**（实际命令、exit code、精确 SHA、环境、结果）、**只读推理**、**未覆盖**、**残余风险**。
@@ -698,8 +767,9 @@ M4 明确不做：
 | 是否有占位符 / TBD | 无。§14 四项均已于 2026-09-03 拍板，含 §8.4 审批读回处置（§14.4）。**计划内无未决判断** |
 | 复审自查 | 已执行，逐条核对源码，发现六项并全部修复（§6.3）。其中 P1、P3 是初稿的**过度断言**，P2 是第三次漏读交付物 |
 | Codex 复审（V1.1） | 通过。两项文档修正已在 V1.2 落实：过期的分支/SHA/工作区事实（§5.1、文首基线），§8.4 的 B3 行脱表渲染与"未拍板"表述 |
-| 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（方法数已由"五个"改为"六个"） |
+| Codex 首轮验收（`797a210`） | **打回**，三条阻断项 + 一条非阻断。逐条根因与处置见 §10 T10；审计事件的拍板见 §14.5。修订记为 V1.3——它追加了一个任务和一条 Protocol 方法，**不是纯文档修正**，与 V1.2 的性质不同 |
+| 内部一致性 | §3 依赖清单 / §10 T0 / §11 deps-audit 三处一致；§9.1「不加第五条命令」与 §12.1、§14.2 一致；`list_stale_leases` 在 §1 第 8 条、§6.2 S1、§8.5、§10 T4、§13、§14.1 六处口径一致（任务生命周期方法数已由"五个"改为"六个"）。**Protocol 方法总数**是另一套数：T4 结束时七个，T10 追加 `record_audit_event` 后八个，唯一真源是 `tests/contract/test_protocol_conformance.py` 的哨兵常量 |
 | 与真源冲突 | 无已知冲突。§7.2 与 ADR-009 一致；§4 与 §8.5 的 E1 口径与 ADR-007 D7 一致；§12.1 与 ADR-008 一致；§13 的"不引入 Compose"与 ADR-007 D8 的 M5 时点一致 |
-| 范围 | 单一里程碑，10 个任务，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
+| 范围 | 单一里程碑，T0–T9 + 首轮验收打回的 T10 + 第二轮复审自查的 T11，可拆为多个 PR。`list_stale_leases` 已用 §8.5 的四条「明确不是」封住向调度能力蔓延的路径 |
 | 歧义 | 无。§14.2 的"必需 gate"已显式区分「验收硬门槛」与「GitHub required status check」，避免重复 M1 那类误述 |
 | 是否降低了既有安全边界 | 否。新增的网络放行经三条测试证明窄度；CI 不引入任何凭证；既有六个 gate 与全部安全测试保持不变 |

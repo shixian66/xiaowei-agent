@@ -1,7 +1,12 @@
 """全局 fixture。
 
-不定义自定义的 socket 放行 fixture；未来需要放行时使用 pytest-socket
-官方提供的 ``socket_enabled``。
+**这里不放行任何 socket，也不要在这里加放行 fixture。** 默认路径必须无网络。
+
+需要放行时唯一被许可的形态是 ``tests/integration/conftest.py`` 里那条：从 DSN 解析出
+单个 host，用**逐 item 的 ``allow_hosts`` marker** 只放行那一个。pytest-socket 0.8.1
+官方的那个"放行 fixture"不能用——它命中后 ``pytest_runtest_setup`` 直接 return，
+``allow_hosts`` 再也不会被解析，看起来像放行，实际是对该用例全开。仓库禁用它，由
+``tests/security/test_integration_network_boundary.py`` 承重。
 """
 
 import os
