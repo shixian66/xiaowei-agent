@@ -1,8 +1,8 @@
-# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.8）
+# M4 PostgreSQL TaskStore 与恢复详细实施计划（V1.9）
 
 > 状态：**已验收通过并合入 `main`**（`714df07`，21 个受审提交以 `--ff-only` 原样保留）。归档见 [docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md](../handoff/archive/2026-09-04-M4-postgres-taskstore.md)。V1–V1.2 经项目负责人与 Codex 审核批准开工（依据 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §11）；T0–T13 已全部落地，经 PR [#6](https://github.com/shixian66/xiaowei-agent/pull/6) 合入。本文件自 V1.3 起同时充当**实施与复审记录**，§10 各任务段按完成时的事实书写。
 >
-> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。**V1.7 是纯文档修正**：文首状态行由「待审核草案」改为实际状态；§10 T5 / T6 / T9 三段仍用现在时写着「一次都没跑过」「镜像用版本 tag」，改为标明那是**交付当时**的事实并注明此后已被哪一任务解除。**V1.7 不改变任何设计决策、任务拆分或判定标准。****V1.8 是合并后的交接收口**：状态行改为已合入并指向归档；三处「基线 = `main` = `origin/main`」在合并后已成假话，改为标明那是成稿时的值。**V1.8 同样不改变任何设计决策、任务拆分或判定标准。**
+> V1 按 Codex 审核的 7 项打回（B1–B7）与自查的 4 项同类问题（S1–S4）成稿，并记入项目负责人 2026-09-03 的三项拍板（§14.1–§14.3）。**V1.1 按提交后的计划复审自查，修正 6 项（§6.3）**——其中 P1、P3 是 V1 的过度断言，P2 是本计划内第三次漏读交付物。**V1.2 是 Codex 复审通过后的纯文档修正**：更新已过期的分支/SHA/工作区事实，并把 §8.4 对审批读回的处置从「一处判断」固化为已拍板结论（§14.4）。**V1.2 不改变任何设计决策、任务拆分或判定标准。****V1.3 是 Codex 首轮验收打回（受审 SHA `797a210`）后的修订**：新增 §10 T10（三条阻断项 + 一条非阻断的逐条根因与处置）与 §14.5（审计事件的拍板）。**V1.3 追加了一个任务和一条 Protocol 方法，因此不是纯文档修正。****V1.4 追加 §10 T11**：第二轮复审自查发现 `integration` gate 的触发条件本身没有承重，处置为四条新测试，不改 `ci.yml`。**V1.5 追加 §10 T12**：`integration` 首次真实运行（PR #6，run `33828598775`）暴露两类缺陷，共同前提是 integration 用例此前既无静态检查也无运行时检查。**V1.6 追加 §10 T13**：Codex 第二轮复审打回 `list_stale_leases` 先 `LIMIT` 后过滤（P1）与一轮文档事实漂移。**V1.7 是纯文档修正**：文首状态行由「待审核草案」改为实际状态；§10 T5 / T6 / T9 三段仍用现在时写着「一次都没跑过」「镜像用版本 tag」，改为标明那是**交付当时**的事实并注明此后已被哪一任务解除。**V1.7 不改变任何设计决策、任务拆分或判定标准。****V1.8 是合并后的交接收口**：状态行改为已合入并指向归档；三处「基线 = `main` = `origin/main`」在合并后已成假话，改为标明那是成稿时的值。**V1.9 是归档后事实漂移修正**：清掉顶部 handoff 与计划局部仍把 M4 写成待验收、待首次 CI 或仍未验证的现在时残留。**V1.8/V1.9 均不改变任何设计决策、任务拆分或判定标准。**
 >
 > 依据基线：本计划成稿时的 `main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。**M4 已合入，该值不再等于 `main` 的当前 HEAD**（用 `git rev-parse main` 查询）。本计划位于分支 `claude/m4-postgres-taskstore`，Codex 复审对象为 `c235ee8f0153931214900c52d20fbdfd091e0c11`（V1.1）。真源为 [ARCHITECTURE.md](../../ARCHITECTURE.md)、[ADR-007](../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-008](../adr/ADR-008-engineering-and-test-baseline.md)、[ADR-009](../adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §7 M4。与真源冲突一律以真源为准。
 
@@ -109,7 +109,7 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
 
 ### 5.3 T0 实证事项
 
-三项在 V1 定稿时**均未验证**，不得当作既成事实。前两项已由 T0 实测收口，第三项仍待 T9：
+三项在 V1 定稿时**均未验证**，不得当作既成事实。前两项已由 T0 实测收口；第三项在 V1/T0 时仍待 T9，此后已由 CI 证实：
 
 1. **SQLAlchemy 2.0 Core 在 `mypy strict` 下的类型完备性——已验证，通过。** `sqlalchemy` 2.0.52 自带 `py.typed`。探针覆盖 `Table` / `Column` / `update().where().values().returning()` / `select().order_by().limit()` / `AsyncEngine.begin()`，`mypy --strict --no-incremental` 零告警。**无需任何 override，全局 strict 完好。** `alembic` 1.19.1 同样自带 `py.typed`。
 2. **`asyncpg` 的类型标注完备性——已验证，结论与计划的预设退路不同。** `asyncpg` 0.30.0 **不带 `py.typed`**；直接 `import asyncpg` 会在 strict 下报 `import-untyped`。
@@ -117,7 +117,7 @@ Python 3.11、Pydantic v2、标准库。**M4 新增且仅新增三个第三方�
    V1 给的退路是"对单个模块加 `ignore_missing_imports`"。**这条退路不必走，因此不走**：驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载，业务代码从不需要它的任何符号。**改为禁止 `src/` 直接 import `asyncpg`**——不 import 就不产生缺失存根，也就不需要放宽任何检查。
 
    代价是这条禁令必须被机制而非注释持有，且需要一个撤销条件。`tests/security/test_dependency_baseline.py` 同时承担两者：AST 扫描 `src/` 禁止该 import，另一条反向断言钉住"asyncpg 当前没有 `py.typed`"——上游一旦补上，该断言转红，正是重新评估禁令的时刻。
-3. GitHub Actions service container 从 job 容器经 `127.0.0.1:5432` 可达。**仍未验证。** 这是标准行为，但属于「未经本项目验证的第三方行为」，与 §5.2 打回的那条属同一类，因此列为 T9 的显式验收项而非假设。
+3. GitHub Actions service container 从 job 容器经 `127.0.0.1:5432` 可达。**V1 定稿时仍未验证**，不得当作既成事实；此后已由 PR #6 与 `main` push 的 `integration` job 证实。这是标准行为，但属于「未经本项目验证的第三方行为」，与 §5.2 打回的那条属同一类，因此在 T9 前只能列为显式验收项而非假设。
 
 ---
 
@@ -455,7 +455,7 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 **「两个绑定用例名集合相等」目前是平凡真**（每组只有 memory 一个绑定）。写成"逐个绑定对齐分组"而不是"两两比较"，是为了让失败信息直接指出哪个绑定少了哪条。**T5 接入 postgres 绑定后必须复查这两条确实会因缺绑定而转红**。
 
-### T3：schema 与 Alembic migration —— **已完成（真实库部分待 T5）**
+### T3：schema 与 Alembic migration —— **已完成（真实库部分此后已由 CI 证实）**
 
 五张表 + fencing 序列 + 唯一索引 + CHECK 约束；`upgrade()` / `downgrade()`；空库与有数据两条 upgrade 路径。
 
@@ -469,7 +469,7 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 **JSON 路径是契约层要求的，不是实现偏好**：`Contract` 全局 `strict=True`，python 校验模式不接受 `str→StrEnum` 与 ISO 字符串→`datetime`，而 JSON 校验模式接受（`contracts/base.py` 已实证）。因此 JSONB 读回的 `dict` 必须经 `model_validate_json`，不能直接 `model_validate`。
 
-**仍未验证**：两条 upgrade 路径（空库 / 有数据）在真实 PostgreSQL 上的执行、`timestamptz` 的实际精度、JSONB 的键序与数值表示。全部推到 T5，本机无 PostgreSQL、无容器运行时。
+**T3 交付时仍未验证**：两条 upgrade 路径（空库 / 有数据）在真实 PostgreSQL 上的执行、`timestamptz` 的实际精度、JSONB 的键序与数值表示。全部推到 T5，因为本机无 PostgreSQL、无容器运行时。此后这些路径已在 PR #6 的 `integration` job 中真实执行并通过。
 
 **`task_id` 列必须是 `text`，不是 `uuid`**（复审自查 P4）。`TaskRecord.task_id` 是 `StrictStr`，而 `uuid` 列读回的是 `UUID` 对象，`StrictStr` 会直接拒绝——这条在写 DDL 时的直觉恰好是错的，因此写死在计划里。同理，所有映射到 `StrictStr` 的列一律 `text`。
 
@@ -480,7 +480,7 @@ marker 只带 DSN 解析出的那一个 host。DSN 未设置时**不加 marker**
 
 `task_approvals` 目前没有 Protocol 读回路径（§8.4 S3），其 round-trip 由 integration 测试**直接用 SQL 读表**验证。
 
-### T4：`PostgresTaskStore` —— **已完成（真实库行为待 T5/T6）**
+### T4：`PostgresTaskStore` —— **已完成（真实库行为此后已由 CI 证实）**
 
 engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5 的 `list_stale_leases`）。此处的「五 / 六」只数任务生命周期方法，不含 `record_approval`；**Protocol 的方法总数在 T4 结束时是七个**（`tests/contract/test_protocol_conformance.py` 的哨兵即为 7），T10 追加 `record_audit_event` 后为八个（§14.5）。CAS 与租约按 §8.3 形状；入参 DTO 在开事务前构造。
 
@@ -503,9 +503,9 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 
 **`test_protocol_conformance.py` 的方法清单原本是写死的四项**，Protocol 长出 `list_stale_leases` 时它不会失败，只会静默少检一个。已改为从 Protocol 派生，并对**两个实现**都跑——只校 fake 会让 PostgreSQL 的签名漂移无人发现。
 
-**仍未验证（需要真实 PostgreSQL）**：S2 禁令的反证（把 UPDATE 的 `WHERE version` 改成事务内读到的值，并发用例必须转红）——它需要多连接并发才能表达，推到 T6；`ON CONFLICT DO NOTHING` 的并发幂等创建、`FOR UPDATE` 的实际串行化、序列的单调性。**T4 交付的是代码与签名一致性，不是运行时行为证据。**
+**T4 交付时仍未验证（需要真实 PostgreSQL）**：`ON CONFLICT DO NOTHING` 的并发幂等创建、`FOR UPDATE` 的实际串行化、序列的单调性，全部推到 T6/CI。S2 禁令的原定反证后来被证伪：把 `UPDATE` 的 `WHERE version` 改成事务内读到的值，即使有真实数据库也不会让并发用例转红；最终改由 T8 的 AST 机械检查承重。**T4 交付的是代码与签名一致性，不是运行时行为证据。**
 
-### T5：integration 基建与 PostgreSQL 绑定 —— **已完成（基建已实证，绑定行为待真实库）**
+### T5：integration 基建与 PostgreSQL 绑定 —— **已完成（绑定行为此后已由 CI 证实）**
 
 `tests/integration/` + conftest（§9.2 marker、§9.3 stash、§9.4 元测试）；把 T2 的套件重绑到 PostgreSQL；补 §9.2 的三条安全测试。
 
@@ -531,7 +531,7 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 **T5 交付时未验证**：全部 PostgreSQL 绑定用例与迁移路径用例当时**一次都没跑过**——本机无 PostgreSQL、无容器运行时。T5 交付的是基建与放行窄度的证据，**不是** PostgreSQL 行为的证据。
 **此状态已由 T10–T13 期间的 CI 解除**：`integration` 已在 PR #6 上真实运行并全绿，逐条分布与结果见[验收报告](../handoff/M4-acceptance-report.md) §4 与 §2.7。
 
-### T6：并发与崩溃恢复故障注入 —— **已写，本机无法运行**
+### T6：并发与崩溃恢复故障注入 —— **已完成（本机无法运行，CI 已证实）**
 
 **必须用多个真实数据库连接**，不得用共用连接的 `asyncio.gather` 冒充并发：
 
@@ -548,7 +548,7 @@ engine/session 工厂；注入 `Clock`；**六个方法**（既有五个 + §8.5
 **T6 交付时**：本机无 PostgreSQL、无容器运行时，这 6 条用例一次都没跑过，判定标准 2 / 3 / 4 的证据要到 CI 的 integration job 才产生。
 **此后已产生**：其中崩溃注入那条在 `integration` 首次运行时暴露出 `begin()` 顺序错误（§10 T12），修复后连同其余 5 条一并通过。
 
-### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter —— **已完成（行为待真实库）**
+### T7：`PlanStore` / `EvidenceLedger` 的 PostgreSQL adapter —— **已完成（行为此后已由 CI 证实）**
 
 **实现既有 port，不新增 port。** 冲突语义与内存实现一致：计划内容不同即 `PlanConflictError`；同 `evidence_id` 内容不同即 `EvidenceConflictError`；`load` 按写入顺序返回，无证据时返回空元组而非抛异常。同样走双绑定套件。
 
@@ -572,7 +572,7 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 
 没有这个文件，第二道闸可以被悄悄改成恒真而全部测试照常全绿；等到某天有人重构掉第一道闸，两道闸会一起消失。
 
-### T9：CI job 与文档收口 —— **已完成（service 可达性待首次 CI）**
+### T9：CI job 与文档收口 —— **已完成（service 可达性此后已由 CI 证实）**
 
 按 §11 清单改 `ci.yml` 与 `test_workflow_policy.py`；更新 `AGENT_HANDOFF.md`、`README.md`、`ARCHITECTURE.md`。
 
@@ -581,7 +581,7 @@ DEVELOPMENT_PLAN §7 M4 明文要求的三项，逐个撤掉承重保护，全�
 **T9 交付时镜像用版本 tag 而不是 digest，这是一处对计划的偏离，理由是不编造未经核对的事实**：digest 只能联网解析，而当时的改动在离线环境完成。写一个没核对过的 digest 比用 `postgres:16.10` 更糟——前者看起来更严格，实际指向未知内容。当时记为需联网的待办，并配了一条断言先挡住 `latest`。
 **此偏离已由 §10 T13 收口**：CI 绿灯后从 run `33829385450` 的 `Initialize containers` 输出取回 digest 钉死，并把那条断言从"带冒号或带 `@sha256`"（一个裸 tag 也能通过）收紧为完整的 `name:tag@sha256:<64>` 形状。
 
-**§5.3 第 3 项（service container 从 job 容器经 `127.0.0.1:5432` 可达）仍未验证**——它只能由首次 CI 运行产生证据。
+**§5.3 第 3 项（service container 从 job 容器经 `127.0.0.1:5432` 可达）在 T9 交付时仍未验证**——它只能由首次 CI 运行产生证据。此后已由 PR #6 的首次 `integration` run 与修复后的全绿 run 证实。
 
 ---
 

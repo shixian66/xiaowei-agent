@@ -2,9 +2,9 @@
 
 > 按 DEVELOPMENT_PLAN §9 的四段格式：已验证 / 只读推理 / 未覆盖 / 残余风险。
 >
-> **本报告为第四版**。第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
+> **版本历史**：第一版的受审对象 `797a210` 被 Codex 首轮验收**打回**（三条阻断项 + 一条非阻断）；第二版补上 T10 与 T11；第三版记录了 `integration` 的首次真实运行与它当场抓出的四条缺陷。
 >
-> **本报告为第七版（终版）**。M4 已合入 `main`，本报告不再更新——后续以 [归档](archive/2026-09-04-M4-postgres-taskstore.md) 为准。第五版记入 Codex 第二轮复审打回的 P1（§2.8）；**第六版是纯文档修正**，清掉第三轮复审指出的五处已成假话的事实，并把「最新一次 run」这种必然过期的写法统一改为「某任务的验证 run」+ 指向 `gh pr checks 6`。
+> **本报告为第八版（归档后事实修正）**。M4 已合入 `main`，后续以 [归档](archive/2026-09-04-M4-postgres-taskstore.md) 为准。第五版记入 Codex 第二轮复审打回的 P1（§2.8）；第六版清掉第三轮复审指出的五处已成假话的事实，并把「最新一次 run」这种必然过期的写法统一改为「某任务的验证 run」+ 指向 `gh pr checks 6`；第七版是合并前终版；第八版只修归档后文档事实漂移，不改变验收结论。
 >
 > **T13 修复验证 run**：[`33830881090`](https://github.com/shixian66/xiaowei-agent/actions/runs/33830881090) @ `f59dc71`，**七个 job 全绿**，integration 步骤输出 `1442 passed`，**0 failed、0 skipped**（`1442 = 本机 1337 passed + 105 skipped`：每一条在本机被跳过的用例都真的跑了，并且全过）。同一 run 的 `Initialize containers` 显示拉取的 digest 正是钉死的那个。
 >
@@ -18,7 +18,7 @@
 | --- | --- |
 | 分支 | `claude/m4-postgres-taskstore` |
 | 基线 | M4 切出时的 `main` = `12b5b584da031bff7aa26ab5544d2122736d8945`。**M4 已合入，`main` 现已前进**——当前值请用 `git rev-parse main` 查询 |
-| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.8 |
+| 计划 | [docs/plans/M4-postgres-taskstore.md](../plans/M4-postgres-taskstore.md) V1.9 |
 | T0–T9 | 各一个提交，末条为 `797a210`——**那是首轮受审对象，不是当前 HEAD** |
 | T10 + T11 | `4ef3701`，已推送 |
 | T12 | `d26d3d3` |

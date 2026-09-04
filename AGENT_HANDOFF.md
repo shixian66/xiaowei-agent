@@ -7,8 +7,8 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
-| 截止时间 | 2026-09-03（Asia/Shanghai） |
-| 阶段 | **M0–M3 已验收并合入 `main`；M4 已在 `claude/m4-postgres-taskstore` 上完成实现，等待验收** |
+| 截止时间 | 2026-09-04（Asia/Shanghai） |
+| 阶段 | **M0–M4 已验收并合入 `main`；M4 已归档；下一步等待 M5 详细计划与开工指令** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -30,17 +30,17 @@
 | M3 合并后 CI | `main` 上 run [`33708913738`](https://github.com/shixian66/xiaowei-agent/actions/runs/33708913738)，六个 gate 全绿（lint、types、secret-scan、tests、deps-audit、security-gate） |
 | M3 工作分支 | `claude/m3-starrocks-slow-query` 已合入 `main`，保留备查 |
 | M3 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`** |
-| M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.7，经 Codex 审核批准开工（V1–V1.2），实施期间随打回追加至 V1.7 |
-| M4 状态 | **已验收通过并归档**。**首轮验收打回三条阻断 + 一条非阻断，此后又被打回三轮**，共四轮；其中三轮的阻断项是本机结构性看不见的东西（`integration` 从未运行、伪造的枚举成员、跑不通的事务顺序、stale 查询先 `LIMIT` 后过滤）。以 `--ff-only` 合入 `main`，**无合并提交**，21 个受审提交原样保留。归档见 [docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md](docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md)，验收报告见 [docs/handoff/M4-acceptance-report.md](docs/handoff/M4-acceptance-report.md) |
+| M4 详细计划 | [docs/plans/M4-postgres-taskstore.md](docs/plans/M4-postgres-taskstore.md) V1.9，经 Codex 审核批准开工（V1–V1.2），实施期间随打回追加至 V1.8，归档后事实漂移修正至 V1.9 |
+| M4 状态 | **已验收通过并归档**。**首轮验收打回三条阻断 + 一条非阻断，此后又被打回三轮**，共四轮；其中三轮的阻断项是本机结构性看不见的东西（首轮时 `integration` job 未曾运行、伪造的枚举成员、跑不通的事务顺序、stale 查询先 `LIMIT` 后过滤）。以 `--ff-only` 合入 `main`，**无合并提交**，21 个受审提交原样保留。归档见 [docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md](docs/handoff/archive/2026-09-04-M4-postgres-taskstore.md)，验收报告见 [docs/handoff/M4-acceptance-report.md](docs/handoff/M4-acceptance-report.md) |
 | M4 合入基线 SHA | `714df07e8064154d6b576376fac23f8f569ae480`（最终验收对象，与合入对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询** |
 | M4 合并后 CI | `main` 上 run [`33842205710`](https://github.com/shixian66/xiaowei-agent/actions/runs/33842205710)，**七个** job 全绿（既有六个 + `integration`）；integration `1442 passed`、**0 skipped** |
 | M4 工作分支 | `claude/m4-postgres-taskstore` 已合入 `main`，保留备查 |
 | M4 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`**。跑绿的是 CI 里一次性的 PostgreSQL service container |
 | CI 第七个 job | `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。镜像已钉 digest（`postgres:16.10@sha256:21f6013…c3c1`）。该 job **不是** GitHub 强制的 required status check——分支保护仍不可用 |
-| 下一里程碑 | **M5**：API + Worker + Compose（M4 验收通过后） |
+| 下一里程碑 | **M5**：API + Worker + Compose |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；**尚未**声明 API、Worker、PostgreSQL、Docker Compose 或任何工具调用可运行 |
+| 运行状态 | 已有可安装、可测试、可静态检查的 Python 包；PostgreSQL TaskStore 仅有 M4 integration 级证据；**尚未**声明 API、Worker、Docker Compose 或任何真实外部工具调用可运行 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 首个闭环 | `starrocks.slow_query.diagnose`——**已实现并合入 `main`**，仅 fake/recording 数据，未连接真实 StarRocks |
 
