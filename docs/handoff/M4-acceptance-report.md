@@ -22,7 +22,8 @@
 | T0–T9 | 各一个提交，末条为 `797a210`——**那是首轮受审对象，不是当前 HEAD** |
 | T10 + T11 | `4ef3701`，已推送 |
 | T12 | `d26d3d3` |
-| T13 | 本轮提交；SHA 即 PR #6 的 HEAD，见下一行 |
+| T13 | `f59dc71` |
+| 其后的纯文档修正 | 若干枚，**不改代码**（逐枚的 `git diff --name-only` 只含文档）。**此处不写 SHA**：每修一次就多一枚提交，写死必然过期；当前 HEAD 见下方「受审对象」行 |
 | PR | [#6](https://github.com/shixian66/xiaowei-agent/pull/6) |
 | CI run #1（首次含 `integration`） | [`33828598775`](https://github.com/shixian66/xiaowei-agent/actions/runs/33828598775) @ `4ef3701`：六个 job success，`integration` **failure**（`4 failed, 1422 passed, 0 skipped`） |
 | CI run #2（复跑） | [`33829057416`](https://github.com/shixian66/xiaowei-agent/actions/runs/33829057416) @ `d26d3d3`：**七个 job 全绿**，integration `1430 passed`（0 failed、0 skipped） |
