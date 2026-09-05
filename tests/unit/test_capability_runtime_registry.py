@@ -229,6 +229,12 @@ def test_execution_lookup_rejects_a_plan_profile_mismatch() -> None:
         _registry().execution_for(plan=plan)
 
 
+def test_runtime_lookup_rejects_a_non_exact_capability_key_without_fallback() -> None:
+    plan = slow_query_plan().model_copy(update={"capability_version": "9.9.9"})
+    with pytest.raises(CapabilityBindingError, match="exact binding"):
+        _registry().runtime_for_plan(plan=plan)
+
+
 def test_runtime_binding_is_frozen() -> None:
     binding = _binding()
     with pytest.raises(FrozenInstanceError):

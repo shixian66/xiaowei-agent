@@ -60,7 +60,7 @@ def test_synthetic_write_capability_is_not_registered() -> None:
 
 
 def test_every_registered_operation_is_read_only() -> None:
-    """M3 只交付只读闭环：registry 里不允许存在任何写操作。"""
+    """M6a PR 1 仍只交付只读闭环：registry 不允许存在写操作。"""
     for spec in StaticCapabilityRegistry().snapshot().specs:
         for operation in spec.operations:
             assert operation.effect_class is EffectClass.READ

@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M5 已归档。下一步是 M6a 详细计划与审批，未获明确启动授权前不实现** |
+| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 的 `prometheus.alert.evidence` fake 候选等待代码审查与项目负责人验收；PR 2 资产能力未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -43,11 +43,13 @@
 | M5 合并后 CI | `main` 上 run [`33952529021`](https://github.com/shixian66/xiaowei-agent/actions/runs/33952529021)，**八个** job 全绿；integration `1866 passed`、0 skipped，`compose-smoke: passed` |
 | M5 工作分支 | `claude/m5-api-worker-compose` 已合入 `main`，保留备查 |
 | M5 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非产品 `user-accepted`**。运行证据来自 GitHub 隔离 runner 的 PostgreSQL service 与 Compose smoke |
-| 下一里程碑 | **M6a 第二、第三条 fake 能力**；先编写详细计划并获批，未收到明确启动授权前不创建实现分支 |
+| M6a 详细计划 | [docs/plans/M6a-prometheus-asset-fake.md](docs/plans/M6a-prometheus-asset-fake.md) V1.1；首审问题回写后复审通过并获明确开工授权 |
+| M6a PR 1 | 工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；代码/测试数据采集点 `c7eca0567d5e5ca18406f2fc2a79947db67f3439`，未合并、未用户验收 |
+| 下一步 | 对 M6a PR 1 做精确 SHA 技术审查与项目负责人验收；只有验收并合入最新 `main` 后，才可另开 PR 2 `asset.inventory.lookup` |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`；GitHub 隔离 runner 已通过真实 PostgreSQL integration 与不可跳过的 Compose smoke。**当前开发机仍无可用 PostgreSQL 测试 DSN、也无 Docker**，所以这不是本机运行、部署、canary 或产品用户验收证据 |
+| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR 1 新增的 PostgreSQL integration 因本机无 `PYTEST_POSTGRES_DSN` 而 skip，新增 Compose 路径因本机无 Docker 未运行；因此没有把 M5 的旧 CI 证据外推到 M6a 候选 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
-| 首个闭环 | `starrocks.slow_query.diagnose`——**已实现并合入 `main`**，仅 fake/recording 数据，未连接真实 StarRocks |
+| 能力闭环 | `starrocks.slow_query.diagnose` 已验收并合入；`prometheus.alert.evidence` 为待验收 fake 候选；`asset.inventory.lookup` 未开始。均未连接对应真实运维系统 |
 
 旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目的分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
 
@@ -89,6 +91,7 @@
 | [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) | 工程与测试基线：Python 3.11、pytest、security marker gate、Ruff、mypy | Accepted 2026-09-01 |
 | [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) | `plan_hash` 规范形状、审批绑定与工具准入 | Accepted 2026-09-02 |
 | [ADR-010](docs/adr/ADR-010-m5-durable-attempt-and-compose-boundary.md) | M5 持久执行尝试、事务审计、readiness 与本地 Compose 边界 | Accepted 2026-09-05 |
+| [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md) | 多能力 binding、operation gateway 与固定 PromQL 模板准入 | Accepted 2026-09-05 |
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
@@ -140,7 +143,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 7. ~~M4 详细计划编写与审批~~ **已完成**：V1–V1.2 经 Codex 审核批准开工。
 8. ~~M4 实现与验收~~ **已完成**：四轮打回后以 `--ff-only` 合入 `main`（`714df07`），CI run `33842205710` 七项全绿，逐条提交历史已归档。
 9. ~~M5 实现与验收~~ **已完成**：最终对象 `372c381` 经终审与项目负责人验收，以 fast-forward 合入 `main`；合并后 run `33952529021` 八项全绿，逐条提交历史已归档。
-10. **下一步：M6a 详细计划与审批**。获批并收到明确启动授权后，再分别实现两个 fake 能力；M6b 仍需单独授权 StarRocks 非生产真实只读验证。
+10. **M6a PR 1 已形成待验收候选**：只包含共享 binding seam 与 `prometheus.alert.evidence` fake 闭环；不得在其验收并合入前开始 PR 2。M6b 仍需单独授权 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
 
@@ -198,6 +201,8 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 
 ### 已验证
 
+- **M6a PR 1 当前工作树四条规范门全部 exit 0**：`python -m pytest -q` 为 1982 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 977 passed / 79 skipped / 1079 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。分层独立门为 unit 416 passed、contract 517 passed、security 目录 897 passed、M6a Prom + 既有 StarRocks 六组 eval 150 passed；能力文档/命令一致性 5 passed。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
+- **M6a PR 1 做了 9 个隔离变异反证且对应用例均先转红**：分别拆掉 PromQL 重编译、operation gateway 派生、无记录结果 fail-closed、snapshot ID 联合 golden、恢复期 plan hash、Evidence 字段白名单、binding 精确查找、入口中立性，以及擅自递增 StarRocks version。变体位于临时 detached worktree、使用独立 pycache，已删除且未进入候选分支。
 - **M5 最终对象 `372c381f44ecfa1fa53961f137d0058033cbd805` 已验收、快进合入并归档**：合并后 `main` run [`33952529021`](https://github.com/shixian66/xiaowei-agent/actions/runs/33952529021) 八个 job 全绿；integration `1866 passed`、0 skipped，`compose-smoke: passed`。本机四门为 1714 passed / 152 skipped、security 923 passed / 79 skipped / 864 deselected、Ruff 通过、mypy 102 个源文件通过。详细命令、变异反证和风险见 [M5 归档](docs/handoff/archive/2026-09-05-M5-api-worker-compose.md)。
 - **M2 最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 640 passed / 3 warnings；`python -m pytest -m security -q` 499 passed / 141 deselected / 3 warnings；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..319253a` 无输出。PR #4 的 merge commit 与 head 均为 `319253a`，`main` 独立 CI run `33629416660` 为 success。更早的逐 SHA 结果见各提交信息与归档。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
@@ -216,7 +221,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 ### 只读推理
 
 - 五份文档的交叉冲突清单与定级（执行上下文字段名漂移、Phase 0/1 重叠、外部调用许可自相矛盾、命令口径分裂、`test-env verified` 术语缺口等）来自逐份阅读比对，无运行时证据。
-- README 架构图与 `AGENTS.md`、`ARCHITECTURE.md` 的执行链顺序、`StepAdmission` 从属关系和 `ApprovalGate` 触发条件已复核一致，因此**未修改该图**，本轮未对其产生 diff。
+- README 架构图保持既有执行顺序，只把 `SQLGuard` 标签扩为同时涵盖 SQL/PromQL 的 `QueryGuard`；没有改变 `StepAdmission` 从属关系或 `ApprovalGate` 触发条件。
 
 ### 未覆盖
 
@@ -224,8 +229,8 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - 未部署、未 canary、未取得产品用户验收；M5 的“验收通过”是项目里程碑验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- M5 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker；真实 PostgreSQL 与 Compose 证据来自合并后 CI，不是本机或生产环境证据。
-- **`StepConditionKind` 四个成员 M3 只消费了两个**：`ALWAYS` 与 `EVIDENCE_ROW_COUNT_BELOW` 已被真实闭环消费；`EVIDENCE_FIELD_ABSENT` 与 `PRIOR_STEP_RESULT_IS` **未被消费、未被验证**，不要误以为四个都已验证。
+- 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker。M6a PR 1 的 PostgreSQL integration 仅验证了无 DSN 时的受控 skip，Compose smoke 未运行；M5 的 CI 证据不是 M6a 候选证据。
+- **`StepConditionKind` 四个成员已有三个被消费**：`ALWAYS`、`EVIDENCE_ROW_COUNT_BELOW` 与 `PRIOR_STEP_RESULT_IS`。后者由 Prom 两步计划消费，并只读取持久化 step journal 的 committed `OK`；`FAILED`/`TIMEOUT`/无记录均不运行后续步骤。`EVIDENCE_FIELD_ABSENT` 仍未消费、未验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
 - ADR-001 至 ADR-006 尚未编写。
@@ -240,9 +245,9 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - **分支保护缺失（已知并被显式接受）**：private + GitHub Free 无法启用（API 实证 403）。项目负责人已批准延后并据此修订 M1 退出标准。后果是**红灯 PR 仍可被人工合并、可强推 `main`、可绕过 PR 流程**，合并纪律完全依赖人工。具备条件后应优先补齐。
 - 日志脱敏是启发式规则：新出现的密钥形状或键名需要补规则；未加引号的敏感值脱敏到分隔符或行尾，属有意的过度脱敏。
 - `pip-audit` 只能发现已收录漏洞，不能证明依赖无恶意代码。
-- 部分架构约束（首条闭环是否正确消费 M2 契约、能力扩展成本）尚无运行验证，要到 M3/M6a 才可证。
-- Reflection 的越权拒绝已有 M2 契约层字段闭集与安全测试；真正被首条闭环消费后的护栏要等 M3 落地。
-- 「预编译的预算内可选只读分支」的形状已在 M2 给出（`StepCondition` 四成员闭集枚举，条件只能引用更早的步骤）。**残余部分**：该闭集是否覆盖 M3 实际需要的条件种类，要到 M3 才可证；不足时须改枚举并过评审，不得改成开放表达式。
+- PR 1 的扩展成本已记录在 [M6a capability 扩展数据](docs/handoff/M6a-capability-extension-data.md)；DSL 结论仍必须等待独立 PR 2 数据，不能仅凭第二个异质能力立项。
+- Reflection 的越权拒绝已由 StarRocks 与 Prometheus 两条 fake 闭环消费；这仍不能推出未来真实 adapter 的外部文本都符合当前证据契约。
+- 「预编译的预算内可选只读分支」已由 Prometheus 两步计划消费 `PRIOR_STEP_RESULT_IS`，并覆盖首次执行与重启后的 OK/FAILED/TIMEOUT/无记录矩阵。该闭集对未来能力是否足够仍须逐能力验证；不足时须改枚举并过评审，不得改成开放表达式。
 - `ToolResult` 的私有性只封堵了直接构造、`model_validate`、`model_construct`、`model_copy` 四条实用路径；`object.__setattr__` 与重定义模块无法在语言层封堵，属已知残余风险，只能由评审与源码扫描覆盖。
 - ~~M2 的全部安全保证尚未被真实闭环消费~~：M3 已消费它们；但下列风险是新增的。
 - **审计表结构未在真实 StarRocks 核对**：表名 `starrocks_audit_db__.starrocks_audit_tbl__`、13 个列名、`state`/`errorCode` 的取值域，以及刻意排除的 `clientIp`/`digest`/`stmt` 是否存在，全部来自旧项目 `ivor_aiops` 的实证与推断。M6b 首次连接时必须用 `SHOW CREATE TABLE` 核对并回修。
@@ -252,3 +257,5 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - **`evidence/` 的纯度由一条 AST 测试承重**：删除 `tests/security/test_evidence_layer_purity.py` 即等于默默取消 `runners → evidence` 这条依赖边的正当性。
 - **重编译比对在原理上无法捕获编译器自身的改动**（它用同一个编译器重算）：这正是 T4 的集合等式断言必须独立存在的理由，不要因为"已经有 A36 了"就删掉它。
 - **`application` 是依赖面最宽的一层**（除 interfaces 外的全部业务包）：其正当性由 `tests/security/test_runtime_bypass.py` 的三条 AST 断言承重（不够到 Gateway、不自签凭证、只调 Runner 的 start/resume）。
+- **PromQL 不是通用解析器验证**：M6a 只允许两个代码内固定模板并做参数重编译比对。未来新增模板、真实 Prometheus API 参数、代理路径、限流和响应形状都必须独立评审，不能把 fake 全绿当作服务端兼容。
+- **本地 Prom metric recording 是有限 synthetic catalog**：装配时只生成中心时刻前后 120 分钟、两个固定告警样例的精确键。它服务短时本地/Compose smoke，不是长时间运行的数据源，也不提供 fallback。

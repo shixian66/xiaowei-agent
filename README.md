@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`。M5 已组装薄 FastAPI、标准库 CLI、Worker、migration 和 API/Worker/PostgreSQL Compose，并继续只使用 fake/recording 能力；合并后 CI 已通过真实 PostgreSQL integration 与隔离 Compose smoke。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，正在等待代码审查与项目负责人验收。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -14,7 +14,7 @@
 4. 本文件：人类开发者的启动和导航信息。
 5. [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 
-授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)。
+授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)。
 
 ## 目标能力
 
@@ -23,7 +23,7 @@
 1. 用户通过 API/CLI 发起自然语言运维问题。
 2. 系统提取结构化意图，并确定性解析 capability、环境和目标。
 3. Planner 生成受约束的读取计划。
-4. Policy 和 SQL AST Guard 检查工具调用。
+4. Policy 和对应的 SQL AST / 固定模板 PromQL Guard 检查工具调用。
 5. ToolGateway 访问外部系统，生成带来源和限制的证据。
 6. Reflection 只消费已生成的结构化证据，判断是否足以回答并说明限制、缺失和降级；它不追加步骤、不选工具、不改计划。确需额外取数时，只能是计划中预编译的预算内只读分支，由 Runner 按确定性条件执行。
 7. Runtime 生成可审计、可复现的最终回答和任务结果。
@@ -46,7 +46,7 @@
                               WorkflowRunner
                                       │
                        StepAdmission（每个步骤边界）
-                    ToolPolicy → SQLGuard → ApprovalGate*
+                 ToolPolicy → QueryGuard → ApprovalGate*
                                       │
                                 ToolGateway
                                       │
@@ -93,7 +93,7 @@ agent/
 ├── .gitignore
 ├── docs/
 │   ├── CAPABILITIES.md        # 能力地图；由 Registry/代码生成并由 CI 检查
-│   ├── adr/                   # 架构决策记录（ADR-007、ADR-008、ADR-009 已建立）
+│   ├── adr/                   # 架构决策记录（当前至 ADR-011）
 │   ├── plans/                 # 里程碑详细实施计划（M2 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # 已建立（M1）
@@ -215,8 +215,13 @@ docker compose up -d --no-deps worker
 ```bash
 python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/readyz").read().decode())'
 xiaowei task submit --text '检查最近三十分钟慢查询' --idempotency-key local-demo-1
+xiaowei task submit --text '查告警 HostHighCpu 在 node-1.example.com:9100 的证据' --idempotency-key local-prom-demo-1
 xiaowei task get TASK_ID
 ```
+
+第二条提交命令只命中内置 Alertmanager/Prometheus synthetic recording。当前本地样例
+还支持 `InstanceDown` + `10.0.0.8:9100`；它不是 Grafana 展示、告警静默，也不是对
+真实监控系统的兼容性证明。
 
 停止会保留数据库 volume；清理会删除本项目的本地数据库数据。执行清理前先确认当前目录与 Compose project：
 
@@ -235,7 +240,11 @@ python -m scripts.compose_smoke
 
 ### 尚未完成与能力边界
 
-M5 基线仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。已通过的 Compose smoke 只证明隔离 PostgreSQL 下的提交、消费、查询、恢复与幂等闭环，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
+当前实现仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。M6a PR 1
+候选增加了 Alertmanager 告警读取与 Prometheus 固定模板指标取证，但本机没有 Docker
+或 PostgreSQL 测试 DSN，因此新增 Compose/PostgreSQL 路径只完成了代码与离线契约
+验证。M5 已通过的 Compose smoke 仍只证明其当时 SHA 在隔离 PostgreSQL 下的提交、
+消费、查询、恢复与幂等闭环，**推不出 M6a 候选或任何生产环境已经验证**。
 
 当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

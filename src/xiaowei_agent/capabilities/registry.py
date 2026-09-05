@@ -4,7 +4,8 @@ Registry 是**声明与版本索引**，不是关键词总表，也不是执行�
 的 ``CapabilitySnapshot``；Resolver 与分类派生都只看快照，因此同一次请求内看到
 的能力集合是确定的。
 
-M3 只注册一个能力。合成写能力 ``test.synthetic.write`` 只存在于测试夹具，
+M6a PR 1 注册 StarRocks 慢查询与 Prometheus 告警证据两个只读能力。合成写能力
+``test.synthetic.write`` 只存在于测试夹具，
 **永远不进入本 registry**（`test_synthetic_write_capability_is_not_registered`
 承重）。
 """
