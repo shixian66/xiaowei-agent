@@ -5,6 +5,8 @@ from typing import Any
 
 import yaml
 
+from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
+
 _ROOT = Path(__file__).resolve().parents[2]
 _APP_SERVICES = {"api", "worker", "migrate"}
 
@@ -31,6 +33,20 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
         assert services[name]["depends_on"] == {
             "migrate": {"condition": "service_completed_successfully"}
         }
+
+
+def test_local_environment_exists_in_the_registered_target_directory() -> None:
+    services = _yaml("docker-compose.yml")["services"]
+    environments = {
+        services[name]["environment"]["XIAOWEI_ENVIRONMENT_ID"]
+        for name in _APP_SERVICES
+    }
+    assert len(environments) == 1
+    environment_id = environments.pop()
+    assert environment_id in KNOWN_ENVIRONMENT_IDS
+    assert f"XIAOWEI_ENVIRONMENT_ID={environment_id}" in (
+        _ROOT / ".env.example"
+    ).read_text(encoding="utf-8").splitlines()
 
 
 def test_compose_exposes_only_api_on_host_loopback() -> None:

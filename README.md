@@ -172,9 +172,12 @@ CI 在无交互 shell 中通过 `astral-sh/setup-uv` 的 `activate-environment: 
 `load_settings()` **只读进程环境变量，不读 `.env`**；`.env.example` 仅作变量名文档。未在其中列出的 `XIAOWEI_*` 变量会被 fail-fast 拒绝；固定开发租户是代码常量，没有对应环境变量。
 
 ```bash
-export XIAOWEI_ENVIRONMENT_ID=dev-local
+export XIAOWEI_ENVIRONMENT_ID=dev
 export XIAOWEI_LOG_LEVEL=INFO
 ```
+
+`dev` 是当前确定性目标目录中已登记的本地 fake 环境；固定开发租户仍是
+`dev-local`。两者是不同的安全维度，不应复用同一个标识。
 
 ### 集成测试（M4）
 

@@ -1,5 +1,5 @@
 x-app-environment: &app-environment
-  XIAOWEI_ENVIRONMENT_ID: dev-local
+  XIAOWEI_ENVIRONMENT_ID: dev
   XIAOWEI_ACTOR: local-developer
   XIAOWEI_LOG_LEVEL: INFO
   XIAOWEI_POSTGRES_HOST: postgres
