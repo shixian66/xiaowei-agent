@@ -160,7 +160,11 @@ def test_compose_command_failure_is_attributed_to_the_current_phase() -> None:
             "SMOKE_CLI_QUERY_FAILED",
         ),
         (
-            lambda session: compose_smoke._psql(session, "task", "SELECT 1"),
+            lambda session: compose_smoke._psql(
+                session,
+                "12345678-1234-4321-9234-123456789abc",
+                "SELECT 1 WHERE :'task_id' IS NOT NULL",
+            ),
             "SMOKE_POSTGRES_OBSERVATION_FAILED",
         ),
     ],
@@ -188,6 +192,60 @@ def test_external_action_failure_is_attributed_without_exposing_output(
         action(session)
     assert caught.value.__context__ is None
     assert "private-external-output" not in str(caught.value)
+
+
+def test_psql_uses_a_server_parseable_uuid_literal() -> None:
+    runner = RecordingRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    task_id = "12345678-1234-4321-9234-123456789abc"
+
+    compose_smoke._psql(
+        session,
+        task_id,
+        "SELECT count(*) FROM tasks WHERE task_id = :'task_id'",
+    )
+
+    command = runner.calls[-1]
+    assert "-v" not in command
+    assert ":'task_id'" not in command[-1]
+    assert command[-1].endswith(f"'{task_id}'")
+
+
+def test_psql_rejects_a_non_uuid_task_id_before_running_docker() -> None:
+    runner = RecordingRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_TASK_ID_INVALID$"):
+        compose_smoke._psql(session, "' OR TRUE; --", "SELECT 1")
+    assert not runner.calls
+
+
+def test_psql_rejects_an_unscoped_observation_before_running_docker() -> None:
+    runner = RecordingRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_OBSERVATION_QUERY_INVALID$"):
+        compose_smoke._psql(
+            session,
+            "12345678-1234-4321-9234-123456789abc",
+            "SELECT count(*) FROM tasks",
+        )
+    assert not runner.calls
 
 
 @pytest.mark.parametrize(

@@ -308,6 +308,16 @@ def _require_worker_scale(session: ComposeSession) -> None:
 
 
 def _psql(session: ComposeSession, task_id: str, statement: str) -> str:
+    try:
+        canonical_task_id = str(uuid.UUID(task_id))
+    except (ValueError, AttributeError):
+        raise SmokeError("SMOKE_TASK_ID_INVALID") from None
+    if canonical_task_id != task_id:
+        raise SmokeError("SMOKE_TASK_ID_INVALID")
+    marker = ":'task_id'"
+    if marker not in statement:
+        raise SmokeError("SMOKE_OBSERVATION_QUERY_INVALID")
+    statement = statement.replace(marker, f"'{canonical_task_id}'")
     return session.run(
         "exec",
         "-T",
@@ -318,8 +328,6 @@ def _psql(session: ComposeSession, task_id: str, statement: str) -> str:
         "-d",
         "xiaowei",
         "-At",
-        "-v",
-        f"task_id={task_id}",
         "-c",
         statement,
         timeout=30.0,
