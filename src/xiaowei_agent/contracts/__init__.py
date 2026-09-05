@@ -77,8 +77,10 @@ from xiaowei_agent.contracts.task import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
     LeaseGrant,
+    TaskLookup,
     TaskOutcome,
     TaskRecord,
+    TaskSubmission,
     TransitionResult,
 )
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
@@ -148,9 +150,11 @@ __all__ = [
     "StrictInt",
     "StrictStr",
     "TargetRejection",
+    "TaskLookup",
     "TaskOutcome",
     "TaskRecord",
     "TaskStatus",
+    "TaskSubmission",
     "ToolCall",
     "ToolCallStatus",
     "ToolResult",

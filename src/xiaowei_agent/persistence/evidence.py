@@ -8,10 +8,10 @@ M4 的跨进程恢复中成立。
 是幂等的（重试不该被当成篡改），内容不同的重写一律拒绝。
 """
 
-import asyncio
 from typing import Protocol
 
 from xiaowei_agent.contracts import EvidenceEnvelope
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 
 
 class EvidenceLedgerError(Exception):
@@ -55,9 +55,10 @@ class InMemoryEvidenceLedger:
     **只有单进程保证**：跨进程原子性与崩溃恢复要到 M4 才可证。
     """
 
-    def __init__(self) -> None:
-        self._entries: dict[str, dict[str, EvidenceEnvelope]] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, *, state: InMemoryPersistenceState | None = None) -> None:
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._entries = self._state.evidence
+        self._lock = self._state.lock
 
     async def append(self, *, task_id: str, envelope: EvidenceEnvelope) -> str:
         async with self._lock:

@@ -23,12 +23,15 @@ if TYPE_CHECKING:
         ExecutionPlan,
         RequestContext,
         RequestEnvelope,
+        TaskLookup,
         TaskRecord,
         TaskStatus,
+        TaskSubmission,
         ToolCall,
     )
     from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
+    from xiaowei_agent.persistence.memory import InMemoryPersistenceState
     from xiaowei_agent.persistence.plans import InMemoryPlanStore
     from xiaowei_agent.persistence.store import TaskStore
     from xiaowei_agent.tools.fake import RecordingToolAdapter
@@ -191,6 +194,44 @@ def make_envelope(**overrides: object) -> "RequestEnvelope":
     return RequestEnvelope(**(base | overrides))
 
 
+def make_submission(
+    context: "RequestContext",
+    *,
+    envelope: "RequestEnvelope | None" = None,
+    as_of: object | None = None,
+) -> "TaskSubmission":
+    """构造提交事实；默认时间固定，避免测试隐式读取进程时钟。"""
+    import datetime as dt
+
+    from xiaowei_agent.contracts import TaskSubmission
+
+    return TaskSubmission(
+        envelope=make_envelope() if envelope is None else envelope,
+        context=context,
+        as_of=dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.UTC) if as_of is None else as_of,
+    )
+
+
+def lookup_for(record: "TaskRecord") -> "TaskLookup":
+    from xiaowei_agent.contracts import TaskLookup
+
+    return TaskLookup(
+        task_id=record.task_id,
+        tenant_id=record.tenant_id,
+        environment_id=record.environment_id,
+    )
+
+
+def make_lookup(task_id: str, context: "RequestContext") -> "TaskLookup":
+    from xiaowei_agent.contracts import TaskLookup
+
+    return TaskLookup(
+        task_id=task_id,
+        tenant_id=context.tenant_id,
+        environment_id=context.environment_id,
+    )
+
+
 @pytest.fixture
 def clock() -> "ManualClock":
     from tests.fakes.clock import ManualClock
@@ -199,29 +240,40 @@ def clock() -> "ManualClock":
 
 
 @pytest.fixture
-def store(clock: "ManualClock") -> "InMemoryTaskStore":
+def memory_state() -> "InMemoryPersistenceState":
+    from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+
+    return InMemoryPersistenceState()
+
+
+@pytest.fixture
+def store(
+    clock: "ManualClock", memory_state: "InMemoryPersistenceState"
+) -> "InMemoryTaskStore":
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
 
-    return InMemoryTaskStore(clock=clock)
+    return InMemoryTaskStore(clock=clock, state=memory_state)
 
 
 @pytest.fixture
-def plan_store() -> "InMemoryPlanStore":
+def plan_store(memory_state: "InMemoryPersistenceState") -> "InMemoryPlanStore":
     from xiaowei_agent.persistence.plans import InMemoryPlanStore
 
-    return InMemoryPlanStore()
+    return InMemoryPlanStore(state=memory_state)
 
 
 @pytest.fixture
-def evidence_ledger() -> "InMemoryEvidenceLedger":
+def evidence_ledger(
+    memory_state: "InMemoryPersistenceState",
+) -> "InMemoryEvidenceLedger":
     from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 
-    return InMemoryEvidenceLedger()
+    return InMemoryEvidenceLedger(state=memory_state)
 
 
 @pytest.fixture
 async def task(store: "InMemoryTaskStore", context: "RequestContext") -> "TaskRecord":
-    return await store.create_task(envelope=make_envelope(), context=context)
+    return await store.create_task(submission=make_submission(context))
 
 
 def _path_to(target: "TaskStatus") -> tuple["TaskStatus", ...]:
@@ -246,13 +298,13 @@ def _path_to(target: "TaskStatus") -> tuple["TaskStatus", ...]:
 
 
 async def drive_to_terminal(
-    store: "TaskStore", task_id: str, terminal: "TaskStatus"
+    store: "TaskStore", lookup: "TaskLookup", terminal: "TaskStatus"
 ) -> None:
     """把任务沿一条合法路径推到指定终态，全程采纳存储层 winner。"""
-    record = await store.get(task_id)
+    record = await store.get(lookup=lookup)
     for status in _path_to(terminal):
         result = await store.transition(
-            task_id=task_id, expected_version=record.version, to_status=status
+            task_id=lookup.task_id, expected_version=record.version, to_status=status
         )
         assert result.applied, result.rejection
         record = result.winner

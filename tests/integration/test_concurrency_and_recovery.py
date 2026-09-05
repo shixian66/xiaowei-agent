@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.conftest import make_envelope
+from tests.conftest import lookup_for, make_envelope, make_submission
 
 from xiaowei_agent.contracts import TaskStatus, TransitionRejection
 
@@ -73,8 +73,9 @@ async def test_concurrent_creates_with_one_key_produce_one_task(
     """
     creators = independent_stores(_CONCURRENCY)
     envelope = make_envelope(idempotency_key="concurrent-idem")
+    submission = make_submission(context, envelope=envelope)
     records = await asyncio.gather(
-        *(creator.create_task(envelope=envelope, context=context) for creator in creators)
+        *(creator.create_task(submission=submission) for creator in creators)
     )
     assert len({record.task_id for record in records}) == 1
 
@@ -85,8 +86,9 @@ async def test_only_one_task_row_exists_after_concurrent_creates(
     """直接读表确认只有一行——返回值一致还可能是"各建各的、恰好返回了同一个"。"""
     creators = independent_stores(_CONCURRENCY)
     envelope = make_envelope(idempotency_key="concurrent-idem")
+    submission = make_submission(context, envelope=envelope)
     await asyncio.gather(
-        *(creator.create_task(envelope=envelope, context=context) for creator in creators)
+        *(creator.create_task(submission=submission) for creator in creators)
     )
     async with clean_database.connect() as connection:
         count = await connection.execute(sa.text("SELECT count(*) FROM tasks"))
@@ -108,7 +110,7 @@ async def test_preempted_worker_cannot_write_with_its_old_token(
     assert new is not None
     assert new.fencing_token > old.fencing_token
 
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     rejected = await old_worker.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -135,7 +137,7 @@ async def test_a_late_event_cannot_reopen_a_terminal_task(
     )
     assert late.applied is False
     assert late.rejection is TransitionRejection.TERMINAL_PROTECTED
-    assert (await store.get(task.task_id)).status is TaskStatus.CANCELED
+    assert (await store.get(lookup=lookup_for(task))).status is TaskStatus.CANCELED
 
 
 async def test_a_killed_backend_leaves_no_intermediate_state(
@@ -150,7 +152,7 @@ async def test_a_killed_backend_leaves_no_intermediate_state(
     不存在"版本已增而状态未改"或"租约字段部分置位"的记录——后者由
     ``ck_tasks_lease_fields_consistent`` 与本条共同保证。
     """
-    before = await store.get(task.task_id)
+    before = await store.get(lookup=lookup_for(task))
     victim = await clean_database.connect()
     try:
         # ``begin()`` 必须排在**第一个** execute 之前：SQLAlchemy 2.0 的 connection
@@ -178,7 +180,7 @@ async def test_a_killed_backend_leaves_no_intermediate_state(
         with contextlib.suppress(sa.exc.SQLAlchemyError):
             await victim.close()
 
-    after = await store.get(task.task_id)
+    after = await store.get(lookup=lookup_for(task))
     assert after == before
     assert after.version == before.version
     assert after.status is before.status

@@ -20,9 +20,10 @@ from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
-from xiaowei_agent.contracts import Channel, RenderPayload, RequestEnvelope
+from xiaowei_agent.contracts import Channel, RenderPayload, RequestEnvelope, TaskLookup
 from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
@@ -34,8 +35,10 @@ _AS_OF = dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC)
 class _TrackingTaskStore(RecordingTaskStore):
     """额外记录被创建过的 task_id，用于断言幂等只产生一个任务事实。"""
 
-    def __init__(self, *, clock: ManualClock) -> None:
-        super().__init__(clock=clock)
+    def __init__(
+        self, *, clock: ManualClock, state: InMemoryPersistenceState | None = None
+    ) -> None:
+        super().__init__(clock=clock, state=state)
         self.created_task_ids: list[str] = []
 
     async def create_task(self, **kwargs: Any) -> Any:
@@ -76,9 +79,10 @@ class RuntimeHarness:
         clear_ledger_before_render: bool = False,
     ) -> None:
         self.clock = ManualClock(start=_AS_OF)
-        self.store = _TrackingTaskStore(clock=self.clock)
-        self.plan_store = InMemoryPlanStore()
-        self.ledger = InMemoryEvidenceLedger()
+        self.state = InMemoryPersistenceState()
+        self.store = _TrackingTaskStore(clock=self.clock, state=self.state)
+        self.plan_store = InMemoryPlanStore(state=self.state)
+        self.ledger = InMemoryEvidenceLedger(state=self.state)
         self.adapter = StarRocksRecordingAdapter(recording)
         self.gateway = CountingGateway(
             DeterministicToolGateway(adapters={"starrocks": self.adapter})
@@ -136,6 +140,14 @@ class RuntimeHarness:
         if self.store.created_task_ids:
             self.task_id = self.store.created_task_ids[-1]
         return payload
+
+    @property
+    def lookup(self) -> TaskLookup:
+        return TaskLookup(
+            task_id=self.task_id,
+            tenant_id=self.context.tenant_id,
+            environment_id=self.context.environment_id,
+        )
 
     # --- 故障注入 -----------------------------------------------------------
 

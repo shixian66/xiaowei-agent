@@ -46,9 +46,11 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     ResolvedTarget,
     StageOutcome,
+    TaskLookup,
     TaskOutcome,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     TraceEvent,
 )
 from xiaowei_agent.observability.sink import TraceSink
@@ -167,7 +169,9 @@ class XiaoweiRuntime:
         plan = self._compile(
             candidate=candidate, params=params, target=target, context=context
         )
-        record = await self._tasks.create_task(envelope=envelope, context=context)
+        record = await self._tasks.create_task(
+            submission=TaskSubmission(envelope=envelope, context=context, as_of=as_of)
+        )
         if record.status in _TERMINAL:
             # 幂等：同一 idempotency_key 只产生一个任务事实。重复请求不再执行，
             # 而是按**已经落库的**证据与终态重新投影——重跑会既违反 at-most-once，
@@ -311,7 +315,13 @@ class XiaoweiRuntime:
             task_id=task_id,
         )
         status = _terminal_status(outcome=outcome, verdict=verdict)
-        current = await self._tasks.get(task_id)
+        current = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
         if current.status not in _TERMINAL:
             result = await self._tasks.transition(
                 task_id=task_id,

@@ -15,6 +15,7 @@ from xiaowei_agent.contracts import (
     ExternalInput,
     RequestContext,
     ResolvedTarget,
+    TaskLookup,
     TaskOutcome,
     TaskStatus,
 )
@@ -74,7 +75,11 @@ class ScriptedRunner:
         与之相对，真实 Runner 消费它们全部；下面 ``resume`` 的 ``external_input``
         同理由 ``DeterministicStepRunner`` 承担实际校验。
         """
-        return await self._drive(task_id, path=(TaskStatus.PLANNING, TaskStatus.RUNNING))
+        return await self._drive(
+            task_id,
+            path=(TaskStatus.PLANNING, TaskStatus.RUNNING),
+            context=context,
+        )
 
     async def resume(
         self,
@@ -85,16 +90,28 @@ class ScriptedRunner:
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
     ) -> TaskOutcome:
-        return await self._drive(task_id, path=(TaskStatus.RUNNING,))
+        return await self._drive(task_id, path=(TaskStatus.RUNNING,), context=context)
 
-    async def _drive(self, task_id: str, *, path: tuple[TaskStatus, ...]) -> TaskOutcome:
+    async def _drive(
+        self,
+        task_id: str,
+        *,
+        path: tuple[TaskStatus, ...],
+        context: RequestContext,
+    ) -> TaskOutcome:
         lease = await self._store.acquire_lease(
             task_id=task_id, owner=self._owner, ttl_seconds=30
         )
         if lease is None:
             # 终态任务不可 acquire lease，因此这也是"任务已结束"的信号。
             raise TerminalOrLeasedTaskError(task_id=task_id)
-        record = await self._store.get(task_id)
+        record = await self._store.get(
+            lookup=TaskLookup(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
         for status in (*path, self._status):
             if record.status is status:
                 continue

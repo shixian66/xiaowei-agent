@@ -17,7 +17,7 @@ class RequestEnvelope(Contract):
     actor: StrictStr
     channel: Channel
     text: NonEmptyText = Field(max_length=8192)
-    idempotency_key: StrictStr
+    idempotency_key: StrictStr = Field(max_length=200)
     environment_id: StrictStr | None = None
 
 

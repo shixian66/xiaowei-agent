@@ -4,6 +4,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from tests.conftest import lookup_for
 from tests.fakes.admission import CONTEXT
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 
@@ -25,7 +26,7 @@ async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
     outcome = await runner.start(task.task_id, **_LIVE)
     assert outcome.status is TaskStatus.SUCCEEDED
-    final = await store.get(task.task_id)
+    final = await store.get(lookup=lookup_for(task))
     assert final.version == 3  # created→planning→running→succeeded
 
 
@@ -33,10 +34,10 @@ async def test_resume_on_a_terminal_task_does_not_overwrite_it(store, task) -> N
     """终态保护由存储层承重；Runner 只是拿不到租约而已。"""
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
     await runner.start(task.task_id, **_LIVE)
-    before = await store.get(task.task_id)
+    before = await store.get(lookup=lookup_for(task))
     with pytest.raises(TerminalOrLeasedTaskError):
         await runner.resume(task.task_id, context=CONTEXT, target=FIXTURE_TARGET)
-    after = await store.get(task.task_id)
+    after = await store.get(lookup=lookup_for(task))
     assert after.version == before.version
     assert after.status is TaskStatus.SUCCEEDED
 
@@ -61,7 +62,7 @@ async def test_runner_holds_the_lease_under_its_own_owner(store, task) -> None:
     """owner 必须真的被用于取租约。"""
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w-alpha")
     await runner.start(task.task_id, **_LIVE)
-    final = await store.get(task.task_id)
+    final = await store.get(lookup=lookup_for(task))
     assert final.lease_owner == "w-alpha"
 
 

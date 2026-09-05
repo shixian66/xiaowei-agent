@@ -13,6 +13,7 @@ from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
+from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 
 TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
     {
@@ -23,6 +24,22 @@ TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
         TaskStatus.INDETERMINATE,
     }
 )
+
+
+class TaskSubmission(Contract):
+    """创建任务时不可变持久化的完整提交事实。"""
+
+    envelope: RequestEnvelope
+    context: RequestContext
+    as_of: AwareDatetime
+
+
+class TaskLookup(Contract):
+    """任务查询的存储作用域；M5 不把 actor 当作读取 ACL。"""
+
+    task_id: StrictStr
+    tenant_id: StrictStr
+    environment_id: StrictStr
 
 ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = MappingProxyType(
     {

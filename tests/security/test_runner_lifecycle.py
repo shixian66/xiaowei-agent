@@ -18,7 +18,7 @@ async def test_synthetic_side_effect_step_pauses_with_zero_gateway_calls() -> No
     harness = RunnerHarness(GOLDEN, synthetic_write=True)
     with pytest.raises(WorkflowPaused) as paused:
         await harness.start()
-    assert (await harness.store.get(harness.task_id)).status is (
+    assert (await harness.store.get(lookup=harness.lookup)).status is (
         TaskStatus.AWAITING_APPROVAL
     )
     assert harness.adapter.call_count == 0

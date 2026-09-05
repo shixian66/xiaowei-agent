@@ -27,6 +27,7 @@ from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
+    TASK_SUBMISSIONS,
     TASKS,
 )
 
@@ -134,6 +135,30 @@ def test_rev_0002_has_the_expected_revision_chain() -> None:
 
     assert revision.revision == "0002_task_execution_columns"
     assert revision.down_revision == "0001_initial"
+
+
+def test_rev_0003_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0003_task_submissions as revision,
+    )
+
+    assert revision.revision == "0003_task_submissions"
+    assert revision.down_revision == "0002_task_execution_columns"
+
+
+def test_submission_table_has_one_row_per_task_and_complete_facts() -> None:
+    assert TASK_SUBMISSIONS.primary_key.columns.keys() == ["task_id"]
+    assert set(TASK_SUBMISSIONS.columns.keys()) == {
+        "task_id",
+        "envelope",
+        "context",
+        "as_of",
+        "submission_digest",
+    }
+    assert TASK_SUBMISSIONS.c.envelope.nullable is False
+    assert TASK_SUBMISSIONS.c.context.nullable is False
+    assert TASK_SUBMISSIONS.c.as_of.nullable is False
+    assert TASK_SUBMISSIONS.c.submission_digest.nullable is False
 
 
 def test_rev_0002_backfills_before_enforcing_constraints() -> None:

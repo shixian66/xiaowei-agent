@@ -9,10 +9,10 @@
 表达比用注释约定更强——PlanStore 不得变成状态、审批、证据或 render 的第二真源。
 """
 
-import asyncio
-from typing import Protocol
+from typing import Protocol, cast
 
 from xiaowei_agent.contracts import Contract, ExecutionPlan, ResolvedTarget
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 
 
 class PlanStoreError(Exception):
@@ -70,9 +70,10 @@ class InMemoryPlanStore:
     一把 ``asyncio.Lock`` 串行化写入，与 ``InMemoryTaskStore`` 同一取舍。
     """
 
-    def __init__(self) -> None:
-        self._plans: dict[str, StoredPlan] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, *, state: InMemoryPersistenceState | None = None) -> None:
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._plans = self._state.plans
+        self._lock = self._state.lock
 
     async def save(
         self, *, task_id: str, plan: ExecutionPlan, target: ResolvedTarget
@@ -91,4 +92,4 @@ class InMemoryPlanStore:
             stored = self._plans.get(task_id)
         if stored is None:
             raise PlanNotFoundError("no plan stored for this task", task_id=task_id)
-        return stored
+        return cast(StoredPlan, stored)

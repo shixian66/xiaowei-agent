@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xiaowei_agent.persistence.migrations.guards import MigrationSafetyError
 from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
@@ -48,12 +49,12 @@ async def test_rev_0002_round_trips_m4_data_and_restores_the_old_conflict_target
     clean_database: AsyncEngine, alembic_runners: tuple[Any, Any], store: Any, context: Any
 ) -> None:
     """降到 M4 后，旧代码使用的约束名与 SQL 形状都必须真的可用。"""
-    from tests.conftest import make_envelope
+    from tests.conftest import make_submission
 
-    await store.create_task(envelope=make_envelope(), context=context)
+    await store.create_task(submission=make_submission(context))
     run_upgrade, run_downgrade = alembic_runners
     async with clean_database.begin() as connection:
-        await connection.run_sync(run_downgrade, "0001_initial")
+        await connection.run_sync(run_downgrade, "0001_initial", True)
         constraints = await connection.execute(
             sa.text("SELECT conname FROM pg_constraint WHERE conrelid = 'tasks'::regclass")
         )
@@ -99,16 +100,16 @@ async def test_downgrade_then_upgrade_over_a_database_with_data(
     残留对象上"，不是"数据能存活"。残留的表会让下一次 upgrade 在"已存在"上失败，
     把一次可回滚的迁移变成需要人工清理的死局。
     """
-    from tests.conftest import make_envelope
+    from tests.conftest import make_submission
 
-    await store.create_task(envelope=make_envelope(), context=context)
+    await store.create_task(submission=make_submission(context))
     async with clean_database.connect() as connection:
         count = await connection.execute(sa.text("SELECT count(*) FROM tasks"))
         assert count.scalar_one() == 1
 
     run_upgrade, run_downgrade = alembic_runners
     async with clean_database.begin() as connection:
-        await connection.run_sync(run_downgrade)
+        await connection.run_sync(run_downgrade, "base", True)
     assert not ({table.name for table in ALL_TABLES} & await _table_names(clean_database))
 
     async with clean_database.begin() as connection:
@@ -124,12 +125,121 @@ async def test_lease_check_constraint_is_enforced_by_the_database(
     绕过 ``TaskStore`` 直接写半置位的租约必须被数据库拒绝——只有这样"两层"才不是
     一句空话。测试可以够到存储细节，生产代码不行。
     """
-    from tests.conftest import make_envelope
+    from tests.conftest import make_submission
 
-    record = await store.create_task(envelope=make_envelope(), context=context)
+    record = await store.create_task(submission=make_submission(context))
     with pytest.raises(sa.exc.IntegrityError):
         async with clean_database.begin() as connection:
             await connection.execute(
                 sa.text("UPDATE tasks SET lease_owner = 'w1' WHERE task_id = :task_id"),
                 {"task_id": record.task_id},
             )
+
+
+async def test_rev_0003_settles_only_non_terminal_m4_tasks_without_audit(
+    clean_database: AsyncEngine, alembic_runners: tuple[Any, Any]
+) -> None:
+    """历史提交事实不可伪造；迁移只终态化仍可能执行的任务。"""
+    run_upgrade, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0002_task_execution_columns")
+        for task_id, status, version, created_seq in (
+            ("legacy-active", "created", 3, 1001),
+            ("legacy-terminal", "succeeded", 5, 1002),
+        ):
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO tasks "
+                    "(task_id, tenant_id, environment_id, actor, idempotency_key, "
+                    "request_digest, status, version, created_seq, "
+                    "idempotency_scope_digest) VALUES "
+                    "(:task_id, 'tenant-a', 'dev', 'alice', :key, :digest, :status, "
+                    ":version, :created_seq, :scope_digest)"
+                ),
+                {
+                    "task_id": task_id,
+                    "key": f"key-{task_id}",
+                    "digest": "d" * 64,
+                    "status": status,
+                    "version": version,
+                    "created_seq": created_seq,
+                    "scope_digest": ("a" if task_id == "legacy-active" else "b") * 64,
+                },
+            )
+        await connection.run_sync(run_upgrade)
+
+    async with clean_database.connect() as connection:
+        rows = (
+            await connection.execute(
+                sa.text(
+                    "SELECT task_id, status, version, terminal_reason FROM tasks "
+                    "WHERE task_id LIKE 'legacy-%' ORDER BY task_id"
+                )
+            )
+        ).all()
+        audit_count = await connection.scalar(
+            sa.text(
+                "SELECT count(*) FROM task_audit_events "
+                "WHERE task_id IN ('legacy-active', 'legacy-terminal')"
+            )
+        )
+    assert rows == [
+        ("legacy-active", "failed", 4, "legacy_task_without_submission"),
+        ("legacy-terminal", "succeeded", 5, None),
+    ]
+    assert audit_count == 0
+
+
+async def test_rev_0003_downgrade_rejects_submission_data_by_default(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_submission
+
+    await store.create_task(submission=make_submission(context))
+    _, run_downgrade = alembic_runners
+    with pytest.raises(MigrationSafetyError):
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0002_task_execution_columns")
+
+    async with clean_database.connect() as connection:
+        assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
+        revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+    assert revision == "0003_task_submissions"
+
+
+async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    run_upgrade, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        await connection.run_sync(
+            run_downgrade, "0002_task_execution_columns", True
+        )
+        row = (
+            await connection.execute(
+                sa.text(
+                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+        ).one()
+        assert row == ("failed", "m5_downgrade_discarded")
+        await connection.run_sync(run_upgrade)
+        restored = (
+            await connection.execute(
+                sa.text(
+                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+        ).one()
+    assert restored == ("failed", "m5_downgrade_discarded")

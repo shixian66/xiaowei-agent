@@ -30,12 +30,15 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     StrictInt,
     StrictStr,
+    TaskLookup,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     TraceEvent,
     TransitionResult,
     content_digest,
 )
+from xiaowei_agent.persistence.rows import dump_contract
 from xiaowei_agent.planning import canonical_json
 
 Clock: TypeAlias = Callable[[], _dt.datetime]
@@ -119,6 +122,16 @@ def idempotency_scope_digest(
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
+def submission_digest(submission: TaskSubmission) -> str:
+    """完整提交事实的一致性 checksum；不作为抗篡改证明。"""
+    payload = {
+        "envelope": dump_contract(submission.envelope),
+        "context": dump_contract(submission.context),
+        "as_of": submission.as_of.isoformat(),
+    }
+    return content_digest(canonical_json(payload).decode("utf-8"))
+
+
 class TransitionCommand(Contract):
     """``transition`` 的入参 DTO。
 
@@ -155,17 +168,15 @@ class LeaseCommand(Contract):
 
 
 class TaskStore(Protocol):
-    async def create_task(
-        self, *, envelope: RequestEnvelope, context: RequestContext
-    ) -> TaskRecord:
+    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
         """按 ``(tenant_id, environment_id, idempotency_key)`` 幂等创建。
 
         :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
         :raises IdempotencyConflictError: 同一作用域内同键但**语义**不同的请求。
         """
 
-    async def get(self, task_id: str) -> TaskRecord:
-        """:raises TaskNotFoundError: 任务不存在。"""
+    async def get(self, *, lookup: TaskLookup) -> TaskRecord:
+        """:raises TaskNotFoundError: 任务不存在或不属于指定作用域。"""
 
     async def transition(
         self,

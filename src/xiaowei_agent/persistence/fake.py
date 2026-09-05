@@ -15,7 +15,6 @@
 模块里就地重写任何判定**，哪怕只是"顺手内联一个条件"：那正是分叉的起点。
 """
 
-import asyncio
 import datetime as _dt
 import uuid
 from typing import Final, TypeVar
@@ -23,10 +22,10 @@ from typing import Final, TypeVar
 from xiaowei_agent.contracts import (
     ApprovalRequest,
     LeaseGrant,
-    RequestContext,
-    RequestEnvelope,
+    TaskLookup,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     TraceEvent,
     TransitionResult,
 )
@@ -39,6 +38,7 @@ from xiaowei_agent.persistence.decisions import (
     may_renew_lease,
     stale_lease_sort_key,
 )
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
@@ -58,18 +58,19 @@ IS_FAKE: Final[bool] = True
 
 
 class InMemoryTaskStore:
-    def __init__(self, *, clock: Clock) -> None:
+    def __init__(
+        self, *, clock: Clock, state: InMemoryPersistenceState | None = None
+    ) -> None:
         self._clock = clock
-        self._records: dict[str, TaskRecord] = {}
-        self._by_key: dict[tuple[str, str, str], str] = {}
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._records = self._state.tasks
+        self._by_key = self._state.task_ids_by_key
         # 两张 append-only 台账都按 task_id 分桶，序号是桶内下标 + 1。
         # 不用扁平 list：PostgreSQL 那边的主键是 ``(task_id, seq)``，扁平结构没有
         # "本任务第几条"这个概念，两个实现会对同一次写入给出不同的序号。
-        self._approvals: dict[str, list[ApprovalRequest]] = {}
-        self._audit_events: dict[str, list[TraceEvent]] = {}
-        self._next_token = 1
-        self._next_created_seq = 1
-        self._lock = asyncio.Lock()
+        self._approvals = self._state.approvals
+        self._audit_events = self._state.audit_events
+        self._lock = self._state.lock
 
     def _require(self, task_id: str) -> TaskRecord:
         try:
@@ -77,9 +78,9 @@ class InMemoryTaskStore:
         except KeyError as exc:
             raise TaskNotFoundError(task_id=task_id) from exc
 
-    async def create_task(
-        self, *, envelope: RequestEnvelope, context: RequestContext
-    ) -> TaskRecord:
+    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+        envelope = submission.envelope
+        context = submission.context
         # 先校验上下文一致性，再谈幂等：不一致时连"属于哪个作用域"都不成立。
         if not context_matches_envelope(envelope, context):
             raise ContextMismatchError("envelope and context disagree on execution context")
@@ -103,18 +104,25 @@ class InMemoryTaskStore:
                 request_digest=digest,
                 status=TaskStatus.CREATED,
                 version=0,
-                created_seq=self._next_created_seq,
+                created_seq=self._state.next_created_seq,
                 attempt_number=0,
                 task_failure_count=0,
                 next_attempt_at=None,
             )
-            self._next_created_seq += 1
+            self._state.next_created_seq += 1
             self._records[record.task_id] = record
+            self._state.submissions[record.task_id] = submission
             self._by_key[scope] = record.task_id
             return record
 
-    async def get(self, task_id: str) -> TaskRecord:
-        return self._require(task_id)
+    async def get(self, *, lookup: TaskLookup) -> TaskRecord:
+        current = self._require(lookup.task_id)
+        if (
+            current.tenant_id != lookup.tenant_id
+            or current.environment_id != lookup.environment_id
+        ):
+            raise TaskNotFoundError(task_id=lookup.task_id)
+        return current
 
     async def transition(
         self,
@@ -155,7 +163,7 @@ class InMemoryTaskStore:
             current = self._require(task_id)
             if not may_acquire_lease(current, owner=owner, now=self._clock()):
                 return None
-            token = self._next_token
+            token = self._state.next_fencing_token
             expires = self._clock() + _dt.timedelta(seconds=ttl_seconds)
             # **先构造并校验，再写入**：反过来会在参数非法时先污染 store，再抛
             # ValidationError，留下一个带着无效租约字段的任务记录。
@@ -169,7 +177,7 @@ class InMemoryTaskStore:
                     "fencing_token": token,
                 }
             )
-            self._next_token += 1
+            self._state.next_fencing_token += 1
             self._records[task_id] = updated
             return grant
 

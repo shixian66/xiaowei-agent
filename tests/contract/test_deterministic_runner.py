@@ -79,7 +79,7 @@ async def test_runner_leaves_the_terminal_decision_to_the_runtime() -> None:
     """
     harness = RunnerHarness(GOLDEN)
     await harness.start()
-    assert (await harness.store.get(harness.task_id)).status is TaskStatus.RUNNING
+    assert (await harness.store.get(lookup=harness.lookup)).status is TaskStatus.RUNNING
 
 
 async def test_plan_and_target_are_saved_before_execution() -> None:
@@ -153,7 +153,7 @@ async def test_runner_adopts_the_store_winner_on_cas_failure() -> None:
     await harness.ensure_task()
     await harness.store.transition(
         task_id=harness.task_id,
-        expected_version=(await harness.store.get(harness.task_id)).version,
+        expected_version=(await harness.store.get(lookup=harness.lookup)).version,
         to_status=TaskStatus.CANCELED,
     )
     with pytest.raises(RuntimeError):
@@ -171,7 +171,7 @@ async def test_rejected_transition_stops_the_run_with_zero_calls() -> None:
     harness = RunnerHarness(GOLDEN)
     await harness.ensure_task()
     # 推到 AWAITING_APPROVAL：非终态（租约可取），但 → PLANNING 不是合法迁移。
-    record = await harness.store.get(harness.task_id)
+    record = await harness.store.get(lookup=harness.lookup)
     for status in (TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL):
         result = await harness.store.transition(
             task_id=harness.task_id,

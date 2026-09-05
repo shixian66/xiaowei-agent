@@ -41,6 +41,7 @@ from xiaowei_agent.contracts import (
     StageOutcome,
     StepCondition,
     StepConditionKind,
+    TaskLookup,
     TaskOutcome,
     TaskRecord,
     TaskStatus,
@@ -191,7 +192,13 @@ class DeterministicStepRunner:
         """
         await self._plans.save(task_id=task_id, plan=plan, target=target)
         grant = await self._acquire(task_id)
-        record = await self._tasks.get(task_id)
+        record = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
         for status in (TaskStatus.PLANNING, TaskStatus.RUNNING):
             record = await self._advance(
                 task_id, record.version, status, grant.fencing_token
@@ -240,7 +247,13 @@ class DeterministicStepRunner:
             plan=plan, stored_target=stored.target, target=target, context=context
         )
         grant = await self._acquire(task_id)
-        record = await self._tasks.get(task_id)
+        record = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
         if record.status is TaskStatus.AWAITING_APPROVAL:
             record = await self._advance(
                 task_id, record.version, TaskStatus.RUNNING, grant.fencing_token
@@ -578,9 +591,8 @@ class DeterministicStepRunner:
             state=ApprovalState.PENDING,
         )
         await self._tasks.record_approval(request=request)
-        record = await self._tasks.get(task_id)
         await self._advance(
-            task_id, record.version, TaskStatus.AWAITING_APPROVAL, fencing_token
+            task_id, version, TaskStatus.AWAITING_APPROVAL, fencing_token
         )
         # 在 raise 之外拼装：拒绝路径的 raise 语句里不得出现任何插值，哪怕取值
         # 本身安全——这条不变量靠"语句里没有插值"来机械保证，不靠逐个判断。

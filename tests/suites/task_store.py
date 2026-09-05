@@ -26,7 +26,13 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from tests.conftest import drive_to_terminal, make_envelope
+from tests.conftest import (
+    drive_to_terminal,
+    lookup_for,
+    make_envelope,
+    make_lookup,
+    make_submission,
+)
 from tests.fakes.sinks import make_event
 
 from xiaowei_agent.contracts import (
@@ -76,15 +82,15 @@ def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]
 
 
 async def test_create_is_idempotent_by_key(store, context) -> None:
-    first = await store.create_task(envelope=make_envelope(), context=context)
-    second = await store.create_task(envelope=make_envelope(), context=context)
+    first = await store.create_task(submission=make_submission(context))
+    second = await store.create_task(submission=make_submission(context))
     assert first.task_id == second.task_id
     assert first.version == second.version
 
 
 async def test_new_task_has_initial_execution_accounting(store, context) -> None:
     """M5 的调度字段由存储层初始化，调用方不能自行猜默认值。"""
-    record = await store.create_task(envelope=make_envelope(), context=context)
+    record = await store.create_task(submission=make_submission(context))
     assert record.created_seq > 0
     assert record.attempt_number == 0
     assert record.task_failure_count == 0
@@ -94,10 +100,14 @@ async def test_new_task_has_initial_execution_accounting(store, context) -> None
 async def test_created_sequence_is_strictly_increasing(store, context) -> None:
     """created_seq 是稳定近似公平顺序；至少必须唯一且随创建推进。"""
     first = await store.create_task(
-        envelope=make_envelope(idempotency_key="created-seq-1"), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="created-seq-1")
+        )
     )
     second = await store.create_task(
-        envelope=make_envelope(idempotency_key="created-seq-2"), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="created-seq-2")
+        )
     )
     assert second.created_seq > first.created_seq
 
@@ -108,37 +118,48 @@ async def test_retry_with_a_new_request_id_reuses_the_same_task(store, context) 
     request_id 每次重试都不同，若把它算进去重摘要，合法重试会被误判为"同键不同
     请求"而被拒。
     """
-    first = await store.create_task(envelope=make_envelope(request_id="r1"), context=context)
-    second = await store.create_task(envelope=make_envelope(request_id="r2"), context=context)
+    first = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(request_id="r1"))
+    )
+    second = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(request_id="r2"))
+    )
     assert first.task_id == second.task_id
     assert first.version == second.version
 
 
 async def test_idempotency_key_is_scoped_per_tenant(store, context) -> None:
     """全局键表会让跨租户同键共用一个任务。"""
-    a = await store.create_task(envelope=make_envelope(), context=context)
+    a = await store.create_task(submission=make_submission(context))
     other = context.model_copy(update={"tenant_id": "other-tenant"})
     b = await store.create_task(
-        envelope=make_envelope(tenant_id="other-tenant"), context=other
+        submission=make_submission(
+            other, envelope=make_envelope(tenant_id="other-tenant")
+        )
     )
     assert a.task_id != b.task_id
 
 
 async def test_idempotency_key_is_scoped_per_environment(store, context) -> None:
-    a = await store.create_task(envelope=make_envelope(), context=context)
+    a = await store.create_task(submission=make_submission(context))
     other = context.model_copy(update={"environment_id": "staging"})
     b = await store.create_task(
-        envelope=make_envelope(environment_id="staging"), context=other
+        submission=make_submission(
+            other, envelope=make_envelope(environment_id="staging")
+        )
     )
     assert a.task_id != b.task_id
 
 
 async def test_same_key_with_a_different_request_is_rejected(store, context) -> None:
     """否则第二个不同的请求会静默搭上第一个任务的结果。"""
-    await store.create_task(envelope=make_envelope(), context=context)
+    await store.create_task(submission=make_submission(context))
     with pytest.raises(IdempotencyConflictError):
         await store.create_task(
-            envelope=make_envelope(text="a completely different question"), context=context
+            submission=make_submission(
+                context,
+                envelope=make_envelope(text="a completely different question"),
+            )
         )
 
 
@@ -149,20 +170,49 @@ async def test_same_key_with_a_different_request_is_rejected(store, context) -> 
 async def test_envelope_context_mismatch_is_rejected(store, context, field, value) -> None:
     """伪造信封上下文必须拒绝，否则任务会记在未经解析确认的租户/环境下。"""
     with pytest.raises(ContextMismatchError):
-        await store.create_task(envelope=make_envelope(**{field: value}), context=context)
+        await store.create_task(
+            submission=make_submission(
+                context, envelope=make_envelope(**{field: value})
+            )
+        )
 
 
 async def test_envelope_without_environment_id_is_accepted(store, context) -> None:
     """environment_id 在信封中可选；缺省时以 context 解析结果为准（ADR-007 D2）。"""
     record = await store.create_task(
-        envelope=make_envelope(environment_id=None), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(environment_id=None)
+        )
     )
     assert record.environment_id == context.environment_id
 
 
-async def test_get_unknown_task_raises(store) -> None:
+async def test_get_unknown_task_raises(store, context) -> None:
     with pytest.raises(TaskNotFoundError):
-        await store.get("no-such-task")
+        await store.get(lookup=make_lookup("no-such-task", context))
+
+
+async def test_get_rejects_the_wrong_tenant_without_leaking_existence(
+    store, context
+) -> None:
+    record = await store.create_task(submission=make_submission(context))
+    lookup = lookup_for(record).model_copy(update={"tenant_id": "other-tenant"})
+    with pytest.raises(TaskNotFoundError):
+        await store.get(lookup=lookup)
+
+
+async def test_get_rejects_the_wrong_environment_without_leaking_existence(
+    store, context
+) -> None:
+    record = await store.create_task(submission=make_submission(context))
+    lookup = lookup_for(record).model_copy(update={"environment_id": "prod"})
+    with pytest.raises(TaskNotFoundError):
+        await store.get(lookup=lookup)
+
+
+async def test_bare_task_id_is_not_a_supported_read_shape(store, task) -> None:
+    with pytest.raises(TypeError):
+        await store.get(task.task_id)
 
 
 # --- CAS 与迁移合法性 ---------------------------------------------------------
@@ -225,7 +275,7 @@ async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task
     )
     assert resumed.applied
     assert resumed.winner.terminal_reason is None
-    assert (await store.get(task.task_id)).terminal_reason is None
+    assert (await store.get(lookup=lookup_for(task))).terminal_reason is None
 
 
 # --- 租约与 fencing -----------------------------------------------------------
@@ -311,7 +361,7 @@ async def test_stale_token_write_is_rejected(store, task, clock) -> None:
     old = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     result = await store.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -325,7 +375,7 @@ async def test_stale_token_write_is_rejected(store, task, clock) -> None:
 async def test_write_without_token_under_live_lease_is_rejected(store, task) -> None:
     """不传 token 即跳过 fencing 校验，等于没有 fencing。"""
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     result = await store.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -389,7 +439,7 @@ async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
     """
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     result = await store.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -405,7 +455,7 @@ async def test_expired_lease_cannot_be_used_with_its_old_token_either(
     """过期后必须重新 acquire，带着旧 token 同样不行。"""
     granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     result = await store.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -467,10 +517,10 @@ async def test_invalid_lease_arguments_do_not_mutate_the_store(
     先污染 store 再抛 ValidationError 会留下一个带着无效租约字段的任务记录，
     之后所有 fencing 判定都建立在这条脏记录上。
     """
-    before = await store.get(task.task_id)
+    before = await store.get(lookup=lookup_for(task))
     with pytest.raises(ValidationError):
         await store.acquire_lease(task_id=task.task_id, owner=owner, ttl_seconds=ttl)
-    after = await store.get(task.task_id)
+    after = await store.get(lookup=lookup_for(task))
     assert after == before
 
 
@@ -480,7 +530,9 @@ async def test_invalid_lease_arguments_do_not_mutate_the_store(
 async def _leased_task(store, context, key: str, owner: str):
     """新建一个任务并给它一份租约，返回 ``(record, grant)``。"""
     record = await store.create_task(
-        envelope=make_envelope(idempotency_key=key), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key=key)
+        )
     )
     grant = await store.acquire_lease(task_id=record.task_id, owner=owner, ttl_seconds=30)
     return record, grant
@@ -512,7 +564,7 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     """
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
-    current = await store.get(task.task_id)
+    current = await store.get(lookup=lookup_for(task))
     result = await store.transition(
         task_id=task.task_id,
         expected_version=current.version,
@@ -592,7 +644,7 @@ async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, cloc
     clock.advance(seconds=5)
     pending, _ = await _leased_task(store, context, "idem-pending", "w2")
 
-    current = await store.get(finished.task_id)
+    current = await store.get(lookup=lookup_for(finished))
     done = await store.transition(
         task_id=finished.task_id,
         expected_version=current.version,
@@ -603,8 +655,8 @@ async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, cloc
     clock.advance(seconds=31)
 
     # 前提必须成立，否则这条用例什么也没测：终态任务仍带着租约字段，且**更早过期**。
-    settled = await store.get(finished.task_id)
-    waiting = await store.get(pending.task_id)
+    settled = await store.get(lookup=lookup_for(finished))
+    waiting = await store.get(lookup=lookup_for(pending))
     assert settled.status in TERMINAL_STATUSES
     assert settled.fencing_token is not None
     assert settled.lease_expires_at is not None
@@ -624,9 +676,9 @@ async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
     """
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
-    before = await store.get(task.task_id)
+    before = await store.get(lookup=lookup_for(task))
     assert await store.list_stale_leases(limit=10)
-    assert await store.get(task.task_id) == before
+    assert await store.get(lookup=lookup_for(task)) == before
 
 
 @pytest.mark.parametrize("bad_limit", [0, -1, True], ids=["zero", "negative", "bool"])
@@ -643,8 +695,8 @@ async def test_list_stale_leases_rejects_a_bad_limit(store, bad_limit: object) -
     "terminal", sorted(TERMINAL_STATUSES, key=lambda s: s.value), ids=lambda s: s.value
 )
 async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -> None:
-    await drive_to_terminal(store, task.task_id, terminal)
-    current = await store.get(task.task_id)
+    await drive_to_terminal(store, lookup_for(task), terminal)
+    current = await store.get(lookup=lookup_for(task))
     for target in TaskStatus:
         result = await store.transition(
             task_id=task.task_id, expected_version=current.version, to_status=target
@@ -689,9 +741,11 @@ async def test_approval_seq_increases_within_a_task(store, task) -> None:
 
 async def test_approval_seq_is_scoped_per_task(store, context) -> None:
     """序号按任务分桶。用全局计数器同样能让上一条通过，但两个任务会共享号段。"""
-    first = await store.create_task(envelope=make_envelope(), context=context)
+    first = await store.create_task(submission=make_submission(context))
     second = await store.create_task(
-        envelope=make_envelope(idempotency_key="idem-2"), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="idem-2")
+        )
     )
     assert await store.record_approval(request=make_approval(first.task_id)) == 1
     assert await store.record_approval(request=make_approval(second.task_id)) == 1
@@ -720,9 +774,11 @@ async def test_audit_seq_increases_within_a_task(store, task) -> None:
 
 
 async def test_audit_seq_is_scoped_per_task(store, context) -> None:
-    first = await store.create_task(envelope=make_envelope(), context=context)
+    first = await store.create_task(submission=make_submission(context))
     second = await store.create_task(
-        envelope=make_envelope(idempotency_key="idem-2"), context=context
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="idem-2")
+        )
     )
     stage = PipelineStage.ADMISSION
     assert await store.record_audit_event(
@@ -793,6 +849,9 @@ CONTRACT_CASES = (
     test_envelope_context_mismatch_is_rejected,
     test_envelope_without_environment_id_is_accepted,
     test_get_unknown_task_raises,
+    test_get_rejects_the_wrong_tenant_without_leaking_existence,
+    test_get_rejects_the_wrong_environment_without_leaking_existence,
+    test_bare_task_id_is_not_a_supported_read_shape,
     test_cas_success_bumps_version,
     test_cas_failure_returns_the_storage_winner,
     test_illegal_transition_is_rejected,

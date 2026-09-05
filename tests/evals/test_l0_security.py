@@ -329,7 +329,7 @@ async def test_a29_a_written_terminal_state_is_not_overwritten() -> None:
     """A29：Reflection 建议降级，但终态已写——终态不可被后到事件改写。"""
     harness = RuntimeHarness(GOLDEN)
     await harness.handle("最近30分钟有哪些慢查询")
-    record = await harness.store.get(harness.task_id)
+    record = await harness.store.get(lookup=harness.lookup)
     assert record.status is TaskStatus.SUCCEEDED
 
     result = await harness.store.transition(

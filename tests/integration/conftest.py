@@ -156,9 +156,12 @@ def _run_upgrade(connection: Any, revision: str = "head") -> None:
     command.upgrade(config, revision)
 
 
-def _run_downgrade(connection: Any, revision: str = "base") -> None:
+def _run_downgrade(
+    connection: Any, revision: str = "base", allow_destructive: bool = False
+) -> None:
     config = _alembic_config()
     config.attributes["connection"] = connection
+    config.attributes["allow_destructive"] = allow_destructive
     command.downgrade(config, revision)
 
 

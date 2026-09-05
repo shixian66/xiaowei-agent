@@ -89,6 +89,17 @@ TASKS: Final = sa.Table(
 它会重新打开"过期后不带 token 即可写入"那个缺口。
 """
 
+TASK_SUBMISSIONS: Final = sa.Table(
+    "task_submissions",
+    METADATA,
+    sa.Column("task_id", sa.Text, primary_key=True),
+    sa.Column("envelope", JSONB, nullable=False),
+    sa.Column("context", JSONB, nullable=False),
+    sa.Column("as_of", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("submission_digest", sa.CHAR(64), nullable=False),
+)
+"""不可变提交事实；终态 M4 历史任务是唯一允许缺少该行的任务。"""
+
 TASK_PLANS: Final = sa.Table(
     "task_plans",
     METADATA,
@@ -150,4 +161,11 @@ TASK_AUDIT_EVENTS: Final = sa.Table(
 因此审计表不会成为新的脱敏缺口——不需要在持久化层再写一份脱敏。
 """
 
-ALL_TABLES: Final = (TASKS, TASK_PLANS, TASK_EVIDENCE, TASK_APPROVALS, TASK_AUDIT_EVENTS)
+ALL_TABLES: Final = (
+    TASKS,
+    TASK_SUBMISSIONS,
+    TASK_PLANS,
+    TASK_EVIDENCE,
+    TASK_APPROVALS,
+    TASK_AUDIT_EVENTS,
+)

@@ -29,7 +29,9 @@ from xiaowei_agent.contracts import (
     EffectClass,
     RequestContext,
     RequestEnvelope,
+    TaskLookup,
     TaskStatus,
+    TaskSubmission,
     ToolCall,
     ToolResult,
 )
@@ -37,6 +39,7 @@ from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
 from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
 from xiaowei_agent.planning.starrocks.compiler import PLAN_BUDGET
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
@@ -87,8 +90,10 @@ class CountingApprovalGate:
 class RecordingTaskStore(InMemoryTaskStore):
     """记录每次 transition 的入参，用于断言 CAS 与 fencing 的携带情况。"""
 
-    def __init__(self, *, clock: ManualClock) -> None:
-        super().__init__(clock=clock)
+    def __init__(
+        self, *, clock: ManualClock, state: InMemoryPersistenceState | None = None
+    ) -> None:
+        super().__init__(clock=clock, state=state)
         self.transitions: list[dict[str, Any]] = []
         self.approvals: list[Any] = []
 
@@ -128,9 +133,14 @@ class RunnerHarness:
     ) -> None:
         self.task_id = TASK_ID
         self.clock = ManualClock(start=dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC))
-        self.store = RecordingTaskStore(clock=self.clock)
-        self.plan_store = InMemoryPlanStore()
-        self.ledger = BlindEvidenceLedger() if blind_ledger else InMemoryEvidenceLedger()
+        self.state = InMemoryPersistenceState()
+        self.store = RecordingTaskStore(clock=self.clock, state=self.state)
+        self.plan_store = InMemoryPlanStore(state=self.state)
+        self.ledger = (
+            BlindEvidenceLedger(state=self.state)
+            if blind_ledger
+            else InMemoryEvidenceLedger(state=self.state)
+        )
         self.adapter = StarRocksRecordingAdapter(recording)
         self.gateway = CountingGateway(
             DeterministicToolGateway(adapters={"starrocks": self.adapter})
@@ -193,7 +203,8 @@ class RunnerHarness:
         if self._created:
             return
         record = await self.store.create_task(
-            envelope=RequestEnvelope(
+            submission=TaskSubmission(
+                envelope=RequestEnvelope(
                 request_id="r1",
                 tenant_id=self.context.tenant_id,
                 actor=self.context.actor,
@@ -201,8 +212,10 @@ class RunnerHarness:
                 text="慢查询",
                 idempotency_key="idem-1",
                 environment_id=self.context.environment_id,
-            ),
-            context=self.context,
+                ),
+                context=self.context,
+                as_of=self.clock(),
+            )
         )
         # task_id 由存储层生成，不由调用方指定。
         self.task_id = record.task_id
@@ -230,7 +243,15 @@ class RunnerHarness:
         from tests.conftest import drive_to_terminal
 
         await self.ensure_task()
-        await drive_to_terminal(self.store, self.task_id, status)
+        await drive_to_terminal(self.store, self.lookup, status)
+
+    @property
+    def lookup(self) -> TaskLookup:
+        return TaskLookup(
+            task_id=self.task_id,
+            tenant_id=self.context.tenant_id,
+            environment_id=self.context.environment_id,
+        )
 
     def reset_call_counters(self) -> None:
         self.adapter.call_count = 0

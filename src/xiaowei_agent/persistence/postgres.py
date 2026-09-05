@@ -39,11 +39,11 @@ from xiaowei_agent.contracts import (
     EvidenceEnvelope,
     ExecutionPlan,
     LeaseGrant,
-    RequestContext,
-    RequestEnvelope,
     ResolvedTarget,
+    TaskLookup,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     TraceEvent,
     TransitionResult,
 )
@@ -78,6 +78,7 @@ from xiaowei_agent.persistence.schema import (
     TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
     TASK_PLANS,
+    TASK_SUBMISSIONS,
     TASKS,
 )
 from xiaowei_agent.persistence.store import (
@@ -91,6 +92,7 @@ from xiaowei_agent.persistence.store import (
     UnscopedAuditEventError,
     idempotency_scope_digest,
     request_dedup_digest,
+    submission_digest,
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
@@ -203,9 +205,19 @@ class PostgresTaskStore:
             raise TaskNotFoundError(task_id=task_id)
         return row
 
-    async def get(self, task_id: str) -> TaskRecord:
+    async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         async with self._engine.connect() as connection:
-            row = await self._require_row(connection, task_id, for_update=False)
+            result = await connection.execute(
+                sa.select(TASKS).where(
+                    TASKS.c.task_id == lookup.task_id,
+                    TASKS.c.tenant_id == lookup.tenant_id,
+                    TASKS.c.environment_id == lookup.environment_id,
+                )
+            )
+            found = result.mappings().first()
+            if found is None:
+                raise TaskNotFoundError(task_id=lookup.task_id)
+            row = _as_row(found)
         return row_to_record(row)
 
     async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
@@ -226,9 +238,7 @@ class PostgresTaskStore:
 
     # --- 写 -------------------------------------------------------------------
 
-    async def create_task(
-        self, *, envelope: RequestEnvelope, context: RequestContext
-    ) -> TaskRecord:
+    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
         """幂等创建。**并发重复请求只产生一个任务事实。**
 
         用 ``ON CONFLICT DO NOTHING`` 而不是"先查后插"：后者两步之间有窗口，两个
@@ -237,12 +247,14 @@ class PostgresTaskStore:
 
         冲突时不返回行，此时再按幂等作用域读回既存记录并比对摘要。
         """
-        if not context_matches_envelope(envelope, context):
+        envelope = submission.envelope
+        request_context = submission.context
+        if not context_matches_envelope(envelope, request_context):
             raise ContextMismatchError("envelope and context disagree on execution context")
-        digest = request_dedup_digest(envelope, context)
+        digest = request_dedup_digest(envelope, request_context)
         scope_digest = idempotency_scope_digest(
-            tenant_id=context.tenant_id,
-            environment_id=context.environment_id,
+            tenant_id=request_context.tenant_id,
+            environment_id=request_context.environment_id,
             idempotency_key=envelope.idempotency_key,
         )
         async with self._engine.begin() as connection:
@@ -251,9 +263,9 @@ class PostgresTaskStore:
             ).scalar_one()
             candidate = TaskRecord(
                 task_id=str(uuid.uuid4()),
-                tenant_id=context.tenant_id,
-                environment_id=context.environment_id,
-                actor=context.actor,
+                tenant_id=request_context.tenant_id,
+                environment_id=request_context.environment_id,
+                actor=request_context.actor,
                 idempotency_key=envelope.idempotency_key,
                 request_digest=digest,
                 status=TaskStatus.CREATED,
@@ -274,6 +286,15 @@ class PostgresTaskStore:
             )
             inserted = (await connection.execute(insert)).mappings().first()
             if inserted is not None:
+                await connection.execute(
+                    sa.insert(TASK_SUBMISSIONS).values(
+                        task_id=candidate.task_id,
+                        envelope=dump_contract(submission.envelope),
+                        context=dump_contract(submission.context),
+                        as_of=submission.as_of,
+                        submission_digest=submission_digest(submission),
+                    )
+                )
                 return row_to_record(_as_row(inserted))
             existing = (
                 (
@@ -288,8 +309,8 @@ class PostgresTaskStore:
             )
         record = row_to_record(_as_row(existing))
         same_scope = (
-            record.tenant_id == context.tenant_id
-            and record.environment_id == context.environment_id
+            record.tenant_id == request_context.tenant_id
+            and record.environment_id == request_context.environment_id
             and record.idempotency_key == envelope.idempotency_key
         )
         if not same_scope or record.request_digest != digest:

@@ -54,7 +54,7 @@ async def test_runtime_writes_the_terminal_state_to_the_task_store() -> None:
     """终态由 Runtime 写，且只写一次。"""
     harness = RuntimeHarness(GOLDEN)
     payload = await harness.handle("最近30分钟有哪些慢查询")
-    record = await harness.store.get(harness.task_id)
+    record = await harness.store.get(lookup=harness.lookup)
     assert record.status is payload.status
     assert record.status in {TaskStatus.SUCCEEDED, TaskStatus.INDETERMINATE}
 

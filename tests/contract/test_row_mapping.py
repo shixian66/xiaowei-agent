@@ -24,14 +24,18 @@ from tests.fakes.sinks import make_event
 from xiaowei_agent.contracts import (
     ApprovalRequest,
     ApprovalState,
+    Channel,
     Contract,
     EvidenceEnvelope,
     ExecutionPlan,
     ExternalSource,
     PipelineStage,
+    RequestContext,
+    RequestEnvelope,
     ResolvedTarget,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     TraceEvent,
 )
 from xiaowei_agent.persistence.rows import (
@@ -68,6 +72,26 @@ _APPROVAL = ApprovalRequest(
     state=ApprovalState.PENDING,
 )
 
+_SUBMISSION = TaskSubmission(
+    envelope=RequestEnvelope(
+        request_id="r1",
+        tenant_id="dev-local",
+        actor="alice",
+        channel=Channel.API,
+        text="why is the query slow",
+        idempotency_key="idem-1",
+        environment_id="dev",
+    ),
+    context=RequestContext(
+        tenant_id="dev-local",
+        actor="alice",
+        environment_id="dev",
+        trace_id="0" * 32,
+        policy_revision="policy-1",
+    ),
+    as_of=_NOW,
+)
+
 _RECORD = TaskRecord(
     task_id="t1",
     tenant_id="dev-local",
@@ -93,6 +117,8 @@ _AUDIT_EVENT = make_event(stage=PipelineStage.ADMISSION, detail={"reason": "deni
 # 它此前是靠人记得往参数列表里加一项的——``task_audit_events.event`` 就是这样漏掉的：
 # 表建了、载荷类型写在 schema 的 docstring 里，往返测试却一次没跑过它。
 _JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
+    ("task_submissions", "envelope"): _SUBMISSION.envelope,
+    ("task_submissions", "context"): _SUBMISSION.context,
     ("task_plans", "plan"): FIXTURE_PLAN,
     ("task_plans", "target"): FIXTURE_TARGET,
     ("task_evidence", "envelope"): _EVIDENCE,
@@ -101,6 +127,8 @@ _JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
 }
 
 _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
+    ("task_submissions", "envelope"): type(_SUBMISSION.envelope),
+    ("task_submissions", "context"): type(_SUBMISSION.context),
     ("task_plans", "plan"): ExecutionPlan,
     ("task_plans", "target"): ResolvedTarget,
     ("task_evidence", "envelope"): EvidenceEnvelope,
