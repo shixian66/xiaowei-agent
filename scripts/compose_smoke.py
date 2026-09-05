@@ -134,21 +134,32 @@ class ComposeSession:
         return command
 
     def run(
-        self, *arguments: str, timeout: float = _COMMAND_TIMEOUT
+        self,
+        *arguments: str,
+        timeout: float = _COMMAND_TIMEOUT,
+        failure_code: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if "up" in arguments:
             self.up_started = True
-        return self.run_docker(self.argv(*arguments), timeout=timeout)
+        return self.run_docker(
+            self.argv(*arguments),
+            timeout=timeout,
+            failure_code=failure_code,
+        )
 
     def run_docker(
-        self, argv: Sequence[str], *, timeout: float
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        failure_code: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """运行 Docker argv；只把当前固定阶段码带过脱敏边界。"""
         failure: SmokeError | None = None
         try:
             return self.runner(argv, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
-            failure = SmokeError(self.failure_code)
+            failure = SmokeError(failure_code or self.failure_code)
         if failure is not None:
             raise failure
         raise RuntimeError("unreachable Docker command outcome")
@@ -190,8 +201,20 @@ def run_smoke(
             secret_path.unlink(missing_ok=True)
 
 
-def _task(session: ComposeSession, *arguments: str) -> dict[str, object]:
-    result = session.run("exec", "-T", "api", "xiaowei", *arguments, timeout=30.0)
+def _task(
+    session: ComposeSession,
+    *arguments: str,
+    failure_code: str = "SMOKE_CLI_COMMAND_FAILED",
+) -> dict[str, object]:
+    result = session.run(
+        "exec",
+        "-T",
+        "api",
+        "xiaowei",
+        *arguments,
+        timeout=30.0,
+        failure_code=failure_code,
+    )
     try:
         value = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -211,7 +234,13 @@ def _task_id(value: dict[str, object]) -> str:
 def _wait_task(session: ComposeSession, task_id: str, *, timeout: float) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        value = _task(session, "task", "get", task_id)
+        value = _task(
+            session,
+            "task",
+            "get",
+            task_id,
+            failure_code="SMOKE_CLI_QUERY_FAILED",
+        )
         if value.get("status") in _TERMINAL:
             return value
         time.sleep(0.5)
@@ -294,6 +323,7 @@ def _psql(session: ComposeSession, task_id: str, statement: str) -> str:
         "-c",
         statement,
         timeout=30.0,
+        failure_code="SMOKE_POSTGRES_OBSERVATION_FAILED",
     ).stdout.strip()
 
 
@@ -329,6 +359,7 @@ def _submit(session: ComposeSession, *, key: str, text: str = _TEXT) -> str:
             text,
             "--idempotency-key",
             key,
+            failure_code="SMOKE_CLI_SUBMIT_FAILED",
         )
     )
 
@@ -368,12 +399,24 @@ def _full_workflow(session: ComposeSession) -> None:
     _wait_ready(timeout=60.0)
 
     session.failure_code = "SMOKE_BASELINE_COMMAND_FAILED"
-    session.run("up", "-d", "--no-deps", "worker", timeout=60.0)
+    session.run(
+        "up",
+        "-d",
+        "--no-deps",
+        "worker",
+        timeout=60.0,
+        failure_code="SMOKE_BASELINE_WORKER_START_FAILED",
+    )
     baseline_key = f"baseline-{uuid.uuid4().hex}"
     baseline_id = _submit(session, key=baseline_key, text=f"{_TEXT} {sensitive_canary}")
     _require_succeeded(_wait_task(session, baseline_id, timeout=120.0))
     baseline_evidence = _normalised_evidence(session, baseline_id)
-    session.run("stop", "worker", timeout=30.0)
+    session.run(
+        "stop",
+        "worker",
+        timeout=30.0,
+        failure_code="SMOKE_BASELINE_WORKER_STOP_FAILED",
+    )
 
     barrier_files = (*session.files, _ROOT / "docker-compose.barrier.yml")
     barrier = ComposeSession(

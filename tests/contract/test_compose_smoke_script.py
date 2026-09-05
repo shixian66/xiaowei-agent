@@ -152,6 +152,45 @@ def test_compose_command_failure_is_attributed_to_the_current_phase() -> None:
 
 
 @pytest.mark.parametrize(
+    ("action", "code"),
+    [
+        (lambda session: compose_smoke._submit(session, key="key"), "SMOKE_CLI_SUBMIT_FAILED"),
+        (
+            lambda session: compose_smoke._wait_task(session, "task", timeout=1.0),
+            "SMOKE_CLI_QUERY_FAILED",
+        ),
+        (
+            lambda session: compose_smoke._psql(session, "task", "SELECT 1"),
+            "SMOKE_POSTGRES_OBSERVATION_FAILED",
+        ),
+    ],
+)
+def test_external_action_failure_is_attributed_without_exposing_output(
+    action: Any, code: str
+) -> None:
+    class FailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            raise subprocess.CalledProcessError(
+                1, argv, stderr="private-external-output"
+            )
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=FailingRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+
+    with pytest.raises(SmokeError, match=rf"^{code}$") as caught:
+        action(session)
+    assert caught.value.__context__ is None
+    assert "private-external-output" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
     ("logs", "expected"),
     [
         ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
