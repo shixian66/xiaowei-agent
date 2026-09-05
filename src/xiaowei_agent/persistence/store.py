@@ -107,6 +107,18 @@ def request_dedup_digest(envelope: RequestEnvelope, context: RequestContext) -> 
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
+def idempotency_scope_digest(
+    *, tenant_id: str, environment_id: str, idempotency_key: str
+) -> str:
+    """定长幂等作用域 checksum；命中后仍必须回查三项明文。"""
+    payload = {
+        "tenant_id": tenant_id,
+        "environment_id": environment_id,
+        "idempotency_key": idempotency_key,
+    }
+    return content_digest(canonical_json(payload).decode("utf-8"))
+
+
 class TransitionCommand(Contract):
     """``transition`` 的入参 DTO。
 

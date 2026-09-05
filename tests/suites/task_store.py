@@ -82,6 +82,26 @@ async def test_create_is_idempotent_by_key(store, context) -> None:
     assert first.version == second.version
 
 
+async def test_new_task_has_initial_execution_accounting(store, context) -> None:
+    """M5 的调度字段由存储层初始化，调用方不能自行猜默认值。"""
+    record = await store.create_task(envelope=make_envelope(), context=context)
+    assert record.created_seq > 0
+    assert record.attempt_number == 0
+    assert record.task_failure_count == 0
+    assert record.next_attempt_at is None
+
+
+async def test_created_sequence_is_strictly_increasing(store, context) -> None:
+    """created_seq 是稳定近似公平顺序；至少必须唯一且随创建推进。"""
+    first = await store.create_task(
+        envelope=make_envelope(idempotency_key="created-seq-1"), context=context
+    )
+    second = await store.create_task(
+        envelope=make_envelope(idempotency_key="created-seq-2"), context=context
+    )
+    assert second.created_seq > first.created_seq
+
+
 async def test_retry_with_a_new_request_id_reuses_the_same_task(store, context) -> None:
     """同键同语义的正常重试必须复用任务。
 
@@ -764,6 +784,8 @@ async def test_audit_events_do_not_require_the_task_to_exist(store) -> None:
 
 CONTRACT_CASES = (
     test_create_is_idempotent_by_key,
+    test_new_task_has_initial_execution_accounting,
+    test_created_sequence_is_strictly_increasing,
     test_retry_with_a_new_request_id_reuses_the_same_task,
     test_idempotency_key_is_scoped_per_tenant,
     test_idempotency_key_is_scoped_per_environment,

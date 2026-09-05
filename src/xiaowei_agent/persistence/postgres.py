@@ -72,6 +72,7 @@ from xiaowei_agent.persistence.rows import (
     row_to_record,
 )
 from xiaowei_agent.persistence.schema import (
+    CREATED_SEQUENCE,
     FENCING_SEQUENCE,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
@@ -88,6 +89,7 @@ from xiaowei_agent.persistence.store import (
     TaskNotFoundError,
     TransitionCommand,
     UnscopedAuditEventError,
+    idempotency_scope_digest,
     request_dedup_digest,
 )
 
@@ -238,23 +240,38 @@ class PostgresTaskStore:
         if not context_matches_envelope(envelope, context):
             raise ContextMismatchError("envelope and context disagree on execution context")
         digest = request_dedup_digest(envelope, context)
-        candidate = TaskRecord(
-            task_id=str(uuid.uuid4()),
+        scope_digest = idempotency_scope_digest(
             tenant_id=context.tenant_id,
             environment_id=context.environment_id,
-            actor=context.actor,
             idempotency_key=envelope.idempotency_key,
-            request_digest=digest,
-            status=TaskStatus.CREATED,
-            version=0,
-        )
-        insert = (
-            sa.dialects.postgresql.insert(TASKS)
-            .values(record_to_row(candidate))
-            .on_conflict_do_nothing(constraint="uq_tasks_idempotency_scope")
-            .returning(TASKS)
         )
         async with self._engine.begin() as connection:
+            created_seq = (
+                await connection.execute(sa.select(CREATED_SEQUENCE.next_value()))
+            ).scalar_one()
+            candidate = TaskRecord(
+                task_id=str(uuid.uuid4()),
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                actor=context.actor,
+                idempotency_key=envelope.idempotency_key,
+                request_digest=digest,
+                status=TaskStatus.CREATED,
+                version=0,
+                created_seq=created_seq,
+                attempt_number=0,
+                task_failure_count=0,
+                next_attempt_at=None,
+            )
+            insert = (
+                sa.dialects.postgresql.insert(TASKS)
+                .values(
+                    **record_to_row(candidate),
+                    idempotency_scope_digest=scope_digest,
+                )
+                .on_conflict_do_nothing(constraint="uq_tasks_idempotency_scope_digest")
+                .returning(TASKS)
+            )
             inserted = (await connection.execute(insert)).mappings().first()
             if inserted is not None:
                 return row_to_record(_as_row(inserted))
@@ -262,9 +279,7 @@ class PostgresTaskStore:
                 (
                     await connection.execute(
                         sa.select(TASKS).where(
-                            TASKS.c.tenant_id == context.tenant_id,
-                            TASKS.c.environment_id == context.environment_id,
-                            TASKS.c.idempotency_key == envelope.idempotency_key,
+                            TASKS.c.idempotency_scope_digest == scope_digest
                         )
                     )
                 )
@@ -272,7 +287,12 @@ class PostgresTaskStore:
                 .one()
             )
         record = row_to_record(_as_row(existing))
-        if record.request_digest != digest:
+        same_scope = (
+            record.tenant_id == context.tenant_id
+            and record.environment_id == context.environment_id
+            and record.idempotency_key == envelope.idempotency_key
+        )
+        if not same_scope or record.request_digest != digest:
             raise IdempotencyConflictError("idempotency key reused for a different request")
         return record
 

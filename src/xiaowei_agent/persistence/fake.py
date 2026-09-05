@@ -68,6 +68,7 @@ class InMemoryTaskStore:
         self._approvals: dict[str, list[ApprovalRequest]] = {}
         self._audit_events: dict[str, list[TraceEvent]] = {}
         self._next_token = 1
+        self._next_created_seq = 1
         self._lock = asyncio.Lock()
 
     def _require(self, task_id: str) -> TaskRecord:
@@ -102,7 +103,12 @@ class InMemoryTaskStore:
                 request_digest=digest,
                 status=TaskStatus.CREATED,
                 version=0,
+                created_seq=self._next_created_seq,
+                attempt_number=0,
+                task_failure_count=0,
+                next_attempt_at=None,
             )
+            self._next_created_seq += 1
             self._records[record.task_id] = record
             self._by_key[scope] = record.task_id
             return record

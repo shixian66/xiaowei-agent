@@ -23,7 +23,12 @@ from alembic.config import Config
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from xiaowei_agent.persistence.schema import ALL_TABLES, FENCING_SEQUENCE_NAME
+from xiaowei_agent.persistence.schema import (
+    ALL_TABLES,
+    CREATED_SEQUENCE_NAME,
+    FENCING_SEQUENCE_NAME,
+    TASKS,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,13 +85,65 @@ def test_each_table_ddl_matches_the_schema_module() -> None:
     emitted = _create_table_statements(_offline_upgrade_sql())
     dialect = postgresql.dialect()
     for table in ALL_TABLES:
+        if table is TASKS:
+            continue
         expected = _normalise(str(CreateTable(table).compile(dialect=dialect)))
         assert emitted[table.name] == expected, f"{table.name} 的迁移 DDL 与 schema.py 不一致"
+
+
+def test_task_head_has_all_declared_columns_and_constraints() -> None:
+    """后续 revision 用 ALTER 演进 tasks；head 仍须与活 schema 的名称集合一致。"""
+    sql = _offline_upgrade_sql()
+    declared_columns = {column.name for column in TASKS.columns}
+    for column in declared_columns:
+        assert re.search(rf"\b{re.escape(column)}\b", sql), column
+    declared_constraints = {item.name for item in TASKS.constraints if item.name is not None}
+    for constraint in declared_constraints:
+        assert constraint in sql
+
+
+def test_m5_execution_columns_are_declared_with_expected_types() -> None:
+    assert isinstance(TASKS.c.created_seq.type, sa.BigInteger)
+    assert isinstance(TASKS.c.attempt_number.type, sa.BigInteger)
+    assert isinstance(TASKS.c.task_failure_count.type, sa.BigInteger)
+    assert isinstance(TASKS.c.next_attempt_at.type, sa.DateTime)
+    assert TASKS.c.created_seq.nullable is False
+    assert TASKS.c.attempt_number.nullable is False
+    assert TASKS.c.task_failure_count.nullable is False
+    assert TASKS.c.next_attempt_at.nullable is True
+
+
+def test_m5_replaces_the_variable_width_idempotency_constraint() -> None:
+    names = {item.name for item in TASKS.constraints if item.name is not None}
+    assert "uq_tasks_idempotency_scope_digest" in names
+    assert "uq_tasks_idempotency_scope" not in names
+    assert isinstance(TASKS.c.idempotency_scope_digest.type, sa.CHAR)
+    assert TASKS.c.idempotency_scope_digest.type.length == 64
 
 
 def test_migration_creates_the_fencing_sequence() -> None:
     """fencing token 的单调性由序列提供；序列没建出来，acquire_lease 会在运行时才炸。"""
     assert f"CREATE SEQUENCE {FENCING_SEQUENCE_NAME}" in _offline_upgrade_sql()
+    assert f"CREATE SEQUENCE {CREATED_SEQUENCE_NAME}" in _offline_upgrade_sql()
+
+
+def test_rev_0002_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0002_task_execution_columns as revision,
+    )
+
+    assert revision.revision == "0002_task_execution_columns"
+    assert revision.down_revision == "0001_initial"
+
+
+def test_rev_0002_backfills_before_enforcing_constraints() -> None:
+    sql = _offline_upgrade_sql()
+    backfill = sql.index("row_number() OVER (ORDER BY task_id)")
+    not_null = sql.index("ALTER COLUMN created_seq SET NOT NULL")
+    assert backfill < not_null
+    assert "setval('task_created_seq'" in sql
+    assert "uq_tasks_idempotency_scope_digest" in sql
+    assert "DROP CONSTRAINT uq_tasks_idempotency_scope" in sql
 
 
 def test_downgrade_drops_everything_upgrade_created() -> None:
@@ -102,7 +159,7 @@ def test_downgrade_drops_everything_upgrade_created() -> None:
     config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline/offline")
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        command.downgrade(config, "0001_initial:base", sql=True)
+        command.downgrade(config, "head:base", sql=True)
     emitted = buffer.getvalue()
     for table in ALL_TABLES:
         assert f"DROP TABLE {table.name}" in emitted

@@ -33,6 +33,11 @@ token，而重复 token 会让整条 fencing 规则失效。序列天然单调�
 
 FENCING_SEQUENCE: Final = sa.Sequence(FENCING_SEQUENCE_NAME, start=1)
 
+CREATED_SEQUENCE_NAME: Final = "task_created_seq"
+"""任务创建顺序的数据库分配源；只承诺稳定的近似公平，不承诺 commit FIFO。"""
+
+CREATED_SEQUENCE: Final = sa.Sequence(CREATED_SEQUENCE_NAME, start=1)
+
 TASKS: Final = sa.Table(
     "tasks",
     METADATA,
@@ -44,16 +49,27 @@ TASKS: Final = sa.Table(
     sa.Column("request_digest", sa.Text, nullable=False),
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("version", sa.Integer, nullable=False),
+    sa.Column("created_seq", sa.BigInteger, CREATED_SEQUENCE, nullable=False),
+    sa.Column("attempt_number", sa.BigInteger, nullable=False, server_default="0"),
+    sa.Column("task_failure_count", sa.BigInteger, nullable=False, server_default="0"),
+    sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("idempotency_scope_digest", sa.CHAR(64), nullable=False),
     sa.Column("terminal_reason", sa.Text, nullable=True),
     sa.Column("lease_owner", sa.Text, nullable=True),
     sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("fencing_token", sa.BigInteger, nullable=True),
     # 幂等作用域。全局键表会让跨租户同键共用一个任务，
     # test_idempotency_key_is_scoped_per_tenant 承重。
+    sa.UniqueConstraint("created_seq", name="uq_tasks_created_seq"),
     sa.UniqueConstraint(
-        "tenant_id", "environment_id", "idempotency_key", name="uq_tasks_idempotency_scope"
+        "idempotency_scope_digest", name="uq_tasks_idempotency_scope_digest"
     ),
     sa.CheckConstraint("version >= 0", name="ck_tasks_version_non_negative"),
+    sa.CheckConstraint("created_seq > 0", name="ck_tasks_created_seq_positive"),
+    sa.CheckConstraint("attempt_number >= 0", name="ck_tasks_attempt_number_non_negative"),
+    sa.CheckConstraint(
+        "task_failure_count >= 0", name="ck_tasks_task_failure_count_non_negative"
+    ),
     sa.CheckConstraint(
         "fencing_token IS NULL OR fencing_token > 0", name="ck_tasks_fencing_token_positive"
     ),

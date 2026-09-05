@@ -68,6 +68,10 @@ class TaskRecord(Contract):
     request_digest: Sha256Hex
     status: TaskStatus
     version: StrictInt = Field(ge=0)
+    created_seq: StrictInt = Field(gt=0)
+    attempt_number: StrictInt = Field(ge=0)
+    task_failure_count: StrictInt = Field(ge=0)
+    next_attempt_at: AwareDatetime | None
     lease_owner: StrictStr | None = None
     lease_expires_at: AwareDatetime | None = None
     fencing_token: StrictInt | None = Field(default=None, gt=0)

@@ -11,7 +11,11 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei_agent.persistence.schema import ALL_TABLES, FENCING_SEQUENCE_NAME
+from xiaowei_agent.persistence.schema import (
+    ALL_TABLES,
+    CREATED_SEQUENCE_NAME,
+    FENCING_SEQUENCE_NAME,
+)
 
 
 async def _table_names(engine: AsyncEngine) -> set[str]:
@@ -37,6 +41,53 @@ async def test_upgrade_creates_the_fencing_sequence(clean_database: AsyncEngine)
             sa.text("SELECT sequencename FROM pg_sequences WHERE schemaname = current_schema()")
         )
         assert FENCING_SEQUENCE_NAME in {row[0] for row in rows}
+        assert CREATED_SEQUENCE_NAME in {row[0] for row in rows}
+
+
+async def test_rev_0002_round_trips_m4_data_and_restores_the_old_conflict_target(
+    clean_database: AsyncEngine, alembic_runners: tuple[Any, Any], store: Any, context: Any
+) -> None:
+    """降到 M4 后，旧代码使用的约束名与 SQL 形状都必须真的可用。"""
+    from tests.conftest import make_envelope
+
+    await store.create_task(envelope=make_envelope(), context=context)
+    run_upgrade, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0001_initial")
+        constraints = await connection.execute(
+            sa.text("SELECT conname FROM pg_constraint WHERE conrelid = 'tasks'::regclass")
+        )
+        assert "uq_tasks_idempotency_scope" in {row[0] for row in constraints}
+        await connection.execute(
+            sa.text(
+                "INSERT INTO tasks "
+                "(task_id, tenant_id, environment_id, actor, idempotency_key, "
+                "request_digest, status, version) "
+                "VALUES (:task_id, :tenant_id, :environment_id, :actor, :key, "
+                ":digest, 'created', 0) "
+                "ON CONFLICT ON CONSTRAINT uq_tasks_idempotency_scope DO NOTHING"
+            ),
+            {
+                "task_id": "m4-shape-task",
+                "tenant_id": context.tenant_id,
+                "environment_id": context.environment_id,
+                "actor": context.actor,
+                "key": "m4-shape-key",
+                "digest": "d" * 64,
+            },
+        )
+        await connection.run_sync(run_upgrade, "head")
+
+    async with clean_database.connect() as connection:
+        row = await connection.execute(
+            sa.text(
+                "SELECT created_seq, attempt_number, task_failure_count, next_attempt_at "
+                "FROM tasks WHERE task_id = 'm4-shape-task'"
+            )
+        )
+        values = row.one()
+        assert values[0] > 0
+        assert values[1:] == (0, 0, None)
 
 
 async def test_downgrade_then_upgrade_over_a_database_with_data(

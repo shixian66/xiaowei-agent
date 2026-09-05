@@ -23,6 +23,8 @@ from xiaowei_agent.contracts import (
     IntentSource,
     PipelineStage,
     StageOutcome,
+    TaskRecord,
+    TaskStatus,
     TraceEvent,
 )
 
@@ -67,6 +69,20 @@ def _samples() -> list[Contract]:
             policy_revision="r",
             error=None,
             detail={"k": "v"},
+        ),
+        TaskRecord(
+            task_id="t1",
+            tenant_id="dev-local",
+            environment_id="dev",
+            actor="alice",
+            idempotency_key="idem-1",
+            request_digest="c" * 64,
+            status=TaskStatus.CREATED,
+            version=0,
+            created_seq=1,
+            attempt_number=0,
+            task_failure_count=0,
+            next_attempt_at=None,
         ),
     ]
 

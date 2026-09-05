@@ -77,6 +77,10 @@ _RECORD = TaskRecord(
     request_digest="c" * 64,
     status=TaskStatus.RUNNING,
     version=3,
+    created_seq=11,
+    attempt_number=2,
+    task_failure_count=1,
+    next_attempt_at=None,
 )
 
 
@@ -191,9 +195,26 @@ def test_row_keeps_none_columns_explicitly() -> None:
     丢失——与 ``decisions.apply_transition`` 挡的是同一个错误，只是换了一层。
     """
     row = record_to_row(_RECORD)
-    for column in ("terminal_reason", "lease_owner", "lease_expires_at", "fencing_token"):
+    for column in (
+        "terminal_reason",
+        "lease_owner",
+        "lease_expires_at",
+        "fencing_token",
+        "next_attempt_at",
+    ):
         assert column in row
         assert row[column] is None
+
+
+def test_execution_accounting_columns_are_not_lost() -> None:
+    next_attempt = _NOW + _dt.timedelta(minutes=5)
+    record = _RECORD.model_copy(update={"next_attempt_at": next_attempt})
+    row = record_to_row(record)
+    assert row["created_seq"] == 11
+    assert row["attempt_number"] == 2
+    assert row["task_failure_count"] == 1
+    assert row["next_attempt_at"] == next_attempt
+    assert row_to_record(row) == record
 
 
 def test_status_is_stored_as_its_string_value() -> None:

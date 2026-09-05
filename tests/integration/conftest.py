@@ -34,7 +34,11 @@ from xiaowei_agent.persistence.postgres import (
     PostgresPlanStore,
     PostgresTaskStore,
 )
-from xiaowei_agent.persistence.schema import ALL_TABLES, FENCING_SEQUENCE_NAME
+from xiaowei_agent.persistence.schema import (
+    ALL_TABLES,
+    CREATED_SEQUENCE_NAME,
+    FENCING_SEQUENCE_NAME,
+)
 
 DSN_ENV_VAR = "PYTEST_POSTGRES_DSN"
 """**不带 ``XIAOWEI_`` 前缀**：它是测试 harness 配置，不是应用配置。见模块 docstring。"""
@@ -146,16 +150,16 @@ def _alembic_config() -> Config:
     return config
 
 
-def _run_upgrade(connection: Any) -> None:
+def _run_upgrade(connection: Any, revision: str = "head") -> None:
     config = _alembic_config()
     config.attributes["connection"] = connection
-    command.upgrade(config, "head")
+    command.upgrade(config, revision)
 
 
-def _run_downgrade(connection: Any) -> None:
+def _run_downgrade(connection: Any, revision: str = "base") -> None:
     config = _alembic_config()
     config.attributes["connection"] = connection
-    command.downgrade(config, "base")
+    command.downgrade(config, revision)
 
 
 @pytest.fixture
@@ -170,6 +174,9 @@ async def clean_database(migrated_engine: AsyncEngine) -> AsyncIterator[AsyncEng
         await connection.execute(sa.text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
         await connection.execute(
             sa.text(f"ALTER SEQUENCE {FENCING_SEQUENCE_NAME} RESTART WITH 1")
+        )
+        await connection.execute(
+            sa.text(f"ALTER SEQUENCE {CREATED_SEQUENCE_NAME} RESTART WITH 1")
         )
     yield migrated_engine
 
