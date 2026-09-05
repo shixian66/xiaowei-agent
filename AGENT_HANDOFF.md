@@ -7,8 +7,8 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
-| 截止时间 | 2026-09-04（Asia/Shanghai） |
-| 阶段 | **M0–M4 已验收并合入 `main`；M4 已归档；下一步等待 M5 详细计划与开工指令** |
+| 截止时间 | 2026-09-05（Asia/Shanghai） |
+| 阶段 | **M0–M4 已验收并合入 `main`；M4 已归档；M5 详细计划已批准并开始实施** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -37,6 +37,8 @@
 | M4 工作分支 | `claude/m4-postgres-taskstore` 已合入 `main`，保留备查 |
 | M4 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`**。跑绿的是 CI 里一次性的 PostgreSQL service container |
 | CI 第七个 job | `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。镜像已钉 digest（`postgres:16.10@sha256:21f6013…c3c1`）。该 job **不是** GitHub 强制的 required status check——分支保护仍不可用 |
+| M5 详细计划 | [docs/plans/M5-api-worker-compose.md](docs/plans/M5-api-worker-compose.md) V5.4.1，经 Claude 最终复审批准开工 |
+| M5 工作分支 | `claude/m5-api-worker-compose`，从 `fa6039bfbce680c0720606b2c34e556ce06c18f4` 创建；实施中，尚未验收 |
 | 下一里程碑 | **M5**：API + Worker + Compose |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
@@ -83,6 +85,7 @@
 | [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) | 首批能力、初始执行上下文与真实调用许可 | Accepted 2026-09-01 |
 | [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) | 工程与测试基线：Python 3.11、pytest、security marker gate、Ruff、mypy | Accepted 2026-09-01 |
 | [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) | `plan_hash` 规范形状、审批绑定与工具准入 | Accepted 2026-09-02 |
+| [ADR-010](docs/adr/ADR-010-m5-durable-attempt-and-compose-boundary.md) | M5 持久执行尝试、事务审计、readiness 与本地 Compose 边界 | Accepted 2026-09-05 |
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
@@ -127,7 +130,7 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 6. ~~M3 实现与验收~~ **已完成**：首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过；以 `--ff-only` 合入 `main`（`64d295c`），CI run `33708913738` 六项全绿，逐条提交历史已归档。
 7. ~~M4 详细计划编写与审批~~ **已完成**：V1–V1.2 经 Codex 审核批准开工。
 8. ~~M4 实现与验收~~ **已完成**：四轮打回后以 `--ff-only` 合入 `main`（`714df07`），CI run `33842205710` 七项全绿，逐条提交历史已归档。
-9. **下一步：M5** 完成 API/CLI/Worker/Compose。**落 Worker 时必须同时把 `TraceSink` 接到 `record_audit_event`**，否则「审计事件」这条交付物在 M5 结束时仍只有测试级证据。
+9. **实施中：M5** 按获批的 [M5 实施计划](docs/plans/M5-api-worker-compose.md) 完成 API/CLI/Worker/Compose。**落 Worker 时必须同时把 `TraceSink` 接到 `record_audit_event`**，否则「审计事件」这条交付物在 M5 结束时仍只有测试级证据。
 10. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项

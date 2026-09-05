@@ -210,6 +210,7 @@ class WorkflowRunner(Protocol):
         self,
         task_id: str,
         *,
+        grant: TaskAttemptGrant,
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
@@ -219,13 +220,14 @@ class WorkflowRunner(Protocol):
         task_id: str,
         external_input: ExternalInput | None = None,
         *,
+        grant: TaskAttemptGrant,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
     ) -> TaskOutcome: ...
 ```
 
-`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要一个活的对照物**：判断"暂停期间 policy 或目标是否变了"，必须拿调用方当下重新解析出的目标与 `policy_revision`，去比对 `PlanStore` 里存的那份。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。这两项按定义不可持久化，它们的语义就是"现在的值"。又因为 Runner 不拥有领域安全规则，它不能自己去重解析，只能由调用方传入。
+`grant` 是 Worker 通过 TaskStore 唯一领取点取得的当前执行权；Runner 不再自行领取 lease，进入后先用 grant 的 owner/token 续租验证，再启动 heartbeat。`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要一个活的对照物**：判断"暂停期间 policy 或目标是否变了"，必须拿调用方当下重新解析出的目标与 `policy_revision`，去比对 `PlanStore` 里存的那份。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。这两项按定义不可持久化，它们的语义就是"现在的值"。又因为 Runner 不拥有领域安全规则，它不能自己去重解析，只能由调用方传入。
 
 M2 曾把接口写成 `start(task_id)` / `resume(task_id, external_input)`。那个形状隐含"只要 task_id 就能推进任务"，与上一段的职责不相容；M3 落地真实 Runner 时据此修正了契约。**不要把它改回窄签名**：唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类，那会让 Runtime→Runner 这条边在类型层完全失去契约。
 
@@ -346,6 +348,12 @@ sha256(canonical_json({
 
 TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移、worker lease、heartbeat、fencing token、stale recovery、终态保护、审批记录和审计事件。所有写入都必须采纳存储层返回的 winner；调用方不能用本地旧对象覆盖 winner。
 
+M5 在同一个 aggregate 事务端口内增加 submission、dispatch/attempt、step execution journal 与 retry handoff。发现候选仍是只读查询；唯一领取点 `begin_task_attempt()` 在行锁内返回当前 winner、grant 与本次提交的不可变 submission，拒绝分支不泄漏用户原文。步骤调用只有 `begin_step_attempt()` 返回 `PROCEED` 后才能进入 ToolGateway；步骤终局、Evidence 与 audit 原子提交，确认丢失后以持久化 digest 重放收敛。
+
+fencing token 有两个推进点：成功取得 lease 时推进；`schedule_retry()` 提交成功时再次推进，使旧 grant 立即失效。heartbeat 不推进 token。任务 attempt、任务失败预算与 Worker 进程级基础设施故障窗口是三套独立计数；基础设施故障不写任务失败。
+
+状态终态化、retry 调度与 step checkpoint 的对应审计和状态事实同事务提交。成功领取只改变可由 TTL 自愈的 lease/attempt，不强制事务审计。持久化写必须区分 confirmed rollback 与 not-confirmed，不能从异常类别猜测数据库是否已经提交。
+
 **stale recovery 拆成「发现」与「接管」两半，只有前一半在 TaskStore 里**（M4）：`list_stale_leases(*, limit)` 是只读方法，返回「曾被租出、租约已过期、未终态」的任务，按 `(lease_expires_at, task_id)` 稳定排序。它不 claim、不调度、不判断审批是否应当恢复、不改变任何状态；接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。把两半合成一个方法会让 TaskStore 长出调度能力，而调度属 Worker。
 
 **审计事件由 TaskStore 承接写入，消费路径不在 M4**：`record_audit_event(*, event)` 是 append-only 写入，按 `(task_id, seq)` 编号并返回本次分配到的 `seq`。**证据表替代不了审计**——证据回答「看到了什么」，审计回答「系统做了什么、准入判成了什么」，一次被策略拒绝的调用不产生任何证据但必须留下审计。载荷是 M2 的 `TraceEvent`，其 `detail` 已在契约层做过键值双向脱敏并限长，持久化层不再脱敏第二次。
@@ -427,10 +435,13 @@ ExternalContent(
 docker compose
 ├── api        Agent Gateway + 同步 Runtime
 ├── worker     WorkflowRunner 异步执行进程
+├── migrate    一次性 schema upgrade，成功后 API/Worker 才启动
 └── postgres   TaskStore / approval / audit / evidence index
 ```
 
 API 与 worker 可以共用一个应用镜像和 Python 包，通过进程角色区分；镜像内部不直接绑定某个渠道。真实基础设施通过网络配置和 adapter 接入，不能把凭证 bake 进镜像。
+
+API、worker 与 migrate 使用同一个应用镜像。`ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，API 不直接依赖 Engine 或 persistence。secret 只通过文件引用挂载；API 只向宿主 loopback 发布端口，PostgreSQL 与 Worker 不发布宿主端口。
 
 初始不强制 Redis。只有出现可测的队列吞吐、分布式租约或缓存需求时，才增加服务，并先更新契约、迁移和运维文档。PostgreSQL 的全文检索先满足知识/证据索引；只有 eval 和查询指标证明不足时才引入 pgvector。
 
