@@ -8,7 +8,6 @@ TaskStore 走到一个终态，用于验证 Runner 契约、终态语义与 ``Ta
 from typing import Final
 
 from xiaowei_agent.contracts import (
-    ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
     ApprovalRequest,
     ExecutionPlan,
@@ -20,6 +19,7 @@ from xiaowei_agent.contracts import (
     TaskStatus,
 )
 from xiaowei_agent.persistence.store import (
+    TaskAttemptGrant,
     TaskIdCarryingError,
     TaskStore,
     TransitionCommand,
@@ -45,27 +45,16 @@ class ScriptedRunner:
         *,
         outcome_status: TaskStatus,
         terminal_reason: str | None = None,
-        owner: str = "scripted-runner",
     ) -> None:
         if outcome_status not in TERMINAL_STATUSES:
             raise ValueError("ScriptedRunner requires a terminal outcome status")
-        # 从 RUNNING 不可达的终态（如 REJECTED）必须在构造时就拒绝，否则要跑到
-        # 最后一步迁移才失败。
-        if outcome_status not in ALLOWED_TRANSITIONS[TaskStatus.RUNNING]:
-            raise ValueError(
-                f"{outcome_status.value} is not reachable from RUNNING; "
-                "ScriptedRunner only drives the running → terminal edge"
-            )
-        if not owner or owner != owner.strip():
-            raise ValueError("owner must be a non-empty, unpadded string")
         self._store = store
         self._status = outcome_status
         self._reason = terminal_reason
-        self._owner = owner
 
     async def start(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         *,
         plan: ExecutionPlan,
         target: ResolvedTarget,
@@ -80,35 +69,30 @@ class ScriptedRunner:
         同理由 ``DeterministicStepRunner`` 承担实际校验。
         """
         return await self._drive(
-            task_id,
+            grant,
             path=(TaskStatus.PLANNING, TaskStatus.RUNNING),
             context=context,
         )
 
     async def resume(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
     ) -> TaskOutcome:
-        return await self._drive(task_id, path=(TaskStatus.RUNNING,), context=context)
+        return await self._drive(grant, path=(TaskStatus.RUNNING,), context=context)
 
     async def _drive(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         *,
         path: tuple[TaskStatus, ...],
         context: RequestContext,
     ) -> TaskOutcome:
-        lease = await self._store.acquire_lease(
-            task_id=task_id, owner=self._owner, ttl_seconds=30
-        )
-        if lease is None:
-            # 终态任务不可 acquire lease，因此这也是"任务已结束"的信号。
-            raise TerminalOrLeasedTaskError(task_id=task_id)
+        task_id = grant.task_id
         record = await self._store.get(
             lookup=TaskLookup(
                 task_id=task_id,
@@ -124,11 +108,13 @@ class ScriptedRunner:
                     task_id=task_id,
                     expected_version=record.version,
                     to_status=status,
-                    fencing_token=lease.fencing_token,
+                    fencing_token=grant.fencing_token,
                     terminal_reason=self._reason if status is self._status else None,
                 )
             )
             if not result.applied:
+                if result.winner.status in TERMINAL_STATUSES:
+                    raise TerminalOrLeasedTaskError(task_id=task_id)
                 raise RuntimeError(f"transition rejected: {result.rejection}")
             record = result.winner  # 必须采纳存储层 winner，不用本地旧对象
         return TaskOutcome(

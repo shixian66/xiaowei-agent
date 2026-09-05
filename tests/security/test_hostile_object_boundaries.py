@@ -116,12 +116,14 @@ def test_canonical_json_rejection_carries_no_type_name() -> None:
 async def test_gateway_non_conforming_return_carries_no_type_name() -> None:
     """adapter 返回值的类可以是运行时构造的，类名因此是外部数据。"""
 
+    from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
+
     class _Adapter:
         async def execute(self, call: object, *, context: object) -> object:
             return _hostile_type()()
 
     gateway = DeterministicToolGateway(adapters={FIXTURE_TOOL_CALL.gateway: _Adapter()})
-    with pytest.raises(TypeError) as caught:
+    with pytest.raises(MalformedAdapterResponseError) as caught:
         await gateway.invoke(
             FIXTURE_TOOL_CALL,
             context=_context(),

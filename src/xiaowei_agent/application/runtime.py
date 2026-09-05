@@ -35,6 +35,7 @@ from xiaowei_agent.capabilities.specs import OP_LIST, SLOW_QUERY_SURFACE
 from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_target
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
+    AttemptIntent,
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
@@ -55,7 +56,12 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
-from xiaowei_agent.persistence.store import Clock, TaskStore, TransitionCommand
+from xiaowei_agent.persistence.store import (
+    Clock,
+    TaskAttemptCommand,
+    TaskStore,
+    TransitionCommand,
+)
 from xiaowei_agent.planning.starrocks.compiler import compile_plan
 from xiaowei_agent.planning.starrocks.params import (
     DEFAULT_MIN_QUERY_TIME_MS,
@@ -66,6 +72,7 @@ from xiaowei_agent.planning.starrocks.params import (
 )
 from xiaowei_agent.reflection.answerability import assess, terminal_status_for
 from xiaowei_agent.rendering.slow_query import render, render_pending
+from xiaowei_agent.runners.deterministic import LifecycleError
 from xiaowei_agent.runners.runner import WorkflowPaused, WorkflowRunner
 
 RENDER_REF: Final[None] = None
@@ -177,9 +184,20 @@ class XiaoweiRuntime:
             # 而是按**已经落库的**证据与终态重新投影——重跑会既违反 at-most-once，
             # 也会让第二次的回答与第一次不同。
             return await self._render_recorded(record=record, context=context)
+        attempt = await self._tasks.begin_task_attempt(
+            command=TaskAttemptCommand(
+                task_id=record.task_id,
+                intent=AttemptIntent.DISPATCH,
+                owner="runtime-handle",
+                ttl_seconds=60,
+                trace_id=context.trace_id,
+            )
+        )
+        if attempt.grant is None:
+            raise LifecycleError("task attempt was not granted", rejection=attempt.rejection)
         try:
             outcome = await self._runner.start(
-                record.task_id, plan=plan, target=target, context=context
+                attempt.grant, plan=plan, target=target, context=context
             )
         except WorkflowPaused as paused:
             evidences = await self._ledger.load(task_id=record.task_id)

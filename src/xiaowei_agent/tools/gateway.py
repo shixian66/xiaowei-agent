@@ -1,6 +1,6 @@
 """数据面唯一工具入口。
 
-六道闸依次生效，任一不过即拒绝且 **adapter 调用次数为 0**：
+七道闸依次生效，任一不过即拒绝且 **adapter 调用次数为 0**：
 
 1. **凭证与调用同属一个步骤** —— 防止拿 A 步骤的凭证执行 B 步骤。
 2. **凭证与调用内容一致** —— 重算 ``tool_call_hash`` 比对。凭证证明的是"**这一个**
@@ -63,6 +63,13 @@ _ERROR_MAP: Final[Mapping[AdapterStatus, tuple[str, ErrorCategory, bool]]] = Map
 )
 
 
+class MalformedAdapterResponseError(RuntimeError):
+    """Adapter returned outside its runtime contract; message never reflects the value."""
+
+    def __init__(self) -> None:
+        super().__init__("adapter returned a malformed response")
+
+
 def _map_error(status: AdapterStatus, cause: ExternalContent | None) -> AgentError | None:
     """把 adapter 状态归类为结构化错误；错误原文只留摘要引用。"""
     if status is AdapterStatus.OK:
@@ -103,7 +110,7 @@ class DeterministicToolGateway:
 
         :raises PermissionError: 凭证与调用不匹配、策略拒绝或触发 E1 硬闸。
         :raises LookupError: adapter 未注册。
-        :raises TypeError: adapter 返回值不是 ``AdapterResponse``。
+        :raises MalformedAdapterResponseError: adapter 返回值不是 ``AdapterResponse``。
         """
         if admission.step_id != call.step_id or admission.operation != call.operation:
             raise PermissionError("admission certificate does not match this step")
@@ -168,7 +175,7 @@ class DeterministicToolGateway:
         if not isinstance(response, AdapterResponse):
             # 不回显类型名：返回值来自 adapter，其类可以是运行时构造的，类名因此
             # 是外部数据。理由同 canonical._normalise。
-            raise TypeError("adapter returned a value that is not an AdapterResponse")
+            raise MalformedAdapterResponseError
         # adapter 出错时不得返回空成功：状态与结构化错误一起传出去，且不把半截
         # payload 当作证据。
         return self._issue(

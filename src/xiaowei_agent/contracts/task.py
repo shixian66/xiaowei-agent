@@ -44,7 +44,12 @@ class TaskLookup(Contract):
 ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = MappingProxyType(
     {
         TaskStatus.CREATED: frozenset(
-            {TaskStatus.PLANNING, TaskStatus.CANCELED, TaskStatus.FAILED}
+            {
+                TaskStatus.PLANNING,
+                TaskStatus.CANCELED,
+                TaskStatus.FAILED,
+                TaskStatus.REJECTED,
+            }
         ),
         TaskStatus.PLANNING: frozenset(
             {
@@ -61,6 +66,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
                 TaskStatus.FAILED,
                 TaskStatus.CANCELED,
                 TaskStatus.INDETERMINATE,
+                TaskStatus.REJECTED,
             }
         ),
         TaskStatus.AWAITING_APPROVAL: frozenset(

@@ -26,6 +26,7 @@ async def test_a_successful_run_emits_the_runner_stages_in_order() -> None:
     stages = [event.stage for event in harness.sink.events]
     assert stages == [
         PipelineStage.LIFECYCLE,
+        PipelineStage.LIFECYCLE,
         PipelineStage.ADMISSION,
         PipelineStage.GATEWAY,
         PipelineStage.EVIDENCE,

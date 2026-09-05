@@ -8,13 +8,28 @@ from tests.conftest import lookup_for
 from tests.fakes.admission import CONTEXT
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 
-from xiaowei_agent.contracts import TaskStatus
+from xiaowei_agent.contracts import AttemptIntent, TaskStatus
+from xiaowei_agent.persistence.store import TaskAttemptCommand
 from xiaowei_agent.runners.fake import ScriptedRunner, TerminalOrLeasedTaskError
 from xiaowei_agent.runners.runner import WorkflowRunner
 
 # ``WorkflowRunner`` 的活输入（见 ARCHITECTURE §5.6）。ScriptedRunner 不消费它们，
 # 但契约要求它们被传入——测试按契约调用，不按实现走捷径。
 _LIVE = {"plan": FIXTURE_PLAN, "target": FIXTURE_TARGET, "context": CONTEXT}
+
+
+async def _grant(store, task):
+    result = await store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=task.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="scripted-runner",
+            ttl_seconds=60,
+            trace_id=CONTEXT.trace_id,
+        )
+    )
+    assert result.grant is not None
+    return result.grant
 
 
 def test_scripted_runner_satisfies_the_workflow_runner_protocol(store) -> None:
@@ -24,27 +39,29 @@ def test_scripted_runner_satisfies_the_workflow_runner_protocol(store) -> None:
 
 async def test_runner_adopts_the_storage_winner_version(store, task) -> None:
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
-    outcome = await runner.start(task.task_id, **_LIVE)
+    outcome = await runner.start(await _grant(store, task), **_LIVE)
     assert outcome.status is TaskStatus.SUCCEEDED
     final = await store.get(lookup=lookup_for(task))
     assert final.version == 3  # created→planning→running→succeeded
 
 
 async def test_resume_on_a_terminal_task_does_not_overwrite_it(store, task) -> None:
-    """终态保护由存储层承重；Runner 只是拿不到租约而已。"""
+    """终态保护由存储层承重；旧 grant 不能覆盖已经落下的终态。"""
     runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
-    await runner.start(task.task_id, **_LIVE)
+    grant = await _grant(store, task)
+    await runner.start(grant, **_LIVE)
     before = await store.get(lookup=lookup_for(task))
     with pytest.raises(TerminalOrLeasedTaskError):
-        await runner.resume(task.task_id, context=CONTEXT, target=FIXTURE_TARGET)
+        await runner.resume(grant, context=CONTEXT, target=FIXTURE_TARGET)
     after = await store.get(lookup=lookup_for(task))
     assert after.version == before.version
     assert after.status is TaskStatus.SUCCEEDED
 
 
-def test_runner_rejects_a_terminal_status_unreachable_from_running(store) -> None:
-    with pytest.raises(ValueError, match="not reachable from RUNNING"):
-        ScriptedRunner(store, outcome_status=TaskStatus.REJECTED)
+async def test_runner_can_reach_rejected_from_running(store, task) -> None:
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.REJECTED)
+    outcome = await runner.start(await _grant(store, task), **_LIVE)
+    assert outcome.status is TaskStatus.REJECTED
 
 
 def test_runner_rejects_a_non_terminal_outcome(store) -> None:
@@ -52,26 +69,49 @@ def test_runner_rejects_a_non_terminal_outcome(store) -> None:
         ScriptedRunner(store, outcome_status=TaskStatus.RUNNING)
 
 
-@pytest.mark.parametrize("bad_owner", ["", "  ", " w1 "])
-def test_runner_rejects_a_blank_or_padded_owner(store, bad_owner: str) -> None:
-    with pytest.raises(ValueError, match="owner"):
-        ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner=bad_owner)
-
-
-async def test_runner_holds_the_lease_under_its_own_owner(store, task) -> None:
-    """owner 必须真的被用于取租约。"""
-    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w-alpha")
-    await runner.start(task.task_id, **_LIVE)
+async def test_runner_preserves_the_grant_owner(store, task) -> None:
+    """Runner 不接受第二份 owner；执行权只来自调度层给出的 grant。"""
+    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
+    result = await store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=task.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="w-alpha",
+            ttl_seconds=60,
+            trace_id=CONTEXT.trace_id,
+        )
+    )
+    assert result.grant is not None
+    await runner.start(result.grant, **_LIVE)
     final = await store.get(lookup=lookup_for(task))
     assert final.lease_owner == "w-alpha"
 
 
-async def test_two_runners_cannot_drive_the_same_task_concurrently(store, task) -> None:
-    """第二个 owner 拿不到租约，必须失败而不是并行推进同一任务。"""
-    assert await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
-    runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED, owner="w2")
-    with pytest.raises(TerminalOrLeasedTaskError):
-        await runner.start(task.task_id, **_LIVE)
+async def test_two_runners_cannot_drive_the_same_task_concurrently(
+    store, task, clock
+) -> None:
+    """Runner 只接受调度层给出的 grant，不得自行竞争或接管租约。"""
+    stale = await _grant(store, task)
+    clock.advance(seconds=61)
+    takeover = await store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=task.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="w2",
+            ttl_seconds=60,
+            trace_id=CONTEXT.trace_id,
+        )
+    )
+    assert takeover.grant is not None
+
+    stale_runner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
+    with pytest.raises(RuntimeError, match="transition rejected"):
+        await stale_runner.start(stale, **_LIVE)
+
+    winner = ScriptedRunner(store, outcome_status=TaskStatus.SUCCEEDED)
+    await winner.start(takeover.grant, **_LIVE)
+    final = await store.get(lookup=lookup_for(task))
+    assert final.lease_owner == "w2"
 
 
 def test_runner_never_imports_a_gateway_or_adapter() -> None:

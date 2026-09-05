@@ -4,6 +4,8 @@ Runner 拥有租约、CAS 推进与暂停，但**不拥有领域安全规则**�
 审批一律经 ``admit_step``；证据一律经 ledger。
 """
 
+import asyncio
+
 import pytest
 from tests.fakes.recordings import (
     EMPTY_IN_SCOPE_BUT_TRAFFIC_ELSEWHERE,
@@ -15,8 +17,94 @@ from tests.fakes.recordings import (
 from tests.fakes.runner import RunnerHarness
 
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
-from xiaowei_agent.contracts import TaskStatus, ToolCallStatus
-from xiaowei_agent.persistence.store import TransitionCommand
+from xiaowei_agent.contracts import (
+    AttemptIntent,
+    PipelineStage,
+    StageOutcome,
+    StepAttemptDecision,
+    StepCommitRejection,
+    StepOutcomeKind,
+    StepResultStatus,
+    TaskStatus,
+    ToolCallStatus,
+    TraceEvent,
+    TransitionRejection,
+)
+from xiaowei_agent.persistence.plans import PlanNotFoundError
+from xiaowei_agent.persistence.store import (
+    StepAttemptCommand,
+    StepAttemptResult,
+    StepCommitCommand,
+    StepCommitResult,
+    TaskAttemptCommand,
+    TaskAttemptGrant,
+    TransitionCommand,
+)
+from xiaowei_agent.runners.deterministic import (
+    _STEP_RESULT_STATUS,
+    LifecycleError,
+    StepJournalInvariantError,
+)
+
+
+async def _begin(harness: RunnerHarness) -> TaskAttemptGrant:
+    await harness.ensure_task()
+    result = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=harness.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=harness.context.trace_id,
+        )
+    )
+    assert result.grant is not None
+    return result.grant
+
+
+async def _prepare_status(
+    harness: RunnerHarness, *statuses: TaskStatus
+) -> TaskAttemptGrant:
+    """保存计划并用一个真实 grant 把任务推进到指定崩溃点。"""
+    grant = await _begin(harness)
+    await harness.plan_store.save(
+        task_id=harness.task_id, plan=harness.plan, target=harness.target
+    )
+    record = await harness.store.get(lookup=harness.lookup)
+    for status in statuses:
+        result = await harness.store.transition(
+            command=TransitionCommand(
+                task_id=harness.task_id,
+                expected_version=record.version,
+                to_status=status,
+                fencing_token=grant.fencing_token,
+            )
+        )
+        assert result.applied
+        record = result.winner
+    return grant
+
+
+def _step_event(
+    harness: RunnerHarness,
+    grant: TaskAttemptGrant,
+    *,
+    outcome: StageOutcome = StageOutcome.FAILED,
+) -> TraceEvent:
+    return TraceEvent(
+        event_id=f"test:{harness.task_id}:{grant.attempt_number}",
+        trace_id=harness.context.trace_id,
+        task_id=harness.task_id,
+        stage=PipelineStage.GATEWAY,
+        outcome=outcome,
+        occurred_at=harness.clock(),
+        capability_id=harness.plan.capability_id,
+        step_id="s1",
+        policy_revision=harness.context.policy_revision,
+        attempt_number=grant.attempt_number,
+        error=None,
+        detail={},
+    )
 
 
 async def test_golden_run_executes_only_the_first_step() -> None:
@@ -26,6 +114,124 @@ async def test_golden_run_executes_only_the_first_step() -> None:
     assert [call.operation for call in harness.adapter.calls] == [OP_LIST]
     assert outcome.status is TaskStatus.SUCCEEDED
     assert len(outcome.evidence_refs) == 1
+
+
+async def test_runner_validates_and_renews_only_the_supplied_grant() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await harness.start()
+    assert harness.grant is not None
+    assert harness.store.renewals == [
+        (
+            harness.grant.task_id,
+            harness.grant.lease.owner,
+            harness.grant.fencing_token,
+            60,
+        )
+    ]
+
+
+async def test_expired_grant_is_rejected_before_plan_or_gateway_work() -> None:
+    harness = RunnerHarness(GOLDEN)
+    grant = await _begin(harness)
+    harness.clock.advance(seconds=60)
+
+    with pytest.raises(LifecycleError, match="no longer current"):
+        await harness.runner.start(
+            grant,
+            plan=harness.plan,
+            target=harness.target,
+            context=harness.context,
+        )
+
+    assert harness.gateway.invocations == 0
+    assert harness.store.transitions == []
+    with pytest.raises(PlanNotFoundError):
+        await harness.plan_store.load(task_id=harness.task_id)
+
+
+async def test_heartbeat_loss_cancels_in_flight_gateway_without_committing() -> None:
+    harness = RunnerHarness(GOLDEN)
+    gateway_entered = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    class _BlockingGateway:
+        cancelled = False
+
+        async def invoke(self, *args: object, **kwargs: object) -> object:
+            gateway_entered.set()
+            try:
+                await never_finishes.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            raise AssertionError("unreachable")
+
+    blocking = _BlockingGateway()
+    original_renew = harness.store.renew_lease
+    renewals: list[tuple[str, str, int, int]] = []
+
+    async def _lose_after_validation(
+        *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
+    ) -> object:
+        renewals.append((task_id, owner, fencing_token, ttl_seconds))
+        if len(renewals) == 1:
+            return await original_renew(
+                task_id=task_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                ttl_seconds=ttl_seconds,
+            )
+        return None
+
+    async def _wake_heartbeat_after_gateway_starts(_: float) -> None:
+        await gateway_entered.wait()
+
+    harness.store.renew_lease = _lose_after_validation  # type: ignore[method-assign]
+    harness.runner._gateway = blocking  # type: ignore[assignment]
+    harness.runner._sleep = _wake_heartbeat_after_gateway_starts
+
+    with pytest.raises(LifecycleError, match="heartbeat was lost"):
+        await harness.start()
+
+    assert blocking.cancelled
+    assert len(renewals) == 2
+    assert {item[1:3] for item in renewals} == {("worker-1", harness.grant.fencing_token)}
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert len(journal) == 1
+    assert journal[0].result_status is None
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
+
+
+async def test_cancelling_the_run_also_cancels_gateway_without_late_commit() -> None:
+    harness = RunnerHarness(GOLDEN)
+    gateway_entered = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    class _BlockingGateway:
+        cancelled = False
+
+        async def invoke(self, *args: object, **kwargs: object) -> object:
+            gateway_entered.set()
+            try:
+                await never_finishes.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            raise AssertionError("unreachable")
+
+    blocking = _BlockingGateway()
+    harness.runner._gateway = blocking  # type: ignore[assignment]
+    running = asyncio.create_task(harness.start())
+    await gateway_entered.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert blocking.cancelled
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert len(journal) == 1
+    assert journal[0].result_status is None
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
 
 
 @pytest.mark.parametrize(
@@ -92,12 +298,240 @@ async def test_plan_and_target_are_saved_before_execution() -> None:
     assert stored.target == harness.target
 
 
+async def test_created_task_with_an_identical_stored_plan_can_start() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await harness.ensure_task()
+    await harness.plan_store.save(
+        task_id=harness.task_id, plan=harness.plan, target=harness.target
+    )
+    outcome = await harness.start()
+    assert outcome.status is TaskStatus.SUCCEEDED
+
+
+async def test_planning_task_must_resume_and_advances_exactly_one_edge() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.store.transitions.clear()
+
+    outcome = await harness.runner.resume(
+        grant, context=harness.context, target=harness.target
+    )
+
+    assert outcome.status is TaskStatus.SUCCEEDED
+    assert [item.to_status for item in harness.store.transitions] == [TaskStatus.RUNNING]
+
+
+async def test_planning_task_rejects_start_as_an_illegal_transition() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.store.transitions.clear()
+
+    with pytest.raises(LifecycleError) as error:
+        await harness.runner.start(
+            grant,
+            plan=harness.plan,
+            target=harness.target,
+            context=harness.context,
+        )
+
+    assert error.value.rejection is TransitionRejection.ILLEGAL_TRANSITION
+    assert harness.gateway.invocations == 0
+
+
+async def test_running_task_resume_does_not_repeat_a_status_transition() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await _prepare_status(harness, TaskStatus.PLANNING, TaskStatus.RUNNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.store.transitions.clear()
+
+    outcome = await harness.runner.resume(
+        grant, context=harness.context, target=harness.target
+    )
+
+    assert outcome.status is TaskStatus.SUCCEEDED
+    assert harness.store.transitions == []
+
+
 async def test_budget_exhaustion_produces_a_structured_failure() -> None:
     harness = RunnerHarness(EMPTY_WITH_TRAFFIC, max_tool_calls=1)
     outcome = await harness.start()
     assert outcome.status is TaskStatus.FAILED
     assert outcome.terminal_reason == "budget.tool_calls_exhausted"
     assert len(harness.adapter.calls) == 1
+
+
+async def test_budget_exhaustion_is_rebuilt_from_the_durable_journal() -> None:
+    harness = RunnerHarness(EMPTY_WITH_TRAFFIC, max_tool_calls=1)
+    first = await harness.start()
+    assert first.terminal_reason == "budget.tool_calls_exhausted"
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.reset_call_counters()
+
+    resumed = await harness.runner.resume(
+        grant, context=harness.context, target=harness.target
+    )
+
+    assert resumed.status is TaskStatus.FAILED
+    assert resumed.terminal_reason == "budget.tool_calls_exhausted"
+    assert harness.gateway.invocations == 0
+
+
+async def test_unknown_step_stops_as_recovery_drift_without_gateway_call() -> None:
+    harness = RunnerHarness(GOLDEN)
+    original = harness.store.begin_step_attempt
+
+    async def _unknown(*, command: StepAttemptCommand) -> StepAttemptResult:
+        current = await harness.store.get(lookup=harness.lookup)
+        return StepAttemptResult(
+            decision=StepAttemptDecision.UNKNOWN_STEP,
+            winner=current,
+            record=None,
+            attempts_used=0,
+        )
+
+    harness.store.begin_step_attempt = _unknown  # type: ignore[method-assign]
+    outcome = await harness.start()
+    harness.store.begin_step_attempt = original  # type: ignore[method-assign]
+
+    assert outcome.status is TaskStatus.FAILED
+    assert outcome.terminal_reason == "recovery_drift"
+    assert harness.gateway.invocations == 0
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [StepAttemptDecision.STALE_FENCING, StepAttemptDecision.NOT_RUNNABLE],
+)
+async def test_step_begin_ownership_rejection_never_calls_gateway(
+    decision: StepAttemptDecision,
+) -> None:
+    harness = RunnerHarness(GOLDEN)
+
+    async def _reject(*, command: StepAttemptCommand) -> StepAttemptResult:
+        current = await harness.store.get(lookup=harness.lookup)
+        return StepAttemptResult(
+            decision=decision,
+            winner=current,
+            record=None,
+            attempts_used=0,
+        )
+
+    harness.store.begin_step_attempt = _reject  # type: ignore[method-assign]
+    with pytest.raises(LifecycleError):
+        await harness.start()
+    assert harness.gateway.invocations == 0
+
+
+@pytest.mark.parametrize(
+    ("rejection", "error_type"),
+    [
+        (StepCommitRejection.STALE_FENCING, LifecycleError),
+        (StepCommitRejection.NOT_RUNNABLE, LifecycleError),
+        (StepCommitRejection.NO_ATTEMPT_IN_FLIGHT, StepJournalInvariantError),
+        (StepCommitRejection.ALREADY_COMMITTED_DIFFERENT, StepJournalInvariantError),
+    ],
+)
+async def test_step_commit_rejections_have_closed_runner_semantics(
+    rejection: StepCommitRejection, error_type: type[Exception]
+) -> None:
+    harness = RunnerHarness(GOLDEN)
+
+    async def _reject(*, command: StepCommitCommand) -> StepCommitResult:
+        current = await harness.store.get(lookup=harness.lookup)
+        journal = await harness.store.load_step_executions(task_id=harness.task_id)
+        return StepCommitResult(
+            committed=False,
+            winner=current,
+            record=None
+            if rejection is StepCommitRejection.NO_ATTEMPT_IN_FLIGHT
+            else journal[0],
+            rejection=rejection,
+        )
+
+    harness.store.commit_step_result = _reject  # type: ignore[method-assign]
+    with pytest.raises(error_type):
+        await harness.start()
+
+    assert harness.gateway.invocations == 1
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert len(journal) == 1
+    assert journal[0].result_status is None
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
+
+
+async def test_failed_step_context_is_rebuilt_without_replaying_the_gateway() -> None:
+    harness = RunnerHarness(GOLDEN)
+    grant = await _prepare_status(
+        harness, TaskStatus.PLANNING, TaskStatus.RUNNING
+    )
+    begun = await harness.store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    assert begun.decision is StepAttemptDecision.PROCEED
+    committed = await harness.store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.MALFORMED_ADAPTER,
+            status=StepResultStatus.FAILED,
+            evidence=None,
+            audit_events=(_step_event(harness, grant),),
+        )
+    )
+    assert committed.committed
+    harness.clock.advance(seconds=61)
+    resumed_grant = await _begin(harness)
+    harness.reset_call_counters()
+
+    outcome = await harness.runner.resume(
+        resumed_grant, context=harness.context, target=harness.target
+    )
+
+    assert outcome.status is TaskStatus.INDETERMINATE
+    assert harness.gateway.invocations == 0
+    assert [item.step_id for item in await harness.store.load_step_executions(
+        task_id=harness.task_id
+    )] == ["s1"]
+
+
+async def test_ok_step_is_adopted_after_restart_without_replay() -> None:
+    harness = RunnerHarness(GOLDEN)
+    first = await harness.start()
+    assert first.status is TaskStatus.SUCCEEDED
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.reset_call_counters()
+
+    resumed = await harness.runner.resume(
+        grant, context=harness.context, target=harness.target
+    )
+
+    assert resumed.status is TaskStatus.SUCCEEDED
+    assert harness.gateway.invocations == 0
+
+
+async def test_start_rejects_a_nonempty_step_journal() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await harness.start()
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.reset_call_counters()
+
+    with pytest.raises(LifecycleError, match="already has a step journal"):
+        await harness.runner.start(
+            grant,
+            plan=harness.plan,
+            target=harness.target,
+            context=harness.context,
+        )
+
+    assert harness.gateway.invocations == 0
 
 
 @pytest.mark.parametrize(
@@ -116,6 +550,61 @@ async def test_tool_failures_never_look_like_empty_success(recording: object) ->
     assert [call.operation for call in harness.adapter.calls] == [OP_LIST]
     for envelope in await harness.ledger.load(task_id=harness.task_id):
         assert envelope.facts == ()
+
+
+@pytest.mark.parametrize(
+    ("recording", "expected_status", "expected_kind", "evidence_count"),
+    [
+        (TIMEOUT, StepResultStatus.TIMEOUT, StepOutcomeKind.TOOL_RESULT, 1),
+        (MALFORMED, StepResultStatus.FAILED, StepOutcomeKind.MALFORMED_ADAPTER, 0),
+    ],
+    ids=["timeout_is_durable", "malformed_has_no_evidence"],
+)
+async def test_failure_kind_is_persisted_without_guessing(
+    recording: object,
+    expected_status: StepResultStatus,
+    expected_kind: StepOutcomeKind,
+    evidence_count: int,
+) -> None:
+    harness = RunnerHarness(recording)
+    await harness.start()
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert len(journal) == 1
+    assert journal[0].result_status is expected_status
+    assert journal[0].kind is expected_kind
+    assert len(await harness.ledger.load(task_id=harness.task_id)) == evidence_count
+
+
+def test_every_tool_status_has_one_step_status() -> None:
+    assert dict(_STEP_RESULT_STATUS) == {
+        ToolCallStatus.OK: StepResultStatus.OK,
+        ToolCallStatus.ERROR: StepResultStatus.FAILED,
+        ToolCallStatus.TIMEOUT: StepResultStatus.TIMEOUT,
+        ToolCallStatus.INDETERMINATE: StepResultStatus.FAILED,
+    }
+
+
+async def test_runner_does_not_misclassify_an_internal_type_error_as_malformed() -> None:
+    harness = RunnerHarness(GOLDEN)
+
+    class _BrokenGateway:
+        calls = 0
+
+        async def invoke(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+            raise TypeError("internal runner dependency failed")
+
+    broken = _BrokenGateway()
+    harness.runner._gateway = broken  # type: ignore[assignment]
+
+    with pytest.raises(TypeError, match="internal runner dependency failed"):
+        await harness.start()
+
+    assert broken.calls == 1
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert len(journal) == 1
+    assert journal[0].result_status is None
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
 
 
 async def test_empty_scope_recording_still_produces_evidence() -> None:

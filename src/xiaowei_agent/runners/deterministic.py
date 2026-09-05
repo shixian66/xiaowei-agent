@@ -17,7 +17,11 @@ Runner 拥有租约、CAS 推进、可选分支求值、预算与暂停；它**�
    Runtime 完成。
 """
 
+import asyncio
+import contextlib
 import datetime as _dt
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from types import MappingProxyType
 from typing import Final, Protocol
 
 from xiaowei_agent.capabilities.specs import GATEWAY_NAME
@@ -30,7 +34,6 @@ from xiaowei_agent.contracts import (
     ExecutionPlan,
     ExternalInput,
     ExternalInputKind,
-    LeaseGrant,
     PipelineStage,
     PlanStep,
     PolicyProfile,
@@ -39,8 +42,12 @@ from xiaowei_agent.contracts import (
     ResolvedTarget,
     SqlSurface,
     StageOutcome,
+    StepAttemptDecision,
+    StepCommitRejection,
     StepCondition,
     StepConditionKind,
+    StepOutcomeKind,
+    StepResultStatus,
     TaskLookup,
     TaskOutcome,
     TaskRecord,
@@ -60,15 +67,36 @@ from xiaowei_agent.governance.step_admission import admit_step
 from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanStore
-from xiaowei_agent.persistence.store import Clock, TaskStore, TransitionCommand
+from xiaowei_agent.persistence.store import (
+    Clock,
+    StepAttemptCommand,
+    StepCommitCommand,
+    StepExecutionRecord,
+    TaskAttemptGrant,
+    TaskStore,
+    TransitionCommand,
+)
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 from xiaowei_agent.runners.runner import WorkflowPaused
+from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
 
 BUDGET_EXHAUSTED_REASON: Final[str] = "budget.tool_calls_exhausted"
 APPROVAL_TTL_SECONDS: Final[int] = 3600
 DEFAULT_LEASE_TTL_SECONDS: Final[int] = 60
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
+RECOVERY_DRIFT_REASON: Final[str] = "recovery_drift"
+
+AsyncSleep = Callable[[float], Awaitable[None]]
+
+_STEP_RESULT_STATUS: Final[Mapping[ToolCallStatus, StepResultStatus]] = MappingProxyType(
+    {
+        ToolCallStatus.OK: StepResultStatus.OK,
+        ToolCallStatus.ERROR: StepResultStatus.FAILED,
+        ToolCallStatus.TIMEOUT: StepResultStatus.TIMEOUT,
+        ToolCallStatus.INDETERMINATE: StepResultStatus.FAILED,
+    }
+)
 
 
 class _Gateway(Protocol):
@@ -102,6 +130,10 @@ class DriftError(RuntimeError):
     """恢复时重解析/重算的结果与存储中的事实不一致。"""
 
 
+class StepJournalInvariantError(RuntimeError):
+    """步骤提交协议被破坏；调用方不得把它降级成一次可重试任务失败。"""
+
+
 class DeterministicStepRunner:
     """按计划顺序推进的 Runner。"""
 
@@ -118,9 +150,9 @@ class DeterministicStepRunner:
         profile: PolicyProfile,
         surface: SqlSurface,
         clock: Clock,
-        owner: str,
         sink: TraceSink,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
         self._tasks = task_store
         self._plans = plan_store
@@ -132,12 +164,45 @@ class DeterministicStepRunner:
         self._profile = profile
         self._surface = surface
         self._clock = clock
-        self._owner = owner
         self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._sleep = sleep
         self._event_seq = 0
 
     # --- trace --------------------------------------------------------------
+
+    def _event(
+        self,
+        *,
+        stage: PipelineStage,
+        outcome: StageOutcome,
+        context: RequestContext,
+        task_id: str,
+        plan: ExecutionPlan | None = None,
+        step_id: str | None = None,
+        attempt_number: int | None = None,
+    ) -> TraceEvent:
+        """构造一条阶段事件；命令决定何时持久化，sink 决定何时记录日志。
+
+        **detail 恒为空**：阶段、结果、步骤与 capability 已经足以把一次失败定位到
+        唯一一个阶段，而 detail 是最容易把 SQL 或外部文本带出去的地方。需要更多
+        诊断信息时应先扩契约字段，而不是往 detail 里塞自由文本。
+        """
+        self._event_seq += 1
+        return TraceEvent(
+            event_id=f"{task_id}:{self._event_seq}",
+            trace_id=context.trace_id,
+            task_id=task_id,
+            stage=stage,
+            outcome=outcome,
+            occurred_at=self._clock(),
+            capability_id=None if plan is None else plan.capability_id,
+            step_id=step_id,
+            policy_revision=context.policy_revision,
+            attempt_number=attempt_number,
+            error=None,
+            detail={},
+        )
 
     def _emit(
         self,
@@ -148,35 +213,29 @@ class DeterministicStepRunner:
         task_id: str,
         plan: ExecutionPlan | None = None,
         step_id: str | None = None,
-    ) -> None:
-        """发一条阶段事件。
-
-        **detail 恒为空**：阶段、结果、步骤与 capability 已经足以把一次失败定位到
-        唯一一个阶段，而 detail 是最容易把 SQL 或外部文本带出去的地方。需要更多
-        诊断信息时应先扩契约字段，而不是往 detail 里塞自由文本。
-        """
-        self._event_seq += 1
-        self._sink.emit(
-            TraceEvent(
-                event_id=f"{task_id}:{self._event_seq}",
-                trace_id=context.trace_id,
-                task_id=task_id,
-                stage=stage,
-                outcome=outcome,
-                occurred_at=self._clock(),
-                capability_id=None if plan is None else plan.capability_id,
-                step_id=step_id,
-                policy_revision=context.policy_revision,
-                error=None,
-                detail={},
-            )
+        attempt_number: int | None = None,
+    ) -> TraceEvent:
+        event = self._event(
+            stage=stage,
+            outcome=outcome,
+            context=context,
+            task_id=task_id,
+            plan=plan,
+            step_id=step_id,
+            attempt_number=attempt_number,
         )
+        self._sink.emit(event)
+        return event
+
+    def _emit_committed(self, events: tuple[TraceEvent, ...]) -> None:
+        for event in events:
+            self._sink.emit(event)
 
     # --- 公开入口 -----------------------------------------------------------
 
     async def start(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         *,
         plan: ExecutionPlan,
         target: ResolvedTarget,
@@ -190,8 +249,24 @@ class DeterministicStepRunner:
         :raises LifecycleError: 租约拿不到，或状态迁移被存储层拒绝。
         :raises WorkflowPaused: 遇到需要审批的副作用步骤。
         """
+        await self._require_current_grant(grant)
+        return await self._run_with_heartbeat(
+            grant,
+            self._start(grant=grant, plan=plan, target=target, context=context),
+        )
+
+    async def _start(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+    ) -> TaskOutcome:
+        task_id = grant.task_id
+        if await self._tasks.load_step_executions(task_id=task_id):
+            raise LifecycleError("new execution already has a step journal")
         await self._plans.save(task_id=task_id, plan=plan, target=target)
-        grant = await self._acquire(task_id)
         record = await self._tasks.get(
             lookup=TaskLookup(
                 task_id=task_id,
@@ -201,27 +276,22 @@ class DeterministicStepRunner:
         )
         for status in (TaskStatus.PLANNING, TaskStatus.RUNNING):
             record = await self._advance(
-                task_id, record.version, status, grant.fencing_token
+                record=record,
+                status=status,
+                grant=grant,
+                context=context,
+                plan=plan,
             )
-        self._emit(
-            stage=PipelineStage.LIFECYCLE,
-            outcome=StageOutcome.OK,
-            context=context,
-            task_id=task_id,
-            plan=plan,
-        )
         return await self._run_steps(
-            task_id=task_id,
+            grant=grant,
             plan=plan,
             target=target,
             context=context,
-            fencing_token=grant.fencing_token,
-            version=record.version,
         )
 
     async def resume(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
         context: RequestContext,
@@ -240,13 +310,34 @@ class DeterministicStepRunner:
             实际用于准入的审批不一致。
         :raises WorkflowPaused: 仍然缺少有效审批。
         """
+        await self._require_current_grant(grant)
+        return await self._run_with_heartbeat(
+            grant,
+            self._resume(
+                grant=grant,
+                external_input=external_input,
+                context=context,
+                target=target,
+                approval=approval,
+            ),
+        )
+
+    async def _resume(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        external_input: ExternalInput | None,
+        context: RequestContext,
+        target: ResolvedTarget,
+        approval: ApprovalRequest | None,
+    ) -> TaskOutcome:
+        task_id = grant.task_id
         self._verify_external_input(external_input, approval=approval)
         stored = await self._plans.load(task_id=task_id)
         plan = stored.plan
         self._verify_no_drift(
             plan=plan, stored_target=stored.target, target=target, context=context
         )
-        grant = await self._acquire(task_id)
         record = await self._tasks.get(
             lookup=TaskLookup(
                 task_id=task_id,
@@ -254,24 +345,21 @@ class DeterministicStepRunner:
                 environment_id=context.environment_id,
             )
         )
-        if record.status is TaskStatus.AWAITING_APPROVAL:
+        if record.status in {TaskStatus.PLANNING, TaskStatus.AWAITING_APPROVAL}:
             record = await self._advance(
-                task_id, record.version, TaskStatus.RUNNING, grant.fencing_token
+                record=record,
+                status=TaskStatus.RUNNING,
+                grant=grant,
+                context=context,
+                plan=plan,
             )
-        self._emit(
-            stage=PipelineStage.LIFECYCLE,
-            outcome=StageOutcome.OK,
-            context=context,
-            task_id=task_id,
-            plan=plan,
-        )
+        elif record.status is not TaskStatus.RUNNING:
+            raise LifecycleError("task status cannot be resumed")
         return await self._run_steps(
-            task_id=task_id,
+            grant=grant,
             plan=plan,
             target=stored.target,
             context=context,
-            fencing_token=grant.fencing_token,
-            version=record.version,
             approval=approval,
         )
 
@@ -320,60 +408,111 @@ class DeterministicStepRunner:
 
     # --- 生命周期 -----------------------------------------------------------
 
-    async def _acquire(self, task_id: str) -> LeaseGrant:
-        grant = await self._tasks.acquire_lease(
-            task_id=task_id, owner=self._owner, ttl_seconds=self._lease_ttl_seconds
-        )
-        if grant is None:
-            # 终态任务或已被他人持有——两种情况都不该继续推进。
-            raise LifecycleError("task lease is unavailable")
-        return grant
-
     async def _advance(
-        self, task_id: str, version: int, status: TaskStatus, fencing_token: int
+        self,
+        *,
+        record: TaskRecord,
+        status: TaskStatus,
+        grant: TaskAttemptGrant,
+        context: RequestContext,
+        plan: ExecutionPlan,
     ) -> TaskRecord:
+        event = self._event(
+            stage=PipelineStage.LIFECYCLE,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=grant.task_id,
+            plan=plan,
+            attempt_number=grant.attempt_number,
+        )
         result = await self._tasks.transition(
             command=TransitionCommand(
-                task_id=task_id,
-                expected_version=version,
+                task_id=grant.task_id,
+                expected_version=record.version,
                 to_status=status,
-                fencing_token=fencing_token,
+                fencing_token=grant.fencing_token,
+                audit_events=(event,),
             )
         )
+        self._sink.emit(event)
         if not result.applied:
             # 必须采纳 winner 并停下，不能用本地旧对象继续推进。
             raise LifecycleError("transition rejected", rejection=result.rejection)
         return result.winner
+
+    async def _heartbeat(self, grant: TaskAttemptGrant) -> None:
+        interval = max(0.01, self._lease_ttl_seconds / 3)
+        while True:
+            await self._sleep(interval)
+            renewed = await self._tasks.renew_lease(
+                task_id=grant.task_id,
+                owner=grant.lease.owner,
+                fencing_token=grant.fencing_token,
+                ttl_seconds=self._lease_ttl_seconds,
+            )
+            if renewed is None:
+                raise LifecycleError("task lease heartbeat was lost")
+
+    async def _require_current_grant(self, grant: TaskAttemptGrant) -> None:
+        renewed = await self._tasks.renew_lease(
+            task_id=grant.task_id,
+            owner=grant.lease.owner,
+            fencing_token=grant.fencing_token,
+            ttl_seconds=self._lease_ttl_seconds,
+        )
+        if renewed is None:
+            raise LifecycleError("task attempt grant is no longer current")
+
+    async def _run_with_heartbeat(
+        self, grant: TaskAttemptGrant, execution: Coroutine[object, object, TaskOutcome]
+    ) -> TaskOutcome:
+        work: asyncio.Task[TaskOutcome] = asyncio.create_task(execution)
+        heartbeat = asyncio.create_task(self._heartbeat(grant))
+        try:
+            done, _ = await asyncio.wait(
+                {work, heartbeat}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeat in done:
+                failure = heartbeat.exception()
+                if failure is not None:
+                    work.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await work
+                    raise failure
+            return await work
+        finally:
+            if not work.done():
+                work.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await work
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
 
     # --- 步骤循环 -----------------------------------------------------------
 
     async def _run_steps(
         self,
         *,
-        task_id: str,
+        grant: TaskAttemptGrant,
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
-        fencing_token: int,
-        version: int,
         approval: ApprovalRequest | None = None,
     ) -> TaskOutcome:
-        tool_calls_used = 0
-        degraded = False
-        # 只记录"哪些步骤执行后未成功"——这是 Runner 自己的生命周期知识，不是证据
-        # 内容。证据内容一律从 ledger 读回。
-        failed_steps: set[str] = set()
+        task_id = grant.task_id
+        recorded = await self._tasks.load_step_executions(task_id=task_id)
+        failed_steps = {
+            item.step_id
+            for item in recorded
+            if item.result_status in {StepResultStatus.FAILED, StepResultStatus.TIMEOUT}
+        }
+        degraded = bool(failed_steps)
         for step in plan.steps:
             if not await self._condition_holds(
                 task_id=task_id, condition=step.condition, failed_steps=failed_steps
             ):
                 continue
-            if tool_calls_used >= plan.budget.max_tool_calls:
-                return await self._outcome(
-                    task_id,
-                    TaskStatus.FAILED,
-                    terminal_reason=BUDGET_EXHAUSTED_REASON,
-                )
             try:
                 certificate, call = self._admit(
                     task_id=task_id,
@@ -391,14 +530,15 @@ class DeterministicStepRunner:
                     task_id=task_id,
                     plan=plan,
                     step_id=step.step_id,
+                    attempt_number=grant.attempt_number,
                 )
                 await self._pause(
                     task_id=task_id,
                     step=step,
                     plan=plan,
                     target=target,
-                    fencing_token=fencing_token,
-                    version=version,
+                    grant=grant,
+                    context=context,
                     step_id=exc.step_id,
                 )
             except Exception:
@@ -411,6 +551,7 @@ class DeterministicStepRunner:
                     task_id=task_id,
                     plan=plan,
                     step_id=step.step_id,
+                    attempt_number=grant.attempt_number,
                 )
                 raise
             self._emit(
@@ -420,53 +561,132 @@ class DeterministicStepRunner:
                 task_id=task_id,
                 plan=plan,
                 step_id=step.step_id,
+                attempt_number=grant.attempt_number,
             )
+
+            attempt = await self._tasks.begin_step_attempt(
+                command=StepAttemptCommand(grant=grant, step_id=step.step_id)
+            )
+            if attempt.decision is StepAttemptDecision.ALREADY_COMMITTED:
+                if attempt.record is None:  # model validator also guards this
+                    raise LifecycleError("committed step has no journal row")
+                degraded = self._adopt_step_record(
+                    attempt.record,
+                    failed_steps=failed_steps,
+                    degraded=degraded,
+                )
+                continue
+            if attempt.decision is StepAttemptDecision.BUDGET_EXHAUSTED:
+                return await self._outcome(
+                    task_id,
+                    TaskStatus.FAILED,
+                    terminal_reason=BUDGET_EXHAUSTED_REASON,
+                )
+            if attempt.decision is StepAttemptDecision.UNKNOWN_STEP:
+                return await self._outcome(
+                    task_id,
+                    TaskStatus.FAILED,
+                    terminal_reason=RECOVERY_DRIFT_REASON,
+                )
+            if attempt.decision is not StepAttemptDecision.PROCEED:
+                raise LifecycleError(
+                    "step attempt rejected", rejection=attempt.decision
+                )
+
             try:
                 result = await self._gateway.invoke(
                     call, context=context, admission=certificate
                 )
-            except TypeError:
-                # Gateway 对"adapter 返回了非 AdapterResponse"抛 TypeError。这是
-                # 上游故障，不是本进程的编程错误：让它冒泡会把一次可降级的取数失败
-                # 变成崩溃，而崩溃既没有证据也没有终态。降级为 indeterminate。
-                tool_calls_used += 1
-                degraded = True
-                failed_steps.add(step.step_id)
-                self._emit(
+            except MalformedAdapterResponseError:
+                gateway_event = self._event(
                     stage=PipelineStage.GATEWAY,
                     outcome=StageOutcome.FAILED,
                     context=context,
                     task_id=task_id,
                     plan=plan,
                     step_id=step.step_id,
+                    attempt_number=grant.attempt_number,
+                )
+                committed = await self._tasks.commit_step_result(
+                    command=StepCommitCommand(
+                        grant=grant,
+                        step_id=step.step_id,
+                        kind=StepOutcomeKind.MALFORMED_ADAPTER,
+                        status=StepResultStatus.FAILED,
+                        evidence=None,
+                        audit_events=(gateway_event,),
+                    )
+                )
+                record = self._require_committed_step(committed)
+                self._emit_committed((gateway_event,))
+                degraded = self._adopt_step_record(
+                    record, failed_steps=failed_steps, degraded=degraded
                 )
                 continue
-            tool_calls_used += 1
             ok = result.status is ToolCallStatus.OK
-            self._emit(
+            gateway_event = self._event(
                 stage=PipelineStage.GATEWAY,
                 outcome=StageOutcome.OK if ok else StageOutcome.FAILED,
                 context=context,
                 task_id=task_id,
                 plan=plan,
                 step_id=step.step_id,
+                attempt_number=grant.attempt_number,
             )
-            if not ok:
-                degraded = True
-                failed_steps.add(step.step_id)
-            await self._record_evidence(
+            evidence = self._build_evidence(
                 task_id=task_id, step=step, plan=plan, result=result
             )
-            self._emit(
+            evidence_event = self._event(
                 stage=PipelineStage.EVIDENCE,
                 outcome=StageOutcome.OK,
                 context=context,
                 task_id=task_id,
                 plan=plan,
                 step_id=step.step_id,
+                attempt_number=grant.attempt_number,
+            )
+            step_status = _STEP_RESULT_STATUS[result.status]
+            committed = await self._tasks.commit_step_result(
+                command=StepCommitCommand(
+                    grant=grant,
+                    step_id=step.step_id,
+                    kind=StepOutcomeKind.TOOL_RESULT,
+                    status=step_status,
+                    evidence=evidence,
+                    audit_events=(gateway_event, evidence_event),
+                )
+            )
+            record = self._require_committed_step(committed)
+            self._emit_committed((gateway_event, evidence_event))
+            degraded = self._adopt_step_record(
+                record, failed_steps=failed_steps, degraded=degraded
             )
         status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
         return await self._outcome(task_id, status, terminal_reason=None)
+
+    @staticmethod
+    def _adopt_step_record(
+        record: StepExecutionRecord, *, failed_steps: set[str], degraded: bool
+    ) -> bool:
+        if record.result_status in {StepResultStatus.FAILED, StepResultStatus.TIMEOUT}:
+            failed_steps.add(record.step_id)
+            return True
+        return degraded
+
+    @staticmethod
+    def _require_committed_step(result: object) -> StepExecutionRecord:
+        from xiaowei_agent.persistence.store import StepCommitResult
+
+        if not isinstance(result, StepCommitResult):
+            raise StepJournalInvariantError("step store returned an invalid result")
+        if result.committed and result.record is not None:
+            return result.record
+        if result.rejection in {
+            StepCommitRejection.STALE_FENCING,
+            StepCommitRejection.NOT_RUNNABLE,
+        }:
+            raise LifecycleError("step commit lost ownership", rejection=result.rejection)
+        raise StepJournalInvariantError("step commit invariant was violated")
 
     async def _condition_holds(
         self, *, task_id: str, condition: StepCondition, failed_steps: set[str]
@@ -550,10 +770,10 @@ class DeterministicStepRunner:
             idempotency_key=idempotency_key,
         )
 
-    async def _record_evidence(
+    def _build_evidence(
         self, *, task_id: str, step: PlanStep, plan: ExecutionPlan, result: ToolResult
     ) -> EvidenceEnvelope:
-        envelope = build_evidence(
+        return build_evidence(
             task_id=task_id,
             step=step,
             plan=plan,
@@ -562,8 +782,6 @@ class DeterministicStepRunner:
             params=SlowQueryParams.from_typed_arguments(step.typed_arguments),
             captured_at=self._clock(),
         )
-        await self._ledger.append(task_id=task_id, envelope=envelope)
-        return envelope
 
     async def _pause(
         self,
@@ -572,8 +790,8 @@ class DeterministicStepRunner:
         step: PlanStep,
         plan: ExecutionPlan,
         target: ResolvedTarget,
-        fencing_token: int,
-        version: int,
+        grant: TaskAttemptGrant,
+        context: RequestContext,
         step_id: str,
     ) -> None:
         """记录审批请求、CAS 到 AWAITING_APPROVAL，然后抛出 ``WorkflowPaused``。
@@ -588,13 +806,24 @@ class DeterministicStepRunner:
             plan_hash=compute_plan_hash(plan),
             target_fingerprint=compute_target_fingerprint(target),
             policy_revision=plan.policy_revision,
-            subject=self._owner,
+            subject=grant.lease.owner,
             expires_at=now + _dt.timedelta(seconds=APPROVAL_TTL_SECONDS),
             state=ApprovalState.PENDING,
         )
         await self._tasks.record_approval(request=request)
+        current = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
         await self._advance(
-            task_id, version, TaskStatus.AWAITING_APPROVAL, fencing_token
+            record=current,
+            status=TaskStatus.AWAITING_APPROVAL,
+            grant=grant,
+            context=context,
+            plan=plan,
         )
         # 在 raise 之外拼装：拒绝路径的 raise 语句里不得出现任何插值，哪怕取值
         # 本身安全——这条不变量靠"语句里没有插值"来机械保证，不靠逐个判断。

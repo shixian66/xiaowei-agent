@@ -25,6 +25,7 @@ from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
 from xiaowei_agent.capabilities.target import resolve_target
 from xiaowei_agent.contracts import (
     AdmissionCertificate,
+    AttemptIntent,
     Channel,
     EffectClass,
     RequestContext,
@@ -41,9 +42,13 @@ from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
-from xiaowei_agent.persistence.store import TransitionCommand
+from xiaowei_agent.persistence.store import (
+    TaskAttemptCommand,
+    TaskAttemptGrant,
+    TransitionCommand,
+)
 from xiaowei_agent.planning.starrocks.compiler import PLAN_BUDGET
-from xiaowei_agent.runners.deterministic import DeterministicStepRunner
+from xiaowei_agent.runners.deterministic import DeterministicStepRunner, LifecycleError
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
 from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
 
@@ -97,6 +102,7 @@ class RecordingTaskStore(InMemoryTaskStore):
         super().__init__(clock=clock, state=state)
         self.transitions: list[TransitionCommand] = []
         self.approvals: list[Any] = []
+        self.renewals: list[tuple[str, str, int, int]] = []
 
     async def transition(self, *, command: TransitionCommand) -> Any:
         self.transitions.append(command)
@@ -105,6 +111,17 @@ class RecordingTaskStore(InMemoryTaskStore):
     async def record_approval(self, *, request: Any) -> int:
         self.approvals.append(request)
         return await super().record_approval(request=request)
+
+    async def renew_lease(
+        self, *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
+    ) -> Any:
+        self.renewals.append((task_id, owner, fencing_token, ttl_seconds))
+        return await super().renew_lease(
+            task_id=task_id,
+            owner=owner,
+            fencing_token=fencing_token,
+            ttl_seconds=ttl_seconds,
+        )
 
 
 class BlindEvidenceLedger(InMemoryEvidenceLedger):
@@ -195,10 +212,10 @@ class RunnerHarness:
             profile=profile,
             surface=SLOW_QUERY_SURFACE,
             clock=self.clock,
-            owner="worker-1",
             sink=self.sink,
         )
         self._created = False
+        self.grant: TaskAttemptGrant | None = None
 
     async def ensure_task(self) -> None:
         if self._created:
@@ -213,7 +230,7 @@ class RunnerHarness:
                 text="慢查询",
                 idempotency_key="idem-1",
                 environment_id=self.context.environment_id,
-                ),
+            ),
                 context=self.context,
                 as_of=self.clock(),
             )
@@ -224,16 +241,45 @@ class RunnerHarness:
 
     async def start(self) -> Any:
         await self.ensure_task()
+        attempt = await self.store.begin_task_attempt(
+            command=TaskAttemptCommand(
+                task_id=self.task_id,
+                intent=AttemptIntent.DISPATCH,
+                owner="worker-1",
+                ttl_seconds=60,
+                trace_id=self.context.trace_id,
+            )
+        )
+        if attempt.grant is None:
+            raise LifecycleError(
+                "task attempt was not granted", rejection=attempt.rejection
+            )
+        self.grant = attempt.grant
         return await self.runner.start(
-            self.task_id, plan=self.plan, target=self.target, context=self.context
+            attempt.grant, plan=self.plan, target=self.target, context=self.context
         )
 
     async def resume(
         self, external_input: Any = None, *, approval: Any = None
     ) -> Any:
         self.recomputed_fingerprints += 1
+        self.clock.advance(seconds=61)
+        attempt = await self.store.begin_task_attempt(
+            command=TaskAttemptCommand(
+                task_id=self.task_id,
+                intent=AttemptIntent.APPROVAL_RESUME,
+                owner="worker-1",
+                ttl_seconds=60,
+                trace_id=self.context.trace_id,
+            )
+        )
+        if attempt.grant is None:
+            raise LifecycleError(
+                "task attempt was not granted", rejection=attempt.rejection
+            )
+        self.grant = attempt.grant
         return await self.runner.resume(
-            self.task_id,
+            attempt.grant,
             external_input,
             context=self.context,
             target=self.target,

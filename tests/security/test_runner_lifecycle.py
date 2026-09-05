@@ -125,6 +125,41 @@ async def test_runner_never_constructs_a_tool_result_or_certificate() -> None:
     assert "issue_admission_certificate" not in called
 
 
+def test_runner_never_acquires_or_releases_a_lease() -> None:
+    """领取权只属于 Worker/TaskStore；任何 Runner 都只能续用传入的 grant。"""
+    import ast
+    from pathlib import Path
+
+    from xiaowei_agent import runners
+
+    offenders: list[str] = []
+    for source in Path(runners.__file__).parent.glob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {
+                "acquire_lease",
+                "release_lease",
+            }:
+                offenders.append(f"{source.name}:{node.lineno}:{node.attr}")
+    assert offenders == []
+
+
+def test_runner_never_appends_evidence_outside_the_step_transaction() -> None:
+    """Evidence 只能随 step result 原子提交，不允许 Runner 走旧的 ledger.append。"""
+    import ast
+    from pathlib import Path
+
+    from xiaowei_agent.runners import deterministic
+
+    tree = ast.parse(Path(deterministic.__file__).read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "append"
+    ]
+    assert offenders == []
+
+
 # --- 恢复输入必须被真正消费 ------------------------------------------------
 #
 # 修复前 ``resume`` 收下 ``external_input`` 后从不读取它：M2 为恢复定义的跨边界

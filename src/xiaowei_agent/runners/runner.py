@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     ResolvedTarget,
     TaskOutcome,
 )
+from xiaowei_agent.persistence.store import TaskAttemptGrant
 
 
 class WorkflowPaused(Exception):  # noqa: N818 —— 见下方 docstring：它不是错误
@@ -57,12 +58,14 @@ class WorkflowRunner(Protocol):
 
     ``plan`` / ``target`` 在 ``start`` 是入参而非从 ``PlanStore`` 读：新编译的计划
     此刻尚未落库，``start`` 的第一件事正是把它存进去。``resume`` 则相反——计划必须
-    从存储取回**当初那份**，所以它不在 ``resume`` 的签名里。
+    从存储取回**当初那份**，所以它不在 ``resume`` 的签名里。M5 再把 ``task_id``
+    收窄成调度层签发的 ``TaskAttemptGrant``：Runner 只能验证、续租并使用这份执行权，
+    不得自行竞争另一份租约。
     """
 
     async def start(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         *,
         plan: ExecutionPlan,
         target: ResolvedTarget,
@@ -71,7 +74,7 @@ class WorkflowRunner(Protocol):
 
     async def resume(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
         context: RequestContext,

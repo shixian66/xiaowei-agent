@@ -122,8 +122,12 @@ async def test_non_conforming_adapter_return_is_refused(ok_call, context, admiss
             return {"status": "ok", "payload": ({"injected": "row"},)}
 
     rogue = DeterministicToolGateway(adapters={"starrocks": _RogueAdapter()})
-    with pytest.raises(TypeError, match="not an AdapterResponse"):
+    from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
+
+    with pytest.raises(MalformedAdapterResponseError) as error:
         await rogue.invoke(ok_call, context=context, admission=admission)
+    assert "Rogue" not in str(error.value)
+    assert "Rogue" not in repr(error.value)
 
 
 def test_adapter_response_cannot_carry_effect_classification() -> None:

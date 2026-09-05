@@ -42,7 +42,6 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "self.kind.value",
         "self.status",
         "approval.state.value",
-        "outcome_status.value",
         "result.rejection",
         # --- 闭集：来自代码定义的必填操作数名，不是外部输入 ---
         "sorted(required)",

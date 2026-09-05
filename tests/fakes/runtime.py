@@ -59,13 +59,13 @@ class _ClearingRunner:
         self._inner = inner
         self._ledger = ledger
 
-    async def start(self, task_id: str, **kwargs: Any) -> Any:
-        outcome = await self._inner.start(task_id, **kwargs)
-        self._ledger._entries.pop(task_id, None)
+    async def start(self, grant: Any, **kwargs: Any) -> Any:
+        outcome = await self._inner.start(grant, **kwargs)
+        self._ledger._entries.pop(grant.task_id, None)
         return outcome
 
-    async def resume(self, task_id: str, **kwargs: Any) -> Any:
-        return await self._inner.resume(task_id, **kwargs)
+    async def resume(self, grant: Any, **kwargs: Any) -> Any:
+        return await self._inner.resume(grant, **kwargs)
 
 
 class RuntimeHarness:
@@ -104,7 +104,6 @@ class RuntimeHarness:
             profile=WRITE_PROFILE if synthetic_write else SLOW_QUERY_READONLY_PROFILE,
             surface=SLOW_QUERY_SURFACE,
             clock=self.clock,
-            owner="worker-1",
             sink=self.sink,
         )
         if synthetic_write:
@@ -190,11 +189,11 @@ class _SyntheticWriteRunner:
     def __init__(self, inner: DeterministicStepRunner) -> None:
         self._inner = inner
 
-    async def start(self, task_id: str, **kwargs: Any) -> Any:
+    async def start(self, grant: Any, **kwargs: Any) -> Any:
         from tests.fakes.admission import synthetic_write_plan
 
         kwargs["plan"] = synthetic_write_plan()
-        return await self._inner.start(task_id, **kwargs)
+        return await self._inner.start(grant, **kwargs)
 
-    async def resume(self, task_id: str, **kwargs: Any) -> Any:
-        return await self._inner.resume(task_id, **kwargs)
+    async def resume(self, grant: Any, **kwargs: Any) -> Any:
+        return await self._inner.resume(grant, **kwargs)
