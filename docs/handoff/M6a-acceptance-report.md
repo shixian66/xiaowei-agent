@@ -3,9 +3,10 @@
 > 按 DEVELOPMENT_PLAN 的四段格式：已验证 / 只读推理 / 未覆盖 / 残余风险。
 >
 > **受审对象**：分支 `claude/m6a-asset-inventory-lookup` 的 HEAD，相对
-> `main = 32826af1ae70c7d88e3e7406d4cf2570f1157d2f`。
+> `main = 9d9380c41af1f059b02025a008b5e44879657dcf`。
 >
-> 代码与测试数据采集点为 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`。本报告自身
+> 历史代码与测试数据采集点为 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`；线性重放到
+> 当前 base 后的等价提交为 `9a2cadc`。本报告自身
 > 还会形成后续提交，所以最终候选 SHA 由交接时的 `git rev-parse HEAD` 提供，不在文件内
 > 写一个必然落后的自引用值。
 >
@@ -75,6 +76,12 @@ mypy src
 lint、types、secret-scan、deps-audit、integration、compose-smoke。后两项补齐本机缺失的
 隔离 PostgreSQL 与三能力 Compose 运行证据；仍不是任何真实运维目标验证。
 
+事实收口提交曾触发既有随机 secret-scan 自检失败；独立 [PR #15](https://github.com/shixian66/xiaowei-agent/pull/15)
+已将自检改成确定性的 40 位高熵 bait，并以 fast-forward 合入当前 base。PR #15 run
+[`33974959970`](https://github.com/shixian66/xiaowei-agent/actions/runs/33974959970) 与 main run
+[`33975166668`](https://github.com/shixian66/xiaowei-agent/actions/runs/33975166668) 均八项全绿。
+旧随机 bait 的具体未命中条件不可追溯；不把长度或熵写成已验证根因。
+
 ### 1.5 隔离变异反证
 
 均在 `5a2bdec` 的 detached 临时 worktree、独立 pycache 与显式 `PYTHONPATH` 下执行；每项
@@ -115,8 +122,8 @@ lint、types、secret-scan、deps-audit、integration、compose-smoke。后两�
 - 本机未提供 PostgreSQL DSN，新增资产 persistence/reprojection integration 实际为 skip；
   本报告没有声称它在真实 PostgreSQL 上运行。
 - 本机没有 Docker，新增资产 Compose task、持久化计数与 API 重启投影没有容器实跑。
-- `c373ad6` 已有 GitHub CI、integration 与 Compose smoke 证据；其后的事实收口只改文档，
-  最终 PR HEAD 的 exact-SHA 结果以 `gh pr checks 14` 为准。
+- `c373ad6` 已有重放前的 GitHub CI、integration 与 Compose smoke 证据；PR 已重放到包含
+  PR #15 的新 base，最终 PR HEAD 的 exact-SHA 结果以 `gh pr checks 14` 为准。
 - 未连接真实资产系统、StarRocks、Prometheus、Alertmanager 或模型 API；没有任何 E1 调用。
 - 未部署、未 canary、未做真实用户问法验收，也未获得项目负责人 M6a 退出验收。
 - 未实现列举、模糊/CIDR/range、跨环境选择、标签搜索、拓扑、巡检、写入、Grafana 或

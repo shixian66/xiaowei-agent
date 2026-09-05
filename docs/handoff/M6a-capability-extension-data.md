@@ -97,8 +97,8 @@ PR 1 只能证明最小 binding seam 可以承载第二个异质能力，尚不�
 
 | 项目 | 事实 |
 | --- | --- |
-| base SHA | `32826af1ae70c7d88e3e7406d4cf2570f1157d2f`（含 PR #12 seam 修复与 PR #13 closure） |
-| 数据采集 head SHA | `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959` |
+| base SHA | `9d9380c41af1f059b02025a008b5e44879657dcf`（含 PR #12/#13 seam closure 与 PR #15 CI 确定性修复） |
+| 数据采集 head SHA | 历史 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`；当前 base 上的等价提交 `9a2cadc` |
 | snapshot | `snapshot.m6a.starrocks-prometheus.v1` → `snapshot.m6a.starrocks-prometheus-asset.v1` |
 | production policy | `policy-2026-09-05` → `policy-2026-09-05.2`；与三个有序 profile ID 成对固定 |
 | 声明集合 | 新增 `asset.inventory.lookup@1.0.0`；保留 StarRocks 与 Prometheus 既有版本 |
@@ -119,7 +119,8 @@ contracts 与 canonical hash：**0 个文件，`+0/-0`**。
 
 - PR 2 没有加入 capability 分支、第二套执行生命周期、adapter fallback 或新 hash 字段。
 - `asset.inventory.lookup` 直接消费 PR 1 binding seam 与已独立合入的 Evidence target seam。
-- 上游 target seam 修复属于 PR #12，已经在本 PR base 中；没有被藏进 PR 2 的成本统计。
+- 上游 target seam 修复属于 PR #12、CI 自检修复属于 PR #15，均已在本 PR base 中；没有被
+  藏进 PR 2 的成本统计。
 
 这证明的是“执行 seam 对第三个异质能力可复用”，不是“新增能力没有共享改动成本”。
 
@@ -172,7 +173,8 @@ PromQL 与时序摘要；StarRocks 独有的是 SQL AST 与慢查询诊断。
 ### 评审、返工与反证
 
 - A1/A2 后发现 Evidence builder 取不到已准入 target，按计划暂停；PR #12 独立修复，
-  PR #13 记录合入事实，PR 2 再快进到 `main@32826af`，没有在资产层复制 scope 参数绕过。
+  PR #13 记录合入事实，PR 2 最初快进到 `main@32826af`，没有在资产层复制 scope 参数绕过。
+  PR #15 合入后，三个资产提交再线性重放到 `main@9d9380c`；资产 diff 与成本统计不变。
 - 首次全量门出现 2 条生命周期用例失败：两处手工 `CapabilityBindingRegistry` 仍只装配
   StarRocks + Prometheus。扫描全部构造点后补齐资产 binding，保持“snapshot 与 bindings
   精确相等”的闸门不变；复跑为 2168 passed / 154 skipped。
@@ -185,6 +187,6 @@ PromQL 与时序摘要；StarRocks 独有的是 SQL AST 与慢查询诊断。
   干净并已删除。第一次 scope 变异误加载主 worktree 的 editable package 而全绿，随后用
   显式 `PYTHONPATH` 核对模块路径并得到预期 2 红；该次全绿不是覆盖结论。
 - PR #14 run [`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736)
-  在 `c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿，包含 PostgreSQL
-  integration 与三能力 Compose smoke。后续事实收口只改文档；最终 HEAD 的 CI 以
-  `gh pr checks 14` 为准。
+  在重放前的 `c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿，包含 PostgreSQL
+  integration 与三能力 Compose smoke。最终 HEAD 已更换 base，CI 以 `gh pr checks 14`
+  为准。
