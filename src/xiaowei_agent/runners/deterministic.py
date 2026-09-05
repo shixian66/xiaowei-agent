@@ -685,7 +685,11 @@ class DeterministicStepRunner:
             )
             try:
                 evidence = self._build_evidence(
-                    task_id=task_id, step=step, plan=plan, result=result
+                    task_id=task_id,
+                    step=step,
+                    plan=plan,
+                    target=target,
+                    result=result,
                 )
             except EvidenceBuildError:
                 evidence_event = self._event(
@@ -902,13 +906,20 @@ class DeterministicStepRunner:
         )
 
     def _build_evidence(
-        self, *, task_id: str, step: PlanStep, plan: ExecutionPlan, result: ToolResult
+        self,
+        *,
+        task_id: str,
+        step: PlanStep,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        result: ToolResult,
     ) -> EvidenceEnvelope:
         execution = self._bindings.execution_for(plan=plan)
         return execution.evidence_builder(
             task_id=task_id,
             step=step,
             plan=plan,
+            target=target,
             result=result,
             captured_at=self._clock(),
         )

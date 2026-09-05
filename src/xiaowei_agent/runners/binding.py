@@ -10,13 +10,14 @@ from xiaowei_agent.contracts import (
     PlanStep,
     PolicyProfile,
     PromqlSurface,
+    ResolvedTarget,
     SqlSurface,
     ToolResult,
 )
 
 
 class StepEvidenceBuilder(Protocol):
-    """把一个已准入的步骤结果转换成该 capability 的证据。"""
+    """用已准入目标把一个步骤结果转换成该 capability 的证据。"""
 
     def __call__(
         self,
@@ -24,6 +25,7 @@ class StepEvidenceBuilder(Protocol):
         task_id: str,
         step: PlanStep,
         plan: ExecutionPlan,
+        target: ResolvedTarget,
         result: ToolResult,
         captured_at: dt.datetime,
     ) -> EvidenceEnvelope: ...

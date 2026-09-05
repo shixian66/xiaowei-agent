@@ -121,7 +121,7 @@ def test_operation_outside_the_profile_is_denied() -> None:
 
 
 def test_environment_outside_the_profile_is_denied() -> None:
-    from tests.fakes.admission import CONTEXT
+    from tests.fakes.admission import CONTEXT, TARGET
 
     other = CONTEXT.model_copy(update={"environment_id": "test"})
     with pytest.raises(PolicyDeniedError) as err:
@@ -129,9 +129,25 @@ def test_environment_outside_the_profile_is_denied() -> None:
             step=slow_query_step(),
             call=slow_query_call(),
             context=other,
+            target=TARGET.model_copy(update={"environment_id": "test"}),
             profile_environments=("dev",),
         )
     assert err.value.reason is PolicyReason.ENVIRONMENT_NOT_ALLOWED
+
+
+def test_target_environment_must_match_the_request_context() -> None:
+    """允许目录不能掩盖目标与本次请求环境不一致。"""
+    from tests.fakes.admission import TARGET
+
+    drifted = TARGET.model_copy(update={"environment_id": "test"})
+    with pytest.raises(PolicyDeniedError) as err:
+        admit(
+            step=slow_query_step(),
+            call=slow_query_call(),
+            target=drifted,
+            profile_environments=("dev", "test"),
+        )
+    assert err.value.reason is PolicyReason.ENVIRONMENT_MISMATCH
 
 
 def test_timeout_beyond_the_profile_cap_is_denied() -> None:

@@ -32,6 +32,7 @@ from xiaowei_agent.contracts import (
     PlanStep,
     PolicySnapshot,
     RequestContext,
+    ResolvedTarget,
     ToolResult,
 )
 from xiaowei_agent.evidence.builder import build_evidence
@@ -123,6 +124,7 @@ def _build_slow_query_evidence(
     task_id: str,
     step: PlanStep,
     plan: ExecutionPlan,
+    target: ResolvedTarget,
     result: ToolResult,
     captured_at: dt.datetime,
 ) -> EvidenceEnvelope:
@@ -205,6 +207,7 @@ def _build_prometheus_alert_evidence(
     task_id: str,
     step: PlanStep,
     plan: ExecutionPlan,
+    target: ResolvedTarget,
     result: ToolResult,
     captured_at: dt.datetime,
 ) -> EvidenceEnvelope:

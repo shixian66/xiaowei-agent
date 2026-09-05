@@ -262,6 +262,7 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 
 - `EvidenceEnvelope` 记录来源、来源类型、capability、时间、是否样本、是否只读、限制和脱敏引用。
 - **证据在步骤边界生成并写入 ledger**：Runner 在每个步骤的工具调用返回后构造 `EvidenceEnvelope`，并写入任务作用域的 append-only `EvidenceLedger`。`TaskOutcome.evidence_refs` 只携带引用，因此消费方（Runtime 渲染、Runner 求值可选分支的 `StepCondition`）一律按引用从 ledger 读回，**不读 Runner 的内部变量**。这使"证据是可寻址、可审计的事实"在执行期就成立，而不是事后归档；也使 M4 的跨进程恢复不必改变消费方。
+- **Evidence builder 同时取得可信执行目标与不可信工具结果**：Runner 把本步骤刚通过 `StepAdmission` 的同一个 `ResolvedTarget` 作为必填参数传入 builder；恢复路径只在 `target_fingerprint` 复核通过后传入目标。`ToolResult`、adapter payload 与外部文本均不能提供或覆盖该目标。builder 据此执行 capability 专属的环境、资源身份与字段一致性校验；无法证明一致时 fail-closed。为保持边界最窄，builder 不接收完整 `RequestContext`。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
 - working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
@@ -409,7 +410,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 - SQLGuard 使用 `sqlglot` AST 解析，按方言和 policy profile 检查语句类型、表/列范围、子查询、锁、写入、注释和多语句边界。
 - PromQL 只允许 capability 注册的完整模板：参数经闭集 schema 与统一 escape 后编译，准入期从 `typed_arguments` 重新编译并逐字节比对；M6a 不接受任意 PromQL，不引入 parser，也不把固定模板安全外推为任意表达式安全。
 - AST 无法解析、方言不确定、目标不完整或权限无法确认时 fail-closed。
-- 所有工具调用都通过 ToolPolicy 做 tenant_id、actor、environment_id、resource、operation、risk 和预算校验。
+- 所有工具调用都通过 ToolPolicy 校验 target 与 context 的 `tenant_id`、`environment_id` 一致，再检查 environment allowlist、operation、effect class 与最大超时；步骤/调用预算继续由计划和 Runner 约束。target/context 漂移必须在 Gateway 与 Evidence 之前 fail-closed。
 - adapter 不把第三方错误文本当作可信控制信号；原始错误先包成 `ExternalContent`，再由确定性 error mapper 归类。
 - 每个真实写操作最多一次 write admission；审批、幂等键、fencing 和 readback 一起保障 at-most-once 尝试语义。不能无证据承诺 exactly-once。
 

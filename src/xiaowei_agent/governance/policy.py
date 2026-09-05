@@ -66,6 +66,8 @@ def evaluate_tool_policy(
         return _decide(profile, PolicyReason.PROFILE_MISMATCH, revision)
     if target.tenant_id != context.tenant_id:
         return _decide(profile, PolicyReason.TENANT_MISMATCH, revision)
+    if target.environment_id != context.environment_id:
+        return _decide(profile, PolicyReason.ENVIRONMENT_MISMATCH, revision)
     if call.operation not in profile.allowed_operations:
         return _decide(profile, PolicyReason.OPERATION_NOT_ALLOWED, revision)
     if effect_class not in profile.allowed_effect_classes:

@@ -28,6 +28,7 @@ from xiaowei_agent.contracts import (
     PolicySnapshot,
     RenderPayload,
     RequestContext,
+    ResolvedTarget,
     TaskStatus,
     ToolResult,
 )
@@ -50,6 +51,7 @@ def _never_build_evidence(
     task_id: str,
     step: PlanStep,
     plan: ExecutionPlan,
+    target: ResolvedTarget,
     result: ToolResult,
     captured_at: dt.datetime,
 ) -> EvidenceEnvelope:
