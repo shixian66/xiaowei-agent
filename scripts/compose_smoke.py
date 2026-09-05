@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -86,12 +87,28 @@ def _preflight(
 def _create_secret(path: Path) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
+        parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    except OSError:
+        raise SmokeError("SMOKE_SECRET_DIRECTORY_INVALID") from None
+    if parent_mode != 0o700:
+        raise SmokeError("SMOKE_SECRET_DIRECTORY_PERMISSIONS")
+    try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         raise SmokeError("SMOKE_SECRET_ALREADY_EXISTS") from None
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(secrets.token_urlsafe(32))
-        stream.write("\n")
+    except OSError:
+        raise SmokeError("SMOKE_SECRET_CREATE_FAILED") from None
+    failed = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(secrets.token_urlsafe(32))
+            stream.write("\n")
+        path.chmod(0o444)
+    except OSError:
+        failed = True
+    if failed:
+        path.unlink(missing_ok=True)
+        raise SmokeError("SMOKE_SECRET_CREATE_FAILED")
 
 
 @dataclass

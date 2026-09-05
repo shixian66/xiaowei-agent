@@ -1637,7 +1637,7 @@ docker compose -p "$P" up -d --wait api worker
 - `docker-compose.barrier.yml` 独立只允许增加 `services.worker.environment.XIAOWEI_SMOKE_STEP_BARRIER=true`，除此之外无任何节点；
 - 有 Docker 时，再分别对 `base + smoke` 与 `base + smoke + barrier` 执行 `docker compose ... config`，把合并后的 YAML 喂给**同一个完整断言函数**。这样静态测试证明 override 没越权，Compose 实测证明合并语义也没有覆盖安全字段。
 - 开发 secret 通过 Compose `secrets` 的 file reference 注入 `/run/secrets/...`；仓库只提交路径示例和 `.example`，不提交实际 secret 文件。
-- **干净 checkout 里没有 secret 文件**，因此 smoke 第一步必须自己创建一个临时的（`umask 077`、写进被 `.gitignore` 覆盖的目录、`finally` 删除），否则脚本在 CI 的全新工作区上第一步就失败。这与"Compose file reference 不存在时必须 fail-fast"是两件事：前者是 smoke 的前置，后者是一条独立负面用例。
+- **干净 checkout 里没有 secret 文件**，因此 smoke 第一步必须自己创建一个临时的：父目录精确为 `0700`，文件先以 `0600` 写入、关闭后改成只读 `0444`，路径在 `.gitignore` 覆盖范围内，并在 `finally` 删除。file-backed Compose secret 实际由 bind mount 提供，不能依赖 `uid` / `gid` / `mode` 重映射；非 root 应用进程的可读性由文件 `0444` 承担，宿主其他用户的隔离由不可遍历的 `0700` 父目录承担。父目录过宽、文件已存在或创建/改权限失败都必须在启动任何服务前 fail-closed。这与"Compose file reference 不存在时必须 fail-fast"是两件事：前者是 smoke 的前置，后者是一条独立负面用例。
 
 `Dockerfile` 形状固化：基础镜像固定到 **digest**（实施时解析真实值，不提交占位）；依赖用 `uv sync --frozen --no-dev`（`--frozen` 保证与 `uv.lock` 一致，`--no-dev` 保证测试工具链不进运行镜像）；以**非 root** 用户运行；命令用 **exec form**（`CMD ["python", "-m", ...]`），否则信号被 shell 吞掉、SIGTERM 传不到进程，优雅停止失效；`alembic.ini` 与 `persistence/migrations/` 必须进镜像；`.dockerignore` 排除 `.git`、venv、缓存、报告、`.env`、本地 secret 目录**与 `tests/`**（后者正是 §5.4 那份 `tools/starrocks_recording.py` 存在的原因）。
 
@@ -1912,7 +1912,7 @@ smoke script 的通用要求：用 `shutil.which("docker")` 检查 Docker，缺�
 完整命令序列共 **23 步**（每一步都有超时；`$P` 为脚本生成并已通过碰撞预检的 project name，`$BASE` = `-f docker-compose.yml -f docker-compose.smoke.yml`）：
 
 ```text
- 1. 创建临时 secret 文件（umask 077，路径在 .gitignore 覆盖范围内）
+ 1. 创建临时 secret 文件（父目录 `0700`；文件写入时 `0600`、关闭后只读 `0444`；路径在 .gitignore 覆盖范围内）
  2. docker compose -p $P $BASE build
  3. docker compose -p $P $BASE up -d --wait postgres            # 或按 §6.1 的实机结论
  4. docker compose -p $P $BASE up migrate ；断言 ExitCode == 0

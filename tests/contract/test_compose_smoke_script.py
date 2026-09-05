@@ -1,6 +1,7 @@
 """smoke 资源归属、超时与清理命令的反例。"""
 
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,25 @@ def test_project_names_have_a_full_random_uuid_suffix() -> None:
     second = project_name()
     assert first != second
     assert re.fullmatch(r"xiaowei_m5_smoke_[0-9a-f]{32}", first)
+
+
+def test_generated_secret_is_host_isolated_and_container_readable(tmp_path: Path) -> None:
+    path = tmp_path / ".secrets" / "postgres_password"
+    compose_smoke._create_secret(path)
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o444
+    assert path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_secret_creation_rejects_a_traversable_parent_directory(tmp_path: Path) -> None:
+    parent = tmp_path / ".secrets"
+    parent.mkdir(mode=0o755)
+    path = parent / "postgres_password"
+
+    with pytest.raises(SmokeError, match="SMOKE_SECRET_DIRECTORY_PERMISSIONS"):
+        compose_smoke._create_secret(path)
+    assert not path.exists()
 
 
 def test_missing_docker_is_a_hard_failure(

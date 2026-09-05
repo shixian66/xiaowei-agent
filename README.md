@@ -197,12 +197,15 @@ python -m pytest -q
 ```bash
 install -d -m 700 .secrets
 (umask 077; python -c 'import pathlib,secrets; pathlib.Path(".secrets/postgres_password").write_text(secrets.token_urlsafe(32) + "\n")')
+chmod 444 .secrets/postgres_password
 docker compose build
 docker compose up -d --wait postgres
 docker compose up --no-deps migrate
 docker compose up -d --wait --no-deps api
 docker compose up -d --no-deps worker
 ```
+
+父目录必须保持 `0700`；secret 写完后改为只读 `0444`，让以非 root 用户运行的应用容器可读取。Compose 的 file-backed secret 在本地实现中是 bind mount，不能依靠 Compose 的 `uid` / `gid` / `mode` 重映射；宿主侧的访问隔离由不可遍历的 `.secrets/` 目录承担，且 secret 只挂载给声明使用它的服务。
 
 `/healthz` 只证明 API 进程存活；`/readyz` 还检查数据库、migration head 与装配状态：
 
