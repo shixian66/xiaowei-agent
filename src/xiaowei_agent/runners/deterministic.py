@@ -551,7 +551,6 @@ class DeterministicStepRunner:
             if not await self._condition_holds(
                 task_id=task_id,
                 condition=step.condition,
-                failed_steps=failed_steps,
                 result_by_step=result_by_step,
             ):
                 continue
@@ -771,7 +770,6 @@ class DeterministicStepRunner:
         *,
         task_id: str,
         condition: StepCondition,
-        failed_steps: set[str],
         result_by_step: Mapping[str, StepResultStatus],
     ) -> bool:
         """按闭集条件决定是否执行该步骤。
@@ -791,7 +789,7 @@ class DeterministicStepRunner:
             threshold = condition.threshold
             if threshold is None or condition.ref_step_id is None:
                 return False
-            if condition.ref_step_id in failed_steps:
+            if result_by_step.get(condition.ref_step_id) is not StepResultStatus.OK:
                 return False
             rows = await self._rows_recorded_for(
                 task_id=task_id, step_id=condition.ref_step_id

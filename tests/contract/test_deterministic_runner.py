@@ -796,8 +796,34 @@ async def test_prior_step_result_condition_is_false_without_a_committed_record()
     assert not await harness.runner._condition_holds(
         task_id=harness.task_id,
         condition=condition,
-        failed_steps=set(),
         result_by_step={},
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [None, StepResultStatus.FAILED, StepResultStatus.TIMEOUT],
+    ids=["no_record", "failed", "timeout"],
+)
+async def test_row_count_condition_requires_a_committed_ok_result(
+    status: StepResultStatus | None,
+) -> None:
+    harness = RunnerHarness(GOLDEN)
+    condition = harness.plan.steps[1].condition
+    result_by_step = {} if status is None else {"s1": status}
+    assert not await harness.runner._condition_holds(
+        task_id=harness.task_id,
+        condition=condition,
+        result_by_step=result_by_step,
+    )
+
+
+async def test_row_count_condition_reads_the_ledger_after_a_committed_ok() -> None:
+    harness = RunnerHarness(GOLDEN)
+    assert await harness.runner._condition_holds(
+        task_id=harness.task_id,
+        condition=harness.plan.steps[1].condition,
+        result_by_step={"s1": StepResultStatus.OK},
     )
 
 
