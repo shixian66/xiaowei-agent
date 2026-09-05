@@ -132,6 +132,10 @@ class LifecycleError(RuntimeError):
         self.rejection = rejection
 
 
+class LeaseLostError(LifecycleError):
+    """当前 Worker 的 grant 已无法续租；调用方只能停止，不得补写。"""
+
+
 class DriftError(RuntimeError):
     """恢复时重解析/重算的结果与存储中的事实不一致。"""
 
@@ -310,6 +314,7 @@ class DeterministicStepRunner:
         grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
+        plan: ExecutionPlan,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
@@ -332,6 +337,7 @@ class DeterministicStepRunner:
             self._resume(
                 grant=grant,
                 external_input=external_input,
+                plan=plan,
                 context=context,
                 target=target,
                 approval=approval,
@@ -343,6 +349,7 @@ class DeterministicStepRunner:
         *,
         grant: TaskAttemptGrant,
         external_input: ExternalInput | None,
+        plan: ExecutionPlan,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None,
@@ -350,10 +357,14 @@ class DeterministicStepRunner:
         task_id = grant.task_id
         self._verify_external_input(external_input, approval=approval)
         stored = await self._plans.load(task_id=task_id)
-        plan = stored.plan
         self._verify_no_drift(
-            plan=plan, stored_target=stored.target, target=target, context=context
+            stored_plan=stored.plan,
+            plan=plan,
+            stored_target=stored.target,
+            target=target,
+            context=context,
         )
+        plan = stored.plan
         record = await self._tasks.get(
             lookup=TaskLookup(
                 task_id=task_id,
@@ -410,13 +421,14 @@ class DeterministicStepRunner:
     def _verify_no_drift(
         self,
         *,
+        stored_plan: ExecutionPlan,
         plan: ExecutionPlan,
         stored_target: ResolvedTarget,
         target: ResolvedTarget,
         context: RequestContext,
     ) -> None:
-        if compute_plan_hash(plan) != compute_plan_hash(plan.model_copy()):
-            raise DriftError("plan_hash is not reproducible")
+        if compute_plan_hash(stored_plan) != compute_plan_hash(plan):
+            raise DriftError("plan_hash drifted since the plan was stored")
         if compute_target_fingerprint(stored_target) != compute_target_fingerprint(target):
             raise DriftError("target_fingerprint drifted since the plan was stored")
         if plan.policy_revision != context.policy_revision:
@@ -477,7 +489,7 @@ class DeterministicStepRunner:
                 ttl_seconds=self._lease_ttl_seconds,
             )
             if renewed is None:
-                raise LifecycleError("task lease heartbeat was lost")
+                raise LeaseLostError("task lease heartbeat was lost")
 
     async def _require_current_grant(self, grant: TaskAttemptGrant) -> None:
         renewed = await self._tasks.renew_lease(
@@ -487,7 +499,7 @@ class DeterministicStepRunner:
             ttl_seconds=self._lease_ttl_seconds,
         )
         if renewed is None:
-            raise LifecycleError("task attempt grant is no longer current")
+            raise LeaseLostError("task attempt grant is no longer current")
 
     async def _run_with_heartbeat(
         self, grant: TaskAttemptGrant, execution: Coroutine[object, object, TaskOutcome]

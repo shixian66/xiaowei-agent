@@ -42,9 +42,15 @@ class PersistenceUnavailableError(RuntimeError):
 class PersistenceIntegrityError(RuntimeError):
     """schema、约束或解码故障；调用方必须 fail-stop，不能改任务。"""
 
-    def __init__(self, *, category: PersistenceIntegrityCategory) -> None:
+    def __init__(
+        self,
+        *,
+        category: PersistenceIntegrityCategory,
+        write_outcome: PersistenceWriteOutcome | None = None,
+    ) -> None:
         super().__init__("persistence integrity failure")
         self.category = category
+        self.write_outcome = write_outcome
 
 
 def classify_persistence_exception(
@@ -79,15 +85,33 @@ def classify_persistence_exception(
             write_outcome=write_outcome,
         )
     if isinstance(exc, sa.exc.IntegrityError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.CONSTRAINT)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.CONSTRAINT,
+            write_outcome=write_outcome,
+        )
     if isinstance(exc, sa.exc.DataError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.DATA)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.DATA,
+            write_outcome=write_outcome,
+        )
     if isinstance(exc, sa.exc.ProgrammingError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.SCHEMA)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.SCHEMA,
+            write_outcome=write_outcome,
+        )
     if isinstance(exc, sa.exc.StatementError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.DATA)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.DATA,
+            write_outcome=write_outcome,
+        )
     if isinstance(exc, sa.exc.SQLAlchemyError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.SCHEMA)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.SCHEMA,
+            write_outcome=write_outcome,
+        )
     if isinstance(exc, ValidationError):
-        return PersistenceIntegrityError(category=PersistenceIntegrityCategory.DECODE)
+        return PersistenceIntegrityError(
+            category=PersistenceIntegrityCategory.DECODE,
+            write_outcome=write_outcome,
+        )
     return None

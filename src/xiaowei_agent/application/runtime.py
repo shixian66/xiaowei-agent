@@ -302,7 +302,7 @@ class XiaoweiRuntime:
                 )
             elif record.status in {TaskStatus.PLANNING, TaskStatus.RUNNING}:
                 terminal = await self._runner.resume(
-                    grant, context=context, target=target
+                    grant, plan=plan, context=context, target=target
                 )
             else:
                 raise LifecycleError("task status cannot be executed")

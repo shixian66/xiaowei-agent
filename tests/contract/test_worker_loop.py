@@ -12,10 +12,16 @@ from tests.fakes.clock import ManualClock
 from xiaowei_agent.application.runtime import RetryableTaskError
 from xiaowei_agent.application.worker import (
     WorkerInfrastructureExhaustedError,
+    WorkerInvariantError,
     WorkerLoop,
 )
 from xiaowei_agent.config import Settings
-from xiaowei_agent.contracts import RequestContext, RetryReason, TaskLookup
+from xiaowei_agent.contracts import (
+    RequestContext,
+    RetryReason,
+    TaskLookup,
+    TransitionRejection,
+)
 from xiaowei_agent.persistence.errors import (
     PersistenceIntegrityCategory,
     PersistenceIntegrityError,
@@ -137,9 +143,9 @@ async def test_paused_and_loser_paths_do_not_consume_failure_budget(kind: str) -
                 step_id="s1",
                 approval_ref="approval-1",
             )
-        from xiaowei_agent.runners.deterministic import LifecycleError
+        from xiaowei_agent.runners.deterministic import LeaseLostError
 
-        raise LifecycleError("lost execution ownership")
+        raise LeaseLostError("lost execution ownership")
 
     worker = WorkerLoop(
         runtime=_Runtime(stop),
@@ -156,6 +162,64 @@ async def test_paused_and_loser_paths_do_not_consume_failure_budget(kind: str) -
     )
     assert winner.task_failure_count == 0
     assert winner.retry_scheduled_by_attempt is None
+
+
+@pytest.mark.asyncio
+async def test_worker_fails_stop_on_a_lifecycle_invariant() -> None:
+    clock = ManualClock(start=_NOW)
+    store, _ = await _ready_store(clock)
+
+    async def fail(_: TaskAttemptGrant) -> None:
+        from xiaowei_agent.runners.deterministic import LifecycleError
+
+        raise LifecycleError(
+            "transition rejected",
+            rejection=TransitionRejection.ILLEGAL_TRANSITION,
+        )
+
+    worker = WorkerLoop(
+        runtime=_Runtime(fail),
+        task_store=store,
+        clock=clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=asyncio.sleep,
+    )
+
+    with pytest.raises(WorkerInvariantError):
+        await worker.poll_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        TransitionRejection.STALE_FENCING_TOKEN,
+        TransitionRejection.LEASE_NOT_HELD,
+        TransitionRejection.TERMINAL_PROTECTED,
+    ],
+)
+async def test_worker_stops_cleanly_for_storage_confirmed_losers(
+    rejection: TransitionRejection,
+) -> None:
+    clock = ManualClock(start=_NOW)
+    store, _ = await _ready_store(clock)
+
+    async def lose(_: TaskAttemptGrant) -> None:
+        from xiaowei_agent.runners.deterministic import LifecycleError
+
+        raise LifecycleError("transition rejected", rejection=rejection)
+
+    worker = WorkerLoop(
+        runtime=_Runtime(lose),
+        task_store=store,
+        clock=clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=asyncio.sleep,
+    )
+
+    assert await worker.poll_once() == 0
 
 
 @pytest.mark.asyncio

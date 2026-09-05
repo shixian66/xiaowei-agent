@@ -106,3 +106,46 @@ def test_exited_migration_is_looked_up_with_all_containers() -> None:
     with pytest.raises(SmokeError, match="SMOKE_CONTAINER_ID_INVALID"):
         compose_smoke._container_id(session, "migrate", include_stopped=True)
     assert runner.calls[-1][-4:] == ("ps", "--all", "--quiet", "migrate")
+
+
+def test_worker_scale_requires_two_distinct_running_containers() -> None:
+    class ScaleRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if tuple(argv)[-3:] == ("ps", "--quiet", "worker"):
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="worker-a\nworker-b\n", stderr=""
+                )
+            return result
+
+    runner = ScaleRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    compose_smoke._require_worker_scale(session)
+
+
+@pytest.mark.parametrize("stdout", ["worker-a\n", "worker-a\nworker-a\n"])
+def test_worker_scale_rejects_missing_or_duplicate_containers(stdout: str) -> None:
+    class ScaleRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if tuple(argv)[-3:] == ("ps", "--quiet", "worker"):
+                return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            return result
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ScaleRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    with pytest.raises(SmokeError, match="SMOKE_WORKER_SCALE_INVALID"):
+        compose_smoke._require_worker_scale(session)

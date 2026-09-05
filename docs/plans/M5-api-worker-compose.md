@@ -300,9 +300,8 @@ Runner 契约修改为显式接收 grant：
 ```python
 async def start(
     self,
-    task_id: str,
-    *,
     grant: TaskAttemptGrant,
+    *,
     plan: ExecutionPlan,
     target: ResolvedTarget,
     context: RequestContext,
@@ -310,17 +309,17 @@ async def start(
 
 async def resume(
     self,
-    task_id: str,
+    grant: TaskAttemptGrant,
     external_input: ExternalInput | None = None,
     *,
-    grant: TaskAttemptGrant,
+    plan: ExecutionPlan,
     context: RequestContext,
     target: ResolvedTarget,
     approval: ApprovalRequest | None = None,
 ) -> TaskOutcome: ...
 ```
 
-Runner 进入后先用相同 owner/token 续租验证 grant，再启动 heartbeat；不得调用 `acquire_lease`。现有 `acquire_lease` 保留为 M4 存储原语和测试面，不再是 M5 执行调用链的一部分。
+Runner 进入后先用相同 owner/token 续租验证 grant，再启动 heartbeat；不得调用 `acquire_lease`。`resume()` 的 `plan` 是从持久化 submission 当下重算出的活对照物，只用于与 stored plan 比较 `plan_hash`；验证通过后仍执行 stored plan。现有 `acquire_lease` 保留为 M4 存储原语和测试面，不再是 M5 执行调用链的一部分。
 
 heartbeat 使用注入的异步 sleep callable 与结构化并发；任何续租失败都取消执行分支并进入 lease-loser 路径，旧持有者不得提交步骤、证据、审计或终态。
 
@@ -1277,7 +1276,7 @@ class RetryResult(Contract):
 
 于是**只有 unavailable 与 systemic 两类**，两类都不改任务。`query_task` 的读路径遇到任何持久化异常都只能向上抛（映射为 503 或 500），**绝不终态化**。一条用例专门证明这件事：注入一个读时故障，断言 `version`、audit 行数、evidence 行数三样都不变。
 
-写路径还必须区分“已确认未应用/已回滚”与“提交结果未知”；异常类型本身回答不了这个问题。增加最小闭集 `PersistenceWriteOutcome = ROLLED_BACK | NOT_CONFIRMED`，并让 `PersistenceUnavailableError.write_outcome` 在写方法中必填、读方法中为 `None`：连接/事务建立前失败、没有任何变更语句发出，或事务明确回滚成功时标 `ROLLED_BACK`；变更语句发出后在 flush/commit 确认前后断开、驱动报告 invalidated、或无法确认服务器是否提交时一律标 `NOT_CONFIRMED`。调用方不得从异常发生位置、异常消息或本地事务对象状态自行猜测。这个字段只描述**本次写是否有正面的“未应用”证明**，不宣称 `NOT_CONFIRMED` 一定写入或一定未写入。
+写路径还必须区分“已确认未应用/已回滚”与“提交结果未知”；异常类型本身回答不了这个问题。增加最小闭集 `PersistenceWriteOutcome = ROLLED_BACK | NOT_CONFIRMED`，并让两个持久化闭集错误都携带可选 `write_outcome`：写方法中必填，读方法中为 `None`。连接/事务建立前失败、没有任何变更语句发出，或事务明确回滚成功时标 `ROLLED_BACK`；变更语句发出后在 flush/commit 确认前后断开、驱动报告 invalidated、或无法确认服务器是否提交时一律标 `NOT_CONFIRMED`。调用方不得从异常发生位置、异常消息或本地事务对象状态自行猜测。这个字段只描述**本次写是否有正面的“未应用”证明**，不宣称 `NOT_CONFIRMED` 一定写入或一定未写入。
 
 写方法只有在 rollback 已确认时才允许抛 `PersistenceIntegrityError`；处理原始完整性/schema 异常期间若 rollback 本身失联，必须提升为 `PersistenceUnavailableError(write_outcome=NOT_CONFIRMED)`。因此调用方看到 systemic 写错误可以安全标 `COMMAND_ROLLED_BACK`，而不会把“先发生 SQL 错误、后丢失回滚确认”的组合误报为 failed。
 
@@ -1934,7 +1933,7 @@ smoke script 的通用要求：用 `shutil.which("docker")` 检查 Docker，缺�
 16. 轮询任务 B 至终态（超时 180s，需覆盖租约到期）
 17. 断言：证据与基线**等值**（规范化后）、该 step 的 attempt_count == 2、attempt_number 严格递增、终态唯一
     ——【并发与幂等】
-18. docker compose -p $P $BASE up -d --scale worker=2
+18. docker compose -p $P $BASE up -d --scale worker=2；`ps --quiet worker` 断言恰有两个不同的运行容器
 19. 重复提交任务 A 的幂等键 → 返回同一 task_id
 20. 并发提交多个任务 → 断言每个任务只有一份 step/evidence
 21. docker compose -p $P $BASE exec api xiaowei task submit ... / task get ...  # 容器内真实 console script，断言真实退出码

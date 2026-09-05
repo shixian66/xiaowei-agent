@@ -57,10 +57,10 @@ class WorkflowRunner(Protocol):
     Runtime→Runner 这条边在类型层完全失去契约。修 M2 契约比在 M3 打兼容补丁正确。
 
     ``plan`` / ``target`` 在 ``start`` 是入参而非从 ``PlanStore`` 读：新编译的计划
-    此刻尚未落库，``start`` 的第一件事正是把它存进去。``resume`` 则相反——计划必须
-    从存储取回**当初那份**，所以它不在 ``resume`` 的签名里。M5 再把 ``task_id``
-    收窄成调度层签发的 ``TaskAttemptGrant``：Runner 只能验证、续租并使用这份执行权，
-    不得自行竞争另一份租约。
+    此刻尚未落库，``start`` 的第一件事正是把它存进去。``resume`` 同时接收当下重算的
+    ``plan`` 并从存储取回**当初那份**：前者只用于漂移检测，验证通过后执行后者。
+    M5 再把 ``task_id`` 收窄成调度层签发的 ``TaskAttemptGrant``：Runner 只能验证、
+    续租并使用这份执行权，不得自行竞争另一份租约。
     """
 
     async def start(
@@ -77,6 +77,7 @@ class WorkflowRunner(Protocol):
         grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
+        plan: ExecutionPlan,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,

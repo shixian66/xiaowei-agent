@@ -13,7 +13,10 @@ from xiaowei_agent.contracts import (
     PipelineStage,
     RetryDecision,
     StageOutcome,
+    StepAttemptDecision,
+    StepCommitRejection,
     TraceEvent,
+    TransitionRejection,
 )
 from xiaowei_agent.observability.log_sink import (
     StructuredLogTraceSink,
@@ -32,7 +35,7 @@ from xiaowei_agent.persistence.store import (
     TaskAttemptGrant,
     TaskStore,
 )
-from xiaowei_agent.runners.deterministic import LifecycleError
+from xiaowei_agent.runners.deterministic import LeaseLostError, LifecycleError
 from xiaowei_agent.runners.runner import WorkflowPaused
 
 MonotonicClock: TypeAlias = Callable[[], float]
@@ -64,6 +67,19 @@ class WorkerInvariantError(RuntimeError):
 
 class WorkerSystemFailureError(RuntimeError):
     """系统性持久化故障的脱敏进程级结果。"""
+
+
+_LOSER_REJECTIONS = frozenset(
+    {
+        TransitionRejection.STALE_FENCING_TOKEN,
+        TransitionRejection.LEASE_NOT_HELD,
+        TransitionRejection.TERMINAL_PROTECTED,
+        StepAttemptDecision.STALE_FENCING,
+        StepAttemptDecision.NOT_RUNNABLE,
+        StepCommitRejection.STALE_FENCING,
+        StepCommitRejection.NOT_RUNNABLE,
+    }
+)
 
 
 class WorkerLoop:
@@ -177,8 +193,14 @@ class WorkerLoop:
                 await self._runtime.execute_task(grant=grant, submission=submission)
             except WorkflowPaused:
                 continue
-            except LifecycleError:
+            except LeaseLostError:
                 continue
+            except LifecycleError as exc:
+                if exc.rejection in _LOSER_REJECTIONS:
+                    continue
+                raise WorkerInvariantError(
+                    "worker encountered a lifecycle invariant failure"
+                ) from None
             except RetryableTaskError as exc:
                 await self._schedule_retry(
                     error=exc,

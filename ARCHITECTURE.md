@@ -208,26 +208,25 @@ Runner 是任务生命周期的宿主，不拥有领域安全规则。它按计�
 class WorkflowRunner(Protocol):
     async def start(
         self,
-        task_id: str,
-        *,
         grant: TaskAttemptGrant,
+        *,
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
     ) -> TaskOutcome: ...
     async def resume(
         self,
-        task_id: str,
+        grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
-        grant: TaskAttemptGrant,
+        plan: ExecutionPlan,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
     ) -> TaskOutcome: ...
 ```
 
-`grant` 是 Worker 通过 TaskStore 唯一领取点取得的当前执行权；Runner 不再自行领取 lease，进入后先用 grant 的 owner/token 续租验证，再启动 heartbeat。`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要一个活的对照物**：判断"暂停期间 policy 或目标是否变了"，必须拿调用方当下重新解析出的目标与 `policy_revision`，去比对 `PlanStore` 里存的那份。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。这两项按定义不可持久化，它们的语义就是"现在的值"。又因为 Runner 不拥有领域安全规则，它不能自己去重解析，只能由调用方传入。
+`grant` 是 Worker 通过 TaskStore 唯一领取点取得的当前执行权；Runner 不再自行领取 lease，进入后先用 grant 的 owner/token 续租验证，再启动 heartbeat。`plan`、`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要活的对照物**：调用方必须以持久化 submission 重新解释、解析并编译，再把当前计划、目标与 policy revision 交给 Runner，与 `PlanStore` 中最初保存的事实逐项比较。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。恢复通过后仍执行存储中的原计划；当前计划只用于验证。Runner 不拥有领域安全规则，因此不能自行重算这些值。
 
 M2 曾把接口写成 `start(task_id)` / `resume(task_id, external_input)`。那个形状隐含"只要 task_id 就能推进任务"，与上一段的职责不相容；M3 落地真实 Runner 时据此修正了契约。**不要把它改回窄签名**：唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类，那会让 Runtime→Runner 这条边在类型层完全失去契约。
 

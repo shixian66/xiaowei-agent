@@ -50,7 +50,12 @@ class RedactingFilter(logging.Filter):
     """在记录分发给任何 handler 之前就地净化，并注入 trace_id。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.trace_id = get_trace_id() or "-"
+        bound_trace_id = get_trace_id()
+        if bound_trace_id is not None:
+            record.trace_id = bound_trace_id
+        else:
+            candidate = redact(getattr(record, "trace_id", None))
+            record.trace_id = candidate if isinstance(candidate, str) and candidate else "-"
         # logger 名可能被调用方动态拼接（如按资源建 logger）而带入密钥。
         # 在此处就地脱敏，可同时保护自有与外部 handler；此时分发已完成，
         # 改写 name 不影响 handler 路由。

@@ -79,6 +79,7 @@ class ScriptedRunner:
         grant: TaskAttemptGrant,
         external_input: ExternalInput | None = None,
         *,
+        plan: ExecutionPlan,
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,

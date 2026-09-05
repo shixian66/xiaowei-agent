@@ -6,6 +6,7 @@ import sys
 
 from xiaowei_agent.application.worker import (
     WorkerInfrastructureExhaustedError,
+    WorkerInvariantError,
     WorkerLoop,
     WorkerSystemFailureError,
 )
@@ -30,6 +31,7 @@ async def serve_worker(*, stack: LocalStack, stop: asyncio.Event) -> int:
         return 0
     except (
         WorkerInfrastructureExhaustedError,
+        WorkerInvariantError,
         WorkerSystemFailureError,
         LookupError,
     ):

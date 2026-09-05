@@ -281,6 +281,7 @@ class RunnerHarness:
         return await self.runner.resume(
             attempt.grant,
             external_input,
+            plan=self.plan,
             context=self.context,
             target=self.target,
             approval=approval,
@@ -315,12 +316,11 @@ class RunnerHarness:
                 update={"policy_revision": "policy-2026-10-01"}
             )
         elif kind == "plan":
-            # 直接改存储里的计划：模拟"计划在存储里被换掉"。
-            stored = self.plan_store._plans[self.task_id]
-            self.plan_store._plans[self.task_id] = stored.model_copy(
+            # 当前编译结果变化；存储中仍保留最初获准执行的计划。
+            self.plan = self.plan.model_copy(
                 update={
-                    "target": self.target.model_copy(
-                        update={"resource_ids": ("starrocks-dev-9",)}
+                    "budget": self.plan.budget.model_copy(
+                        update={"max_tool_calls": self.plan.budget.max_tool_calls + 1}
                     )
                 }
             )

@@ -11,7 +11,10 @@ from xiaowei_agent.persistence.errors import (
     PersistenceWriteOutcome,
     classify_persistence_exception,
 )
-from xiaowei_agent.persistence.postgres import _persistence_boundary
+from xiaowei_agent.persistence.postgres import (
+    _persistence_boundary,
+    _write_transaction,
+)
 
 
 def _statement_error(error_type: type[sa.exc.StatementError]) -> sa.exc.StatementError:
@@ -118,3 +121,113 @@ async def test_postgres_read_boundary_has_no_write_outcome() -> None:
     with pytest.raises(PersistenceUnavailableError) as caught:
         await fail()
     assert caught.value.write_outcome is None
+
+
+class _TransactionContext:
+    def __init__(
+        self,
+        *,
+        enter_error: Exception | None = None,
+        exit_error: Exception | None = None,
+    ) -> None:
+        self.enter_error = enter_error
+        self.exit_error = exit_error
+
+    async def __aenter__(self) -> object:
+        if self.enter_error is not None:
+            raise self.enter_error
+        return object()
+
+    async def __aexit__(self, *args: object) -> bool:
+        if self.exit_error is not None:
+            raise self.exit_error
+        return False
+
+
+class _Engine:
+    def __init__(self, transaction: _TransactionContext) -> None:
+        self.transaction = transaction
+
+    def begin(self) -> _TransactionContext:
+        return self.transaction
+
+
+async def test_write_transaction_returns_after_a_successful_commit() -> None:
+    engine = _Engine(_TransactionContext())
+
+    async with _write_transaction(engine):  # type: ignore[arg-type]
+        pass
+
+
+async def test_write_transaction_reports_a_confirmed_rollback() -> None:
+    engine = _Engine(_TransactionContext())
+
+    @_persistence_boundary(write=True)
+    async def operation() -> None:
+        async with _write_transaction(engine):  # type: ignore[arg-type]
+            raise sa.exc.OperationalError(
+                "SELECT :value", {"value": "private"}, ConnectionError("private")
+            )
+
+    with pytest.raises(PersistenceUnavailableError) as caught:
+        await operation()
+
+    assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+    assert caught.value.__context__ is None
+
+
+async def test_write_transaction_reports_an_unknown_commit_result() -> None:
+    engine = _Engine(
+        _TransactionContext(exit_error=sa.exc.DisconnectionError("private"))
+    )
+
+    @_persistence_boundary(write=True)
+    async def operation() -> None:
+        async with _write_transaction(engine):  # type: ignore[arg-type]
+            pass
+
+    with pytest.raises(PersistenceUnavailableError) as caught:
+        await operation()
+
+    assert caught.value.write_outcome is PersistenceWriteOutcome.NOT_CONFIRMED
+    assert caught.value.__context__ is None
+
+
+async def test_integrity_error_is_exposed_only_after_confirmed_rollback() -> None:
+    engine = _Engine(_TransactionContext())
+
+    @_persistence_boundary(write=True)
+    async def operation() -> None:
+        async with _write_transaction(engine):  # type: ignore[arg-type]
+            raise sa.exc.ProgrammingError(
+                "SELECT :value",
+                {"value": "private"},
+                RuntimeError("private"),
+            )
+
+    with pytest.raises(PersistenceIntegrityError) as caught:
+        await operation()
+
+    assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+    assert caught.value.__context__ is None
+
+
+async def test_rollback_connection_loss_overrides_the_original_integrity_error() -> None:
+    engine = _Engine(
+        _TransactionContext(exit_error=sa.exc.DisconnectionError("rollback-private"))
+    )
+
+    @_persistence_boundary(write=True)
+    async def operation() -> None:
+        async with _write_transaction(engine):  # type: ignore[arg-type]
+            raise sa.exc.IntegrityError(
+                "INSERT", {"value": "body-private"}, RuntimeError("body-private")
+            )
+
+    with pytest.raises(PersistenceUnavailableError) as caught:
+        await operation()
+
+    assert caught.value.write_outcome is PersistenceWriteOutcome.NOT_CONFIRMED
+    assert caught.value.__context__ is None
+    assert "private" not in str(caught.value)
+    assert "private" not in repr(caught.value)

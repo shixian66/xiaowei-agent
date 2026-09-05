@@ -52,7 +52,7 @@ async def test_resume_on_a_terminal_task_does_not_overwrite_it(store, task) -> N
     await runner.start(grant, **_LIVE)
     before = await store.get(lookup=lookup_for(task))
     with pytest.raises(TerminalOrLeasedTaskError):
-        await runner.resume(grant, context=CONTEXT, target=FIXTURE_TARGET)
+        await runner.resume(grant, **_LIVE)
     after = await store.get(lookup=lookup_for(task))
     assert after.version == before.version
     assert after.status is TaskStatus.SUCCEEDED

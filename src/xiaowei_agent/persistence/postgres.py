@@ -28,7 +28,8 @@
 import datetime as _dt
 import functools
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from contextlib import asynccontextmanager
 from typing import Any, Final, ParamSpec, TypeVar
 
 import sqlalchemy as sa
@@ -156,11 +157,17 @@ def _persistence_boundary(
             try:
                 return await operation(*args, **kwargs)
             except Exception as exc:
-                mapped = classify_persistence_exception(
-                    exc,
-                    write_outcome=(
-                        PersistenceWriteOutcome.NOT_CONFIRMED if write else None
-                    ),
+                mapped = (
+                    exc
+                    if isinstance(
+                        exc, (PersistenceUnavailableError, PersistenceIntegrityError)
+                    )
+                    else classify_persistence_exception(
+                        exc,
+                        write_outcome=(
+                            PersistenceWriteOutcome.NOT_CONFIRMED if write else None
+                        ),
+                    )
                 )
                 if mapped is None:
                     raise
@@ -170,12 +177,57 @@ def _persistence_boundary(
                     write_outcome=mapped.write_outcome,
                 )
             if isinstance(mapped, PersistenceIntegrityError):
-                raise PersistenceIntegrityError(category=mapped.category)
+                raise PersistenceIntegrityError(
+                    category=mapped.category,
+                    write_outcome=mapped.write_outcome,
+                )
             raise RuntimeError("persistence exception classification failed")
 
         return wrapped
 
     return decorate
+
+
+@asynccontextmanager
+async def _write_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+    """打开写事务，并以事务退出事实区分回滚与未知提交结果。"""
+    entered = False
+    body_error: Exception | None = None
+    mapped: PersistenceUnavailableError | PersistenceIntegrityError | None = None
+    try:
+        async with engine.begin() as connection:
+            entered = True
+            try:
+                yield connection
+            except Exception as exc:
+                body_error = exc
+                raise
+    except Exception as exc:
+        # 未进入事务就失败时没有语句被执行；正文异常原样穿过 __aexit__ 则证明
+        # rollback 已完成。commit/rollback 阶段换成了另一异常时，结果不可确认。
+        rolled_back = not entered or exc is body_error
+        mapped = classify_persistence_exception(
+            exc,
+            write_outcome=(
+                PersistenceWriteOutcome.ROLLED_BACK
+                if rolled_back
+                else PersistenceWriteOutcome.NOT_CONFIRMED
+            ),
+        )
+        if mapped is None:
+            raise
+    if mapped is None:
+        return
+    if isinstance(mapped, PersistenceUnavailableError):
+        raise PersistenceUnavailableError(
+            category=mapped.category,
+            write_outcome=mapped.write_outcome,
+        )
+    if isinstance(mapped, PersistenceIntegrityError):
+        raise PersistenceIntegrityError(
+            category=mapped.category,
+            write_outcome=mapped.write_outcome,
+        )
 
 
 async def _serialise_on_task(connection: AsyncConnection, task_id: str) -> None:
@@ -502,7 +554,7 @@ class PostgresTaskStore:
     async def begin_task_attempt(
         self, *, command: TaskAttemptCommand
     ) -> TaskAttemptResult:
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
             )
@@ -596,7 +648,7 @@ class PostgresTaskStore:
     @_persistence_boundary(write=True)
     async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
         digest = retry_command_digest(command)
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(
                     connection, command.grant.task_id, for_update=True
@@ -702,7 +754,7 @@ class PostgresTaskStore:
     async def begin_step_attempt(
         self, *, command: StepAttemptCommand
     ) -> StepAttemptResult:
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(
                     connection, command.grant.task_id, for_update=True
@@ -831,7 +883,7 @@ class PostgresTaskStore:
         self, *, command: StepCommitCommand
     ) -> StepCommitResult:
         digest = step_commit_digest(command)
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(
                     connection, command.grant.task_id, for_update=True
@@ -975,7 +1027,7 @@ class PostgresTaskStore:
             environment_id=request_context.environment_id,
             idempotency_key=envelope.idempotency_key,
         )
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             created_seq = (
                 await connection.execute(sa.select(CREATED_SEQUENCE.next_value()))
             ).scalar_one()
@@ -1039,7 +1091,7 @@ class PostgresTaskStore:
     async def transition(
         self, *, command: TransitionCommand
     ) -> TransitionResult:
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
             )
@@ -1082,7 +1134,7 @@ class PostgresTaskStore:
         self, *, task_id: str, owner: str, ttl_seconds: int
     ) -> LeaseGrant | None:
         command = LeaseCommand(task_id=task_id, owner=owner, ttl_seconds=ttl_seconds)
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
             )
@@ -1116,7 +1168,7 @@ class PostgresTaskStore:
             task_id=task_id, owner=owner, ttl_seconds=ttl_seconds, fencing_token=fencing_token
         )
         token = command.fencing_token if command.fencing_token is not None else 0
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
             )
@@ -1145,7 +1197,7 @@ class PostgresTaskStore:
         ``RETURNING seq`` 取回数据库真正分配到的序号，而不是在 Python 侧再算一遍：
         再算一遍就是空洞检查——两侧同源，比对恒真。
         """
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             await _serialise_on_task(connection, request.task_id)
             seq = (
                 await connection.execute(
@@ -1177,7 +1229,7 @@ class PostgresTaskStore:
         if event.task_id is None:
             raise UnscopedAuditEventError("audit event has no task_id")
         task_id = event.task_id
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             seqs = await _append_audit_events(
                 connection, task_id=task_id, events=(event,)
             )
@@ -1210,7 +1262,7 @@ class PostgresPlanStore:
             .on_conflict_do_nothing(index_elements=["task_id"])
             .returning(TASK_PLANS.c.task_id)
         )
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             inserted = (await connection.execute(insert)).first()
             if inserted is not None:
                 return
@@ -1262,7 +1314,7 @@ class PostgresEvidenceLedger:
 
     @_persistence_boundary(write=True)
     async def append(self, *, task_id: str, envelope: EvidenceEnvelope) -> str:
-        async with self._engine.begin() as connection:
+        async with _write_transaction(self._engine) as connection:
             return await _append_evidence(
                 connection, task_id=task_id, envelope=envelope
             )

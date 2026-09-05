@@ -216,6 +216,14 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
     return set(values)
 
 
+def _require_worker_scale(session: ComposeSession) -> None:
+    worker_ids = session.run(
+        "ps", "--quiet", "worker", timeout=15.0
+    ).stdout.splitlines()
+    if len(worker_ids) != 2 or len(set(worker_ids)) != 2:
+        raise SmokeError("SMOKE_WORKER_SCALE_INVALID")
+
+
 def _psql(session: ComposeSession, task_id: str, statement: str) -> str:
     return session.run(
         "exec",
@@ -364,6 +372,7 @@ def _full_workflow(session: ComposeSession) -> None:
         raise SmokeError("SMOKE_RECOVERY_ATTEMPT_MISMATCH")
 
     session.run("up", "-d", "--scale", "worker=2", timeout=60.0)
+    _require_worker_scale(session)
     if (
         _submit(session, key=baseline_key, text=f"{_TEXT} {sensitive_canary}")
         != baseline_id

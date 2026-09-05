@@ -307,6 +307,71 @@ async def test_conflicting_stored_plan_fails_before_gateway() -> None:
     assert harness.gateway.invocations == 0
 
 
+async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xiaowei_agent.application import runtime as runtime_module
+
+    harness = RuntimeHarness(GOLDEN)
+    compiled = RunnerHarness(GOLDEN)
+    submission = harness.submission("最近30分钟有哪些慢查询")
+    view = await harness.runtime.submit_task(submission=submission)
+    harness.task_id = view.task_id
+    first = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert first.grant is not None
+    await harness.plan_store.save(
+        task_id=view.task_id,
+        plan=compiled.plan,
+        target=compiled.target,
+    )
+    current = await harness.store.get(lookup=harness.lookup)
+    planning = await harness.store.transition(
+        command=TransitionCommand(
+            task_id=view.task_id,
+            expected_version=current.version,
+            to_status=TaskStatus.PLANNING,
+            fencing_token=first.grant.fencing_token,
+        )
+    )
+    assert planning.applied
+    harness.clock.advance(seconds=61)
+    resumed = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-2",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert resumed.grant is not None and resumed.submission is not None
+    changed = compiled.plan.model_copy(
+        update={
+            "budget": compiled.plan.budget.model_copy(
+                update={"max_tool_calls": compiled.plan.budget.max_tool_calls + 1}
+            )
+        }
+    )
+    monkeypatch.setattr(runtime_module, "compile_plan", lambda **_: changed)
+
+    outcome = await harness.runtime.execute_task(
+        grant=resumed.grant,
+        submission=resumed.submission,
+    )
+
+    assert outcome.status is TaskStatus.FAILED
+    assert outcome.terminal_reason == RECOVERY_DRIFT_REASON
+    assert harness.gateway.invocations == 0
+
+
 async def test_nonempty_new_execution_journal_is_terminal_invariant_failure() -> None:
     harness = RuntimeHarness(GOLDEN)
     submission = harness.submission("最近30分钟有哪些慢查询")

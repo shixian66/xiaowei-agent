@@ -316,7 +316,7 @@ async def test_planning_task_must_resume_and_advances_exactly_one_edge() -> None
     harness.store.transitions.clear()
 
     outcome = await harness.runner.resume(
-        grant, context=harness.context, target=harness.target
+        grant, plan=harness.plan, context=harness.context, target=harness.target
     )
 
     assert outcome.status is TaskStatus.SUCCEEDED
@@ -350,7 +350,7 @@ async def test_running_task_resume_does_not_repeat_a_status_transition() -> None
     harness.store.transitions.clear()
 
     outcome = await harness.runner.resume(
-        grant, context=harness.context, target=harness.target
+        grant, plan=harness.plan, context=harness.context, target=harness.target
     )
 
     assert outcome.status is TaskStatus.SUCCEEDED
@@ -374,11 +374,37 @@ async def test_budget_exhaustion_is_rebuilt_from_the_durable_journal() -> None:
     harness.reset_call_counters()
 
     resumed = await harness.runner.resume(
-        grant, context=harness.context, target=harness.target
+        grant, plan=harness.plan, context=harness.context, target=harness.target
     )
 
     assert resumed.status is TaskStatus.FAILED
     assert resumed.terminal_reason == "budget.tool_calls_exhausted"
+    assert harness.gateway.invocations == 0
+
+
+async def test_resume_rejects_a_recomputed_plan_drift_before_gateway() -> None:
+    harness = RunnerHarness(GOLDEN)
+    await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    changed = harness.plan.model_copy(
+        update={
+            "budget": harness.plan.budget.model_copy(
+                update={"max_tool_calls": harness.plan.budget.max_tool_calls + 1}
+            )
+        }
+    )
+
+    from xiaowei_agent.runners.deterministic import DriftError
+
+    with pytest.raises(DriftError, match="plan_hash"):
+        await harness.runner.resume(
+            grant,
+            plan=changed,
+            context=harness.context,
+            target=harness.target,
+        )
+
     assert harness.gateway.invocations == 0
 
 
@@ -490,7 +516,10 @@ async def test_failed_step_context_is_rebuilt_without_replaying_the_gateway() ->
     harness.reset_call_counters()
 
     outcome = await harness.runner.resume(
-        resumed_grant, context=harness.context, target=harness.target
+        resumed_grant,
+        plan=harness.plan,
+        context=harness.context,
+        target=harness.target,
     )
 
     assert outcome.status is TaskStatus.INDETERMINATE
@@ -509,7 +538,7 @@ async def test_ok_step_is_adopted_after_restart_without_replay() -> None:
     harness.reset_call_counters()
 
     resumed = await harness.runner.resume(
-        grant, context=harness.context, target=harness.target
+        grant, plan=harness.plan, context=harness.context, target=harness.target
     )
 
     assert resumed.status is TaskStatus.SUCCEEDED

@@ -1,18 +1,24 @@
 """TraceSink 的显式投递意图、落库结局与结构化日志契约。"""
 
+import json
 import logging
+from io import StringIO
 
 import pytest
 from tests.fakes.sinks import make_event
 
+from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import PipelineStage
+from xiaowei_agent.log import configure_logging
 from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.observability.log_sink import (
     StructuredLogTraceSink,
     worker_log_context,
 )
-from xiaowei_agent.observability.sink import Delivery
+from xiaowei_agent.observability.sink import Delivery, delivery_for_write_exception
 from xiaowei_agent.persistence import (
+    PersistenceIntegrityCategory,
+    PersistenceIntegrityError,
     PersistenceUnavailableCategory,
     PersistenceUnavailableError,
     PersistenceWriteOutcome,
@@ -116,6 +122,14 @@ async def test_durable_failure_is_not_retried_or_misreported(
     assert [record.delivery_state for record in caplog.records] == [state]
 
 
+async def test_confirmed_integrity_rollback_is_logged_as_failed() -> None:
+    failure = PersistenceIntegrityError(
+        category=PersistenceIntegrityCategory.SCHEMA,
+        write_outcome=PersistenceWriteOutcome.ROLLED_BACK,
+    )
+    assert delivery_for_write_exception(failure) is Delivery.COMMAND_ROLLED_BACK
+
+
 async def test_unexpected_write_failure_is_fail_closed_and_not_confirmed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -186,6 +200,20 @@ async def test_non_worker_log_still_has_a_null_worker_instance(
             delivery=Delivery.COMMAND_COMMITTED,
         )
     assert caplog.records[0].worker_instance is None
+
+
+async def test_worker_event_trace_survives_the_real_logging_filter() -> None:
+    stream = StringIO()
+    configure_logging(Settings(environment_id="dev"), stream=stream)
+    event = make_event(stage=PipelineStage.LIFECYCLE)
+
+    await StructuredLogTraceSink(worker_instance="worker-1").emit(
+        event,
+        delivery=Delivery.COMMAND_COMMITTED,
+    )
+
+    payload = json.loads(stream.getvalue())
+    assert payload["trace_id"] == event.trace_id
 
 
 @pytest.mark.asyncio
