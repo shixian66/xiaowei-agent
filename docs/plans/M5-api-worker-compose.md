@@ -1,6 +1,8 @@
 # M5 API / CLI / Worker / Docker Compose 实施计划 V5.4.1
 
-> 状态：待最终审核；未获“开始 M5”授权，禁止据此建分支或实现。
+> 状态：已按本计划实施，并于 2026-09-05 验收归档。本文件保存获批实施规范，不是当前进度真源；最终对象、验证证据与残余风险见 [M5 归档与验收报告](../handoff/archive/2026-09-05-M5-api-worker-compose.md)。
+>
+> 实施后对账：§1.1、§6 与 Task 13 中“本机无 Docker”“须实机确认”等文字是计划获批时的证据快照，不再代表当前缺口。合并后 CI run `33952529021` 已通过不可跳过的 Compose smoke：实际采用“先 `postgres`、再前台 `migrate`、后启动 `api`/`worker`”的退路序列，容器内 Python healthcheck 与 Worker `--force-recreate --no-deps`/环境复位均成功；本机仍未执行 Docker。完整运行证据只在归档中维护，不在本计划逐段复制。
 >
 > 执行要求：后续实施必须使用 TDD，逐项完成红灯、最小实现、边界回归和真实 diff 审查；不得把本计划当成实现、运行或验收证据。
 >

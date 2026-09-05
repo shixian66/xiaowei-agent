@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M4 已验收。M5 工作分支已组装薄 FastAPI、标准库 CLI、Worker、migration 和 API/Worker/PostgreSQL Compose，并继续只使用 fake/recording 能力；本机离线测试和静态检查已覆盖这些代码，但本机没有 Docker，Compose 运行闭环仍待 CI 或有 Docker 的环境验证。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`。M5 已组装薄 FastAPI、标准库 CLI、Worker、migration 和 API/Worker/PostgreSQL Compose，并继续只使用 fake/recording 能力；合并后 CI 已通过真实 PostgreSQL integration 与隔离 Compose smoke。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -79,7 +79,7 @@
 - `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
-这些依赖与文件已在 M5 工作分支落地；服务能否组成真实运行闭环仍以 Compose smoke 的运行结果为准。
+这些依赖与文件已随 M5 合入 `main`；隔离 Compose smoke 已在合并后 CI 实际通过，生产兼容性仍需独立部署与运行证据。
 
 ## 预期目录
 
@@ -193,7 +193,7 @@ python -m pytest -q
 - 需要一个**隔离**的 PostgreSQL：用例会 `TRUNCATE` 全部表。本地可用单容器、本机已有实例或 M5 Compose；不要指向共享数据库。
 - schema 由 Alembic 迁移建立，不由 `create_all` 建立。
 
-### 本地 Compose（M5 候选）
+### 本地 Compose（M5）
 
 先生成仅供本地隔离数据库使用的随机 secret 文件；它被 `.gitignore` 排除，不得提交：
 
@@ -231,11 +231,11 @@ docker compose down --volumes --remove-orphans
 python -m scripts.compose_smoke
 ```
 
-缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败或日志泄漏都会返回非零；脚本不允许 skip。当前开发机没有 Docker，因此上述运行步骤尚未在本机验证。
+缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败或日志泄漏都会返回非零；脚本不允许 skip。当前开发机没有 Docker，因此上述运行步骤未在本机验证；合并后 GitHub CI run `33952529021` 已实际通过同一 Compose smoke。
 
 ### 尚未完成与能力边界
 
-M5 候选仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。Compose smoke 即使通过，也只证明本地隔离 PostgreSQL 下的提交、消费、查询、恢复与幂等闭环，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
+M5 基线仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。已通过的 Compose smoke 只证明隔离 PostgreSQL 下的提交、消费、查询、恢复与幂等闭环，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
 
 当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 
