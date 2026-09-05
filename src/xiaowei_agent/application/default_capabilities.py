@@ -117,6 +117,7 @@ SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
         capability_version=CAPABILITY_VERSION,
         policy_profile=SLOW_QUERY_READONLY_PROFILE,
         sql_surface=SLOW_QUERY_SURFACE,
+        promql_surface=None,
         evidence_builder=_build_slow_query_evidence,
     ),
 )

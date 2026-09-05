@@ -4,7 +4,7 @@
 1 verify_policy_revision     计划依据的 revision 与 profile 是否当前生效
 2 verify_plan_effects        分类从快照重算，与步骤标记双向比对
 3 ToolPolicy.evaluate        允许面判定
-4 SQLGuard.verify_sql        携带 SQL 的步骤才做
+4 QueryGuard                 携带 SQL/PromQL 的步骤走对应重编译闸门
 5 ApprovalGate.require       副作用步骤才做
 6 issue_admission_certificate
 ```
@@ -28,6 +28,8 @@ from xiaowei_agent.contracts import (
     PolicyProfile,
     PolicyReason,
     PolicySnapshot,
+    PromqlGuardRejection,
+    PromqlSurface,
     RequestContext,
     ResolvedTarget,
     SqlSurface,
@@ -39,34 +41,75 @@ from xiaowei_agent.governance.admission import issue_admission_certificate
 from xiaowei_agent.governance.approval import ApprovalGate
 from xiaowei_agent.governance.binding import verify_policy_revision
 from xiaowei_agent.governance.policy import PolicyDeniedError, evaluate_tool_policy
+from xiaowei_agent.governance.promqlguard import PromqlGuardError, verify_promql
 from xiaowei_agent.governance.sqlguard import SqlGuardError, verify_sql
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 
 _SQL_KEY = "sql"
-_TEMPLATE_KEY = "sql_template_id"
+_SQL_TEMPLATE_KEY = "sql_template_id"
+_PROMQL_KEY = "promql"
+_PROMQL_TEMPLATE_KEY = "promql_template_id"
 
 
-def _verify_step_sql(*, step: PlanStep, surface: SqlSurface | None) -> None:
-    """第 4 段：携带 SQL 的步骤必须过 SQLGuard。
+def _verify_step_query(
+    *,
+    step: PlanStep,
+    sql_surface: SqlSurface | None,
+    promql_surface: PromqlSurface | None,
+) -> None:
+    """第 4 段：查询信封必须完整、互斥，并通过对应闸门。
 
     **准入不信任步骤自称的 SQL**：参数从 ``typed_arguments`` 经
     ``from_typed_arguments`` 重新校验后还原，SQLGuard 再用它重编译比对。少了这一步，
     比对就会基于一份未经校验的参数进行，比对本身失去意义。
 
-    两个信封键必须同时存在或同时不存在：只有一个时，"这条 SQL 由哪个模板产生"没有
-    答案，无法比对——fail-closed。
+    同类信封键必须同时存在或同时不存在，SQL 与 PromQL 也不能同时出现。无查询
+    信封的普通只读步骤继续由计划哈希、ToolPolicy 和 adapter 操作闭集约束。
     """
-    sql = step.typed_arguments.get(_SQL_KEY)
-    template_id = step.typed_arguments.get(_TEMPLATE_KEY)
-    if sql is None and template_id is None:
+    sql_keys = (
+        _SQL_KEY in step.typed_arguments,
+        _SQL_TEMPLATE_KEY in step.typed_arguments,
+    )
+    promql_keys = (
+        _PROMQL_KEY in step.typed_arguments,
+        _PROMQL_TEMPLATE_KEY in step.typed_arguments,
+    )
+    if any(sql_keys) and not all(sql_keys):
+        raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
+    if any(promql_keys) and not all(promql_keys):
+        raise PromqlGuardError(PromqlGuardRejection.INCOMPLETE_ENVELOPE)
+    if all(sql_keys) and all(promql_keys):
+        raise PromqlGuardError(PromqlGuardRejection.ENVELOPE_CONFLICT)
+    if not any(sql_keys) and not any(promql_keys):
         return
-    if not isinstance(sql, str) or not isinstance(template_id, str):
-        raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
-    if surface is None:
-        raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
-    params = SlowQueryParams.from_typed_arguments(step.typed_arguments)
-    verify_sql(sql=sql, params=params, surface=surface, template_id=template_id)
+    if all(sql_keys):
+        sql = step.typed_arguments[_SQL_KEY]
+        template_id = step.typed_arguments[_SQL_TEMPLATE_KEY]
+        if not isinstance(sql, str) or not isinstance(template_id, str):
+            raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
+        if sql_surface is None:
+            raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
+        params = SlowQueryParams.from_typed_arguments(step.typed_arguments)
+        verify_sql(
+            sql=sql,
+            params=params,
+            surface=sql_surface,
+            template_id=template_id,
+        )
+        return
+    promql = step.typed_arguments[_PROMQL_KEY]
+    template_id = step.typed_arguments[_PROMQL_TEMPLATE_KEY]
+    if not isinstance(promql, str) or not isinstance(template_id, str):
+        raise PromqlGuardError(PromqlGuardRejection.INVALID_ARGUMENTS)
+    if promql_surface is None:
+        raise PromqlGuardError(PromqlGuardRejection.SURFACE_MISSING)
+    verify_promql(
+        promql=promql,
+        template_id=template_id,
+        typed_arguments=step.typed_arguments,
+        surface=promql_surface,
+    )
 
 
 def admit_step(
@@ -79,7 +122,8 @@ def admit_step(
     snapshot: CapabilitySnapshot,
     policy_snapshot: PolicySnapshot,
     profile: PolicyProfile,
-    surface: SqlSurface | None,
+    sql_surface: SqlSurface | None,
+    promql_surface: PromqlSurface | None,
     approval_gate: ApprovalGate,
     task_id: str,
     now: _dt.datetime,
@@ -92,6 +136,7 @@ def admit_step(
     :raises SpecResolutionError: 分类无法派生，或与步骤标记冲突。
     :raises PolicyDeniedError: 允许面判定拒绝。
     :raises SqlGuardError: SQL 未通过 AST 校验或重编译比对。
+    :raises PromqlGuardError: PromQL 信封或重编译比对不成立。
     :raises ApprovalRequiredError: 副作用步骤缺少有效审批。
     """
     verify_policy_revision(policy_snapshot, plan=plan)
@@ -114,7 +159,11 @@ def admit_step(
         raise PolicyDeniedError(
             decision=decision, reason=PolicyReason(decision.reason_code)
         )
-    _verify_step_sql(step=step, surface=surface)
+    _verify_step_query(
+        step=step,
+        sql_surface=sql_surface,
+        promql_surface=promql_surface,
+    )
     approval_ref: str | None = None
     if declared.side_effect:
         # 只有副作用步骤才走审批：ApprovalGate 是执行中断点，不是入口总开关。

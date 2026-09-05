@@ -43,6 +43,7 @@ from xiaowei_agent.contracts.enums import (
     IntentSource,
     PipelineStage,
     PolicyReason,
+    PromqlGuardRejection,
     RetryDecision,
     RetryReason,
     RiskLevel,
@@ -73,6 +74,7 @@ from xiaowei_agent.contracts.plan import (
     StepCondition,
 )
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicyProfile, PolicySnapshot
+from xiaowei_agent.contracts.promql_surface import PromqlSurface
 from xiaowei_agent.contracts.readiness import ReadinessProbe, ReadinessReport
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
@@ -146,6 +148,8 @@ __all__ = [
     "PolicyProfile",
     "PolicyReason",
     "PolicySnapshot",
+    "PromqlGuardRejection",
+    "PromqlSurface",
     "ReadinessProbe",
     "ReadinessReport",
     "Rejection",

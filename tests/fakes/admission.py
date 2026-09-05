@@ -33,6 +33,7 @@ from xiaowei_agent.contracts import (
     PlanStep,
     PolicyProfile,
     PolicySnapshot,
+    PromqlSurface,
     RequestContext,
     RiskLevel,
     SqlSurface,
@@ -216,7 +217,8 @@ def admit(
     approval: ApprovalRequest | None = None,
     approval_gate: ApprovalGate | None = None,
     profile_environments: tuple[str, ...] | None = None,
-    surface: SqlSurface | None = SLOW_QUERY_SURFACE,
+    sql_surface: SqlSurface | None = SLOW_QUERY_SURFACE,
+    promql_surface: PromqlSurface | None = None,
 ) -> AdmissionCertificate:
     """按被测步骤挑选正确的快照与 profile，其余一律走生产路径。"""
     is_write = step.operation == WRITE_OP
@@ -237,7 +239,8 @@ def admit(
         snapshot=SNAPSHOT if is_write else REGISTRY_SNAPSHOT,
         policy_snapshot=POLICY_SNAPSHOT,
         profile=profile,
-        surface=surface,
+        sql_surface=sql_surface,
+        promql_surface=promql_surface,
         approval_gate=approval_gate if approval_gate is not None else NeverGrantingApprovalGate(),
         approval=approval,
         task_id=TASK_ID,

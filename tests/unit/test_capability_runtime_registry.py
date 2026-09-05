@@ -95,6 +95,7 @@ def _binding(
             capability_version=capability_version,
             policy_profile=profile,
             sql_surface=None,
+            promql_surface=None,
             evidence_builder=_never_build_evidence,
         ),
     )

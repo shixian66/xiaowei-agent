@@ -22,11 +22,49 @@ from tests.fakes.admission import (
 )
 
 from xiaowei_agent.capabilities.effect import SpecResolutionError
-from xiaowei_agent.contracts import EffectClass, PolicyReason
+from xiaowei_agent.contracts import (
+    EffectClass,
+    PlanStep,
+    PolicyReason,
+    PromqlGuardRejection,
+    PromqlSurface,
+)
 from xiaowei_agent.governance.approval import ApprovalRequiredError
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
+from xiaowei_agent.governance.promqlguard import PromqlGuardError
 from xiaowei_agent.governance.sqlguard import SqlGuardError
+from xiaowei_agent.planning.prometheus.compiler import compile_promql
+from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
+from xiaowei_agent.planning.prometheus.templates import (
+    CPU_PERCENT_V1,
+    INSTANCE_UP_V1,
+)
+
+PROMQL_SURFACE = PromqlSurface(
+    surface_id="promql.prometheus.alert.evidence.v1",
+    allowed_template_ids=(CPU_PERCENT_V1, INSTANCE_UP_V1),
+    max_window_minutes=360,
+    max_series=5,
+    max_points_per_series=361,
+)
+
+
+def _promql_step(**envelope: object) -> PlanStep:
+    params = PrometheusAlertParams(
+        alert_name="HostHighCpu",
+        instance="node-1.example.com:9100",
+        window_start=NOW - dt.timedelta(minutes=30),
+        window_end=NOW,
+    )
+    arguments = params.to_typed_arguments() | {
+        "promql": compile_promql(
+            template_id=CPU_PERCENT_V1, params=params, surface=PROMQL_SURFACE
+        ),
+        "promql_template_id": CPU_PERCENT_V1,
+    }
+    arguments.update(envelope)
+    return slow_query_step().model_copy(update={"typed_arguments": arguments})
 
 
 def test_a_read_step_is_admitted_and_bound_to_this_call() -> None:
@@ -114,7 +152,67 @@ def test_tampered_sql_is_refused_by_the_guard() -> None:
 
 def test_sql_envelope_without_a_registered_surface_is_refused() -> None:
     with pytest.raises(SqlGuardError):
-        admit(step=slow_query_step(), call=slow_query_call(), surface=None)
+        admit(step=slow_query_step(), call=slow_query_call(), sql_surface=None)
+
+
+def test_registered_promql_envelope_is_admitted() -> None:
+    step = _promql_step()
+    call = slow_query_call(typed_args=dict(step.typed_arguments))
+    certificate = admit(
+        step=step,
+        plan=slow_query_plan(steps=(step,)),
+        call=call,
+        sql_surface=None,
+        promql_surface=PROMQL_SURFACE,
+    )
+    assert certificate.step_id == step.step_id
+
+
+@pytest.mark.parametrize(
+    "typed_arguments",
+    [
+        {"sql": "SELECT 1"},
+        {"sql_template_id": "starrocks.slow_query.list.v1"},
+        {"promql": "up"},
+        {"promql_template_id": INSTANCE_UP_V1},
+    ],
+)
+def test_partial_query_envelope_is_rejected(
+    typed_arguments: dict[str, object],
+) -> None:
+    step = slow_query_step().model_copy(update={"typed_arguments": typed_arguments})
+    with pytest.raises((SqlGuardError, PromqlGuardError)):
+        admit(
+            step=step,
+            plan=slow_query_plan(steps=(step,)),
+            call=slow_query_call(typed_args=typed_arguments),
+            promql_surface=PROMQL_SURFACE,
+        )
+
+
+def test_sql_and_promql_envelopes_cannot_coexist() -> None:
+    sql_step = slow_query_step()
+    promql_step = _promql_step(**dict(sql_step.typed_arguments))
+    with pytest.raises(PromqlGuardError) as caught:
+        admit(
+            step=promql_step,
+            plan=slow_query_plan(steps=(promql_step,)),
+            call=slow_query_call(typed_args=dict(promql_step.typed_arguments)),
+            promql_surface=PROMQL_SURFACE,
+        )
+    assert caught.value.rejection is PromqlGuardRejection.ENVELOPE_CONFLICT
+
+
+def test_promql_envelope_without_a_registered_surface_is_refused() -> None:
+    step = _promql_step()
+    with pytest.raises(PromqlGuardError) as caught:
+        admit(
+            step=step,
+            plan=slow_query_plan(steps=(step,)),
+            call=slow_query_call(typed_args=dict(step.typed_arguments)),
+            sql_surface=None,
+        )
+    assert caught.value.rejection is PromqlGuardRejection.SURFACE_MISSING
 
 
 def test_admission_reparses_params_from_typed_arguments() -> None:

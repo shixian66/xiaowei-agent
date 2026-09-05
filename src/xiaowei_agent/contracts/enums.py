@@ -250,6 +250,17 @@ class SqlGuardRejection(StrEnum):
     RECOMPILE_MISMATCH = "recompile_mismatch"
 
 
+class PromqlGuardRejection(StrEnum):
+    """固定模板 PromQL 准入失败的闭集原因。"""
+
+    UNKNOWN_TEMPLATE = "unknown_template"
+    INVALID_ARGUMENTS = "invalid_arguments"
+    RECOMPILE_MISMATCH = "recompile_mismatch"
+    INCOMPLETE_ENVELOPE = "incomplete_envelope"
+    ENVELOPE_CONFLICT = "envelope_conflict"
+    SURFACE_MISSING = "surface_missing"
+
+
 class TargetRejection(StrEnum):
     """目标解析失败的闭集原因。
 

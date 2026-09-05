@@ -9,6 +9,7 @@ from xiaowei_agent.contracts import (
     ExecutionPlan,
     PlanStep,
     PolicyProfile,
+    PromqlSurface,
     SqlSurface,
     ToolResult,
 )
@@ -36,6 +37,7 @@ class CapabilityExecutionBinding:
     capability_version: str
     policy_profile: PolicyProfile
     sql_surface: SqlSurface | None
+    promql_surface: PromqlSurface | None
     evidence_builder: StepEvidenceBuilder
 
 

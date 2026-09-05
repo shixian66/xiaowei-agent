@@ -86,6 +86,7 @@ SYNTHETIC_WRITE_BINDING = CapabilityRuntimeBinding(
         capability_version=CAP_VERSION,
         policy_profile=WRITE_PROFILE,
         sql_surface=None,
+        promql_surface=None,
         evidence_builder=_never_build_evidence,
     ),
 )
