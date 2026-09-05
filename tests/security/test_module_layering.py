@@ -108,6 +108,10 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.trace",
     },
     "interfaces/body_limit.py": {"xiaowei_agent.interfaces"},
+    "interfaces/cli.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/http_models.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
