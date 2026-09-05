@@ -37,7 +37,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "a824cb267ced1952ed321e4d637b4d949b7562ce733fa4f9da77ad2f020400c6"
+_WORKFLOW_SHA256 = "63dd4bb990030060937a6471066bbaf1407451fce5973d4dabcf4f33d9141812"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -62,9 +62,9 @@ _ALLOWED_RUN_COMMANDS = {
 # 多行 run block 的规范化 SHA-256；改一个字符即变红。
 _ALLOWED_RUN_BLOCK_DIGESTS = {
     "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
-    "b4bb7ab4cb739eaa52d8b1067f199ff40ee20dbd0340a842f08ee3573e752cc1",  # scanner self-test
+    "ee75ea2f49c802f84ce507f6b64c51248952e8728e1261e0315de3fdae3cf416",  # scanner self-test
     # allowlist narrowness self-test
-    "b4970651b205a24017459f1429819c27df77c7e50c1b4ad0c19da066027903a2",
+    "bca2fa3f6f83b2540afd0a3fa16f588a854409b214b8cf5b50eba46f00345dba",
 }
 
 
