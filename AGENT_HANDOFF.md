@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 `prometheus.alert.evidence` 已验收并合入。PR 2 `asset.inventory.lookup` 已启动，但在 A3 前发现 Evidence builder 缺少可信目标的上游 seam 缺陷，当前按计划暂停 PR 2，先独立修复公共契约** |
+| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 `prometheus.alert.evidence` 已验收并合入。PR 2 `asset.inventory.lookup` 已启动；A3 前发现的 Evidence target seam 缺陷已由 PR #12 独立修复并合入，PR 2 可在同步最新 `main` 后继续** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -47,8 +47,8 @@
 | M6a PR 1 | [PR #11](https://github.com/shixian66/xiaowei-agent/pull/11)，工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；最终复审对象 `cfd63923a35be1e5dcfe13b3dbd78c00e0bca520` 已获项目负责人验收，并以 fast-forward 合入 `main`；合入后 `main` SHA 为 `ffd58ef09f13d983fb63fd3c8e106cabe60d4977` |
 | M6a PR 1 CI | 候选 `cfd63923` 上 run [`33966437003`](https://github.com/shixian66/xiaowei-agent/actions/runs/33966437003) 八个 job 全绿；合入后 `main` run [`33967274727`](https://github.com/shixian66/xiaowei-agent/actions/runs/33967274727) 八个 job 全绿，integration `2139 passed`、`compose-smoke: passed` |
 | M6a PR 2 | 分支 `claude/m6a-asset-inventory-lookup` 从 `ffd58ef09f13d983fb63fd3c8e106cabe60d4977` 创建；A1 领域层与 A2 fake adapter 已完成局部 TDD，尚未形成提交。A3 开始前发现公共 Evidence seam 无法取得已准入目标，按计划 §13.2 暂停，未用 adapter 信任或参数复制绕过 |
-| M6a 上游 seam 修复 | 分支 `claude/m6a-evidence-target-seam` 从 `ffd58ef09f13d983fb63fd3c8e106cabe60d4977` 创建；目标是把已准入/恢复期已复核的 `ResolvedTarget` 显式传给 `StepEvidenceBuilder`，并在 ToolPolicy 补齐 target/context 环境一致性拒绝。完成独立审查与合入前不恢复 PR 2 |
-| 下一步 | 完成并验收独立 Evidence target seam 修复；以 fast-forward 合入最新 `main` 后，PR 2 再同步该基线并继续 A3–A5 |
+| M6a 上游 seam 修复 | [PR #12](https://github.com/shixian66/xiaowei-agent/pull/12)，分支 `claude/m6a-evidence-target-seam`，base `ffd58ef09f13d983fb63fd3c8e106cabe60d4977`，候选 `b8a16705f16c7400a0accb8131a1d4a25f3a6b3d`；以 rebase 方式合入后 `main` SHA 为 `8bac76aec5acf6eea82fcff2d3efaedd232c77ee`。PR run [`33970097354`](https://github.com/shixian66/xiaowei-agent/actions/runs/33970097354) 与 main run [`33970187056`](https://github.com/shixian66/xiaowei-agent/actions/runs/33970187056) 均八个 job 全绿 |
+| 下一步 | PR 2 同步 `main@8bac76aec5acf6eea82fcff2d3efaedd232c77ee`，复跑局部门后继续 A3–A5；不跳过资产 Evidence 对环境与精确身份的一致性校验 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR #11 已合入并在 GitHub 隔离 runner 实跑 PostgreSQL integration 与 Compose Prometheus smoke；本机仍无 `PYTEST_POSTGRES_DSN`/Docker，未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -205,7 +205,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 
 ### 已验证
 
-- **M6a Evidence target seam 独立修复完成本地深档验证**：在 `claude/m6a-evidence-target-seam` 上，新增 start/resume 真实 Runner 用例证明 `StepEvidenceBuilder` 收到已准入/已复核 `ResolvedTarget`；准入与安全用例证明 target/context 环境不一致以 `policy.environment_mismatch` 在 Gateway/Evidence 前拒绝。两项保护均做隔离变异反证：撤掉 target 传递时 2 条 Runner 用例转红，撤掉环境一致性检查时契约与安全用例各 1 条转红；还原后关键 4 条全绿。全量为 1991 passed / 153 skipped / 5 warnings；security gate 为 980 passed / 79 skipped / 1085 deselected / 5 warnings；Ruff 与 mypy（124 个源文件）通过。均为本地 fake/recording 证据，不是部署或真实系统验证。
+- **M6a Evidence target seam 已独立合入并取得本地与远程验证**：PR #12 新增 start/resume 真实 Runner 用例证明 `StepEvidenceBuilder` 收到已准入/已复核 `ResolvedTarget`；准入与安全用例证明 target/context 环境不一致以 `policy.environment_mismatch` 在 Gateway/Evidence 前拒绝。两项保护均做隔离变异反证：撤掉 target 传递时 2 条 Runner 用例转红，撤掉环境一致性检查时契约与安全用例各 1 条转红；还原后关键 4 条全绿。本地全量为 1991 passed / 153 skipped / 5 warnings，security gate 为 980 passed / 79 skipped / 1085 deselected / 5 warnings，Ruff 与 mypy（124 个源文件）通过；PR run `33970097354` 与合入后 main run `33970187056` 均八个 job 全绿。以上仍是 fake/recording、隔离 PostgreSQL 与 Compose 证据，不是部署或真实运维系统验证。
 - **M6a PR 1 审查修复后四条规范门全部 exit 0**：`python -m pytest -q` 为 1986 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 979 passed / 79 skipped / 1081 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
 - **首轮独立审查的必修项已做 TDD 根因修复**：production policy revision/profile 成对 golden 在旧 revision 上先红、递增后转绿；向 `application/worker.py` 临时注入 capability import 后，新逐文件依赖护栏真实转红，移除变体后恢复；60 分钟非默认窗口端到端到达 Prometheus adapter 后以 `INDETERMINATE` 收口，证明本地 recording 无 fallback。变体未保留。
 - **M6a PR #11 首轮远程 CI 已取得非生产运行证据**：run [`33966437003`](https://github.com/shixian66/xiaowei-agent/actions/runs/33966437003) 的 head SHA 为 `cfd63923a35be1e5dcfe13b3dbd78c00e0bca520`，八个 job 全部 success；PostgreSQL integration 实跑 `2139 passed`、0 skipped，Compose 实跑 `python -m scripts.compose_smoke` 并输出 `compose-smoke: passed`。这不是部署、canary 或真实 Prometheus/Alertmanager 兼容证据。
