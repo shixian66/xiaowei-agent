@@ -23,6 +23,7 @@ import pytest
 pytestmark = pytest.mark.security
 
 _SOURCE = Path(__file__).resolve().parents[2] / "src/xiaowei_agent/persistence/postgres.py"
+_RUNTIME = Path(__file__).resolve().parents[2] / "src/xiaowei_agent/application/runtime.py"
 
 
 def _transition_body() -> ast.AsyncFunctionDef:
@@ -31,6 +32,14 @@ def _transition_body() -> ast.AsyncFunctionDef:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "transition":
             return node
     raise AssertionError("PostgresTaskStore.transition 不见了")
+
+
+def _runtime_finalize_body() -> ast.AsyncFunctionDef:
+    tree = ast.parse(_RUNTIME.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_finalize":
+            return node
+    raise AssertionError("XiaoweiRuntime._finalize 不见了")
 
 
 def _attribute_chains(node: ast.AST) -> set[str]:
@@ -71,3 +80,9 @@ def test_the_ban_would_notice_the_forbidden_shape() -> None:
     chains = _attribute_chains(function)
     assert "current.version" in chains
     assert "command.expected_version" not in chains
+
+
+def test_runtime_finish_uses_the_granted_fencing_token() -> None:
+    chains = _attribute_chains(_runtime_finalize_body())
+    assert "grant.fencing_token" in chains
+    assert "current.fencing_token" not in chains

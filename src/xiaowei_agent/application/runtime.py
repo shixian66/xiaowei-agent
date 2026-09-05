@@ -30,6 +30,7 @@ import datetime as _dt
 import uuid
 from typing import Final
 
+from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.capabilities.specs import OP_LIST, SLOW_QUERY_SURFACE
@@ -47,23 +48,36 @@ from xiaowei_agent.contracts import (
     RequestContext,
     RequestEnvelope,
     ResolvedTarget,
+    RetryReason,
     StageOutcome,
     TaskLookup,
     TaskOutcome,
     TaskRecord,
     TaskStatus,
     TaskSubmission,
+    TaskView,
     TraceEvent,
+    task_query_path,
 )
+from xiaowei_agent.governance.binding import BindingError
+from xiaowei_agent.governance.policy import PolicyDeniedError
+from xiaowei_agent.governance.sqlguard import SqlGuardError
 from xiaowei_agent.observability.sink import (
     Delivery,
     TraceSink,
     delivery_for_write_exception,
 )
+from xiaowei_agent.persistence.errors import (
+    PersistenceIntegrityError,
+    PersistenceUnavailableError,
+)
 from xiaowei_agent.persistence.evidence import EvidenceLedger
+from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError
 from xiaowei_agent.persistence.store import (
     Clock,
     TaskAttemptCommand,
+    TaskAttemptGrant,
+    TaskIdCarryingError,
     TaskStore,
     TransitionCommand,
 )
@@ -77,14 +91,19 @@ from xiaowei_agent.planning.starrocks.params import (
 )
 from xiaowei_agent.reflection.answerability import assess, terminal_status_for
 from xiaowei_agent.rendering.slow_query import render, render_pending
-from xiaowei_agent.runners.deterministic import LifecycleError
+from xiaowei_agent.runners.deterministic import (
+    RECOVERY_DRIFT_REASON,
+    DriftError,
+    LifecycleError,
+    StepJournalInvariantError,
+)
 from xiaowei_agent.runners.runner import WorkflowPaused, WorkflowRunner
 
 RENDER_REF: Final[None] = None
 """M3 不持久化 ``RenderPayload``。
 
-它由 Runtime 同步返回，没有任何读回方。与其造一个没人读的 store，不如把这个决定
-显式钉住——M4/M5 拆出 worker 与 API 后才有真实的读回需求。
+它只由兼容的同步 ``handle()`` 返回，不另建 render store。M5 的异步查询从 TaskRecord
+与 Evidence 纯函数重建终态投影；非终态统一返回 ``render=None``。
 """
 
 _TERMINAL: Final[frozenset[TaskStatus]] = frozenset(
@@ -107,6 +126,23 @@ class RequestRejectedError(RuntimeError):
     def __init__(self, message: str, *, stage: PipelineStage) -> None:
         super().__init__(message)
         self.stage = stage
+
+
+class TaskInProgressError(TaskIdCarryingError, RuntimeError):
+    """同步入口遇到已经在推进的幂等任务。"""
+
+    def __init__(self, *, task_id: str) -> None:
+        super().__init__("task is already in progress", task_id=task_id)
+
+
+class RetryableTaskError(TaskIdCarryingError, RuntimeError):
+    """一次任务尝试遇到未分类故障；只向 Worker 暴露闭集原因。"""
+
+    def __init__(self, *, task_id: str, reason: RetryReason) -> None:
+        if not isinstance(reason, RetryReason):
+            raise TypeError("reason must be a RetryReason")
+        super().__init__("task attempt requires retry", task_id=task_id)
+        self.reason = reason
 
 
 class XiaoweiRuntime:
@@ -184,6 +220,120 @@ class XiaoweiRuntime:
 
     # --- 请求处理 -----------------------------------------------------------
 
+    async def submit_task(self, *, submission: TaskSubmission) -> TaskView:
+        """只持久化提交事实并返回应用层投影，不解释或执行。"""
+        record = await self._tasks.create_task(submission=submission)
+        return await self._task_view(record=record)
+
+    async def query_task(self, *, lookup: TaskLookup) -> TaskView:
+        """按受信 scope 纯读任务；不发 trace、不改变任何任务事实。"""
+        record = await self._tasks.get(lookup=lookup)
+        return await self._task_view(record=record)
+
+    async def execute_task(
+        self, *, grant: TaskAttemptGrant, submission: TaskSubmission
+    ) -> TaskOutcome:
+        """在调度层签发的 grant 下重建并执行一次任务尝试。"""
+        context = submission.context
+        record = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=grant.task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
+        )
+        terminal: TaskOutcome | None = None
+        retryable = False
+        try:
+            draft = await self._interpret(
+                envelope=submission.envelope,
+                context=context,
+                task_id=grant.task_id,
+                attempt_number=grant.attempt_number,
+            )
+            candidate = await self._resolve(
+                draft=draft,
+                context=context,
+                task_id=grant.task_id,
+                attempt_number=grant.attempt_number,
+            )
+            target, params = await self._plan_inputs(
+                draft=draft,
+                context=context,
+                as_of=submission.as_of,
+                task_id=grant.task_id,
+                attempt_number=grant.attempt_number,
+            )
+            plan = await self._compile(
+                candidate=candidate,
+                params=params,
+                target=target,
+                context=context,
+                task_id=grant.task_id,
+                attempt_number=grant.attempt_number,
+            )
+            if record.status is TaskStatus.CREATED:
+                terminal = await self._runner.start(
+                    grant, plan=plan, target=target, context=context
+                )
+            elif record.status in {TaskStatus.PLANNING, TaskStatus.RUNNING}:
+                terminal = await self._runner.resume(
+                    grant, context=context, target=target
+                )
+            else:
+                raise LifecycleError("task status cannot be executed")
+        except (WorkflowPaused, LifecycleError):
+            raise
+        except (PersistenceUnavailableError, PersistenceIntegrityError):
+            raise
+        except (DriftError, PlanConflictError, PlanNotFoundError, StepJournalInvariantError):
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.FAILED,
+                terminal_reason=RECOVERY_DRIFT_REASON,
+            )
+        except LookupError:
+            # gateway adapter 缺失是装配故障，不能写坏当前任务。
+            raise
+        except (
+            RequestRejectedError,
+            TargetResolutionError,
+            PolicyDeniedError,
+            SqlGuardError,
+            BindingError,
+            SpecResolutionError,
+            PermissionError,
+        ):
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.REJECTED,
+                terminal_reason=None,
+            )
+        except Exception:
+            retryable = True
+
+        if retryable:
+            # 必须在 except 块外抛出，避免原始异常留在 __context__。
+            raise RetryableTaskError(
+                task_id=grant.task_id,
+                reason=RetryReason.UNCLASSIFIED_ERROR,
+            )
+        if terminal is None:
+            raise RuntimeError("execution produced no terminal outcome")
+        winner, evidences, _ = await self._finalize(
+            record=record,
+            outcome=terminal,
+            context=context,
+            grant=grant,
+        )
+        return TaskOutcome(
+            task_id=winner.task_id,
+            status=winner.status,
+            terminal_reason=winner.terminal_reason,
+            evidence_refs=tuple(item.evidence_id for item in evidences),
+            render_ref=None,
+        )
+
     async def handle(
         self, *, envelope: RequestEnvelope, context: RequestContext, as_of: _dt.datetime
     ) -> RenderPayload:
@@ -208,6 +358,10 @@ class XiaoweiRuntime:
             # 而是按**已经落库的**证据与终态重新投影——重跑会既违反 at-most-once，
             # 也会让第二次的回答与第一次不同。
             return await self._render_recorded(record=record, context=context)
+        if record.status is not TaskStatus.CREATED or record.attempt_number > 0:
+            # ``create_task`` 不返回 created 标记；只有 CREATED/attempt=0 与全新行
+            # 无法区分。任何已推进事实都必须让给 Worker，不能由同步入口接管。
+            raise TaskInProgressError(task_id=record.task_id)
         attempt = await self._tasks.begin_task_attempt(
             command=TaskAttemptCommand(
                 task_id=record.task_id,
@@ -218,7 +372,11 @@ class XiaoweiRuntime:
             )
         )
         if attempt.grant is None:
-            raise LifecycleError("task attempt was not granted", rejection=attempt.rejection)
+            if attempt.winner.status in _TERMINAL:
+                return await self._render_recorded(
+                    record=attempt.winner, context=context
+                )
+            raise TaskInProgressError(task_id=record.task_id)
         try:
             outcome = await self._runner.start(
                 attempt.grant, plan=plan, target=target, context=context
@@ -240,7 +398,23 @@ class XiaoweiRuntime:
             record=record,
             outcome=outcome,
             context=context,
-            attempt_number=attempt.grant.attempt_number,
+            grant=attempt.grant,
+        )
+
+    async def _task_view(self, *, record: TaskRecord) -> TaskView:
+        payload: RenderPayload | None = None
+        if record.status in _TERMINAL:
+            evidences = await self._ledger.load(task_id=record.task_id)
+            payload = project_terminal(
+                record=record,
+                evidences=evidences,
+                verdict=assess(evidences=evidences),
+            )
+        return TaskView(
+            task_id=record.task_id,
+            status=record.status,
+            render=payload,
+            query_path=task_query_path(record.task_id),
         )
 
     async def _render_recorded(
@@ -255,24 +429,38 @@ class XiaoweiRuntime:
             task_id=record.task_id,
             delivery=Delivery.LOG_AND_DURABLE,
         )
-        return render(evidences=evidences, verdict=verdict, status=record.status)
+        return project_terminal(
+            record=record, evidences=evidences, verdict=verdict
+        )
 
     # --- 各阶段 -------------------------------------------------------------
 
     async def _interpret(
-        self, *, envelope: RequestEnvelope, context: RequestContext
+        self,
+        *,
+        envelope: RequestEnvelope,
+        context: RequestContext,
+        task_id: str | None = None,
+        attempt_number: int | None = None,
     ) -> IntentDraft:
         draft = self._interpreter.interpret(text=envelope.text, context=context)
         await self._emit(
             stage=PipelineStage.INTENT,
             outcome=StageOutcome.OK,
             context=context,
-            delivery=Delivery.LOG_ONLY,
+            task_id=task_id,
+            attempt_number=attempt_number,
+            delivery=_independent_delivery(task_id),
         )
         return draft
 
     async def _resolve(
-        self, *, draft: IntentDraft, context: RequestContext
+        self,
+        *,
+        draft: IntentDraft,
+        context: RequestContext,
+        task_id: str | None = None,
+        attempt_number: int | None = None,
     ) -> Candidate:
         candidates = self._resolver.resolve(
             draft=draft, context=context, snapshot=self._snapshot
@@ -285,7 +473,9 @@ class XiaoweiRuntime:
                 stage=PipelineStage.RESOLVER,
                 outcome=StageOutcome.REJECTED,
                 context=context,
-                delivery=Delivery.LOG_ONLY,
+                task_id=task_id,
+                attempt_number=attempt_number,
+                delivery=_independent_delivery(task_id),
             )
             raise RequestRejectedError(
                 "no capability candidate for this request",
@@ -295,12 +485,20 @@ class XiaoweiRuntime:
             stage=PipelineStage.RESOLVER,
             outcome=StageOutcome.OK,
             context=context,
-            delivery=Delivery.LOG_ONLY,
+            task_id=task_id,
+            attempt_number=attempt_number,
+            delivery=_independent_delivery(task_id),
         )
         return entry
 
     async def _plan_inputs(
-        self, *, draft: IntentDraft, context: RequestContext, as_of: _dt.datetime
+        self,
+        *,
+        draft: IntentDraft,
+        context: RequestContext,
+        as_of: _dt.datetime,
+        task_id: str | None = None,
+        attempt_number: int | None = None,
     ) -> tuple[ResolvedTarget, SlowQueryParams]:
         try:
             target = resolve_target(context=context, draft=draft)
@@ -321,7 +519,9 @@ class XiaoweiRuntime:
                 stage=PipelineStage.PLANNER,
                 outcome=StageOutcome.REJECTED,
                 context=context,
-                delivery=Delivery.LOG_ONLY,
+                task_id=task_id,
+                attempt_number=attempt_number,
+                delivery=_independent_delivery(task_id),
             )
             raise RequestRejectedError(
                 "request parameters are outside the allowed range",
@@ -336,6 +536,8 @@ class XiaoweiRuntime:
         params: SlowQueryParams,
         target: ResolvedTarget,
         context: RequestContext,
+        task_id: str | None = None,
+        attempt_number: int | None = None,
     ) -> ExecutionPlan:
         plan = compile_plan(
             candidate=candidate,
@@ -349,7 +551,9 @@ class XiaoweiRuntime:
             stage=PipelineStage.PLANNER,
             outcome=StageOutcome.OK,
             context=context,
-            delivery=Delivery.LOG_ONLY,
+            task_id=task_id,
+            attempt_number=attempt_number,
+            delivery=_independent_delivery(task_id),
         )
         return plan
 
@@ -359,10 +563,40 @@ class XiaoweiRuntime:
         record: TaskRecord,
         outcome: TaskOutcome,
         context: RequestContext,
-        attempt_number: int,
+        grant: TaskAttemptGrant,
     ) -> RenderPayload:
         """读回证据、判定终态、写 TaskStore、投影。"""
+        winner, evidences, verdict = await self._finalize(
+            record=record,
+            outcome=outcome,
+            context=context,
+            grant=grant,
+        )
+        payload = project_terminal(
+            record=winner, evidences=evidences, verdict=verdict
+        )
+        await self._emit(
+            stage=PipelineStage.RENDERING,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=winner.task_id,
+            attempt_number=grant.attempt_number,
+            delivery=Delivery.LOG_AND_DURABLE,
+        )
+        return payload
+
+    async def _finalize(
+        self,
+        *,
+        record: TaskRecord,
+        outcome: TaskOutcome,
+        context: RequestContext,
+        grant: TaskAttemptGrant,
+    ) -> tuple[TaskRecord, tuple[EvidenceEnvelope, ...], AnswerabilityVerdict]:
+        """在原 grant 下完成终态 CAS，并返回投影所需的持久化事实。"""
         task_id = record.task_id
+        if task_id != grant.task_id or outcome.task_id != grant.task_id:
+            raise LifecycleError("execution result belongs to a different task")
         # 按引用读回：Runner 的返回值只带 refs，内容一律来自 ledger。
         evidences: tuple[EvidenceEnvelope, ...] = await self._ledger.load(
             task_id=task_id
@@ -372,15 +606,14 @@ class XiaoweiRuntime:
         # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
         # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
         executed_cleanly = outcome.status is TaskStatus.SUCCEEDED
-        await self._emit(
+        reflection_event = self._event(
             stage=PipelineStage.REFLECTION,
             outcome=StageOutcome.OK
             if verdict.sufficient or not executed_cleanly
             else StageOutcome.REJECTED,
             context=context,
             task_id=task_id,
-            attempt_number=attempt_number,
-            delivery=Delivery.LOG_AND_DURABLE,
+            attempt_number=grant.attempt_number,
         )
         status = _terminal_status(outcome=outcome, verdict=verdict)
         current = await self._tasks.get(
@@ -395,48 +628,36 @@ class XiaoweiRuntime:
             outcome=StageOutcome.OK,
             context=context,
             task_id=task_id,
-            attempt_number=attempt_number,
+            attempt_number=grant.attempt_number,
         )
-        if current.status not in _TERMINAL:
-            try:
-                result = await self._tasks.transition(
-                    command=TransitionCommand(
-                        task_id=task_id,
-                        expected_version=current.version,
-                        to_status=status,
-                        fencing_token=current.fencing_token,
-                        terminal_reason=outcome.terminal_reason,
-                        audit_events=(lifecycle_event,),
-                    )
+        try:
+            result = await self._tasks.transition(
+                command=TransitionCommand(
+                    task_id=task_id,
+                    expected_version=current.version,
+                    to_status=status,
+                    fencing_token=grant.fencing_token,
+                    terminal_reason=outcome.terminal_reason,
+                    audit_events=(reflection_event, lifecycle_event),
                 )
-            except Exception as exc:
-                await self._sink.emit(
-                    lifecycle_event, delivery=delivery_for_write_exception(exc)
-                )
-                raise
-            await self._sink.emit(
-                lifecycle_event,
-                delivery=Delivery.COMMAND_COMMITTED
-                if result.applied
-                else Delivery.COMMAND_ROLLED_BACK,
             )
-            # 采纳存储层 winner：终态由存储保护，不由调用方自觉。
-            status = result.winner.status
-        else:
-            status = current.status
-            await self._sink.emit(
-                lifecycle_event, delivery=Delivery.LOG_AND_DURABLE
-            )
-        payload = render(evidences=evidences, verdict=verdict, status=status)
-        await self._emit(
-            stage=PipelineStage.RENDERING,
-            outcome=StageOutcome.OK,
-            context=context,
-            task_id=task_id,
-            attempt_number=attempt_number,
-            delivery=Delivery.LOG_AND_DURABLE,
+        except Exception as exc:
+            delivery = delivery_for_write_exception(exc)
+            for event in (reflection_event, lifecycle_event):
+                await self._sink.emit(event, delivery=delivery)
+            raise
+        delivery = (
+            Delivery.COMMAND_COMMITTED
+            if result.applied
+            else Delivery.COMMAND_ROLLED_BACK
         )
-        return payload
+        for event in (reflection_event, lifecycle_event):
+            await self._sink.emit(event, delivery=delivery)
+        if not result.applied:
+            raise LifecycleError(
+                "terminal transition rejected", rejection=result.rejection
+            )
+        return result.winner, evidences, verdict
 
 
 def _window_minutes(draft: IntentDraft) -> int:
@@ -450,6 +671,32 @@ def _window_minutes(draft: IntentDraft) -> int:
     return int(raw)
 
 
+def _independent_delivery(task_id: str | None) -> Delivery:
+    return Delivery.LOG_ONLY if task_id is None else Delivery.LOG_AND_DURABLE
+
+
+def _task_outcome(
+    *, task_id: str, status: TaskStatus, terminal_reason: str | None
+) -> TaskOutcome:
+    return TaskOutcome(
+        task_id=task_id,
+        status=status,
+        terminal_reason=terminal_reason,
+        evidence_refs=(),
+        render_ref=None,
+    )
+
+
+def project_terminal(
+    *,
+    record: TaskRecord,
+    evidences: tuple[EvidenceEnvelope, ...],
+    verdict: AnswerabilityVerdict,
+) -> RenderPayload:
+    """把终态持久化事实投影为回答；纯函数，不发 trace、不做 I/O。"""
+    return render(evidences=evidences, verdict=verdict, status=record.status)
+
+
 def _terminal_status(
     *, outcome: TaskOutcome, verdict: AnswerabilityVerdict
 ) -> TaskStatus:
@@ -459,8 +706,8 @@ def _terminal_status(
     两个结论取更保守的那个。
     """
     executed = outcome.status
-    if executed is TaskStatus.FAILED:
-        return TaskStatus.FAILED
+    if executed is not TaskStatus.SUCCEEDED:
+        return executed
     suggested = terminal_status_for(verdict)
     if executed is TaskStatus.SUCCEEDED and suggested is TaskStatus.SUCCEEDED:
         return TaskStatus.SUCCEEDED

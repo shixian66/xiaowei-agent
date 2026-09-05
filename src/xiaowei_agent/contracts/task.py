@@ -8,11 +8,13 @@
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final, Self
+from urllib.parse import quote
 
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
+from xiaowei_agent.contracts.render import RenderPayload
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 
 TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
@@ -40,6 +42,31 @@ class TaskLookup(Contract):
     task_id: StrictStr
     tenant_id: StrictStr
     environment_id: StrictStr
+
+
+def task_query_path(task_id: str) -> str:
+    """生成任务查询的相对路径；保留字符不能改变路由层级。"""
+    return f"/v1/tasks/{quote(task_id, safe='')}"
+
+
+class TaskView(Contract):
+    """入口层可见的任务投影；不暴露租约、版本或失败预算。"""
+
+    task_id: StrictStr
+    status: TaskStatus
+    render: RenderPayload | None = None
+    query_path: StrictStr
+
+    @model_validator(mode="after")
+    def _projection_is_consistent(self) -> Self:
+        terminal = self.status in TERMINAL_STATUSES
+        if terminal != (self.render is not None):
+            raise ValueError("render presence must agree with terminal status")
+        if self.render is not None and self.render.status is not self.status:
+            raise ValueError("render status must agree with task status")
+        if self.query_path != task_query_path(self.task_id):
+            raise ValueError("query_path does not belong to task_id")
+        return self
 
 ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = MappingProxyType(
     {

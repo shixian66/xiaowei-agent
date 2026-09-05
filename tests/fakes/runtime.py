@@ -20,7 +20,13 @@ from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
-from xiaowei_agent.contracts import Channel, RenderPayload, RequestEnvelope, TaskLookup
+from xiaowei_agent.contracts import (
+    Channel,
+    RenderPayload,
+    RequestEnvelope,
+    TaskLookup,
+    TaskSubmission,
+)
 from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
@@ -124,6 +130,23 @@ class RuntimeHarness:
         self.task_id = ""
 
     async def handle(self, text: str, *, idempotency_key: str = "idem-1") -> RenderPayload:
+        submission = self.submission(text, idempotency_key=idempotency_key)
+        payload = await self.runtime.handle(
+            envelope=submission.envelope,
+            context=submission.context,
+            as_of=submission.as_of,
+        )
+        if self.store.created_task_ids:
+            self.task_id = self.store.created_task_ids[-1]
+        return payload
+
+    def submission(
+        self,
+        text: str,
+        *,
+        idempotency_key: str = "idem-1",
+        as_of: dt.datetime = _AS_OF,
+    ) -> TaskSubmission:
         envelope = RequestEnvelope(
             request_id="r1",
             tenant_id=self.context.tenant_id,
@@ -133,12 +156,11 @@ class RuntimeHarness:
             idempotency_key=idempotency_key,
             environment_id=self.context.environment_id,
         )
-        payload = await self.runtime.handle(
-            envelope=envelope, context=self.context, as_of=_AS_OF
+        return TaskSubmission(
+            envelope=envelope,
+            context=self.context,
+            as_of=as_of,
         )
-        if self.store.created_task_ids:
-            self.task_id = self.store.created_task_ids[-1]
-        return payload
 
     @property
     def lookup(self) -> TaskLookup:

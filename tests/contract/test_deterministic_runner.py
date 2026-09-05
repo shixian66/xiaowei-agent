@@ -523,7 +523,7 @@ async def test_start_rejects_a_nonempty_step_journal() -> None:
     grant = await _begin(harness)
     harness.reset_call_counters()
 
-    with pytest.raises(LifecycleError, match="already has a step journal"):
+    with pytest.raises(StepJournalInvariantError, match="already has a step journal"):
         await harness.runner.start(
             grant,
             plan=harness.plan,

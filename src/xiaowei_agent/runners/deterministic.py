@@ -273,7 +273,7 @@ class DeterministicStepRunner:
     ) -> TaskOutcome:
         task_id = grant.task_id
         if await self._tasks.load_step_executions(task_id=task_id):
-            raise LifecycleError("new execution already has a step journal")
+            raise StepJournalInvariantError("new execution already has a step journal")
         await self._plans.save(task_id=task_id, plan=plan, target=target)
         record = await self._tasks.get(
             lookup=TaskLookup(

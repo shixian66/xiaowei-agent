@@ -89,7 +89,9 @@ from xiaowei_agent.contracts.task import (
     TaskOutcome,
     TaskRecord,
     TaskSubmission,
+    TaskView,
     TransitionResult,
+    task_query_path,
 )
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
 from xiaowei_agent.contracts.trace_events import TraceEvent
@@ -171,6 +173,7 @@ __all__ = [
     "TaskRecord",
     "TaskStatus",
     "TaskSubmission",
+    "TaskView",
     "ToolCall",
     "ToolCallStatus",
     "ToolResult",
@@ -182,4 +185,5 @@ __all__ = [
     "content_digest",
     "evidence_id",
     "frozen_map",
+    "task_query_path",
 ]
