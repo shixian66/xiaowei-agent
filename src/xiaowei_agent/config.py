@@ -16,7 +16,7 @@ import os
 from collections.abc import Mapping
 from typing import Annotated, Final, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from xiaowei_agent.redaction import safe_error_details
 
@@ -50,6 +50,30 @@ class Settings(BaseModel):
 
     environment_id: StrictStr
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    lease_ttl_seconds: int = Field(default=60, gt=0)
+    heartbeat_interval_seconds: float = Field(default=10.0, gt=0)
+    task_failure_limit: int = Field(default=3, gt=0)
+    infrastructure_backoff_base_seconds: float = Field(default=1.0, gt=0)
+    infrastructure_backoff_cap_seconds: float = Field(default=30.0, gt=0)
+    continuous_infrastructure_failure_window_seconds: float = Field(default=900.0, gt=0)
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    dispatch_batch_limit: int = Field(default=10, gt=0, le=100)
+    smoke_step_barrier: bool = False
+
+    @model_validator(mode="after")
+    def _worker_timings_are_consistent(self) -> "Settings":
+        if self.heartbeat_interval_seconds >= self.lease_ttl_seconds / 2:
+            raise ValueError("heartbeat interval must be less than half the lease ttl")
+        if self.infrastructure_backoff_cap_seconds < self.infrastructure_backoff_base_seconds:
+            raise ValueError("infrastructure backoff cap must not be below its base")
+        if (
+            self.continuous_infrastructure_failure_window_seconds
+            <= self.infrastructure_backoff_cap_seconds
+        ):
+            raise ValueError("infrastructure failure window must exceed the backoff cap")
+        if self.worker_poll_interval_seconds > self.lease_ttl_seconds / 4:
+            raise ValueError("worker poll interval must not exceed one quarter of the lease ttl")
+        return self
 
     @property
     def tenant_id(self) -> str:
@@ -60,6 +84,17 @@ class Settings(BaseModel):
 _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "environment_id": "XIAOWEI_ENVIRONMENT_ID",
     "log_level": "XIAOWEI_LOG_LEVEL",
+    "lease_ttl_seconds": "XIAOWEI_LEASE_TTL_SECONDS",
+    "heartbeat_interval_seconds": "XIAOWEI_HEARTBEAT_INTERVAL_SECONDS",
+    "task_failure_limit": "XIAOWEI_TASK_FAILURE_LIMIT",
+    "infrastructure_backoff_base_seconds": "XIAOWEI_INFRASTRUCTURE_BACKOFF_BASE_SECONDS",
+    "infrastructure_backoff_cap_seconds": "XIAOWEI_INFRASTRUCTURE_BACKOFF_CAP_SECONDS",
+    "continuous_infrastructure_failure_window_seconds": (
+        "XIAOWEI_CONTINUOUS_INFRASTRUCTURE_FAILURE_WINDOW_SECONDS"
+    ),
+    "worker_poll_interval_seconds": "XIAOWEI_WORKER_POLL_INTERVAL_SECONDS",
+    "dispatch_batch_limit": "XIAOWEI_DISPATCH_BATCH_LIMIT",
+    "smoke_step_barrier": "XIAOWEI_SMOKE_STEP_BARRIER",
 }
 
 

@@ -158,6 +158,7 @@ class DeterministicStepRunner:
         clock: Clock,
         sink: TraceSink,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        heartbeat_interval_seconds: float | None = None,
         sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
         self._tasks = task_store
@@ -172,6 +173,13 @@ class DeterministicStepRunner:
         self._clock = clock
         self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._heartbeat_interval_seconds = (
+            lease_ttl_seconds / 3
+            if heartbeat_interval_seconds is None
+            else heartbeat_interval_seconds
+        )
+        if not 0 < self._heartbeat_interval_seconds < lease_ttl_seconds / 2:
+            raise ValueError("heartbeat interval must be below half the lease ttl")
         self._sleep = sleep
 
     # --- trace --------------------------------------------------------------
@@ -460,9 +468,8 @@ class DeterministicStepRunner:
         return result.winner
 
     async def _heartbeat(self, grant: TaskAttemptGrant) -> None:
-        interval = max(0.01, self._lease_ttl_seconds / 3)
         while True:
-            await self._sleep(interval)
+            await self._sleep(self._heartbeat_interval_seconds)
             renewed = await self._tasks.renew_lease(
                 task_id=grant.task_id,
                 owner=grant.lease.owner,

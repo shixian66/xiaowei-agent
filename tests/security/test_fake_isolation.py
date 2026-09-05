@@ -16,6 +16,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 _FAKE_MODULES = (
     "tools.fake",
     "tools.starrocks_fake",
+    "tools.starrocks_recording",
     "persistence.fake",
     "runners.fake",
 )
@@ -57,6 +58,7 @@ def _imports_a_fake(path: Path) -> list[str]:
     是代码行为。
     """
     hits: list[str] = []
+    fake_names = {f"xiaowei_agent.{name}" for name in _FAKE_MODULES}
     tree = ast.parse(path.read_text(encoding="utf-8"))
     guarded = _type_checking_line_ranges(tree)
     for node in ast.walk(tree):
@@ -67,10 +69,13 @@ def _imports_a_fake(path: Path) -> list[str]:
         module = node.module if isinstance(node, ast.ImportFrom) else None
         if isinstance(node, ast.Import):
             module = node.names[0].name
-        if (module or "").endswith(".fake"):
+        if module in fake_names:
             hits.append(module or "")
-        if isinstance(node, ast.ImportFrom) and any(a.name == "fake" for a in node.names):
-            hits.append(f"{node.module}.fake")
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported = f"{node.module}.{alias.name}"
+                if imported in fake_names:
+                    hits.append(imported)
     return hits
 
 
@@ -123,13 +128,48 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
     )
     assert _imports_a_fake(e)
 
+    f = tmp_path / "f.py"
+    f.write_text(
+        "from xiaowei_agent.tools import starrocks_fake" + chr(10),
+        encoding="utf-8",
+    )
+    assert _imports_a_fake(f) == ["xiaowei_agent.tools.starrocks_fake"]
+
+    g = tmp_path / "g.py"
+    g.write_text(
+        "from xiaowei_agent.tools.starrocks_recording import default_recording"
+        + chr(10),
+        encoding="utf-8",
+    )
+    assert _imports_a_fake(g) == ["xiaowei_agent.tools.starrocks_recording"]
+
 
 def test_no_production_module_imports_a_fake() -> None:
     fake_paths = {_SRC / f"{name.replace('.', '/')}.py" for name in _FAKE_MODULES}
+    allowed = {_SRC / "interfaces/local_stack.py"}
     offenders = [
         (str(path.relative_to(_SRC)), hit)
         for path in _SRC.rglob("*.py")
-        if path not in fake_paths
+        if path not in fake_paths | allowed
         for hit in _imports_a_fake(path)
     ]
     assert not offenders, f"生产模块不得导入 fake: {offenders}"
+
+
+def test_src_never_imports_test_recordings() -> None:
+    offenders = [
+        str(path.relative_to(_SRC))
+        for path in _SRC.rglob("*.py")
+        if "tests.fakes.recordings" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders
+
+
+def test_only_local_stack_imports_a_fake_at_runtime() -> None:
+    fake_paths = {_SRC / f"{name.replace('.', '/')}.py" for name in _FAKE_MODULES}
+    importers = {
+        path.relative_to(_SRC).as_posix()
+        for path in _SRC.rglob("*.py")
+        if path not in fake_paths and _imports_a_fake(path)
+    }
+    assert importers == {"interfaces/local_stack.py"}

@@ -73,6 +73,7 @@ from xiaowei_agent.contracts.plan import (
     StepCondition,
 )
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicyProfile, PolicySnapshot
+from xiaowei_agent.contracts.readiness import ReadinessProbe, ReadinessReport
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 from xiaowei_agent.contracts.sql_surface import (
@@ -145,6 +146,8 @@ __all__ = [
     "PolicyProfile",
     "PolicyReason",
     "PolicySnapshot",
+    "ReadinessProbe",
+    "ReadinessReport",
     "Rejection",
     "RenderPayload",
     "RenderSection",

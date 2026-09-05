@@ -7,7 +7,10 @@ from tests.fakes.sinks import make_event
 
 from xiaowei_agent.contracts import PipelineStage
 from xiaowei_agent.observability.durable_sink import DurableTraceSink
-from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
+from xiaowei_agent.observability.log_sink import (
+    StructuredLogTraceSink,
+    worker_log_context,
+)
 from xiaowei_agent.observability.sink import Delivery
 from xiaowei_agent.persistence import (
     PersistenceUnavailableCategory,
@@ -183,6 +186,27 @@ async def test_non_worker_log_still_has_a_null_worker_instance(
             delivery=Delivery.COMMAND_COMMITTED,
         )
     assert caplog.records[0].worker_instance is None
+
+
+@pytest.mark.asyncio
+async def test_worker_log_context_is_task_local_and_resets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="xiaowei_agent.trace")
+    sink = StructuredLogTraceSink()
+    event = make_event(task_id="task-1", stage=PipelineStage.LIFECYCLE)
+
+    with worker_log_context("worker-context-1"):
+        await sink.emit(event, delivery=Delivery.COMMAND_COMMITTED)
+    await sink.emit(
+        event.model_copy(update={"event_id": "event-after-worker"}),
+        delivery=Delivery.COMMAND_COMMITTED,
+    )
+
+    assert [record.worker_instance for record in caplog.records] == [
+        "worker-context-1",
+        None,
+    ]
 
 
 def test_every_production_emit_is_awaited_and_not_fire_and_forget() -> None:

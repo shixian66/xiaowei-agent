@@ -21,6 +21,8 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 # 环的一部分，故由 ``test_redaction_stays_a_leaf`` 单独钉死。
 _UNIVERSAL_LEAF = {"xiaowei_agent.redaction"}
 
+_FILE_SCOPED_PACKAGES = {"interfaces"}
+
 _ALLOWED_INTERNAL = {
     # contracts 除叶子外不得依赖任何内部模块；log / config / trace 一律不可。
     "contracts": {"xiaowei_agent.contracts"},
@@ -86,6 +88,34 @@ _ALLOWED_INTERNAL = {
     "reflection": {"xiaowei_agent.contracts", "xiaowei_agent.reflection"},
     "rendering": {"xiaowei_agent.contracts", "xiaowei_agent.rendering"},
     "observability": {"xiaowei_agent.contracts", "xiaowei_agent.observability"},
+    # 入口层不能使用包级并集；下面的逐文件穷尽表才是它的承重规则。
+    "interfaces": {"xiaowei_agent.interfaces"},
+}
+
+_ALLOWED_INTERNAL_BY_FILE = {
+    "interfaces/__init__.py": {"xiaowei_agent.interfaces"},
+    "interfaces/local_stack.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.capabilities",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.evidence",
+        "xiaowei_agent.governance",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.observability",
+        "xiaowei_agent.persistence",
+        "xiaowei_agent.planning",
+        "xiaowei_agent.reflection",
+        "xiaowei_agent.rendering",
+        "xiaowei_agent.runners",
+        "xiaowei_agent.tools",
+        "xiaowei_agent.config",
+        "xiaowei_agent.log",
+        "xiaowei_agent.trace",
+    },
+    "interfaces/worker.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.interfaces",
+    },
 }
 
 
@@ -105,7 +135,9 @@ def _internal_imports(path: Path) -> set[str]:
     return found
 
 
-@pytest.mark.parametrize("package", sorted(_ALLOWED_INTERNAL))
+@pytest.mark.parametrize(
+    "package", sorted(set(_ALLOWED_INTERNAL) - _FILE_SCOPED_PACKAGES)
+)
 def test_package_only_imports_allowed_internal_modules(package: str) -> None:
     allowed = _ALLOWED_INTERNAL[package] | _UNIVERSAL_LEAF
     offenders: list[tuple[str, str]] = []
@@ -114,6 +146,36 @@ def test_package_only_imports_allowed_internal_modules(package: str) -> None:
             if module not in allowed:
                 offenders.append((str(path.relative_to(_SRC)), module))
     assert not offenders, f"{package} 出现非法内部依赖: {offenders}"
+
+
+@pytest.mark.parametrize("relative", sorted(_ALLOWED_INTERNAL_BY_FILE))
+def test_interface_file_only_imports_its_explicit_allowlist(relative: str) -> None:
+    path = _SRC / relative
+    allowed = _ALLOWED_INTERNAL_BY_FILE[relative] | _UNIVERSAL_LEAF
+    offenders = sorted(_internal_imports(path) - allowed)
+    assert not offenders, f"{relative} 出现非法内部依赖: {offenders}"
+
+
+def test_every_interface_file_is_registered_exactly_once() -> None:
+    actual = {
+        path.relative_to(_SRC).as_posix()
+        for path in (_SRC / "interfaces").rglob("*.py")
+    }
+    assert set(_ALLOWED_INTERNAL_BY_FILE) == actual
+
+
+def test_only_local_stack_has_the_wide_interface_allowlist() -> None:
+    broad = {
+        relative
+        for relative, allowed in _ALLOWED_INTERNAL_BY_FILE.items()
+        if "xiaowei_agent.persistence" in allowed or "xiaowei_agent.tools" in allowed
+    }
+    assert broad == {"interfaces/local_stack.py"}
+
+
+def test_tools_recording_cannot_reverse_import_capabilities() -> None:
+    path = _SRC / "tools/starrocks_recording.py"
+    assert "xiaowei_agent.capabilities" not in _internal_imports(path)
 
 
 def test_every_existing_package_is_registered() -> None:

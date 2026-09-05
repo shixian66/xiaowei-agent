@@ -6,7 +6,9 @@
 """
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Final
 
 from xiaowei_agent.contracts import TraceEvent
@@ -15,6 +17,9 @@ from xiaowei_agent.observability.sink import Delivery, validate_delivery
 LOGGER_NAME: Final[str] = "xiaowei_agent.trace"
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(LOGGER_NAME)
+_WORKER_INSTANCE: ContextVar[str | None] = ContextVar(
+    "xiaowei_worker_instance", default=None
+)
 
 _DELIVERY_STATE: Final[Mapping[Delivery, str]] = {
     Delivery.LOG_ONLY: "not_applicable",
@@ -22,6 +27,16 @@ _DELIVERY_STATE: Final[Mapping[Delivery, str]] = {
     Delivery.COMMAND_ROLLED_BACK: "failed",
     Delivery.COMMAND_NOT_CONFIRMED: "not_confirmed",
 }
+
+
+@contextmanager
+def worker_log_context(worker_instance: str) -> Iterator[None]:
+    """把 Worker owner 限定在当前异步执行树，退出后必定复位。"""
+    token = _WORKER_INSTANCE.set(worker_instance)
+    try:
+        yield
+    finally:
+        _WORKER_INSTANCE.reset(token)
 
 
 class StructuredLogTraceSink:
@@ -75,7 +90,11 @@ class StructuredLogTraceSink:
                     "error": error_summary,
                     # detail 已在契约层脱敏；这里原样透出，不再二次拼装。
                     "detail": dict(event.detail),
-                    "worker_instance": self._worker_instance,
+                    "worker_instance": (
+                        self._worker_instance
+                        if self._worker_instance is not None
+                        else _WORKER_INSTANCE.get()
+                    ),
                 },
             )
         except Exception:
