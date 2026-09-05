@@ -20,6 +20,7 @@ Runner 拥有租约、CAS 推进、可选分支求值、预算与暂停；它**�
 import asyncio
 import contextlib
 import datetime as _dt
+import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from types import MappingProxyType
 from typing import Final, Protocol
@@ -27,6 +28,7 @@ from typing import Final, Protocol
 from xiaowei_agent.capabilities.specs import GATEWAY_NAME
 from xiaowei_agent.contracts import (
     AdmissionCertificate,
+    AgentError,
     ApprovalRequest,
     ApprovalState,
     CapabilitySnapshot,
@@ -64,7 +66,11 @@ from xiaowei_agent.governance.approval import (
     approval_ref,
 )
 from xiaowei_agent.governance.step_admission import admit_step
-from xiaowei_agent.observability.sink import TraceSink
+from xiaowei_agent.observability.sink import (
+    Delivery,
+    TraceSink,
+    delivery_for_write_exception,
+)
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanStore
 from xiaowei_agent.persistence.store import (
@@ -167,7 +173,6 @@ class DeterministicStepRunner:
         self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
         self._sleep = sleep
-        self._event_seq = 0
 
     # --- trace --------------------------------------------------------------
 
@@ -181,6 +186,7 @@ class DeterministicStepRunner:
         plan: ExecutionPlan | None = None,
         step_id: str | None = None,
         attempt_number: int | None = None,
+        error: AgentError | None = None,
     ) -> TraceEvent:
         """构造一条阶段事件；命令决定何时持久化，sink 决定何时记录日志。
 
@@ -188,9 +194,8 @@ class DeterministicStepRunner:
         唯一一个阶段，而 detail 是最容易把 SQL 或外部文本带出去的地方。需要更多
         诊断信息时应先扩契约字段，而不是往 detail 里塞自由文本。
         """
-        self._event_seq += 1
         return TraceEvent(
-            event_id=f"{task_id}:{self._event_seq}",
+            event_id=str(uuid.uuid4()),
             trace_id=context.trace_id,
             task_id=task_id,
             stage=stage,
@@ -200,11 +205,11 @@ class DeterministicStepRunner:
             step_id=step_id,
             policy_revision=context.policy_revision,
             attempt_number=attempt_number,
-            error=None,
+            error=error,
             detail={},
         )
 
-    def _emit(
+    async def _emit(
         self,
         *,
         stage: PipelineStage,
@@ -214,6 +219,7 @@ class DeterministicStepRunner:
         plan: ExecutionPlan | None = None,
         step_id: str | None = None,
         attempt_number: int | None = None,
+        delivery: Delivery,
     ) -> TraceEvent:
         event = self._event(
             stage=stage,
@@ -224,12 +230,14 @@ class DeterministicStepRunner:
             step_id=step_id,
             attempt_number=attempt_number,
         )
-        self._sink.emit(event)
+        await self._sink.emit(event, delivery=delivery)
         return event
 
-    def _emit_committed(self, events: tuple[TraceEvent, ...]) -> None:
+    async def _emit_all(
+        self, events: tuple[TraceEvent, ...], *, delivery: Delivery
+    ) -> None:
         for event in events:
-            self._sink.emit(event)
+            await self._sink.emit(event, delivery=delivery)
 
     # --- 公开入口 -----------------------------------------------------------
 
@@ -425,16 +433,27 @@ class DeterministicStepRunner:
             plan=plan,
             attempt_number=grant.attempt_number,
         )
-        result = await self._tasks.transition(
-            command=TransitionCommand(
-                task_id=grant.task_id,
-                expected_version=record.version,
-                to_status=status,
-                fencing_token=grant.fencing_token,
-                audit_events=(event,),
+        try:
+            result = await self._tasks.transition(
+                command=TransitionCommand(
+                    task_id=grant.task_id,
+                    expected_version=record.version,
+                    to_status=status,
+                    fencing_token=grant.fencing_token,
+                    audit_events=(event,),
+                )
             )
+        except Exception as exc:
+            await self._sink.emit(
+                event, delivery=delivery_for_write_exception(exc)
+            )
+            raise
+        await self._sink.emit(
+            event,
+            delivery=Delivery.COMMAND_COMMITTED
+            if result.applied
+            else Delivery.COMMAND_ROLLED_BACK,
         )
-        self._sink.emit(event)
         if not result.applied:
             # 必须采纳 winner 并停下，不能用本地旧对象继续推进。
             raise LifecycleError("transition rejected", rejection=result.rejection)
@@ -523,7 +542,7 @@ class DeterministicStepRunner:
                     approval=approval,
                 )
             except ApprovalRequiredError as exc:
-                self._emit(
+                await self._emit(
                     stage=PipelineStage.ADMISSION,
                     outcome=StageOutcome.REJECTED,
                     context=context,
@@ -531,6 +550,7 @@ class DeterministicStepRunner:
                     plan=plan,
                     step_id=step.step_id,
                     attempt_number=grant.attempt_number,
+                    delivery=Delivery.LOG_AND_DURABLE,
                 )
                 await self._pause(
                     task_id=task_id,
@@ -544,7 +564,7 @@ class DeterministicStepRunner:
             except Exception:
                 # 准入的任何拒绝都归因到 ADMISSION，然后照常向上传播——Runner
                 # 不吞掉治理层的拒绝，只负责让它在 trace 上落到正确的阶段。
-                self._emit(
+                await self._emit(
                     stage=PipelineStage.ADMISSION,
                     outcome=StageOutcome.REJECTED,
                     context=context,
@@ -552,9 +572,10 @@ class DeterministicStepRunner:
                     plan=plan,
                     step_id=step.step_id,
                     attempt_number=grant.attempt_number,
+                    delivery=Delivery.LOG_AND_DURABLE,
                 )
                 raise
-            self._emit(
+            await self._emit(
                 stage=PipelineStage.ADMISSION,
                 outcome=StageOutcome.OK,
                 context=context,
@@ -562,6 +583,7 @@ class DeterministicStepRunner:
                 plan=plan,
                 step_id=step.step_id,
                 attempt_number=grant.attempt_number,
+                delivery=Delivery.LOG_AND_DURABLE,
             )
 
             attempt = await self._tasks.begin_step_attempt(
@@ -607,18 +629,18 @@ class DeterministicStepRunner:
                     step_id=step.step_id,
                     attempt_number=grant.attempt_number,
                 )
-                committed = await self._tasks.commit_step_result(
-                    command=StepCommitCommand(
+                gateway_events = (gateway_event,)
+                record = await self._commit_step(
+                    StepCommitCommand(
                         grant=grant,
                         step_id=step.step_id,
                         kind=StepOutcomeKind.MALFORMED_ADAPTER,
                         status=StepResultStatus.FAILED,
                         evidence=None,
                         audit_events=(gateway_event,),
-                    )
+                    ),
+                    events=gateway_events,
                 )
-                record = self._require_committed_step(committed)
-                self._emit_committed((gateway_event,))
                 degraded = self._adopt_step_record(
                     record, failed_steps=failed_steps, degraded=degraded
                 )
@@ -632,6 +654,7 @@ class DeterministicStepRunner:
                 plan=plan,
                 step_id=step.step_id,
                 attempt_number=grant.attempt_number,
+                error=result.error,
             )
             evidence = self._build_evidence(
                 task_id=task_id, step=step, plan=plan, result=result
@@ -646,23 +669,41 @@ class DeterministicStepRunner:
                 attempt_number=grant.attempt_number,
             )
             step_status = _STEP_RESULT_STATUS[result.status]
-            committed = await self._tasks.commit_step_result(
-                command=StepCommitCommand(
+            committed_events = (gateway_event, evidence_event)
+            record = await self._commit_step(
+                StepCommitCommand(
                     grant=grant,
                     step_id=step.step_id,
                     kind=StepOutcomeKind.TOOL_RESULT,
                     status=step_status,
                     evidence=evidence,
                     audit_events=(gateway_event, evidence_event),
-                )
+                ),
+                events=committed_events,
             )
-            record = self._require_committed_step(committed)
-            self._emit_committed((gateway_event, evidence_event))
             degraded = self._adopt_step_record(
                 record, failed_steps=failed_steps, degraded=degraded
             )
         status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
         return await self._outcome(task_id, status, terminal_reason=None)
+
+    async def _commit_step(
+        self, command: StepCommitCommand, *, events: tuple[TraceEvent, ...]
+    ) -> StepExecutionRecord:
+        try:
+            result = await self._tasks.commit_step_result(command=command)
+        except Exception as exc:
+            await self._emit_all(
+                events, delivery=delivery_for_write_exception(exc)
+            )
+            raise
+        await self._emit_all(
+            events,
+            delivery=Delivery.COMMAND_COMMITTED
+            if result.committed
+            else Delivery.COMMAND_ROLLED_BACK,
+        )
+        return self._require_committed_step(result)
 
     @staticmethod
     def _adopt_step_record(

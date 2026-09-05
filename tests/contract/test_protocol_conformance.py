@@ -19,10 +19,10 @@ from xiaowei_agent.runners.runner import WorkflowRunner
 from xiaowei_agent.tools.adapter import ToolAdapter
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
 
-# 有实现的 Protocol 必须在锚点文件中出现；无实现的（CapabilityRegistry /
-# CapabilityResolver / TraceSink）只冻结形状，M3 落地实现时再补锚点。
-_ANCHORED = {"ToolGateway", "ToolAdapter", "TaskStore", "WorkflowRunner"}
-_FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver", "TraceSink"}
+# 有实现的 Protocol 必须在锚点文件中出现；无实现的 CapabilityRegistry /
+# CapabilityResolver 只冻结形状，落地实现时再补锚点。
+_ANCHORED = {"ToolGateway", "ToolAdapter", "TaskStore", "WorkflowRunner", "TraceSink"}
+_FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
 
 def _annotated_names(path: Path) -> set[str]:
@@ -158,9 +158,8 @@ def test_the_signature_check_rejects_the_old_narrow_runner() -> None:
 def test_protocols_without_implementations_are_documented_as_such() -> None:
     """无实现锚点的 Protocol 必须是明确列举的，而不是被遗忘的。"""
     from xiaowei_agent.capabilities import CapabilityRegistry, CapabilityResolver
-    from xiaowei_agent.observability import TraceSink
 
-    declared = {CapabilityRegistry.__name__, CapabilityResolver.__name__, TraceSink.__name__}
+    declared = {CapabilityRegistry.__name__, CapabilityResolver.__name__}
     assert declared == _FROZEN_WITHOUT_IMPLEMENTATION
 
 

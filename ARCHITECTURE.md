@@ -360,7 +360,7 @@ fencing token 有两个推进点：成功取得 lease 时推进；`schedule_retr
 
 `TraceEvent.task_id` 可为 `None`（任务创建之前就失败的请求），而 `task_audit_events.task_id` 是 `NOT NULL`；这道落差在入口显式拒绝（`UnscopedAuditEventError`），不交给数据库约束——交给约束会让两个实现抛出不同的异常。这类无任务归属的事件仍走 `TraceSink`。
 
-**生产者接线不在 M4**：`TraceSink.emit` 是同步的，`record_audit_event` 是异步的，把两者接起来需要改 M2 已定的 `TraceSink` 形状并波及整条 Runner 调用链。M4 交付的是**存储能力**（Protocol + 两个实现 + 用例），接线归 M5——Worker 那一层本就在异步边界上。审批记录的消费路径同理归 M8（见 M4 计划 §14.4）。
+M5 已把 `TraceSink.emit` 收窄为必须等待的异步出口，并用显式 `Delivery` 参数区分独立 durable 写、已随命令提交、已确认回滚和结果未知；调用方不得从 `TraceEvent` 字段猜投递路径，也不得 fire-and-forget。无任务归属的事件只写结构化日志；带任务且未随命令提交的事件由 durable sink 经 `record_audit_event` 落库。审批记录的消费路径仍归 M8。
 
 **判定规则与存储实现分离**（M4）：拒绝顺序、fencing 闭合真值表、租约与续租条件由 `persistence/decisions.py` 的纯函数持有，内存实现与 PostgreSQL 实现逐字共用。这样消除的是「两个实现各自跑偏」——那类分叉不会被任何单实现的用例发现，因为每个实现都通过自己那份断言。代价是纯函数里的 bug 会让两个实现同时通过，因此由变异反证承重。
 

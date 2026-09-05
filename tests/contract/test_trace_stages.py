@@ -10,13 +10,16 @@ INTENT / RESOLVER / PLANNER / REFLECTION / RENDERING 由 Runtime 发射，在 T1
 """
 
 import logging
+import uuid
 
 import pytest
 from tests.fakes.recordings import EMPTY_WITH_TRAFFIC, GOLDEN, MALFORMED, TIMEOUT
 from tests.fakes.runner import RunnerHarness
 
-from xiaowei_agent.contracts import PipelineStage, StageOutcome
+from xiaowei_agent.contracts import ErrorCategory, PipelineStage, StageOutcome
+from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
+from xiaowei_agent.observability.sink import Delivery
 from xiaowei_agent.runners.runner import WorkflowPaused
 
 
@@ -49,6 +52,29 @@ async def test_every_event_carries_the_trace_id_and_task_id() -> None:
     for event in harness.sink.events:
         assert event.trace_id == harness.context.trace_id
         assert event.task_id == harness.task_id
+        assert event.attempt_number == harness.grant.attempt_number
+        assert str(uuid.UUID(event.event_id)) == event.event_id
+
+
+async def test_successful_run_routes_each_event_exactly_once() -> None:
+    """独立 admission 由 sink 落库；命令缓冲事件只补日志，不重复 append。"""
+    harness = RunnerHarness(GOLDEN)
+    logs = harness.sink
+    harness.runner._sink = DurableTraceSink(writer=harness.store, log_sink=logs)
+    await harness.start()
+
+    stored = harness.state.audit_events[harness.task_id]
+    assert [event.event_id for event in stored] == [
+        event.event_id for event in logs.events
+    ]
+    assert len({event.event_id for event in stored}) == len(stored)
+    assert logs.deliveries == [
+        Delivery.COMMAND_COMMITTED,
+        Delivery.COMMAND_COMMITTED,
+        Delivery.COMMAND_COMMITTED,
+        Delivery.COMMAND_COMMITTED,
+        Delivery.COMMAND_COMMITTED,
+    ]
 
 
 async def test_successful_stages_are_marked_ok() -> None:
@@ -73,6 +99,18 @@ async def test_each_injected_failure_is_attributable_to_one_stage(
     await harness.start()
     failed = [e for e in harness.sink.events if e.outcome is not StageOutcome.OK]
     assert [e.stage for e in failed] == [expected_stage]
+
+
+async def test_timeout_error_summary_is_durable_and_recoverable() -> None:
+    harness = RunnerHarness(TIMEOUT)
+    await harness.start()
+    gateway = next(
+        event
+        for event in harness.state.audit_events[harness.task_id]
+        if event.stage is PipelineStage.GATEWAY
+    )
+    assert gateway.error is not None
+    assert gateway.error.category is ErrorCategory.TIMEOUT
 
 
 async def test_a_tampered_plan_is_attributed_to_admission() -> None:
@@ -102,18 +140,20 @@ async def test_trace_detail_never_carries_sql_or_external_text() -> None:
         assert "starrocks_audit_tbl__" not in dumped
 
 
-def test_structured_log_sink_writes_one_record_per_event(
+async def test_structured_log_sink_writes_one_record_per_event(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from tests.fakes.sinks import make_event
 
     sink = StructuredLogTraceSink()
     with caplog.at_level(logging.INFO):
-        sink.emit(make_event(stage=PipelineStage.GATEWAY))
+        await sink.emit(
+            make_event(stage=PipelineStage.GATEWAY), delivery=Delivery.LOG_ONLY
+        )
     assert len(caplog.records) == 1
 
 
-def test_structured_log_sink_keeps_a_constant_message(
+async def test_structured_log_sink_keeps_a_constant_message(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """消息体恒为常量，取值只经 ``extra`` 传出。
@@ -127,11 +167,14 @@ def test_structured_log_sink_keeps_a_constant_message(
 
     sink = StructuredLogTraceSink()
     with caplog.at_level(logging.INFO):
-        sink.emit(make_event(stage=PipelineStage.GATEWAY, detail={"note": "n"}))
+        await sink.emit(
+            make_event(stage=PipelineStage.GATEWAY, detail={"note": "n"}),
+            delivery=Delivery.LOG_ONLY,
+        )
     assert caplog.records[0].getMessage() == "trace event"
 
 
-def test_contract_layer_scrubs_detail_before_it_reaches_the_sink(
+async def test_contract_layer_scrubs_detail_before_it_reaches_the_sink(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """纵深防御的另一层：即便 sink 出错，detail 里也已经没有原文。"""
@@ -142,7 +185,7 @@ def test_contract_layer_scrubs_detail_before_it_reaches_the_sink(
     assert "hunter2" not in str(dict(event.detail))
     sink = StructuredLogTraceSink()
     with caplog.at_level(logging.INFO):
-        sink.emit(event)
+        await sink.emit(event, delivery=Delivery.LOG_ONLY)
     assert "hunter2" not in caplog.text
 
 

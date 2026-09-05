@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from xiaowei_agent.contracts import PipelineStage, StageOutcome, TraceEvent
+from xiaowei_agent.observability.sink import Delivery
 
 _AT = dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC)
 
@@ -39,9 +40,11 @@ class RecordingTraceSink:
 
     def __init__(self) -> None:
         self.events: list[TraceEvent] = []
+        self.deliveries: list[Delivery] = []
 
-    def emit(self, event: TraceEvent) -> None:
+    async def emit(self, event: TraceEvent, *, delivery: Delivery) -> None:
         self.events.append(event)
+        self.deliveries.append(delivery)
 
 
 class SpyEvidenceLedger:

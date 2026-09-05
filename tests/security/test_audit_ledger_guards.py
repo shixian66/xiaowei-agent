@@ -89,3 +89,28 @@ def test_both_implementations_raise_the_same_error(class_name: str) -> None:
         and isinstance(node.exc.func, ast.Name)
     }
     assert raised == {"UnscopedAuditEventError"}
+
+
+async def test_admission_rejection_is_durable_without_creating_evidence() -> None:
+    """准入拒绝发生在 step begin 之前，只能由 durable sink 留下审计。"""
+    from tests.fakes.recordings import GOLDEN
+    from tests.fakes.runner import RunnerHarness
+
+    from xiaowei_agent.contracts import PipelineStage, StageOutcome
+    from xiaowei_agent.observability.durable_sink import DurableTraceSink
+
+    harness = RunnerHarness(GOLDEN, tamper_sql=True)
+    harness.runner._sink = DurableTraceSink(
+        writer=harness.store, log_sink=harness.sink
+    )
+    with pytest.raises(Exception):  # noqa: B017 - 本条只承重 durable audit
+        await harness.start()
+
+    rejected = [
+        event
+        for event in harness.state.audit_events[harness.task_id]
+        if event.stage is PipelineStage.ADMISSION
+        and event.outcome is StageOutcome.REJECTED
+    ]
+    assert len(rejected) == 1
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
