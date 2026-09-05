@@ -16,13 +16,18 @@ from tests.fakes.recordings import (
 )
 from tests.fakes.runner import RunnerHarness
 
+from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
 from xiaowei_agent.contracts import (
     AttemptIntent,
+    EvidenceEnvelope,
+    ExternalSource,
     PipelineStage,
     StageOutcome,
     StepAttemptDecision,
     StepCommitRejection,
+    StepCondition,
+    StepConditionKind,
     StepOutcomeKind,
     StepResultStatus,
     TaskStatus,
@@ -45,6 +50,28 @@ from xiaowei_agent.runners.deterministic import (
     LifecycleError,
     StepJournalInvariantError,
 )
+
+
+def _use_prior_result_condition(
+    harness: RunnerHarness, expected: StepResultStatus
+) -> None:
+    second = harness.plan.steps[1]
+    harness.plan = harness.plan.model_copy(
+        update={
+            "steps": (
+                harness.plan.steps[0],
+                second.model_copy(
+                    update={
+                        "condition": StepCondition(
+                            kind=StepConditionKind.PRIOR_STEP_RESULT_IS,
+                            ref_step_id="s1",
+                            expected_result=expected,
+                        )
+                    }
+                ),
+            )
+        }
+    )
 
 
 async def _begin(harness: RunnerHarness) -> TaskAttemptGrant:
@@ -736,3 +763,139 @@ async def test_gateway_results_reach_evidence_unchanged_in_shape() -> None:
     stored = await harness.ledger.load(task_id=harness.task_id)
     assert len(stored[0].facts) == 3
     assert harness.gateway.results[0].status is ToolCallStatus.OK
+
+
+@pytest.mark.parametrize(
+    ("recording", "expected", "operations"),
+    [
+        (GOLDEN, StepResultStatus.OK, [OP_LIST, OP_COUNT]),
+        (MALFORMED, StepResultStatus.FAILED, [OP_LIST, OP_COUNT]),
+        (TIMEOUT, StepResultStatus.TIMEOUT, [OP_LIST, OP_COUNT]),
+        (GOLDEN, StepResultStatus.FAILED, [OP_LIST]),
+    ],
+    ids=["ok", "failed", "timeout", "mismatch"],
+)
+async def test_prior_step_result_condition_uses_the_committed_result(
+    recording: object,
+    expected: StepResultStatus,
+    operations: list[str],
+) -> None:
+    harness = RunnerHarness(recording)
+    _use_prior_result_condition(harness, expected)
+    await harness.start()
+    assert [call.operation for call in harness.adapter.calls] == operations
+
+
+async def test_prior_step_result_condition_is_false_without_a_committed_record() -> None:
+    harness = RunnerHarness(GOLDEN)
+    condition = StepCondition(
+        kind=StepConditionKind.PRIOR_STEP_RESULT_IS,
+        ref_step_id="s1",
+        expected_result=StepResultStatus.OK,
+    )
+    assert not await harness.runner._condition_holds(
+        task_id=harness.task_id,
+        condition=condition,
+        failed_steps=set(),
+        result_by_step={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [
+        (StepResultStatus.OK, StepOutcomeKind.TOOL_RESULT),
+        (StepResultStatus.FAILED, StepOutcomeKind.MALFORMED_ADAPTER),
+        (StepResultStatus.TIMEOUT, StepOutcomeKind.TOOL_RESULT),
+    ],
+    ids=["ok", "failed", "timeout"],
+)
+async def test_prior_step_result_is_rebuilt_from_the_journal_after_restart(
+    status: StepResultStatus, kind: StepOutcomeKind
+) -> None:
+    harness = RunnerHarness(MALFORMED)
+    _use_prior_result_condition(harness, status)
+    grant = await _prepare_status(
+        harness, TaskStatus.PLANNING, TaskStatus.RUNNING
+    )
+    begun = await harness.store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    assert begun.decision is StepAttemptDecision.PROCEED
+    committed = await harness.store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=kind,
+            status=status,
+            evidence=(
+                None
+                if kind is StepOutcomeKind.MALFORMED_ADAPTER
+                else EvidenceEnvelope(
+                    evidence_id=f"{harness.task_id}:s1",
+                    capability_id=harness.plan.capability_id,
+                    capability_version=harness.plan.capability_version,
+                    facts=(),
+                    source="journal-fixture",
+                    source_kind=ExternalSource.TOOL,
+                    captured_at=harness.clock(),
+                    sampled=False,
+                    limitations=("synthetic recovery evidence",),
+                )
+            ),
+            audit_events=(_step_event(harness, grant),),
+        )
+    )
+    assert committed.committed
+    harness.clock.advance(seconds=61)
+    resumed_grant = await _begin(harness)
+    harness.reset_call_counters()
+
+    await harness.runner.resume(
+        resumed_grant,
+        plan=harness.plan,
+        context=harness.context,
+        target=harness.target,
+    )
+    assert [call.operation for call in harness.adapter.calls] == [OP_COUNT]
+
+
+def test_tool_call_gateway_is_derived_from_the_operation_declaration() -> None:
+    harness = RunnerHarness(GOLDEN, synthetic_write=True)
+    step = harness.plan.steps[0]
+    call = harness.runner._build_call(
+        plan=harness.plan, step=step, idempotency_key="fixed"
+    )
+    assert call.gateway == "test"
+
+
+def test_step_arguments_cannot_override_the_declared_gateway() -> None:
+    harness = RunnerHarness(GOLDEN)
+    step = harness.plan.steps[0]
+    hostile = step.model_copy(
+        update={"typed_arguments": {**step.typed_arguments, "gateway": "evil"}}
+    )
+    call = harness.runner._build_call(
+        plan=harness.plan, step=hostile, idempotency_key="fixed"
+    )
+    assert call.gateway == "starrocks"
+
+
+@pytest.mark.parametrize("field", ["capability_id", "capability_version"])
+async def test_unknown_capability_key_is_rejected_before_gateway(field: str) -> None:
+    harness = RunnerHarness(GOLDEN)
+    harness.plan = harness.plan.model_copy(update={field: "unknown"})
+    with pytest.raises(SpecResolutionError):
+        await harness.start()
+    assert harness.gateway.invocations == 0
+
+
+async def test_unknown_operation_is_rejected_before_gateway() -> None:
+    harness = RunnerHarness(GOLDEN)
+    first = harness.plan.steps[0].model_copy(update={"operation": "unknown"})
+    harness.plan = harness.plan.model_copy(
+        update={"steps": (first, *harness.plan.steps[1:])}
+    )
+    with pytest.raises(SpecResolutionError):
+        await harness.start()
+    assert harness.gateway.invocations == 0

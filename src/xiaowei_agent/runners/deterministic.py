@@ -6,8 +6,9 @@ Runner 拥有租约、CAS 推进、可选分支求值、预算与暂停；它**�
 
 三条承重设计：
 
-1. **条件求值从 ledger 读回，不读本地变量。** 这让 ledger 在**执行期**就成为唯一
-   路径，而不只是事后归档；M4 的跨进程恢复因此不必改变消费方。
+1. **条件求值从持久事实重建，不读上次进程的内存。** Evidence 条件从 ledger
+   读回；步骤结果条件从 step journal 重建，并随本轮 committed/adopted result 更新。
+   M4 的跨进程恢复因此不需要猜测上次进程的局部状态。
 2. **每次状态变更都携带 ``expected_version`` 与 ``fencing_token``，并采纳存储层
    ``winner``。** CAS 失败是正常并发结果，不是异常路径。
 3. **Runner 不写终态。** 终态由 Runtime 依 Answerability 的结构化结论确定性判定
@@ -535,6 +536,11 @@ class DeterministicStepRunner:
     ) -> TaskOutcome:
         task_id = grant.task_id
         recorded = await self._tasks.load_step_executions(task_id=task_id)
+        result_by_step = {
+            item.step_id: item.result_status
+            for item in recorded
+            if item.result_status is not None
+        }
         failed_steps = {
             item.step_id
             for item in recorded
@@ -543,7 +549,10 @@ class DeterministicStepRunner:
         degraded = bool(failed_steps)
         for step in plan.steps:
             if not await self._condition_holds(
-                task_id=task_id, condition=step.condition, failed_steps=failed_steps
+                task_id=task_id,
+                condition=step.condition,
+                failed_steps=failed_steps,
+                result_by_step=result_by_step,
             ):
                 continue
             try:
@@ -609,6 +618,7 @@ class DeterministicStepRunner:
                 degraded = self._adopt_step_record(
                     attempt.record,
                     failed_steps=failed_steps,
+                    result_by_step=result_by_step,
                     degraded=degraded,
                 )
                 continue
@@ -656,7 +666,10 @@ class DeterministicStepRunner:
                     events=gateway_events,
                 )
                 degraded = self._adopt_step_record(
-                    record, failed_steps=failed_steps, degraded=degraded
+                    record,
+                    failed_steps=failed_steps,
+                    result_by_step=result_by_step,
+                    degraded=degraded,
                 )
                 continue
             ok = result.status is ToolCallStatus.OK
@@ -696,7 +709,10 @@ class DeterministicStepRunner:
                 events=committed_events,
             )
             degraded = self._adopt_step_record(
-                record, failed_steps=failed_steps, degraded=degraded
+                record,
+                failed_steps=failed_steps,
+                result_by_step=result_by_step,
+                degraded=degraded,
             )
         status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
         return await self._outcome(task_id, status, terminal_reason=None)
@@ -721,8 +737,15 @@ class DeterministicStepRunner:
 
     @staticmethod
     def _adopt_step_record(
-        record: StepExecutionRecord, *, failed_steps: set[str], degraded: bool
+        record: StepExecutionRecord,
+        *,
+        failed_steps: set[str],
+        result_by_step: dict[str, StepResultStatus],
+        degraded: bool,
     ) -> bool:
+        if record.result_status is None:
+            raise StepJournalInvariantError("committed step has no result status")
+        result_by_step[record.step_id] = record.result_status
         if record.result_status in {StepResultStatus.FAILED, StepResultStatus.TIMEOUT}:
             failed_steps.add(record.step_id)
             return True
@@ -744,11 +767,18 @@ class DeterministicStepRunner:
         raise StepJournalInvariantError("step commit invariant was violated")
 
     async def _condition_holds(
-        self, *, task_id: str, condition: StepCondition, failed_steps: set[str]
+        self,
+        *,
+        task_id: str,
+        condition: StepCondition,
+        failed_steps: set[str],
+        result_by_step: Mapping[str, StepResultStatus],
     ) -> bool:
         """按闭集条件决定是否执行该步骤。
 
-        **证据从 ledger 读回**，不读本地变量：这让 ledger 在执行期就成为唯一路径。
+        Evidence 条件从 ledger 读回；步骤结果条件只读由 step journal 构造并随
+        committed/adopted result 更新的 ``result_by_step``。两者都不依赖上次进程的
+        内存状态。
 
         但**被引用的步骤若执行失败，条件一律不成立**（fail-closed）：
         ``EVIDENCE_ROW_COUNT_BELOW`` 在数值上无法区分"取到零行"与"根本没取到"，
@@ -767,7 +797,14 @@ class DeterministicStepRunner:
                 task_id=task_id, step_id=condition.ref_step_id
             )
             return rows < threshold
-        # 其余两个成员 M3 未消费；不猜测语义，一律不执行（fail-closed）。
+        if condition.kind is StepConditionKind.PRIOR_STEP_RESULT_IS:
+            if condition.ref_step_id is None or condition.expected_result is None:
+                return False
+            return (
+                result_by_step.get(condition.ref_step_id)
+                is condition.expected_result
+            )
+        # EVIDENCE_FIELD_ABSENT 尚未消费；不猜测语义，一律不执行（fail-closed）。
         return False
 
     async def _rows_recorded_for(self, *, task_id: str, step_id: str) -> int:
