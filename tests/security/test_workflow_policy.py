@@ -37,7 +37,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "2431b7cfb1b84163418d171cf92f68abd6088a6f91fb1a7faf1b78280601dd4d"
+_WORKFLOW_SHA256 = "a824cb267ced1952ed321e4d637b4d949b7562ce733fa4f9da77ad2f020400c6"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -62,9 +62,9 @@ _ALLOWED_RUN_COMMANDS = {
 # 多行 run block 的规范化 SHA-256；改一个字符即变红。
 _ALLOWED_RUN_BLOCK_DIGESTS = {
     "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
-    "1542f514fb26fe1fec603de711f032493d5f46f74c7edfb1f7ef4340209f2ca5",  # scanner self-test
+    "b4bb7ab4cb739eaa52d8b1067f199ff40ee20dbd0340a842f08ee3573e752cc1",  # scanner self-test
     # allowlist narrowness self-test
-    "f7e4098014484c0b069b5769ea455b97cf25e34fa331636174cd3ab84ed2c475",
+    "b4970651b205a24017459f1429819c27df77c7e50c1b4ad0c19da066027903a2",
 }
 
 
@@ -168,6 +168,12 @@ def test_multiline_run_blocks_match_exactly() -> None:
     assert Counter(digests) == Counter(dict.fromkeys(_ALLOWED_RUN_BLOCK_DIGESTS, 1)), (
         f"多行 run block 多重集不符: {Counter(digests)}"
     )
+
+
+def test_secret_scanner_self_tests_use_deterministic_baits() -> None:
+    """安全门自检不能因随机样本偶尔低于熵阈值而误报失败。"""
+    secret_scan = _TEXT.split("  secret-scan:\n", maxsplit=1)[1]
+    assert "/dev/urandom" not in secret_scan
 
 
 def test_no_step_level_control_attributes() -> None:

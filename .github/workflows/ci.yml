@@ -176,7 +176,8 @@ jobs:
         run: |
           set -uo pipefail
           tmp="$(mktemp -d)"
-          printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" > "$tmp/bait.tf"
+          bait="$(printf '%s' 'xiaowei-gitleaks-scanner-self-test-v1' | sha256sum | cut -c1-40)"
+          printf 'aws_secret_access_key = "%s"\n' "$bait" > "$tmp/bait.tf"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"
           rc=$?
@@ -194,13 +195,13 @@ jobs:
           # .gitleaks.toml 豁免了一个已知的伪造取值。豁免的窄度必须由机器证明：
           # 只写 paths 会整文件放行（gitleaks 对 paths/regexes 取 OR），
           # matchCondition="AND" 在 8.30 顶层 allowlist 里不生效且更宽。
-          # 这里放一个随机高熵 secret，它必须仍被拦下。
+          # 这里放一个确定性的高熵 secret，它必须仍被拦下；禁止随机生成，避免样本
+          # 偶尔低于 scanner 的熵阈值而让安全门误报失败。
           tmp="$(mktemp -d)"
           cp .gitleaks.toml "$tmp/"
           mkdir -p "$tmp/tests/security"
-          printf 'y = "token=%s"\n' \
-            "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" \
-            > "$tmp/tests/security/test_trace_event_redaction.py"
+          bait="$(printf '%s' 'xiaowei-gitleaks-allowlist-narrowness-v1' | sha256sum | cut -c1-40)"
+          printf 'y = "token=%s"\n' "$bait" > "$tmp/tests/security/test_trace_event_redaction.py"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"
           rc=$?
