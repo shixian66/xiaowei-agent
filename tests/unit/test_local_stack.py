@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from tests.fakes.clock import ManualClock
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -31,6 +32,8 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
     stack = build_in_memory_local_stack(settings=Settings(environment_id="dev"))
     assert isinstance(stack, LocalStack)
     assert isinstance(stack.runtime._runner._gateway, DeterministicToolGateway)
+    assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
+    assert stack.runtime._runner._bindings is stack.runtime._bindings
     assert await stack.readiness.check() == ReadinessReport(
         database_ok=True,
         revision_matches_head=True,

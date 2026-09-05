@@ -13,9 +13,9 @@ from tests.fakes.admission import (
     PARAMS,
     POLICY_SNAPSHOT,
     TASK_ID,
-    WRITE_PROFILE,
     synthetic_write_plan,
 )
+from tests.fakes.capability_bindings import build_test_capability_bindings
 from tests.fakes.clock import ManualClock
 from tests.fakes.fixtures import SNAPSHOT as WRITE_SNAPSHOT
 from tests.fakes.sinks import RecordingTraceSink
@@ -37,7 +37,6 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
-from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
@@ -172,14 +171,12 @@ class RunnerHarness:
         if synthetic_write:
             self.plan = synthetic_write_plan()
             snapshot = WRITE_SNAPSHOT
-            profile = WRITE_PROFILE
         else:
             params = PARAMS if database is None else PARAMS.model_copy(
                 update={"database": database}
             )
             self.plan = _slow_query_plan_with(params)
             snapshot = StaticCapabilityRegistry().snapshot()
-            profile = SLOW_QUERY_READONLY_PROFILE
         if tamper_sql:
             # 模拟"计划在存储里被篡改"：SQL 与参数不再自洽，准入必须拒绝。
             step = self.plan.steps[0]
@@ -209,8 +206,9 @@ class RunnerHarness:
             approval_gate=self.approval_gate,
             snapshot=snapshot,
             policy_snapshot=POLICY_SNAPSHOT,
-            profile=profile,
-            surface=SLOW_QUERY_SURFACE,
+            bindings=build_test_capability_bindings(
+                snapshot=snapshot, policy_snapshot=POLICY_SNAPSHOT
+            ),
             clock=self.clock,
             sink=self.sink,
         )

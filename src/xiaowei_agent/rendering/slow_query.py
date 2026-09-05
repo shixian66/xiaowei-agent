@@ -20,7 +20,6 @@ _ANSWER_NONE: Final[str] = "该范围内有查询流量，但没有超过阈值�
 _ANSWER_INDETERMINATE: Final[str] = (
     "无法确认该范围内的慢查询情况：证据不足，结果按不确定处理。"
 )
-_ANSWER_PENDING: Final[str] = "该步骤需要审批，任务已暂停等待人工决定。"
 
 _SECTION_LIMITATIONS: Final[str] = "limitations"
 _SECTION_FINDINGS: Final[str] = "findings"
@@ -32,7 +31,6 @@ _NEXT_STEP_CHECK_SCOPE: Final[str] = (
 _NEXT_STEP_CHECK_PIPELINE: Final[str] = (
     "确认审计采集是否正常：范围内完全没有审计行，也可能是采集中断。"
 )
-_NEXT_STEP_APPROVE: Final[str] = "请审批人处理该审批请求后恢复任务。"
 
 # 方向判断的阈值来自旧项目，**未在本项目的真实工作负载上校准**，因此结论一律带
 # "疑似"，且只进说明段、不进事实。
@@ -119,22 +117,4 @@ def render(
         next_steps=next_steps,
         status=status,
         refs=tuple(envelope.evidence_id for envelope in evidences),
-    )
-
-
-def render_pending(
-    *, approval_ref: str, evidences: tuple[EvidenceEnvelope, ...]
-) -> RenderPayload:
-    """暂停时的可审计 pending 投影。
-
-    ``refs`` 同时携带审批引用与**已取得的**证据引用：暂停不是"什么都没发生"，
-    已经取到的事实必须仍然可追溯。
-    """
-    section = _limitation_section(evidences)
-    return RenderPayload(
-        answer=_ANSWER_PENDING,
-        sections=() if section is None else (section,),
-        next_steps=(_NEXT_STEP_APPROVE,),
-        status=TaskStatus.AWAITING_APPROVAL,
-        refs=(*(envelope.evidence_id for envelope in evidences), approval_ref),
     )

@@ -22,6 +22,16 @@ def _tree(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"))
 
 
+def _imported_symbols(path: Path) -> set[str]:
+    symbols: set[str] = set()
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.ImportFrom):
+            symbols.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            symbols.update(alias.name for alias in node.names)
+    return symbols
+
+
 def _called_names(path: Path) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(_tree(path)):
@@ -108,7 +118,9 @@ def test_runtime_uses_the_resolver_and_the_compiler() -> None:
         called |= _called_names(path)
     assert "resolve" in called
     assert "compile_plan" in called
-    assert "assess" in called
+    assert "assessor" in {
+        name for path in _APPLICATION for name in _attribute_names(path)
+    }
 
 
 async def test_runtime_cannot_reach_the_gateway_without_a_certificate() -> None:
@@ -148,3 +160,43 @@ def test_runtime_module_does_not_import_fakes() -> None:
         assert "starrocks_fake" not in source
         assert "persistence.fake" not in source
     assert runtime_module is not None
+
+
+def test_runtime_module_has_no_starrocks_domain_dependencies() -> None:
+    path = Path(runtime_module.__file__)
+    imported = _imported_symbols(path)
+    banned_symbols = {
+        "SlowQueryParams",
+        "SLOW_QUERY_SURFACE",
+        "OP_LIST",
+        "resolve_target",
+        "normalise_window",
+        "compile_plan",
+        "assess",
+        "render",
+    }
+    assert not (imported & banned_symbols)
+    for node in ast.walk(_tree(path)):
+        module = node.module if isinstance(node, ast.ImportFrom) else None
+        if isinstance(node, ast.Import):
+            module = node.names[0].name
+        assert not (module or "").startswith(
+            (
+                "xiaowei_agent.planning.starrocks",
+                "xiaowei_agent.rendering.slow_query",
+                "xiaowei_agent.reflection.answerability",
+            )
+        )
+
+
+def test_runner_module_has_no_starrocks_domain_dependencies() -> None:
+    from xiaowei_agent.runners import deterministic
+
+    path = Path(deterministic.__file__)
+    imported = _imported_symbols(path)
+    assert not ({"GATEWAY_NAME", "SlowQueryParams", "build_evidence"} & imported)
+    for node in ast.walk(_tree(path)):
+        module = node.module if isinstance(node, ast.ImportFrom) else None
+        if isinstance(node, ast.Import):
+            module = node.names[0].name
+        assert not (module or "").startswith("xiaowei_agent.planning.starrocks")

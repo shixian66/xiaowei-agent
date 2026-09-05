@@ -112,6 +112,11 @@ def test_tampered_sql_is_refused_by_the_guard() -> None:
         admit(step=hostile, call=slow_query_call(), plan=slow_query_plan(steps=(hostile,)))
 
 
+def test_sql_envelope_without_a_registered_surface_is_refused() -> None:
+    with pytest.raises(SqlGuardError):
+        admit(step=slow_query_step(), call=slow_query_call(), surface=None)
+
+
 def test_admission_reparses_params_from_typed_arguments() -> None:
     """篡改参数而不动 SQL，同样必须被重编译比对挡下。"""
     step = slow_query_step()

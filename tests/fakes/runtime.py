@@ -8,18 +8,21 @@ import datetime as dt
 from collections.abc import Mapping
 from typing import Any
 
-from tests.fakes.admission import CONTEXT, POLICY_SNAPSHOT, WRITE_PROFILE
+from tests.fakes.admission import CONTEXT, POLICY_SNAPSHOT
+from tests.fakes.capability_bindings import build_test_capability_bindings
 from tests.fakes.clock import ManualClock
 from tests.fakes.fixtures import SNAPSHOT as WRITE_SNAPSHOT
 from tests.fakes.recordings import EMPTY_WITHOUT_TRAFFIC, GOLDEN, TIMEOUT
 from tests.fakes.runner import CountingApprovalGate, CountingGateway, RecordingTaskStore
 from tests.fakes.sinks import RecordingTraceSink
 
+from xiaowei_agent.application.default_capabilities import (
+    build_default_capability_bindings,
+)
 from xiaowei_agent.application.runtime import XiaoweiRuntime
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
-from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
 from xiaowei_agent.contracts import (
     Channel,
     RenderPayload,
@@ -27,7 +30,6 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskSubmission,
 )
-from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
@@ -99,6 +101,9 @@ class RuntimeHarness:
         self.snapshot = (
             WRITE_SNAPSHOT if synthetic_write else StaticCapabilityRegistry().snapshot()
         )
+        runner_bindings = build_test_capability_bindings(
+            snapshot=self.snapshot, policy_snapshot=POLICY_SNAPSHOT
+        )
         runner: Any = DeterministicStepRunner(
             task_store=self.store,
             plan_store=self.plan_store,
@@ -107,8 +112,7 @@ class RuntimeHarness:
             approval_gate=self.approval_gate,
             snapshot=self.snapshot,
             policy_snapshot=POLICY_SNAPSHOT,
-            profile=WRITE_PROFILE if synthetic_write else SLOW_QUERY_READONLY_PROFILE,
-            surface=SLOW_QUERY_SURFACE,
+            bindings=runner_bindings,
             clock=self.clock,
             sink=self.sink,
         )
@@ -116,11 +120,17 @@ class RuntimeHarness:
             runner = _SyntheticWriteRunner(runner)
         if clear_ledger_before_render:
             runner = _ClearingRunner(runner, self.ledger)
+        runtime_snapshot = StaticCapabilityRegistry().snapshot()
+        runtime_bindings = build_default_capability_bindings(
+            snapshot=runtime_snapshot, policy_snapshot=POLICY_SNAPSHOT
+        )
         self.runtime = XiaoweiRuntime(
             interpreter=RuleBasedIntentInterpreter(),
             resolver=DeterministicCapabilityResolver(),
-            snapshot=StaticCapabilityRegistry().snapshot(),
+            snapshot=runtime_snapshot,
+            bindings=runtime_bindings,
             task_store=self.store,
+            plan_store=self.plan_store,
             ledger=self.ledger,
             runner=runner,
             sink=self.sink,

@@ -31,24 +31,28 @@ import uuid
 from enum import StrEnum
 from typing import Final
 
+from xiaowei_agent.application.capability_runtime import (
+    CapabilityBindingError,
+    CapabilityBindingRegistry,
+    CapabilityPreparationError,
+    CapabilityRuntimeBinding,
+    PreparedCapability,
+)
 from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
-from xiaowei_agent.capabilities.specs import OP_LIST, SLOW_QUERY_SURFACE
-from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_target
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     AttemptIntent,
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
-    ExecutionPlan,
     IntentDraft,
+    MissingItem,
     PipelineStage,
     RenderPayload,
     RequestContext,
     RequestEnvelope,
-    ResolvedTarget,
     RetryReason,
     StageOutcome,
     TaskLookup,
@@ -73,7 +77,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger
-from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError
+from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError, PlanStore
 from xiaowei_agent.persistence.store import (
     Clock,
     TaskAttemptCommand,
@@ -82,16 +86,9 @@ from xiaowei_agent.persistence.store import (
     TaskStore,
     TransitionCommand,
 )
-from xiaowei_agent.planning.starrocks.compiler import compile_plan
-from xiaowei_agent.planning.starrocks.params import (
-    DEFAULT_MIN_QUERY_TIME_MS,
-    DEFAULT_ROW_LIMIT,
-    DEFAULT_WINDOW_MINUTES,
-    SlowQueryParams,
-    normalise_window,
-)
-from xiaowei_agent.reflection.answerability import assess, terminal_status_for
-from xiaowei_agent.rendering.slow_query import render, render_pending
+from xiaowei_agent.reflection.status import terminal_status_for
+from xiaowei_agent.rendering.generic import render_preplan_rejection
+from xiaowei_agent.rendering.pending import render_pending
 from xiaowei_agent.runners.deterministic import (
     RECOVERY_DRIFT_REASON,
     DriftError,
@@ -178,7 +175,9 @@ class XiaoweiRuntime:
         interpreter: IntentInterpreter,
         resolver: DeterministicCapabilityResolver,
         snapshot: CapabilitySnapshot,
+        bindings: CapabilityBindingRegistry,
         task_store: TaskStore,
+        plan_store: PlanStore,
         ledger: EvidenceLedger,
         runner: WorkflowRunner,
         sink: TraceSink,
@@ -187,7 +186,9 @@ class XiaoweiRuntime:
         self._interpreter = interpreter
         self._resolver = resolver
         self._snapshot = snapshot
+        self._bindings = bindings
         self._tasks = task_store
+        self._plans = plan_store
         self._ledger = ledger
         self._runner = runner
         self._sink = sink
@@ -267,6 +268,8 @@ class XiaoweiRuntime:
             )
         )
         terminal: TaskOutcome | None = None
+        binding: CapabilityRuntimeBinding | None = None
+        prepared: PreparedCapability | None = None
         retryable = False
         try:
             draft = await self._interpret(
@@ -275,27 +278,23 @@ class XiaoweiRuntime:
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
             )
-            candidate = await self._resolve(
+            candidate, binding = await self._resolve(
                 draft=draft,
                 context=context,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
             )
-            target, params = await self._plan_inputs(
+            prepared = await self._prepare(
+                binding=binding,
+                candidate=candidate,
                 draft=draft,
                 context=context,
                 as_of=submission.as_of,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
             )
-            plan = await self._compile(
-                candidate=candidate,
-                params=params,
-                target=target,
-                context=context,
-                task_id=grant.task_id,
-                attempt_number=grant.attempt_number,
-            )
+            plan = prepared.plan
+            target = prepared.target
             if record.status is TaskStatus.CREATED:
                 terminal = await self._runner.start(
                     grant, plan=plan, target=target, context=context
@@ -321,10 +320,10 @@ class XiaoweiRuntime:
             raise
         except (
             RequestRejectedError,
-            TargetResolutionError,
             PolicyDeniedError,
             SqlGuardError,
             BindingError,
+            CapabilityBindingError,
             SpecResolutionError,
             PermissionError,
         ):
@@ -349,6 +348,7 @@ class XiaoweiRuntime:
             outcome=terminal,
             context=context,
             grant=grant,
+            binding=binding if prepared is not None else None,
         )
         return TaskOutcome(
             task_id=winner.task_id,
@@ -367,13 +367,16 @@ class XiaoweiRuntime:
         :raises RequestRejectedError: 取数之前的确定性拒绝。
         """
         draft = await self._interpret(envelope=envelope, context=context)
-        candidate = await self._resolve(draft=draft, context=context)
-        target, params = await self._plan_inputs(
-            draft=draft, context=context, as_of=as_of
+        candidate, binding = await self._resolve(draft=draft, context=context)
+        prepared = await self._prepare(
+            binding=binding,
+            candidate=candidate,
+            draft=draft,
+            context=context,
+            as_of=as_of,
         )
-        plan = await self._compile(
-            candidate=candidate, params=params, target=target, context=context
-        )
+        plan = prepared.plan
+        target = prepared.target
         record = await self._tasks.create_task(
             submission=TaskSubmission(envelope=envelope, context=context, as_of=as_of)
         )
@@ -423,17 +426,13 @@ class XiaoweiRuntime:
             outcome=outcome,
             context=context,
             grant=attempt.grant,
+            binding=binding,
         )
 
     async def _task_view(self, *, record: TaskRecord) -> TaskView:
         payload: RenderPayload | None = None
         if record.status in _TERMINAL:
-            evidences = await self._ledger.load(task_id=record.task_id)
-            payload = project_terminal(
-                record=record,
-                evidences=evidences,
-                verdict=assess(evidences=evidences),
-            )
+            payload = await self._project_recorded(record=record)
         return TaskView(
             task_id=record.task_id,
             status=record.status,
@@ -444,8 +443,7 @@ class XiaoweiRuntime:
     async def _render_recorded(
         self, *, record: TaskRecord, context: RequestContext
     ) -> RenderPayload:
-        evidences = await self._ledger.load(task_id=record.task_id)
-        verdict = assess(evidences=evidences)
+        payload = await self._project_recorded(record=record)
         await self._emit(
             stage=PipelineStage.RENDERING,
             outcome=StageOutcome.OK,
@@ -453,9 +451,7 @@ class XiaoweiRuntime:
             task_id=record.task_id,
             delivery=Delivery.LOG_AND_DURABLE,
         )
-        return project_terminal(
-            record=record, evidences=evidences, verdict=verdict
-        )
+        return payload
 
     # --- 各阶段 -------------------------------------------------------------
 
@@ -485,14 +481,13 @@ class XiaoweiRuntime:
         context: RequestContext,
         task_id: str | None = None,
         attempt_number: int | None = None,
-    ) -> Candidate:
+    ) -> tuple[Candidate, CapabilityRuntimeBinding]:
         candidates = self._resolver.resolve(
             draft=draft, context=context, snapshot=self._snapshot
         )
-        entry = next(
-            (item for item in candidates.items if item.operation == OP_LIST), None
-        )
-        if entry is None:
+        try:
+            selected = self._bindings.select_entry(candidates)
+        except CapabilityBindingError as exc:
             await self._emit(
                 stage=PipelineStage.RESOLVER,
                 outcome=StageOutcome.REJECTED,
@@ -504,7 +499,7 @@ class XiaoweiRuntime:
             raise RequestRejectedError(
                 "no capability candidate for this request",
                 stage=PipelineStage.RESOLVER,
-            )
+            ) from exc
         await self._emit(
             stage=PipelineStage.RESOLVER,
             outcome=StageOutcome.OK,
@@ -513,32 +508,28 @@ class XiaoweiRuntime:
             attempt_number=attempt_number,
             delivery=_independent_delivery(task_id),
         )
-        return entry
+        return selected
 
-    async def _plan_inputs(
+    async def _prepare(
         self,
         *,
+        binding: CapabilityRuntimeBinding,
+        candidate: Candidate,
         draft: IntentDraft,
         context: RequestContext,
         as_of: _dt.datetime,
         task_id: str | None = None,
         attempt_number: int | None = None,
-    ) -> tuple[ResolvedTarget, SlowQueryParams]:
+    ) -> PreparedCapability:
         try:
-            target = resolve_target(context=context, draft=draft)
-            start, end = normalise_window(
-                as_of=as_of, window_minutes=_window_minutes(draft)
+            prepared = binding.planner(
+                candidate=candidate,
+                draft=draft,
+                context=context,
+                as_of=as_of,
+                snapshot=self._snapshot,
             )
-            params = SlowQueryParams(
-                window_start=start,
-                window_end=end,
-                min_query_time_ms=DEFAULT_MIN_QUERY_TIME_MS,
-                row_limit=DEFAULT_ROW_LIMIT,
-                database=draft.slots.get("database"),
-                user_name=draft.slots.get("user_name"),
-                query_id=draft.slots.get("query_id"),
-            )
-        except (TargetResolutionError, ValueError) as exc:
+        except CapabilityPreparationError as exc:
             await self._emit(
                 stage=PipelineStage.PLANNER,
                 outcome=StageOutcome.REJECTED,
@@ -551,26 +542,6 @@ class XiaoweiRuntime:
                 "request parameters are outside the allowed range",
                 stage=PipelineStage.PLANNER,
             ) from exc
-        return target, params
-
-    async def _compile(
-        self,
-        *,
-        candidate: Candidate,
-        params: SlowQueryParams,
-        target: ResolvedTarget,
-        context: RequestContext,
-        task_id: str | None = None,
-        attempt_number: int | None = None,
-    ) -> ExecutionPlan:
-        plan = compile_plan(
-            candidate=candidate,
-            params=params,
-            target=target,
-            context=context,
-            snapshot=self._snapshot,
-            surface=SLOW_QUERY_SURFACE,
-        )
         await self._emit(
             stage=PipelineStage.PLANNER,
             outcome=StageOutcome.OK,
@@ -579,7 +550,7 @@ class XiaoweiRuntime:
             attempt_number=attempt_number,
             delivery=_independent_delivery(task_id),
         )
-        return plan
+        return prepared
 
     async def _finish(
         self,
@@ -588,6 +559,7 @@ class XiaoweiRuntime:
         outcome: TaskOutcome,
         context: RequestContext,
         grant: TaskAttemptGrant,
+        binding: CapabilityRuntimeBinding,
     ) -> RenderPayload:
         """读回证据、判定终态、写 TaskStore、投影。"""
         winner, evidences, verdict = await self._finalize(
@@ -595,9 +567,13 @@ class XiaoweiRuntime:
             outcome=outcome,
             context=context,
             grant=grant,
+            binding=binding,
         )
         payload = project_terminal(
-            record=winner, evidences=evidences, verdict=verdict
+            record=winner,
+            evidences=evidences,
+            verdict=verdict,
+            binding=binding,
         )
         await self._emit(
             stage=PipelineStage.RENDERING,
@@ -616,6 +592,7 @@ class XiaoweiRuntime:
         outcome: TaskOutcome,
         context: RequestContext,
         grant: TaskAttemptGrant,
+        binding: CapabilityRuntimeBinding | None,
     ) -> tuple[TaskRecord, tuple[EvidenceEnvelope, ...], AnswerabilityVerdict]:
         """在原 grant 下完成终态 CAS，并返回投影所需的持久化事实。"""
         task_id = record.task_id
@@ -625,7 +602,7 @@ class XiaoweiRuntime:
         evidences: tuple[EvidenceEnvelope, ...] = await self._ledger.load(
             task_id=task_id
         )
-        verdict = assess(evidences=evidences)
+        verdict = _assess_evidence(binding=binding, evidences=evidences)
         # REFLECTION 只在**执行本身没出问题、却仍然证据不足**时记为 REJECTED。
         # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
         # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
@@ -683,16 +660,22 @@ class XiaoweiRuntime:
             )
         return result.winner, evidences, verdict
 
-
-def _window_minutes(draft: IntentDraft) -> int:
-    """从槽位取时间窗；取不出或非法即用声明默认值。
-
-    槽位来自模型输出，因此这里只接受纯数字字符串——参数层随后还会再校验一次上限。
-    """
-    raw = draft.slots.get("window_minutes")
-    if raw is None or not raw.isdigit():
-        return DEFAULT_WINDOW_MINUTES
-    return int(raw)
+    async def _project_recorded(self, *, record: TaskRecord) -> RenderPayload:
+        evidences = await self._ledger.load(task_id=record.task_id)
+        try:
+            stored = await self._plans.load(task_id=record.task_id)
+        except PlanNotFoundError:
+            if record.status is TaskStatus.REJECTED and not evidences:
+                return render_preplan_rejection(status=record.status)
+            raise
+        binding = self._bindings.runtime_for_plan(plan=stored.plan)
+        verdict = _assess_evidence(binding=binding, evidences=evidences)
+        return project_terminal(
+            record=record,
+            evidences=evidences,
+            verdict=verdict,
+            binding=binding,
+        )
 
 
 def _independent_delivery(task_id: str | None) -> Delivery:
@@ -716,9 +699,36 @@ def project_terminal(
     record: TaskRecord,
     evidences: tuple[EvidenceEnvelope, ...],
     verdict: AnswerabilityVerdict,
+    binding: CapabilityRuntimeBinding,
 ) -> RenderPayload:
     """把终态持久化事实投影为回答；纯函数，不发 trace、不做 I/O。"""
-    return render(evidences=evidences, verdict=verdict, status=record.status)
+    return binding.renderer(
+        evidences=evidences, verdict=verdict, status=record.status
+    )
+
+
+def _assess_evidence(
+    *,
+    binding: CapabilityRuntimeBinding | None,
+    evidences: tuple[EvidenceEnvelope, ...],
+) -> AnswerabilityVerdict:
+    if binding is None:
+        if evidences:
+            raise CapabilityBindingError("evidence exists without a capability plan")
+        return AnswerabilityVerdict(
+            sufficient=False,
+            limitations=("request was rejected before a plan was stored",),
+            missing=(MissingItem(key="execution_plan", reason_key="plan.absent"),),
+            downgrade_suggestion=True,
+            needs_user_input=False,
+        )
+    expected = (binding.capability_id, binding.capability_version)
+    if any(
+        (item.capability_id, item.capability_version) != expected
+        for item in evidences
+    ):
+        raise CapabilityBindingError("evidence capability key differs from plan")
+    return binding.assessor(evidences=evidences)
 
 
 def _terminal_status(

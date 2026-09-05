@@ -24,8 +24,8 @@ from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     EvidenceEnvelope,
     MissingItem,
-    TaskStatus,
 )
+from xiaowei_agent.reflection.status import terminal_status_for as terminal_status_for
 
 COUNT_ALIAS: Final[str] = "query_count"
 LIST_STEP_SUFFIX: Final[str] = ":s1"
@@ -125,14 +125,3 @@ def assess(*, evidences: tuple[EvidenceEnvelope, ...]) -> AnswerabilityVerdict:
         # 库名或用户可能写错，补充信息可能让下一次取到数据。
         needs_user_input=True,
     )
-
-
-def terminal_status_for(verdict: AnswerabilityVerdict) -> TaskStatus:
-    """把建议性结论映射成终态。
-
-    映射是**确定性的**且只有两个取值：Reflection 给的是建议，这一步才是决定。
-    调用方（Runtime）负责真正写 TaskStore，并由终态保护兜底。
-    """
-    if verdict.sufficient and not verdict.downgrade_suggestion:
-        return TaskStatus.SUCCEEDED
-    return TaskStatus.INDETERMINATE

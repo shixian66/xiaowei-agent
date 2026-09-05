@@ -6,11 +6,14 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from xiaowei_agent.application.default_capabilities import (
+    build_default_capability_bindings,
+)
 from xiaowei_agent.application.runtime import XiaoweiRuntime
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
-from xiaowei_agent.capabilities.specs import GATEWAY_NAME, OP_COUNT, OP_LIST, SLOW_QUERY_SURFACE
+from xiaowei_agent.capabilities.specs import GATEWAY_NAME, OP_COUNT, OP_LIST
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdmissionCertificate,
@@ -21,10 +24,7 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
-from xiaowei_agent.governance.profiles import (
-    ACTIVE_POLICY_SNAPSHOT,
-    SLOW_QUERY_READONLY_PROFILE,
-)
+from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
 from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.persistence.database import (
     PostgresReadinessProbe,
@@ -124,6 +124,9 @@ def _assemble_local_stack(
     )
     sink = DurableTraceSink(writer=task_store)
     snapshot = StaticCapabilityRegistry().snapshot()
+    bindings = build_default_capability_bindings(
+        snapshot=snapshot, policy_snapshot=ACTIVE_POLICY_SNAPSHOT
+    )
     runner = DeterministicStepRunner(
         task_store=task_store,
         plan_store=plan_store,
@@ -132,8 +135,7 @@ def _assemble_local_stack(
         approval_gate=NeverGrantingApprovalGate(),
         snapshot=snapshot,
         policy_snapshot=ACTIVE_POLICY_SNAPSHOT,
-        profile=SLOW_QUERY_READONLY_PROFILE,
-        surface=SLOW_QUERY_SURFACE,
+        bindings=bindings,
         clock=clock,
         sink=sink,
         lease_ttl_seconds=settings.lease_ttl_seconds,
@@ -143,7 +145,9 @@ def _assemble_local_stack(
         interpreter=RuleBasedIntentInterpreter(),
         resolver=DeterministicCapabilityResolver(),
         snapshot=snapshot,
+        bindings=bindings,
         task_store=task_store,
+        plan_store=plan_store,
         ledger=ledger,
         runner=runner,
         sink=sink,

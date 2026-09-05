@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from types import MappingProxyType
 from typing import Final, Protocol
 
-from xiaowei_agent.capabilities.specs import GATEWAY_NAME
+from xiaowei_agent.capabilities.effect import derive_effect
 from xiaowei_agent.contracts import (
     AdmissionCertificate,
     AgentError,
@@ -38,11 +38,9 @@ from xiaowei_agent.contracts import (
     ExternalInputKind,
     PipelineStage,
     PlanStep,
-    PolicyProfile,
     PolicySnapshot,
     RequestContext,
     ResolvedTarget,
-    SqlSurface,
     StageOutcome,
     StepAttemptDecision,
     StepCommitRejection,
@@ -59,7 +57,6 @@ from xiaowei_agent.contracts import (
     ToolResult,
     TraceEvent,
 )
-from xiaowei_agent.evidence import build_evidence
 from xiaowei_agent.governance.approval import (
     ApprovalGate,
     ApprovalRequiredError,
@@ -83,7 +80,7 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
 )
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
-from xiaowei_agent.planning.starrocks.params import SlowQueryParams
+from xiaowei_agent.runners.binding import ExecutionBindingProvider
 from xiaowei_agent.runners.runner import WorkflowPaused
 from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
 
@@ -157,8 +154,7 @@ class DeterministicStepRunner:
         approval_gate: ApprovalGate,
         snapshot: CapabilitySnapshot,
         policy_snapshot: PolicySnapshot,
-        profile: PolicyProfile,
-        surface: SqlSurface,
+        bindings: ExecutionBindingProvider,
         clock: Clock,
         sink: TraceSink,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
@@ -172,8 +168,7 @@ class DeterministicStepRunner:
         self._approval_gate = approval_gate
         self._snapshot = snapshot
         self._policy_snapshot = policy_snapshot
-        self._profile = profile
-        self._surface = surface
+        self._bindings = bindings
         self._clock = clock
         self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
@@ -793,9 +788,11 @@ class DeterministicStepRunner:
     ) -> tuple[AdmissionCertificate, ToolCall]:
         """六段准入。**同步**：准入不做 I/O，把它与工具调用分开才能各自归因。"""
         call = self._build_call(
+            plan=plan,
             step=step,
             idempotency_key=f"{compute_plan_hash(plan)[:16]}:{step.step_id}",
         )
+        execution = self._bindings.execution_for(plan=plan)
         certificate = admit_step(
             step=step,
             plan=plan,
@@ -804,8 +801,8 @@ class DeterministicStepRunner:
             target=target,
             snapshot=self._snapshot,
             policy_snapshot=self._policy_snapshot,
-            profile=self._profile,
-            surface=self._surface,
+            profile=execution.policy_profile,
+            surface=execution.sql_surface,
             approval_gate=self._approval_gate,
             approval=approval,
             task_id=task_id,
@@ -813,7 +810,9 @@ class DeterministicStepRunner:
         )
         return certificate, call
 
-    def _build_call(self, *, step: PlanStep, idempotency_key: str) -> ToolCall:
+    def _build_call(
+        self, *, plan: ExecutionPlan, step: PlanStep, idempotency_key: str
+    ) -> ToolCall:
         """构造本步骤的工具调用。
 
         **幂等键由 plan_hash + step_id 派生，不含 task_id**：退出标准要求"固定
@@ -821,8 +820,14 @@ class DeterministicStepRunner:
         task_id 由存储层生成、每次都不同。用计划指纹派生既满足这条，也保持了正确
         的幂等语义——同一份计划的同一步骤就是同一次尝试。
         """
+        declared = derive_effect(
+            self._snapshot,
+            capability_id=plan.capability_id,
+            capability_version=plan.capability_version,
+            operation=step.operation,
+        )
         return ToolCall(
-            gateway=GATEWAY_NAME,
+            gateway=declared.gateway,
             operation=step.operation,
             step_id=step.step_id,
             typed_args=dict(step.typed_arguments),
@@ -833,13 +838,12 @@ class DeterministicStepRunner:
     def _build_evidence(
         self, *, task_id: str, step: PlanStep, plan: ExecutionPlan, result: ToolResult
     ) -> EvidenceEnvelope:
-        return build_evidence(
+        execution = self._bindings.execution_for(plan=plan)
+        return execution.evidence_builder(
             task_id=task_id,
             step=step,
             plan=plan,
             result=result,
-            surface=self._surface,
-            params=SlowQueryParams.from_typed_arguments(step.typed_arguments),
             captured_at=self._clock(),
         )
 

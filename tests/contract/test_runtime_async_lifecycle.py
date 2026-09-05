@@ -1,6 +1,7 @@
 """M5 Runtime 的提交、执行、查询与 fencing 契约。"""
 
 import datetime as dt
+from dataclasses import replace
 from urllib.parse import quote
 
 import pytest
@@ -9,6 +10,13 @@ from tests.fakes.recordings import GOLDEN
 from tests.fakes.runner import RunnerHarness
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application import runtime as runtime_module
+from xiaowei_agent.application.capability_runtime import (
+    CapabilityBindingError,
+    CapabilityBindingRegistry,
+    PreparedCapability,
+)
+from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
 from xiaowei_agent.application.runtime import (
     RECOVERY_DRIFT_REASON,
     RetryableTaskError,
@@ -134,8 +142,6 @@ async def test_query_is_pure_and_projects_terminal_state() -> None:
 async def test_handle_and_query_share_the_terminal_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xiaowei_agent.application import runtime as runtime_module
-
     harness = RuntimeHarness(GOLDEN)
     first = await harness.handle("最近30分钟有哪些慢查询")
     original = runtime_module.project_terminal
@@ -153,6 +159,76 @@ async def test_handle_and_query_share_the_terminal_projection(
     assert queried.render == first
     assert repeated == first
     assert calls == 2
+
+
+async def test_terminal_query_uses_the_renderer_selected_by_the_stored_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fakes.admission import POLICY_SNAPSHOT
+
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+
+    def sentinel_renderer(
+        *, evidences: tuple[object, ...], verdict: object, status: TaskStatus
+    ) -> RenderPayload:
+        return RenderPayload(
+            answer="binding-selected-renderer",
+            sections=(),
+            next_steps=(),
+            status=status,
+            refs=(),
+        )
+
+    selected = replace(SLOW_QUERY_BINDING, renderer=sentinel_renderer)
+    monkeypatch.setattr(
+        harness.runtime,
+        "_bindings",
+        CapabilityBindingRegistry(
+            snapshot=harness.runtime._snapshot,
+            policy_snapshot=POLICY_SNAPSHOT,
+            bindings=(selected,),
+        ),
+    )
+    view = await harness.runtime.query_task(lookup=harness.lookup)
+    assert view.render is not None
+    assert view.render.answer == "binding-selected-renderer"
+
+
+async def test_terminal_projection_rejects_evidence_for_another_capability() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+    evidence = (await harness.ledger.load(task_id=harness.task_id))[0]
+    harness.state.evidence[harness.task_id][evidence.evidence_id] = evidence.model_copy(
+        update={"capability_id": "test.foreign"}
+    )
+    with pytest.raises(CapabilityBindingError):
+        await harness.runtime.query_task(lookup=harness.lookup)
+
+
+async def test_preplan_rejection_uses_generic_projection_and_calls_no_gateway() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    submission = harness.submission("帮我重启一下集群")
+    view = await harness.runtime.submit_task(submission=submission)
+    harness.task_id = view.task_id
+    attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempt.grant is not None and attempt.submission is not None
+    outcome = await harness.runtime.execute_task(
+        grant=attempt.grant, submission=attempt.submission
+    )
+    projected = await harness.runtime.query_task(lookup=harness.lookup)
+    assert outcome.status is TaskStatus.REJECTED
+    assert projected.render is not None
+    assert "慢查询" not in projected.render.answer
+    assert harness.gateway.invocations == 0
 
 
 async def test_query_pending_returns_no_render_and_does_not_emit() -> None:
@@ -310,8 +386,6 @@ async def test_conflicting_stored_plan_fails_before_gateway() -> None:
 async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xiaowei_agent.application import runtime as runtime_module
-
     harness = RuntimeHarness(GOLDEN)
     compiled = RunnerHarness(GOLDEN)
     submission = harness.submission("最近30分钟有哪些慢查询")
@@ -360,7 +434,40 @@ async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
             )
         }
     )
-    monkeypatch.setattr(runtime_module, "compile_plan", lambda **_: changed)
+    from tests.fakes.admission import POLICY_SNAPSHOT
+
+    def changed_planner(**_: object) -> PreparedCapability:
+        prepared = SLOW_QUERY_BINDING.planner(
+            candidate=next(
+                item
+                for item in harness.runtime._resolver.resolve(
+                    draft=harness.runtime._interpreter.interpret(
+                        text=submission.envelope.text, context=submission.context
+                    ),
+                    context=submission.context,
+                    snapshot=harness.runtime._snapshot,
+                ).items
+                if item.operation == SLOW_QUERY_BINDING.entry_operation
+            ),
+            draft=harness.runtime._interpreter.interpret(
+                text=submission.envelope.text, context=submission.context
+            ),
+            context=submission.context,
+            as_of=submission.as_of,
+            snapshot=harness.runtime._snapshot,
+        )
+        return replace(prepared, plan=changed)
+
+    changed_binding = replace(SLOW_QUERY_BINDING, planner=changed_planner)
+    monkeypatch.setattr(
+        harness.runtime,
+        "_bindings",
+        CapabilityBindingRegistry(
+            snapshot=harness.runtime._snapshot,
+            policy_snapshot=POLICY_SNAPSHOT,
+            bindings=(changed_binding,),
+        ),
+    )
 
     outcome = await harness.runtime.execute_task(
         grant=resumed.grant,
@@ -468,6 +575,7 @@ async def test_stale_finisher_cannot_borrow_the_winners_fencing_token() -> None:
             ),
             context=submission.context,
             grant=first.grant,
+            binding=SLOW_QUERY_BINDING,
         )
 
     after = await harness.store.get(lookup=harness.lookup)

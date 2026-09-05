@@ -20,6 +20,13 @@ M3 补齐了五个此前只有形状、没有实现的 Protocol 锚点：``Capab
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
+    from xiaowei_agent.application.capability_runtime import (
+        CapabilityAssessor,
+        CapabilityBindingRegistry,
+        CapabilityPlanner,
+        CapabilityRenderer,
+    )
+    from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
     from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
     from xiaowei_agent.capabilities.resolver import (
         CapabilityRegistry,
@@ -38,6 +45,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         PostgresTaskStore,
     )
     from xiaowei_agent.persistence.store import Clock, TaskStore
+    from xiaowei_agent.runners.binding import (
+        ExecutionBindingProvider,
+        StepEvidenceBuilder,
+    )
     from xiaowei_agent.runners.deterministic import DeterministicStepRunner
     from xiaowei_agent.runners.fake import ScriptedRunner
     from xiaowei_agent.runners.runner import WorkflowRunner
@@ -87,3 +98,16 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """
         anchored: WorkflowRunner = step_runner
         _ = anchored
+
+    def _capability_binding_anchors(
+        registry: "CapabilityBindingRegistry",
+    ) -> None:
+        """显式 binding 实现必须保持 application 与 Runner 两侧的窄协议。"""
+        provider: ExecutionBindingProvider = registry
+        planner: CapabilityPlanner = SLOW_QUERY_BINDING.planner
+        assessor: CapabilityAssessor = SLOW_QUERY_BINDING.assessor
+        renderer: CapabilityRenderer = SLOW_QUERY_BINDING.renderer
+        evidence_builder: StepEvidenceBuilder = (
+            SLOW_QUERY_BINDING.execution.evidence_builder
+        )
+        _ = (provider, planner, assessor, renderer, evidence_builder)

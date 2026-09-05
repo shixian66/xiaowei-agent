@@ -165,6 +165,14 @@ def _internal_imports(path: Path) -> set[str]:
     return found
 
 
+def _string_literals(path: Path) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
 @pytest.mark.parametrize(
     "package", sorted(set(_ALLOWED_INTERNAL) - _FILE_SCOPED_PACKAGES)
 )
@@ -201,6 +209,29 @@ def test_only_local_stack_can_import_the_tools_layer() -> None:
         if "xiaowei_agent.tools" in allowed
     }
     assert broad == {"interfaces/local_stack.py"}
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "application/worker.py",
+        "interfaces/api.py",
+        "interfaces/cli.py",
+        "interfaces/worker.py",
+    ],
+)
+def test_thin_entry_files_do_not_embed_capability_or_gateway_ids(
+    relative: str,
+) -> None:
+    literals = _string_literals(_SRC / relative)
+    forbidden = {
+        "starrocks.slow_query.diagnose",
+        "prometheus.alert.evidence",
+        "starrocks",
+        "alertmanager",
+        "prometheus",
+    }
+    assert not (literals & forbidden), relative
 
 
 def test_tools_recording_cannot_reverse_import_capabilities() -> None:

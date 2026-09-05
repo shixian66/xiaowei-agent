@@ -6,10 +6,14 @@ policy 细节。
 
 import datetime as dt
 
+import pytest
+
 from xiaowei_agent.capabilities.specs import CAPABILITY_ID, CAPABILITY_VERSION
 from xiaowei_agent.contracts import EvidenceEnvelope, ExternalSource, TaskStatus
 from xiaowei_agent.reflection.answerability import assess
-from xiaowei_agent.rendering.slow_query import render, render_pending
+from xiaowei_agent.rendering.generic import render_preplan_rejection
+from xiaowei_agent.rendering.pending import render_pending
+from xiaowei_agent.rendering.slow_query import render
 
 _AT = dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC)
 
@@ -110,3 +114,8 @@ def test_pending_payload_carries_the_evidence_gathered_so_far() -> None:
     )
     assert "task-1:s1" in payload.refs
     assert "task-1:s2" in payload.refs
+
+
+def test_generic_projection_only_accepts_a_preplan_rejection() -> None:
+    with pytest.raises(ValueError):
+        render_preplan_rejection(status=TaskStatus.FAILED)

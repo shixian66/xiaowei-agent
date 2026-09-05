@@ -14,14 +14,27 @@ from pathlib import Path
 import pytest
 
 from xiaowei_agent import _conformance
+from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.runners.binding import ExecutionBindingProvider
 from xiaowei_agent.runners.runner import WorkflowRunner
 from xiaowei_agent.tools.adapter import ToolAdapter
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
 
 # 有实现的 Protocol 必须在锚点文件中出现；无实现的 CapabilityRegistry /
 # CapabilityResolver 只冻结形状，落地实现时再补锚点。
-_ANCHORED = {"ToolGateway", "ToolAdapter", "TaskStore", "WorkflowRunner", "TraceSink"}
+_ANCHORED = {
+    "CapabilityAssessor",
+    "CapabilityPlanner",
+    "CapabilityRenderer",
+    "ExecutionBindingProvider",
+    "StepEvidenceBuilder",
+    "ToolGateway",
+    "ToolAdapter",
+    "TaskStore",
+    "WorkflowRunner",
+    "TraceSink",
+}
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
 
@@ -70,6 +83,12 @@ def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
     assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(
         ToolGateway.invoke
     )
+
+
+def test_binding_registry_keeps_the_execution_provider_signature() -> None:
+    assert _keyword_params(
+        CapabilityBindingRegistry.execution_for
+    ) == _keyword_params(ExecutionBindingProvider.execution_for)
 
 
 def _protocol_methods(protocol: type) -> tuple[str, ...]:

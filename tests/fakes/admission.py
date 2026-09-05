@@ -35,6 +35,7 @@ from xiaowei_agent.contracts import (
     PolicySnapshot,
     RequestContext,
     RiskLevel,
+    SqlSurface,
     StepCondition,
     ToolCall,
 )
@@ -75,7 +76,8 @@ PARAMS: Final[SlowQueryParams] = SlowQueryParams(
 REGISTRY_SNAPSHOT = StaticCapabilityRegistry().snapshot()
 
 POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
-    policy_revision=POLICY_REVISION, profiles=(POLICY_PROFILE, WRITE_PROFILE_ID)
+    policy_revision=POLICY_REVISION,
+    profiles=(POLICY_PROFILE, "readonly.default", WRITE_PROFILE_ID),
 )
 
 # 合成写 profile 只在测试里存在：它允许 MUTATE_TARGET，正是为了证明**即使策略层
@@ -214,6 +216,7 @@ def admit(
     approval: ApprovalRequest | None = None,
     approval_gate: ApprovalGate | None = None,
     profile_environments: tuple[str, ...] | None = None,
+    surface: SqlSurface | None = SLOW_QUERY_SURFACE,
 ) -> AdmissionCertificate:
     """按被测步骤挑选正确的快照与 profile，其余一律走生产路径。"""
     is_write = step.operation == WRITE_OP
@@ -234,7 +237,7 @@ def admit(
         snapshot=SNAPSHOT if is_write else REGISTRY_SNAPSHOT,
         policy_snapshot=POLICY_SNAPSHOT,
         profile=profile,
-        surface=SLOW_QUERY_SURFACE,
+        surface=surface,
         approval_gate=approval_gate if approval_gate is not None else NeverGrantingApprovalGate(),
         approval=approval,
         task_id=TASK_ID,

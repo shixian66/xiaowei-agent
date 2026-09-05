@@ -47,9 +47,7 @@ _SQL_KEY = "sql"
 _TEMPLATE_KEY = "sql_template_id"
 
 
-def _verify_step_sql(
-    *, step: PlanStep, surface: SqlSurface
-) -> None:
+def _verify_step_sql(*, step: PlanStep, surface: SqlSurface | None) -> None:
     """第 4 段：携带 SQL 的步骤必须过 SQLGuard。
 
     **准入不信任步骤自称的 SQL**：参数从 ``typed_arguments`` 经
@@ -65,6 +63,8 @@ def _verify_step_sql(
         return
     if not isinstance(sql, str) or not isinstance(template_id, str):
         raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
+    if surface is None:
+        raise SqlGuardError(SqlGuardRejection.UNKNOWN_TEMPLATE)
     params = SlowQueryParams.from_typed_arguments(step.typed_arguments)
     verify_sql(sql=sql, params=params, surface=surface, template_id=template_id)
 
@@ -79,7 +79,7 @@ def admit_step(
     snapshot: CapabilitySnapshot,
     policy_snapshot: PolicySnapshot,
     profile: PolicyProfile,
-    surface: SqlSurface,
+    surface: SqlSurface | None,
     approval_gate: ApprovalGate,
     task_id: str,
     now: _dt.datetime,
