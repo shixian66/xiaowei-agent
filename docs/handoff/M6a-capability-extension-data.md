@@ -1,7 +1,8 @@
 # M6a capability 扩展数据
 
-> 本文件只记录可复核的扩展成本事实，不是验收报告。PR 1 尚未部署、未 canary、
-> 未连接真实 Alertmanager/Prometheus，也未取得项目负责人验收；PR 2 资产能力尚未开始。
+> 本文件只记录可复核的扩展成本事实，不是验收报告。PR 1 已验收并合入；PR 2 已形成
+> 本地数据采集提交，但尚未通过独立复审、远程 CI 或项目负责人验收。两个 PR 均未部署、
+> 未 canary，也未连接真实 Alertmanager、Prometheus 或资产系统。
 
 ## PR 1：`prometheus.alert.evidence`
 
@@ -91,3 +92,95 @@ PR 1 只能证明最小 binding seam 可以承载第二个异质能力，尚不�
 - `cfd63923` 复审无剩余代码阻断；PR #11 run `33966437003` 八个 job 全绿，integration
   `2139 passed`、0 skipped，Compose 输出 `compose-smoke: passed`。这只补齐 GitHub
   隔离 runner 的非生产运行证据；部署、canary 与用户验收仍未发生。
+
+## PR 2：`asset.inventory.lookup`
+
+| 项目 | 事实 |
+| --- | --- |
+| base SHA | `32826af1ae70c7d88e3e7406d4cf2570f1157d2f`（含 PR #12 seam 修复与 PR #13 closure） |
+| 数据采集 head SHA | `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959` |
+| snapshot | `snapshot.m6a.starrocks-prometheus.v1` → `snapshot.m6a.starrocks-prometheus-asset.v1` |
+| production policy | `policy-2026-09-05` → `policy-2026-09-05.2`；与三个有序 profile ID 成对固定 |
+| 声明集合 | 新增 `asset.inventory.lookup@1.0.0`；保留 StarRocks 与 Prometheus 既有版本 |
+| 总 diff | 45 files，`+3002/-31`；测试与 eval 占主要行数，不把行数当成架构质量指标 |
+| 测试文件 | 27 个新增或修改的 `tests/` 文件 |
+| 测试收集 | 数据采集 head 共 2322 tests collected |
+| M6a asset eval | L0/L1/L2 共 53 个 corpus case、59 个实际 pytest case |
+| 工时 | 未采集，无可靠来源 |
+
+数据采集 head 包含代码、测试、ADR、README 与生成能力地图。其后只增加本事实表、验收
+报告和当前 handoff；最终送审 SHA 以 `git rev-parse HEAD` 为准，不在提交自身中写一个
+必然落后的自引用 SHA。
+
+### 执行核心改动
+
+按计划口径检查 Runtime、Runner、Gateway、StepAdmission、生命周期/持久化、跨边界
+contracts 与 canonical hash：**0 个文件，`+0/-0`**。
+
+- PR 2 没有加入 capability 分支、第二套执行生命周期、adapter fallback 或新 hash 字段。
+- `asset.inventory.lookup` 直接消费 PR 1 binding seam 与已独立合入的 Evidence target seam。
+- 上游 target seam 修复属于 PR #12，已经在本 PR base 中；没有被藏进 PR 2 的成本统计。
+
+这证明的是“执行 seam 对第三个异质能力可复用”，不是“新增能力没有共享改动成本”。
+
+### 注册与装配面改动
+
+计划指定的五个注册/装配真源加生成能力地图共 6 个文件，`+183/-17`：
+
+- `capabilities/intent.py`：登记资产窄意图、三类 selector 槽位闭集与 near-miss 排除面；
+- `capabilities/registry.py`：登记 capability 并递增 snapshot ID；
+- `governance/profiles.py`：登记只读 operation/environment 允许面并递增 policy revision；
+- `application/default_capabilities.py`：组合 planner、Evidence、Answerability 与 renderer；
+- `interfaces/local_stack.py`：显式装配唯一资产 recording adapter；
+- `docs/CAPABILITIES.md`：从最终 Registry snapshot 生成第三个能力条目。
+
+五个注册点的重复编辑是真实维护成本。它不否定 seam 复用，也不能从统计中删掉后宣称
+“零共享改动”。
+
+### capability 专属规则
+
+- 参数：恰好一个 `asset_id`、`hostname` 或 `ip`；NFC、hostname lowercase/末尾点、
+  `ipaddress` compressed 规范化；拒绝 wildcard、CIDR、range、zone id、端口与多 selector。
+- target：tenant/environment 只来自 `RequestContext`；资源键是 selector kind + canonical
+  value；只允许 fake 目录的 `dev`/`test`。
+- planner：固定一个 `lookup_asset` 只读步骤，`field_set_id=asset.summary.v1`、`limit=2`，
+  用 0/1/2 行区分未命中、唯一与歧义。
+- evidence：只保留九个目录字段；校验已准入 target、environment、精确身份与 canonical
+  hostname/IP；额外 credential、secret、tags、notes 与自由文本全部丢弃。
+- answerability/render：只有一条合法事实才成功；0/2 行、timeout、malformed、scope 或
+  identity 冲突均 `INDETERMINATE`；不生成巡检、健康分、拓扑或根因结论。
+- adapter：recording key 精确包含 tenant、environment、selector kind/value；未命中即失败，
+  不跨 scope、不模糊匹配、不列举。
+
+### 重复形状与 DSL 判断
+
+PR 2 复用了 `CapabilitySpec`、binding registry、受信 target、单一 StepAdmission/Gateway、
+EvidenceEnvelope、Answerability、RenderPayload 与 L0-L2 驱动形状。资产独有的是精确 selector
+规范化、单行唯一性、九字段目录白名单；Prometheus 独有的是双 gateway 条件计划、固定
+PromQL 与时序摘要；StarRocks 独有的是 SQL AST 与慢查询诊断。
+
+因此，M6a 的事实支持两个结论：
+
+1. 显式 binding seam 已能承载三个异质能力，暂时没有必要以 DSL 替换执行核心；
+2. 每加一个能力仍重复编辑五个注册/装配真源，存在维护成本，但目前没有“三个同类能力”
+   证明一套声明式 DSL 能同时覆盖其语义、失败方式、policy、Evidence 与 eval。
+
+**ADR-004 / 通用 capability DSL 继续延期。** 若未来至少三个同类能力再次稳定重复这些
+注册动作，应另立 ADR 评估窄的声明式注册；不得在 M6a 内实现动态 discovery、任意 executor
+或削弱现有显式审查面。
+
+### 评审、返工与反证
+
+- A1/A2 后发现 Evidence builder 取不到已准入 target，按计划暂停；PR #12 独立修复，
+  PR #13 记录合入事实，PR 2 再快进到 `main@32826af`，没有在资产层复制 scope 参数绕过。
+- 首次全量门出现 2 条生命周期用例失败：两处手工 `CapabilityBindingRegistry` 仍只装配
+  StarRocks + Prometheus。扫描全部构造点后补齐资产 binding，保持“snapshot 与 bindings
+  精确相等”的闸门不变；复跑为 2168 passed / 154 skipped。
+- A4 自审发现初版 L1 没真正驱动多 selector/非法 hostname/非法 IP，L2 前三条都走 hostname；
+  已按计划矩阵改成 asset ID/hostname/IP 三条真实闭环与对应失败输入。
+- 本轮 TDD 红灯包括：A3 三个纯模块缺失导致 3 个 collection error；A4 recording 模块缺失
+  导致 1 个 collection error；Compose 新 helper 缺失导致 4 failed；均在最小实现后转绿。
+- 五个 detached-worktree 变异分别撤掉 scope key、放行 `credential`、回退 snapshot ID、跳过
+  恢复期 plan hash、回退 policy revision，依次得到 2/1/1/1/1 条失败；还原后临时工作树
+  干净并已删除。第一次 scope 变异误加载主 worktree 的 editable package 而全绿，随后用
+  显式 `PYTHONPATH` 核对模块路径并得到预期 2 红；该次全绿不是覆盖结论。

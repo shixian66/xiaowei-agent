@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 `prometheus.alert.evidence`、Evidence target seam 修复均已验收合入。PR 2 正在形成 `asset.inventory.lookup` fake/recording 送审候选，尚未合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 `prometheus.alert.evidence`、Evidence target seam 修复均已验收合入。PR 2 已形成 `asset.inventory.lookup` fake/recording 本地送审候选，尚待独立复审、远程 CI 与项目负责人验收，未合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
