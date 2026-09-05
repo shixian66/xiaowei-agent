@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.conftest import make_envelope, make_submission
 
 from xiaowei_agent.contracts import RequestContext, RequestEnvelope
+from xiaowei_agent.persistence.errors import (
+    PersistenceIntegrityError,
+    PersistenceWriteOutcome,
+)
 from xiaowei_agent.persistence.rows import load_contract
 from xiaowei_agent.persistence.schema import TASK_SUBMISSIONS, TASKS
 
@@ -79,13 +83,15 @@ async def test_submission_insert_failure_rolls_back_the_task_row(
             )
         )
     try:
-        with pytest.raises(sa.exc.DBAPIError):
+        with pytest.raises(PersistenceIntegrityError) as caught:
             await store.create_task(
                 submission=make_submission(
                     context,
                     envelope=make_envelope(idempotency_key="atomic-failure"),
                 )
             )
+        assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+        assert caught.value.__context__ is None
         async with clean_database.connect() as connection:
             task_count = await connection.scalar(sa.select(sa.func.count()).select_from(TASKS))
             submission_count = await connection.scalar(

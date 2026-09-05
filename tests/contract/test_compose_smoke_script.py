@@ -66,7 +66,7 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
     def workflow(session: ComposeSession) -> None:
         session.run("up", "-d", "postgres")
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(SmokeError, match="SMOKE_COMPOSE_COMMAND_FAILED"):
         run_smoke(
             docker="/usr/bin/docker",
             runner=runner,
@@ -93,6 +93,42 @@ def test_missing_docker_is_a_hard_failure(
     monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: None)
     assert compose_smoke.main() == 1
     assert capsys.readouterr().err == "compose-smoke: docker_not_found\n"
+
+
+def test_main_reports_only_the_fixed_smoke_error_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(
+        compose_smoke,
+        "run_smoke",
+        lambda **_: (_ for _ in ()).throw(SmokeError("SMOKE_BASELINE_COMMAND_FAILED")),
+    )
+
+    assert compose_smoke.main() == 1
+    assert capsys.readouterr().err == "compose-smoke: SMOKE_BASELINE_COMMAND_FAILED\n"
+
+
+def test_compose_command_failure_is_attributed_to_the_current_phase() -> None:
+    class FailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            raise subprocess.CalledProcessError(1, argv, stderr="private-driver-output")
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=FailingRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_BUILD_COMMAND_FAILED$") as caught:
+        session.run("build")
+    assert caught.value.__context__ is None
+    assert "private-driver-output" not in str(caught.value)
 
 
 def test_exited_migration_is_looked_up_with_all_containers() -> None:

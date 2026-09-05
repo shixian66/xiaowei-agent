@@ -1129,11 +1129,14 @@ class PostgresTaskStore:
             applied=True, winner=row_to_record(_as_row(row)), rejection=None
         )
 
-    @_persistence_boundary(write=True)
     async def acquire_lease(
         self, *, task_id: str, owner: str, ttl_seconds: int
     ) -> LeaseGrant | None:
         command = LeaseCommand(task_id=task_id, owner=owner, ttl_seconds=ttl_seconds)
+        return await self._acquire_lease(command=command)
+
+    @_persistence_boundary(write=True)
+    async def _acquire_lease(self, *, command: LeaseCommand) -> LeaseGrant | None:
         async with _write_transaction(self._engine) as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
@@ -1160,13 +1163,16 @@ class PostgresTaskStore:
             )
         return grant
 
-    @_persistence_boundary(write=True)
     async def renew_lease(
         self, *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
     ) -> LeaseGrant | None:
         command = LeaseCommand(
             task_id=task_id, owner=owner, ttl_seconds=ttl_seconds, fencing_token=fencing_token
         )
+        return await self._renew_lease(command=command)
+
+    @_persistence_boundary(write=True)
+    async def _renew_lease(self, *, command: LeaseCommand) -> LeaseGrant | None:
         token = command.fencing_token if command.fencing_token is not None else 0
         async with _write_transaction(self._engine) as connection:
             current = row_to_record(

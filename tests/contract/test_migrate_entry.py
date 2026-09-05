@@ -5,6 +5,8 @@ from collections.abc import Callable
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateIndex
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.interfaces import migrate
@@ -106,7 +108,11 @@ def test_m4_index_probe_precedes_downgrade_and_is_rolled_back(
             order.append("begin_probe")
             return Nested()
 
-        def execute(self, _: object) -> None:
+        def execute(self, statement: object) -> None:
+            assert isinstance(statement, CreateIndex)
+            compiled = str(statement.compile(dialect=postgresql.dialect()))
+            assert "CREATE UNIQUE INDEX" in compiled
+            assert " ON tasks " in compiled
             order.append("create_probe")
 
     monkeypatch.setattr(

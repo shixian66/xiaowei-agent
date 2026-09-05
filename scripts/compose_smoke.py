@@ -65,7 +65,13 @@ def _preflight(
         (docker, "volume", "ls", "-q", "--filter", label),
     )
     for argv in queries:
-        result = runner(argv, timeout=15.0)
+        failure: SmokeError | None = None
+        try:
+            result = runner(argv, timeout=15.0)
+        except (OSError, subprocess.SubprocessError):
+            failure = SmokeError("SMOKE_PREFLIGHT_COMMAND_FAILED")
+        if failure is not None:
+            raise failure
         if result.stdout.strip():
             raise SmokeError("SMOKE_PROJECT_COLLISION")
 
@@ -88,6 +94,7 @@ class ComposeSession:
     project: str
     files: tuple[Path, ...]
     up_started: bool = False
+    failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
 
     def argv(self, *arguments: str) -> list[str]:
         command = [self.docker, "compose", "-p", self.project]
@@ -101,7 +108,20 @@ class ComposeSession:
     ) -> subprocess.CompletedProcess[str]:
         if "up" in arguments:
             self.up_started = True
-        return self.runner(self.argv(*arguments), timeout=timeout)
+        return self.run_docker(self.argv(*arguments), timeout=timeout)
+
+    def run_docker(
+        self, argv: Sequence[str], *, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        """运行 Docker argv；只把当前固定阶段码带过脱敏边界。"""
+        failure: SmokeError | None = None
+        try:
+            return self.runner(argv, timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            failure = SmokeError(self.failure_code)
+        if failure is not None:
+            raise failure
+        raise RuntimeError("unreachable Docker command outcome")
 
 
 Workflow = Callable[[ComposeSession], None]
@@ -129,6 +149,7 @@ def run_smoke(
     finally:
         try:
             if session.up_started:
+                session.failure_code = "SMOKE_CLEANUP_COMMAND_FAILED"
                 session.run(
                     "down",
                     "--volumes",
@@ -203,7 +224,7 @@ def _container_id(
 
 def _container_env(session: ComposeSession, service: str) -> set[str]:
     container = _container_id(session, service)
-    result = session.runner(
+    result = session.run_docker(
         (session.docker, "inspect", "--format", "{{json .Config.Env}}", container),
         timeout=15.0,
     )
@@ -281,11 +302,14 @@ def _submit(session: ComposeSession, *, key: str, text: str = _TEXT) -> str:
 
 def _full_workflow(session: ComposeSession) -> None:
     sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
+    session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
     session.run("build", timeout=300.0)
+    session.failure_code = "SMOKE_POSTGRES_COMMAND_FAILED"
     session.run("up", "-d", "--wait", "postgres", timeout=120.0)
+    session.failure_code = "SMOKE_MIGRATION_COMMAND_FAILED"
     session.run("up", "--no-deps", "migrate", timeout=120.0)
     migrate_id = _container_id(session, "migrate", include_stopped=True)
-    exit_code = session.runner(
+    exit_code = session.run_docker(
         (
             session.docker,
             "inspect",
@@ -297,9 +321,11 @@ def _full_workflow(session: ComposeSession) -> None:
     ).stdout.strip()
     if exit_code != "0":
         raise SmokeError("SMOKE_MIGRATION_FAILED")
+    session.failure_code = "SMOKE_API_COMMAND_FAILED"
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)
 
+    session.failure_code = "SMOKE_BASELINE_COMMAND_FAILED"
     session.run("up", "-d", "--no-deps", "worker", timeout=60.0)
     baseline_key = f"baseline-{uuid.uuid4().hex}"
     baseline_id = _submit(session, key=baseline_key, text=f"{_TEXT} {sensitive_canary}")
@@ -314,6 +340,7 @@ def _full_workflow(session: ComposeSession) -> None:
         project=session.project,
         files=barrier_files,
         up_started=True,
+        failure_code="SMOKE_BARRIER_COMMAND_FAILED",
     )
     barrier.run(
         "up",
@@ -325,6 +352,7 @@ def _full_workflow(session: ComposeSession) -> None:
     )
     if "XIAOWEI_SMOKE_STEP_BARRIER=true" not in _container_env(barrier, "worker"):
         raise SmokeError("SMOKE_BARRIER_NOT_ENABLED")
+    session.failure_code = "SMOKE_BARRIER_COMMAND_FAILED"
     interrupted_id = _submit(session, key=f"interrupted-{uuid.uuid4().hex}")
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
@@ -345,6 +373,7 @@ def _full_workflow(session: ComposeSession) -> None:
         raise SmokeError("SMOKE_BARRIER_POSITION_INVALID")
     session.run("kill", "worker", timeout=30.0)
 
+    session.failure_code = "SMOKE_RECOVERY_COMMAND_FAILED"
     session.run(
         "up",
         "-d",
@@ -371,6 +400,7 @@ def _full_workflow(session: ComposeSession) -> None:
     if attempts != "2|2":
         raise SmokeError("SMOKE_RECOVERY_ATTEMPT_MISMATCH")
 
+    session.failure_code = "SMOKE_CONCURRENCY_COMMAND_FAILED"
     session.run("up", "-d", "--scale", "worker=2", timeout=60.0)
     _require_worker_scale(session)
     if (
@@ -398,6 +428,7 @@ def _full_workflow(session: ComposeSession) -> None:
         if execution_shape != "t|t|t":
             raise SmokeError("SMOKE_CONCURRENT_EXECUTION_MISMATCH")
 
+    session.failure_code = "SMOKE_FINAL_AUDIT_COMMAND_FAILED"
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)
@@ -416,7 +447,10 @@ def main() -> int:
         return 1
     try:
         run_smoke(docker=docker, workflow=_full_workflow)
-    except (SmokeError, OSError, subprocess.SubprocessError):
+    except SmokeError as exc:
+        sys.stderr.write(f"compose-smoke: {exc}\n")
+        return 1
+    except (OSError, subprocess.SubprocessError):
         sys.stderr.write("compose-smoke: failed\n")
         return 1
     sys.stdout.write("compose-smoke: passed\n")

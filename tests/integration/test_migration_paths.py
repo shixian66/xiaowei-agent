@@ -41,8 +41,9 @@ async def test_upgrade_creates_the_fencing_sequence(clean_database: AsyncEngine)
         rows = await connection.execute(
             sa.text("SELECT sequencename FROM pg_sequences WHERE schemaname = current_schema()")
         )
-        assert FENCING_SEQUENCE_NAME in {row[0] for row in rows}
-        assert CREATED_SEQUENCE_NAME in {row[0] for row in rows}
+        names = {row[0] for row in rows}
+        assert FENCING_SEQUENCE_NAME in names
+        assert CREATED_SEQUENCE_NAME in names
 
 
 async def test_rev_0002_round_trips_m4_data_and_restores_the_old_conflict_target(

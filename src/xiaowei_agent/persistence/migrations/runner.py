@@ -18,11 +18,12 @@ class MigrationCompatibilityError(RuntimeError):
 
 def _probe_m4_index_compatibility(connection: Connection) -> None:
     """在 SAVEPOINT 中证明旧三列唯一索引可建立，不留下任何 DDL。"""
-    tasks = sa.table(
+    tasks = sa.Table(
         "tasks",
-        sa.column("tenant_id"),
-        sa.column("environment_id"),
-        sa.column("idempotency_key"),
+        sa.MetaData(),
+        sa.Column("tenant_id", sa.Text),
+        sa.Column("environment_id", sa.Text),
+        sa.Column("idempotency_key", sa.Text),
     )
     index = sa.Index(
         f"ix_m4_downgrade_probe_{uuid.uuid4().hex}",

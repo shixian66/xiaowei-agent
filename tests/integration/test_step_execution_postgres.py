@@ -11,6 +11,7 @@ from tests.fakes.sinks import make_event
 from tests.suites.task_store import STEP_EXECUTION_CASES, bind
 
 from xiaowei_agent.contracts import (
+    AttemptIntent,
     EvidenceEnvelope,
     ExternalSource,
     PipelineStage,
@@ -18,6 +19,10 @@ from xiaowei_agent.contracts import (
     StepResultStatus,
     TaskStatus,
     evidence_id,
+)
+from xiaowei_agent.persistence.errors import (
+    PersistenceIntegrityError,
+    PersistenceWriteOutcome,
 )
 from xiaowei_agent.persistence.store import (
     StepAttemptCommand,
@@ -32,7 +37,13 @@ bind(globals(), STEP_EXECUTION_CASES)
 async def _running_grant(store, plan_store, context):
     task = await store.create_task(submission=make_submission(context))
     attempt = await store.begin_task_attempt(
-        command=TaskAttemptCommand(task_id=task.task_id, owner="worker-1")
+        command=TaskAttemptCommand(
+            task_id=task.task_id,
+            owner="worker-1",
+            intent=AttemptIntent.DISPATCH,
+            ttl_seconds=30,
+            trace_id=context.trace_id,
+        )
     )
     assert attempt.grant is not None
     await plan_store.save(task_id=task.task_id, plan=FIXTURE_PLAN, target=FIXTURE_TARGET)
@@ -108,8 +119,10 @@ async def test_step_commit_rolls_back_journal_evidence_and_audit_together(
         audit_events=(_event(grant, event_id="atomic-step"),),
     )
     try:
-        with pytest.raises(sa.exc.DBAPIError):
+        with pytest.raises(PersistenceIntegrityError) as caught:
             await store.commit_step_result(command=command)
+        assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+        assert caught.value.__context__ is None
     finally:
         async with clean_database.begin() as connection:
             await connection.execute(
@@ -157,7 +170,7 @@ async def test_transition_rolls_back_status_and_version_when_audit_fails(
         event_id="atomic-transition",
     )
     try:
-        with pytest.raises(sa.exc.DBAPIError):
+        with pytest.raises(PersistenceIntegrityError) as caught:
             await store.transition(
                 command=TransitionCommand(
                     task_id=task.task_id,
@@ -166,6 +179,8 @@ async def test_transition_rolls_back_status_and_version_when_audit_fails(
                     audit_events=(event,),
                 )
             )
+        assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+        assert caught.value.__context__ is None
     finally:
         async with clean_database.begin() as connection:
             await connection.execute(

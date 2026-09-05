@@ -1,7 +1,10 @@
 """SQLAlchemy 异常必须先归成不含驱动原文的闭集结果。"""
 
+import datetime as dt
+
 import pytest
 import sqlalchemy as sa
+from pydantic import ValidationError
 
 from xiaowei_agent.persistence.errors import (
     PersistenceIntegrityCategory,
@@ -12,6 +15,7 @@ from xiaowei_agent.persistence.errors import (
     classify_persistence_exception,
 )
 from xiaowei_agent.persistence.postgres import (
+    PostgresTaskStore,
     _persistence_boundary,
     _write_transaction,
 )
@@ -82,6 +86,35 @@ def test_connection_invalidated_wins_over_statement_error() -> None:
 
 def test_unrelated_errors_are_not_claimed_by_the_persistence_boundary() -> None:
     assert classify_persistence_exception(ValueError("constant")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "arguments"),
+    [
+        ("acquire_lease", {"task_id": "t1", "owner": b"worker", "ttl_seconds": 30}),
+        (
+            "renew_lease",
+            {
+                "task_id": "t1",
+                "owner": "worker",
+                "fencing_token": 1,
+                "ttl_seconds": 0,
+            },
+        ),
+    ],
+)
+async def test_lease_input_validation_precedes_the_postgres_boundary(
+    method: str, arguments: dict[str, object]
+) -> None:
+    """调用方形状错误仍是 ValidationError，且不能触碰数据库。"""
+    store = PostgresTaskStore(
+        engine=object(),  # type: ignore[arg-type]
+        clock=lambda: dt.datetime(2026, 9, 5, tzinfo=dt.UTC),
+    )
+
+    with pytest.raises(ValidationError):
+        await getattr(store, method)(**arguments)  # type: ignore[misc]
 
 
 def test_mapped_errors_never_echo_driver_text() -> None:
