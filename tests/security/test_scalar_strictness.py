@@ -68,6 +68,7 @@ def test_operation_spec_side_effect_rejects_truthy_strings(sneaky: object) -> No
     with pytest.raises(ValidationError):
         OperationSpec(
             operation="o",
+            gateway="g",
             effect_class=EffectClass.MUTATE_TARGET,
             side_effect=sneaky,
             argument_schema_ref="s",

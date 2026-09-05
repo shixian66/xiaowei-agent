@@ -18,6 +18,7 @@ from xiaowei_agent.contracts.enums import EffectClass
 
 class OperationSpec(Contract):
     operation: StrictStr
+    gateway: StrictStr
     effect_class: EffectClass
     side_effect: bool
     argument_schema_ref: StrictStr

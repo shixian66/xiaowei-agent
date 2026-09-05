@@ -112,7 +112,7 @@ RequestEnvelope
 
 ### 4.1 模型边界
 
-`IntentInterpreter` 可以使用模型，但模型输出必须解析为带 schema 的 `IntentDraft`。模型输出的意图、目标线索、自然语言参数和置信信息都属于不可信输入；Resolver 必须重新从已注册能力、租户上下文、环境目录和确定性规则得到最终候选。
+`IntentInterpreter` 可以使用模型，但模型输出必须解析为带 schema 的 `IntentDraft`。模型输出的意图、目标线索、自然语言参数和置信信息都属于不可信输入；Resolver 必须重新从已注册能力、租户上下文、环境目录和确定性规则得到最终候选。Runtime 可以用显式 capability binding 组合 planner、执行元数据、Evidence builder、Answerability 与 renderer，但 binding 只能精确消费 Resolver 的候选，不能再次生成、评分或回退候选。
 
 模型允许：
 
@@ -182,7 +182,7 @@ Reflection 不是第二条执行链，也不是模型拥有的“自我授权”
 
 ### 5.2 XiaoweiRuntime
 
-应用层唯一编排入口，负责组装依赖、创建或恢复任务、调用 Runner、汇总 evidence 和生成 `RenderPayload`。它保持轻薄，不承载具体数据库、Prometheus 或 Jenkins 业务分支。
+应用层唯一编排入口，负责组装依赖、创建或恢复任务、调用 Runner、汇总 evidence 和生成 `RenderPayload`。它通过显式、版本化 key 的 capability binding 选择领域 planner、Answerability 与 renderer；binding 不拥有候选生成权。Runtime 保持轻薄，不承载具体数据库、Prometheus 或 Jenkins 业务分支。
 
 ### 5.3 ContextAssembler
 
@@ -230,7 +230,7 @@ class WorkflowRunner(Protocol):
 
 M2 曾把接口写成 `start(task_id)` / `resume(task_id, external_input)`。那个形状隐含"只要 task_id 就能推进任务"，与上一段的职责不相容；M3 落地真实 Runner 时据此修正了契约。**不要把它改回窄签名**：唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类，那会让 Runtime→Runner 这条边在类型层完全失去契约。
 
-Runner 在每个步骤执行前调用统一的 `StepAdmission`：先做 `ToolPolicy`，需要 SQL 时做 `SQLGuard`，副作用步骤再调用 `ApprovalGate`，通过后才把 `ToolCall` 交给 `ToolGateway`。因此审批既不是入口层总开关，也不是每个 runner 各自复制的一套安全逻辑。
+Runner 在每个步骤执行前调用统一的 `StepAdmission`：先做 `ToolPolicy`；步骤携带 SQL 信封时做 `SQLGuard`，携带已注册 PromQL 信封时做确定性模板重编译比对；副作用步骤再调用 `ApprovalGate`，通过后才把 `ToolCall` 交给 `ToolGateway`。operation 的 gateway 从版本化 `OperationSpec` 派生，不读用户、模型或 step arguments。因此审批既不是入口层总开关，也不是每个 runner 各自复制的一套安全逻辑。
 
 ### 5.7 ApprovalGate
 
@@ -277,7 +277,7 @@ adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的
 | `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
-| `CapabilitySpec` | id、version、domain、operation、schemas、policy_profile、evidence_contract | 声明能力，不直接执行 |
+| `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
 | `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
 | `PolicyDecision` | allow、reason、risk、policy_revision、obligations | fail-closed，理由结构化 |
@@ -382,6 +382,8 @@ created → planning → running → awaiting_approval → running
 
 一个 capability 的最小可执行闭环是：声明 → Resolver 候选 → 确定性 PlanCompiler → Policy profile → ToolGateway adapter → evidence contract → renderer → unit/contract/eval。只登记 YAML 或 Registry 不会自动产生可执行能力。
 
+application 层可用显式 `CapabilityRuntimeBinding` 组装上述实现，Runner 只消费更窄的 execution binding。binding key 必须与 Registry snapshot 完全一致，且只能精确消费 Resolver 已生成的候选；缺失、重复、错版本或 profile 不一致都 fail-closed。M6a 仍使用显式 Python 注册，不实现通用 DSL 或动态插件发现。
+
 ### 8.2 DSL 的适用范围
 
 DB/资产域的资源和操作组合数量大、结构相似，可以使用受限 DSL 减少枚举条目；DSL 是声明式语义层，不是执行语言。每个 DSL 实例必须可映射到一个确定性的 compiler 和一个 policy profile。
@@ -405,6 +407,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 
 - 允许执行的 SQL 由确定性 compiler 生成；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
 - SQLGuard 使用 `sqlglot` AST 解析，按方言和 policy profile 检查语句类型、表/列范围、子查询、锁、写入、注释和多语句边界。
+- PromQL 只允许 capability 注册的完整模板：参数经闭集 schema 与统一 escape 后编译，准入期从 `typed_arguments` 重新编译并逐字节比对；M6a 不接受任意 PromQL，不引入 parser，也不把固定模板安全外推为任意表达式安全。
 - AST 无法解析、方言不确定、目标不完整或权限无法确认时 fail-closed。
 - 所有工具调用都通过 ToolPolicy 做 tenant_id、actor、environment_id、resource、operation、risk 和预算校验。
 - adapter 不把第三方错误文本当作可信控制信号；原始错误先包成 `ExternalContent`，再由确定性 error mapper 归类。
@@ -579,5 +582,7 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-007：首批能力、初始执行上下文与真实调用许可（已记录：[docs/adr/ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)）。
 - ADR-008：工程与测试基线，含 Python 3.11、pytest、security marker gate、Ruff 和 mypy（已记录：[docs/adr/ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）。
 - ADR-009：`plan_hash` 规范形状、审批绑定与工具准入（已记录：[docs/adr/ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)）。
+- ADR-010：M5 持久执行尝试与本地 Compose 边界（已记录：[docs/adr/ADR-010](docs/adr/ADR-010-m5-durable-attempt-and-compose-boundary.md)）。
+- ADR-011：M6a capability binding、operation gateway 与 PromQL 固定模板准入（已记录：[docs/adr/ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

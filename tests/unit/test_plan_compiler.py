@@ -94,6 +94,7 @@ def _snapshot_with(operation: str, effect: EffectClass, *, side_effect: bool) ->
                 operations=tuple(
                     OperationSpec(
                         operation=op.operation,
+                        gateway=op.gateway,
                         effect_class=effect if op.operation == operation else op.effect_class,
                         side_effect=(
                             side_effect if op.operation == operation else op.side_effect

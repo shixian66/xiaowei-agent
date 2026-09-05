@@ -32,12 +32,14 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
     operations=(
         OperationSpec(
             operation=OP_LIST,
+            gateway=GATEWAY_NAME,
             effect_class=EffectClass.READ,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.list.v1",
         ),
         OperationSpec(
             operation=OP_COUNT,
+            gateway=GATEWAY_NAME,
             effect_class=EffectClass.READ,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.count.v1",

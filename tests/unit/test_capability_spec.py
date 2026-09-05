@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from xiaowei_agent.capabilities.specs import SLOW_QUERY_SPEC
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     CapabilitySpec,
@@ -14,6 +15,7 @@ from xiaowei_agent.contracts import (
 def _op(**overrides: object) -> OperationSpec:
     base: dict[str, object] = {
         "operation": "list_slow_queries",
+        "gateway": "starrocks",
         "effect_class": EffectClass.READ,
         "side_effect": False,
         "argument_schema_ref": "schema.v1",
@@ -42,6 +44,41 @@ def test_write_declared_as_readonly_is_rejected() -> None:
 def test_read_declared_as_side_effecting_is_rejected() -> None:
     with pytest.raises(ValidationError):
         _op(effect_class=EffectClass.READ, side_effect=True)
+
+
+def test_operation_requires_a_gateway() -> None:
+    """没有 adapter 路由归属的 operation 不能进入能力声明。"""
+    with pytest.raises(ValidationError):
+        OperationSpec(
+            operation="list_slow_queries",
+            effect_class=EffectClass.READ,
+            side_effect=False,
+            argument_schema_ref="schema.v1",
+        )
+
+
+def test_operation_accepts_a_nonempty_gateway() -> None:
+    operation = _op(gateway="starrocks")
+    assert operation.gateway == "starrocks"
+
+
+@pytest.mark.parametrize("gateway", ["", " starrocks", "starrocks "])
+def test_operation_rejects_an_empty_or_padded_gateway(gateway: str) -> None:
+    with pytest.raises(ValidationError) as caught:
+        _op(gateway=gateway)
+    assert caught.value.errors()[0]["type"] == "value_error"
+
+
+def test_starrocks_declaration_keeps_version_and_explicit_gateway() -> None:
+    """首次显式化既有路由，不得无意义改版本或 operation 顺序。"""
+    assert SLOW_QUERY_SPEC.version == "1.0.0"
+    assert [
+        (operation.operation, operation.gateway)
+        for operation in SLOW_QUERY_SPEC.operations
+    ] == [
+        ("list_slow_queries", "starrocks"),
+        ("count_queries_in_window", "starrocks"),
+    ]
 
 
 def test_copy_cannot_make_an_operation_spec_self_contradictory() -> None:

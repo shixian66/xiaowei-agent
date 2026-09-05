@@ -32,6 +32,7 @@ SNAPSHOT = CapabilitySnapshot(
             operations=(
                 OperationSpec(
                     operation=READ_OP,
+                    gateway="starrocks",
                     effect_class=EffectClass.READ,
                     side_effect=False,
                     argument_schema_ref="schema.starrocks.slow_query.v1",
@@ -48,6 +49,7 @@ SNAPSHOT = CapabilitySnapshot(
             operations=(
                 OperationSpec(
                     operation=WRITE_OP,
+                    gateway="test",
                     effect_class=EffectClass.MUTATE_TARGET,
                     side_effect=True,
                     argument_schema_ref="schema.test.write.v1",
