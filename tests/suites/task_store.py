@@ -39,6 +39,7 @@ from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ApprovalRequest,
     ApprovalState,
+    AttemptIntent,
     PipelineStage,
     TaskStatus,
     TransitionRejection,
@@ -48,6 +49,14 @@ from xiaowei_agent.persistence import (
     IdempotencyConflictError,
     TaskNotFoundError,
     UnscopedAuditEventError,
+)
+from xiaowei_agent.persistence.store import (
+    DispatchQuery,
+    RetryCommand,
+    RetryDecision,
+    RetryReason,
+    TaskAttemptCommand,
+    TaskAttemptRejection,
 )
 
 _APPROVAL_AT = _dt.datetime(2026, 9, 3, 12, 0, tzinfo=_dt.UTC)
@@ -832,6 +841,304 @@ async def test_audit_events_do_not_require_the_task_to_exist(store) -> None:
     assert await store.record_audit_event(event=event) == 1
 
 
+# --- M5 分派、任务尝试与重试 -------------------------------------------------
+
+
+def _attempt_command(
+    task_id: str,
+    *,
+    owner: str = "worker-1",
+    intent: AttemptIntent = AttemptIntent.DISPATCH,
+    ttl_seconds: int = 60,
+) -> TaskAttemptCommand:
+    return TaskAttemptCommand(
+        task_id=task_id,
+        intent=intent,
+        owner=owner,
+        ttl_seconds=ttl_seconds,
+        trace_id="1" * 32,
+    )
+
+
+def _retry_command(grant, *, next_attempt_at: _dt.datetime, event_id: str = "retry-1"):
+    event = make_event(
+        stage=PipelineStage.LIFECYCLE,
+        task_id=grant.task_id,
+        event_id=event_id,
+    ).model_copy(
+        update={
+            "attempt_number": grant.attempt_number,
+            "capability_id": None,
+            "step_id": None,
+        }
+    )
+    return RetryCommand(
+        grant=grant,
+        next_attempt_at=next_attempt_at,
+        reason=RetryReason.UNCLASSIFIED_ERROR,
+        audit_events=(event,),
+    )
+
+
+async def _move(store, record, *statuses: TaskStatus):
+    current = record
+    for status in statuses:
+        result = await store.transition(
+            task_id=current.task_id,
+            expected_version=current.version,
+            to_status=status,
+        )
+        assert result.applied, result.rejection
+        current = result.winner
+    return current
+
+
+async def test_dispatch_filters_before_applying_the_limit(store, context) -> None:
+    excluded = await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="dispatch-excluded")
+        )
+    )
+    await _move(
+        store,
+        excluded,
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.AWAITING_APPROVAL,
+    )
+    expected = await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="dispatch-expected")
+        )
+    )
+    found = await store.list_dispatchable_tasks(
+        query=DispatchQuery(
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            limit=1,
+        )
+    )
+    assert [record.task_id for record in found] == [expected.task_id]
+
+
+async def test_dispatch_is_scope_isolated_and_stably_ordered(store, context) -> None:
+    first = await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="dispatch-first")
+        )
+    )
+    second = await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key="dispatch-second")
+        )
+    )
+    other_context = context.model_copy(update={"tenant_id": "other-tenant"})
+    await store.create_task(
+        submission=make_submission(
+            other_context,
+            envelope=make_envelope(
+                tenant_id="other-tenant", idempotency_key="dispatch-other"
+            ),
+        )
+    )
+    found = await store.list_dispatchable_tasks(
+        query=DispatchQuery(
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            limit=10,
+        )
+    )
+    assert [record.task_id for record in found] == [first.task_id, second.task_id]
+
+
+async def test_begin_attempt_returns_the_original_submission_and_one_grant(
+    store, context
+) -> None:
+    submission = make_submission(context)
+    task = await store.create_task(submission=submission)
+    result = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert result.applied
+    assert result.submission == submission
+    assert result.grant is not None
+    assert result.grant.attempt_number == 1
+    assert result.winner.attempt_number == 1
+    assert result.winner.version == task.version
+    assert result.committed_audit_events == ()
+
+    loser = await store.begin_task_attempt(
+        command=_attempt_command(task.task_id, owner="worker-2")
+    )
+    assert loser.applied is False
+    assert loser.rejection is TaskAttemptRejection.LIVE_LEASE
+    assert loser.submission is None
+    assert loser.winner.attempt_number == 1
+
+
+async def test_attempt_intents_have_disjoint_status_sets(store, task) -> None:
+    wrong_resume = await store.begin_task_attempt(
+        command=_attempt_command(task.task_id, intent=AttemptIntent.APPROVAL_RESUME)
+    )
+    assert wrong_resume.rejection is TaskAttemptRejection.NOT_DISPATCHABLE
+
+    awaiting = await _move(
+        store,
+        task,
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.AWAITING_APPROVAL,
+    )
+    wrong_dispatch = await store.begin_task_attempt(
+        command=_attempt_command(awaiting.task_id)
+    )
+    assert wrong_dispatch.rejection is TaskAttemptRejection.NOT_DISPATCHABLE
+
+    resumed = await store.begin_task_attempt(
+        command=_attempt_command(
+            awaiting.task_id, intent=AttemptIntent.APPROVAL_RESUME
+        )
+    )
+    assert resumed.applied
+    assert resumed.grant is not None
+
+
+async def test_schedule_retry_is_idempotent_and_immediately_fences_the_grant(
+    store, task, clock
+) -> None:
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    command = _retry_command(
+        started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=10)
+    )
+    first = await store.schedule_retry(command=command)
+    assert first.decision is RetryDecision.SCHEDULED
+    assert first.winner.task_failure_count == 1
+    assert first.winner.fencing_token > started.grant.fencing_token
+    assert first.winner.lease_expires_at == command.next_attempt_at
+    stale_write = await store.transition(
+        task_id=task.task_id,
+        expected_version=first.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    assert stale_write.applied is False
+    assert stale_write.rejection is TransitionRejection.STALE_FENCING_TOKEN
+
+    replay = await store.schedule_retry(command=command)
+    assert replay.decision is RetryDecision.ALREADY_SCHEDULED
+    assert replay.winner == first.winner
+
+    changed = command.model_copy(
+        update={"next_attempt_at": command.next_attempt_at + _dt.timedelta(seconds=1)}
+    )
+    mismatch = await store.schedule_retry(command=changed)
+    assert mismatch.decision is RetryDecision.COMMAND_MISMATCH
+    assert mismatch.winner == first.winner
+
+
+@pytest.mark.parametrize("delay", [30, 60, 90], ids=["shorter", "equal", "longer"])
+async def test_retry_is_not_due_until_the_exact_boundary(
+    store, task, clock, delay
+) -> None:
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    due = clock() + _dt.timedelta(seconds=delay)
+    scheduled = await store.schedule_retry(
+        command=_retry_command(started.grant, next_attempt_at=due)
+    )
+    assert scheduled.decision is RetryDecision.SCHEDULED
+
+    early = await store.begin_task_attempt(
+        command=_attempt_command(task.task_id, owner="worker-2")
+    )
+    assert early.rejection is TaskAttemptRejection.RETRY_NOT_DUE
+    clock.advance(seconds=delay)
+    next_attempt = await store.begin_task_attempt(
+        command=_attempt_command(task.task_id, owner="worker-2")
+    )
+    assert next_attempt.applied
+    assert next_attempt.grant is not None
+    assert next_attempt.grant.attempt_number == 2
+
+    stale_replay = await store.schedule_retry(
+        command=_retry_command(started.grant, next_attempt_at=due)
+    )
+    assert stale_replay.decision is RetryDecision.STALE_FENCING
+
+
+async def test_retry_accepts_a_grant_that_failed_during_planning(
+    store, task, clock
+) -> None:
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    planning = await store.transition(
+        task_id=task.task_id,
+        expected_version=started.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    assert planning.applied
+    retried = await store.schedule_retry(
+        command=_retry_command(
+            started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1)
+        )
+    )
+    assert retried.decision is RetryDecision.SCHEDULED
+    assert retried.winner.task_failure_count == 1
+
+
+async def test_expired_grant_cannot_schedule_retry(store, task, clock) -> None:
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    clock.advance(seconds=60)
+    result = await store.schedule_retry(
+        command=_retry_command(
+            started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1)
+        )
+    )
+    assert result.decision is RetryDecision.STALE_FENCING
+    assert result.winner.task_failure_count == 0
+
+
+async def test_retry_exhaustion_terminalizes_before_allocating_a_fourth_grant(
+    store, task, clock
+) -> None:
+    current_task = task
+    for attempt_number in range(1, 4):
+        started = await store.begin_task_attempt(
+            command=_attempt_command(current_task.task_id, owner=f"worker-{attempt_number}")
+        )
+        assert started.grant is not None
+        assert started.grant.attempt_number == attempt_number
+        scheduled = await store.schedule_retry(
+            command=_retry_command(
+                started.grant,
+                next_attempt_at=clock() + _dt.timedelta(seconds=1),
+                event_id=f"retry-{attempt_number}",
+            )
+        )
+        assert scheduled.decision is RetryDecision.SCHEDULED
+        current_task = scheduled.winner
+        clock.advance(seconds=1)
+
+    exhausted = await store.begin_task_attempt(
+        command=_attempt_command(current_task.task_id, owner="worker-4")
+    )
+    assert exhausted.applied is False
+    assert exhausted.rejection is TaskAttemptRejection.RETRY_EXHAUSTED
+    assert exhausted.winner.status is TaskStatus.FAILED
+    assert exhausted.winner.terminal_reason == "retry_exhausted"
+    assert exhausted.winner.attempt_number == 3
+    assert len(exhausted.committed_audit_events) == 1
+
+
+async def test_terminal_attempt_rejection_never_mutates_the_winner(store, task) -> None:
+    terminal = await _move(store, task, TaskStatus.CANCELED)
+    result = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert result.rejection is TaskAttemptRejection.TERMINAL_PROTECTED
+    assert result.winner == terminal
+    assert result.submission is None
+
+
 # --- 分组 ---------------------------------------------------------------------
 #
 # 分组决定用例落在哪个绑定模块，从而决定它带不带 ``security`` marker。分组之间不得
@@ -905,8 +1212,22 @@ TERMINAL_PROTECTION_CASES = (
     test_terminal_protection_wins_over_version_mismatch,
 )
 
+DISPATCH_ATTEMPT_CASES = (
+    test_dispatch_filters_before_applying_the_limit,
+    test_dispatch_is_scope_isolated_and_stably_ordered,
+    test_begin_attempt_returns_the_original_submission_and_one_grant,
+    test_attempt_intents_have_disjoint_status_sets,
+    test_schedule_retry_is_idempotent_and_immediately_fences_the_grant,
+    test_retry_is_not_due_until_the_exact_boundary,
+    test_retry_accepts_a_grant_that_failed_during_planning,
+    test_expired_grant_cannot_schedule_retry,
+    test_retry_exhaustion_terminalizes_before_allocating_a_fourth_grant,
+    test_terminal_attempt_rejection_never_mutates_the_winner,
+)
+
 ALL_GROUPS = {
     "contract": CONTRACT_CASES,
     "lease_fencing": LEASE_FENCING_CASES,
     "terminal_protection": TERMINAL_PROTECTION_CASES,
+    "dispatch_attempt": DISPATCH_ATTEMPT_CASES,
 }

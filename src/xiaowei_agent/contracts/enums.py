@@ -104,6 +104,39 @@ class TaskStatus(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
+class AttemptIntent(StrEnum):
+    DISPATCH = "dispatch"
+    APPROVAL_RESUME = "approval_resume"
+
+
+class TaskAttemptRejection(StrEnum):
+    LIVE_LEASE = "live_lease"
+    NOT_DISPATCHABLE = "not_dispatchable"
+    RETRY_NOT_DUE = "retry_not_due"
+    TERMINAL_PROTECTED = "terminal_protected"
+    RETRY_EXHAUSTED = "retry_exhausted"
+    SUBMISSION_INVARIANT_VIOLATION = "submission_invariant_violation"
+
+
+class GrantRejection(StrEnum):
+    TERMINAL_PROTECTED = "terminal_protected"
+    STATUS_NOT_ALLOWED = "status_not_allowed"
+    LEASE_NOT_HELD = "lease_not_held"
+    STALE_FENCING = "stale_fencing"
+
+
+class RetryReason(StrEnum):
+    UNCLASSIFIED_ERROR = "unclassified_error"
+
+
+class RetryDecision(StrEnum):
+    SCHEDULED = "scheduled"
+    ALREADY_SCHEDULED = "already_scheduled"
+    COMMAND_MISMATCH = "command_mismatch"
+    STALE_FENCING = "stale_fencing"
+    TERMINAL_PROTECTED = "terminal_protected"
+
+
 class TransitionRejection(StrEnum):
     VERSION_MISMATCH = "version_mismatch"
     ILLEGAL_TRANSITION = "illegal_transition"

@@ -89,6 +89,8 @@ class TaskRecord(Contract):
     attempt_number: StrictInt = Field(ge=0)
     task_failure_count: StrictInt = Field(ge=0)
     next_attempt_at: AwareDatetime | None
+    retry_scheduled_by_attempt: StrictInt | None = Field(default=None, gt=0)
+    retry_command_digest: Sha256Hex | None = None
     lease_owner: StrictStr | None = None
     lease_expires_at: AwareDatetime | None = None
     fencing_token: StrictInt | None = Field(default=None, gt=0)
@@ -108,6 +110,19 @@ class TaskRecord(Contract):
             raise ValueError(
                 "lease_owner, lease_expires_at and fencing_token must be set or cleared together"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _retry_marker_fields_are_consistent(self) -> Self:
+        attempt = self.retry_scheduled_by_attempt
+        marked = attempt is not None
+        if marked != (self.retry_command_digest is not None):
+            raise ValueError(
+                "retry_scheduled_by_attempt and retry_command_digest "
+                "must be set or cleared together"
+            )
+        if attempt is not None and attempt > self.attempt_number:
+            raise ValueError("retry marker cannot refer to a future attempt")
         return self
 
 

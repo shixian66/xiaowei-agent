@@ -146,6 +146,25 @@ def test_rev_0003_has_the_expected_revision_chain() -> None:
     assert revision.down_revision == "0002_task_execution_columns"
 
 
+def test_rev_0004_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0004_retry_markers as revision,
+    )
+
+    assert revision.revision == "0004_retry_markers"
+    assert revision.down_revision == "0003_task_submissions"
+
+
+def test_retry_markers_are_nullable_but_pairwise_constrained() -> None:
+    assert isinstance(TASKS.c.retry_scheduled_by_attempt.type, sa.BigInteger)
+    assert isinstance(TASKS.c.retry_command_digest.type, sa.Text)
+    assert TASKS.c.retry_scheduled_by_attempt.nullable is True
+    assert TASKS.c.retry_command_digest.nullable is True
+    names = {item.name for item in TASKS.constraints if item.name is not None}
+    assert "ck_tasks_retry_markers_consistent" in names
+    assert "ck_tasks_retry_attempt_not_future" in names
+
+
 def test_submission_table_has_one_row_per_task_and_complete_facts() -> None:
     assert TASK_SUBMISSIONS.primary_key.columns.keys() == ["task_id"]
     assert set(TASK_SUBMISSIONS.columns.keys()) == {

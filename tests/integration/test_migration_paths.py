@@ -207,7 +207,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0003_task_submissions"
+    assert revision == "0004_retry_markers"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -243,3 +243,48 @@ async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
             )
         ).one()
     assert restored == ("failed", "m5_downgrade_discarded")
+
+
+async def test_rev_0004_retry_columns_round_trip_without_changing_task_facts(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    task: Any,
+) -> None:
+    """rev4 的 downgrade/upgrade 只移除重试幂等标记，不改既有任务事实。"""
+    run_upgrade, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        before = (
+            await connection.execute(
+                sa.text(
+                    "SELECT task_id, status, version, attempt_number, task_failure_count "
+                    "FROM tasks WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+        ).one()
+        await connection.run_sync(run_downgrade, "0003_task_submissions")
+        columns_after_down = {
+            row[0]
+            for row in (
+                await connection.execute(
+                    sa.text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'tasks'"
+                    )
+                )
+            ).all()
+        }
+        assert "retry_scheduled_by_attempt" not in columns_after_down
+        assert "retry_command_digest" not in columns_after_down
+
+        await connection.run_sync(run_upgrade)
+        after = (
+            await connection.execute(
+                sa.text(
+                    "SELECT task_id, status, version, attempt_number, task_failure_count "
+                    "FROM tasks WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+        ).one()
+    assert after == before

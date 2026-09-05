@@ -53,6 +53,8 @@ TASKS: Final = sa.Table(
     sa.Column("attempt_number", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("task_failure_count", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("retry_scheduled_by_attempt", sa.BigInteger, nullable=True),
+    sa.Column("retry_command_digest", sa.Text, nullable=True),
     sa.Column("idempotency_scope_digest", sa.CHAR(64), nullable=False),
     sa.Column("terminal_reason", sa.Text, nullable=True),
     sa.Column("lease_owner", sa.Text, nullable=True),
@@ -69,6 +71,17 @@ TASKS: Final = sa.Table(
     sa.CheckConstraint("attempt_number >= 0", name="ck_tasks_attempt_number_non_negative"),
     sa.CheckConstraint(
         "task_failure_count >= 0", name="ck_tasks_task_failure_count_non_negative"
+    ),
+    sa.CheckConstraint(
+        "(retry_scheduled_by_attempt IS NULL AND retry_command_digest IS NULL)"
+        " OR (retry_scheduled_by_attempt IS NOT NULL AND retry_command_digest IS NOT NULL)",
+        name="ck_tasks_retry_markers_consistent",
+    ),
+    sa.CheckConstraint(
+        "retry_scheduled_by_attempt IS NULL"
+        " OR (retry_scheduled_by_attempt > 0"
+        " AND retry_scheduled_by_attempt <= attempt_number)",
+        name="ck_tasks_retry_attempt_not_future",
     ),
     sa.CheckConstraint(
         "fencing_token IS NULL OR fencing_token > 0", name="ck_tasks_fencing_token_positive"

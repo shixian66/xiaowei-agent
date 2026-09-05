@@ -12,12 +12,13 @@ M3 建立首个错误分析闭环的前提。
 from collections.abc import Mapping
 from typing import Annotated, Final
 
-from pydantic import AfterValidator, BeforeValidator, PlainSerializer
+from pydantic import AfterValidator, BeforeValidator, Field, PlainSerializer
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
     Contract,
     FreeText,
+    StrictInt,
     StrictStr,
     TraceId,
     frozen_map,
@@ -93,5 +94,6 @@ class TraceEvent(Contract):
     capability_id: StrictStr | None
     step_id: StrictStr | None
     policy_revision: StrictStr | None
+    attempt_number: StrictInt | None = Field(default=None, ge=0)
     error: AgentError | None
     detail: TraceDetail

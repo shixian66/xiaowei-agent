@@ -20,6 +20,7 @@ class InMemoryPersistenceState:
         self.tasks: dict[str, TaskRecord] = {}
         self.task_ids_by_key: dict[tuple[str, str, str], str] = {}
         self.submissions: dict[str, TaskSubmission] = {}
+        self.submission_digests: dict[str, str] = {}
         self.plans: dict[str, Any] = {}
         self.evidence: dict[str, dict[str, EvidenceEnvelope]] = {}
         self.approvals: dict[str, list[ApprovalRequest]] = {}

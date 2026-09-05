@@ -45,23 +45,110 @@ import datetime as _dt
 from xiaowei_agent.contracts import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
+    AttemptIntent,
+    GrantRejection,
     RequestContext,
     RequestEnvelope,
+    TaskAttemptRejection,
     TaskRecord,
+    TaskStatus,
     TransitionRejection,
 )
-from xiaowei_agent.persistence.store import TransitionCommand
+from xiaowei_agent.persistence.store import (
+    DispatchQuery,
+    TaskAttemptGrant,
+    TransitionCommand,
+)
 
 __all__ = [
     "apply_transition",
+    "attempt_statuses",
+    "classify_task_attempt",
     "classify_transition",
     "context_matches_envelope",
+    "dispatch_sort_key",
+    "grant_is_current",
+    "is_dispatchable",
     "is_stale_lease",
     "lease_is_live",
     "may_acquire_lease",
     "may_renew_lease",
     "stale_lease_sort_key",
 ]
+
+_DISPATCH_STATUSES = frozenset(
+    {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
+)
+_APPROVAL_RESUME_STATUSES = frozenset({TaskStatus.AWAITING_APPROVAL})
+
+
+def attempt_statuses(intent: AttemptIntent) -> frozenset[TaskStatus]:
+    """返回某种领取意图唯一允许的状态集合。"""
+    if intent is AttemptIntent.DISPATCH:
+        return _DISPATCH_STATUSES
+    return _APPROVAL_RESUME_STATUSES
+
+
+def is_dispatchable(
+    record: TaskRecord, query: DispatchQuery, *, now: _dt.datetime
+) -> bool:
+    """任务是否是指定作用域内此刻可供普通 Worker 竞争的候选。"""
+    return (
+        record.tenant_id == query.tenant_id
+        and record.environment_id == query.environment_id
+        and record.status in _DISPATCH_STATUSES
+        and (record.next_attempt_at is None or record.next_attempt_at <= now)
+        and not lease_is_live(record, now=now)
+    )
+
+
+def dispatch_sort_key(record: TaskRecord) -> tuple[int, str]:
+    """稳定的近似公平次序；sequence 相同仍由主键决胜。"""
+    return (record.created_seq, record.task_id)
+
+
+def classify_task_attempt(
+    record: TaskRecord,
+    *,
+    intent: AttemptIntent,
+    now: _dt.datetime,
+    task_failure_limit: int,
+) -> TaskAttemptRejection | None:
+    """grant 之前的共享拒绝顺序；submission 完整性由存储事务另行判定。"""
+    if record.status in TERMINAL_STATUSES:
+        return TaskAttemptRejection.TERMINAL_PROTECTED
+    if record.status not in attempt_statuses(intent):
+        return TaskAttemptRejection.NOT_DISPATCHABLE
+    if record.next_attempt_at is not None and record.next_attempt_at > now:
+        return TaskAttemptRejection.RETRY_NOT_DUE
+    if lease_is_live(record, now=now):
+        return TaskAttemptRejection.LIVE_LEASE
+    if record.task_failure_count >= task_failure_limit:
+        return TaskAttemptRejection.RETRY_EXHAUSTED
+    return None
+
+
+def grant_is_current(
+    record: TaskRecord,
+    grant: TaskAttemptGrant,
+    *,
+    now: _dt.datetime,
+    allowed_statuses: frozenset[TaskStatus],
+) -> GrantRejection | None:
+    """``None`` 表示 grant 此刻仍是该任务唯一合法的 fenced 写入者。"""
+    if record.status in TERMINAL_STATUSES:
+        return GrantRejection.TERMINAL_PROTECTED
+    if record.status not in allowed_statuses:
+        return GrantRejection.STATUS_NOT_ALLOWED
+    if not lease_is_live(record, now=now):
+        return GrantRejection.LEASE_NOT_HELD
+    if (
+        record.lease_owner != grant.lease.owner
+        or record.fencing_token != grant.fencing_token
+        or record.attempt_number != grant.attempt_number
+    ):
+        return GrantRejection.STALE_FENCING
+    return None
 
 
 def lease_is_live(record: TaskRecord, *, now: _dt.datetime) -> bool:

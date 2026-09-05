@@ -36,10 +36,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ApprovalRequest,
+    AttemptIntent,
     EvidenceEnvelope,
     ExecutionPlan,
     LeaseGrant,
+    RequestContext,
+    RequestEnvelope,
     ResolvedTarget,
+    RetryDecision,
+    TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
     TaskStatus,
@@ -49,8 +54,13 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
+    attempt_statuses,
+    classify_task_attempt,
     classify_transition,
     context_matches_envelope,
+    dispatch_sort_key,
+    grant_is_current,
+    is_dispatchable,
     is_stale_lease,
     may_acquire_lease,
     may_renew_lease,
@@ -84,15 +94,25 @@ from xiaowei_agent.persistence.schema import (
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
+    DispatchQuery,
     IdempotencyConflictError,
     LeaseCommand,
+    RetryCommand,
+    RetryResult,
     StaleLeaseQuery,
+    TaskAttemptCommand,
+    TaskAttemptGrant,
+    TaskAttemptResult,
     TaskNotFoundError,
     TransitionCommand,
     UnscopedAuditEventError,
+    attempt_terminal_event,
     idempotency_scope_digest,
     request_dedup_digest,
+    retry_command_digest,
     submission_digest,
+    submission_matches_record,
+    validate_task_failure_limit,
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
@@ -127,6 +147,35 @@ def _next_seq(table: sa.Table, task_id: str) -> sa.ScalarSelect[int]:
         .where(table.c.task_id == task_id)
         .scalar_subquery()
     )
+
+
+async def _append_audit_events(
+    connection: AsyncConnection, *, task_id: str, events: tuple[TraceEvent, ...]
+) -> tuple[int, ...]:
+    """在调用方事务内追加一组审计；整组与 aggregate 写入同生共死。"""
+    if any(event.task_id != task_id for event in events):
+        raise ValueError("audit event belongs to a different task")
+    if not events:
+        return ()
+    await _serialise_on_task(connection, task_id)
+    seqs: list[int] = []
+    for event in events:
+        seq = (
+            await connection.execute(
+                sa.insert(TASK_AUDIT_EVENTS)
+                .values(
+                    task_id=task_id,
+                    seq=_next_seq(TASK_AUDIT_EVENTS, task_id),
+                    stage=event.stage.value,
+                    outcome=event.outcome.value,
+                    occurred_at=event.occurred_at,
+                    event=dump_contract(event),
+                )
+                .returning(TASK_AUDIT_EVENTS.c.seq)
+            )
+        ).scalar_one()
+        seqs.append(int(seq))
+    return tuple(seqs)
 
 
 def stale_lease_statement(*, now: _dt.datetime, limit: int) -> sa.Select[Any]:
@@ -181,9 +230,12 @@ def _as_row(mapping: Mapping[Any, Any]) -> dict[str, Any]:
 
 
 class PostgresTaskStore:
-    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+    def __init__(
+        self, *, engine: AsyncEngine, clock: Clock, task_failure_limit: int = 3
+    ) -> None:
         self._engine = engine
         self._clock = clock
+        self._task_failure_limit = validate_task_failure_limit(task_failure_limit)
 
     # --- 读 -------------------------------------------------------------------
 
@@ -235,6 +287,267 @@ class PostgresTaskStore:
         records = [row_to_record(_as_row(row)) for row in rows]
         stale = [record for record in records if is_stale_lease(record, now=now)]
         return tuple(sorted(stale, key=stale_lease_sort_key))
+
+    async def list_dispatchable_tasks(
+        self, *, query: DispatchQuery
+    ) -> tuple[TaskRecord, ...]:
+        now = self._clock()
+        live_lease = sa.and_(
+            TASKS.c.lease_owner.is_not(None),
+            TASKS.c.lease_expires_at.is_not(None),
+            TASKS.c.lease_expires_at > now,
+        )
+        statement = (
+            sa.select(TASKS)
+            .where(
+                TASKS.c.tenant_id == query.tenant_id,
+                TASKS.c.environment_id == query.environment_id,
+                TASKS.c.status.in_(
+                    sorted(
+                        status.value
+                        for status in attempt_statuses(AttemptIntent.DISPATCH)
+                    )
+                ),
+                sa.or_(TASKS.c.next_attempt_at.is_(None), TASKS.c.next_attempt_at <= now),
+                sa.not_(live_lease),
+            )
+            .order_by(TASKS.c.created_seq, TASKS.c.task_id)
+            .limit(query.limit)
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        records = [row_to_record(_as_row(row)) for row in rows]
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in records
+                    if is_dispatchable(record, query, now=now)
+                ),
+                key=dispatch_sort_key,
+            )
+        )
+
+    async def _load_submission_row(
+        self, connection: AsyncConnection, task_id: str
+    ) -> Mapping[str, Any] | None:
+        found = (
+            (
+                await connection.execute(
+                    sa.select(TASK_SUBMISSIONS).where(
+                        TASK_SUBMISSIONS.c.task_id == task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if found is None:
+            return None
+        return {column.name: found[column.name] for column in TASK_SUBMISSIONS.columns}
+
+    async def _terminalize_attempt_rejection(
+        self,
+        connection: AsyncConnection,
+        *,
+        current: TaskRecord,
+        command: TaskAttemptCommand,
+        rejection: TaskAttemptRejection,
+        now: _dt.datetime,
+    ) -> TaskAttemptResult:
+        expected = current.model_copy(
+            update={
+                "status": TaskStatus.FAILED,
+                "version": current.version + 1,
+                "terminal_reason": rejection.value,
+            }
+        )
+        row = (
+            (
+                await connection.execute(
+                    sa.update(TASKS)
+                    .where(TASKS.c.task_id == current.task_id)
+                    .values(
+                        status=expected.status.value,
+                        version=expected.version,
+                        terminal_reason=expected.terminal_reason,
+                    )
+                    .returning(TASKS)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        winner = row_to_record(_as_row(row))
+        event = attempt_terminal_event(command=command, winner=winner, now=now)
+        await _append_audit_events(
+            connection, task_id=current.task_id, events=(event,)
+        )
+        return TaskAttemptResult(
+            applied=False,
+            winner=winner,
+            rejection=rejection,
+            committed_audit_events=(event,),
+        )
+
+    async def begin_task_attempt(
+        self, *, command: TaskAttemptCommand
+    ) -> TaskAttemptResult:
+        async with self._engine.begin() as connection:
+            current = row_to_record(
+                await self._require_row(connection, command.task_id, for_update=True)
+            )
+            now = self._clock()
+            rejection = classify_task_attempt(
+                current,
+                intent=command.intent,
+                now=now,
+                task_failure_limit=self._task_failure_limit,
+            )
+            if rejection is TaskAttemptRejection.RETRY_EXHAUSTED:
+                return await self._terminalize_attempt_rejection(
+                    connection,
+                    current=current,
+                    command=command,
+                    rejection=rejection,
+                    now=now,
+                )
+            if rejection is not None:
+                return TaskAttemptResult(
+                    applied=False, winner=current, rejection=rejection
+                )
+
+            stored = await self._load_submission_row(connection, current.task_id)
+            submission: TaskSubmission | None = None
+            if stored is not None:
+                try:
+                    submission = TaskSubmission(
+                        envelope=load_contract(RequestEnvelope, stored["envelope"]),
+                        context=load_contract(RequestContext, stored["context"]),
+                        as_of=stored["as_of"],
+                    )
+                except ValueError:
+                    submission = None
+            if (
+                stored is None
+                or submission is None
+                or not submission_matches_record(
+                    current,
+                    submission,
+                    stored_digest=stored["submission_digest"],
+                )
+            ):
+                return await self._terminalize_attempt_rejection(
+                    connection,
+                    current=current,
+                    command=command,
+                    rejection=TaskAttemptRejection.SUBMISSION_INVARIANT_VIOLATION,
+                    now=now,
+                )
+
+            token = (
+                await connection.execute(sa.select(FENCING_SEQUENCE.next_value()))
+            ).scalar_one()
+            expires_at = now + _dt.timedelta(seconds=command.ttl_seconds)
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(TASKS)
+                        .where(TASKS.c.task_id == current.task_id)
+                        .values(
+                            attempt_number=current.attempt_number + 1,
+                            next_attempt_at=None,
+                            lease_owner=command.owner,
+                            lease_expires_at=expires_at,
+                            fencing_token=token,
+                        )
+                        .returning(TASKS)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            winner = row_to_record(_as_row(row))
+            grant = TaskAttemptGrant(
+                lease=LeaseGrant(
+                    task_id=current.task_id,
+                    owner=command.owner,
+                    expires_at=expires_at,
+                    fencing_token=token,
+                ),
+                attempt_number=winner.attempt_number,
+            )
+            return TaskAttemptResult(
+                applied=True,
+                winner=winner,
+                grant=grant,
+                submission=submission,
+            )
+
+    async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
+        digest = retry_command_digest(command)
+        async with self._engine.begin() as connection:
+            current = row_to_record(
+                await self._require_row(
+                    connection, command.grant.task_id, for_update=True
+                )
+            )
+            if current.status in TERMINAL_STATUSES:
+                return RetryResult(
+                    decision=RetryDecision.TERMINAL_PROTECTED, winner=current
+                )
+            if (
+                current.retry_scheduled_by_attempt == command.grant.attempt_number
+                and current.attempt_number == command.grant.attempt_number
+            ):
+                decision = (
+                    RetryDecision.ALREADY_SCHEDULED
+                    if current.retry_command_digest == digest
+                    else RetryDecision.COMMAND_MISMATCH
+                )
+                return RetryResult(decision=decision, winner=current)
+
+            rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=attempt_statuses(AttemptIntent.DISPATCH),
+            )
+            if rejection is not None:
+                return RetryResult(decision=RetryDecision.STALE_FENCING, winner=current)
+
+            token = (
+                await connection.execute(sa.select(FENCING_SEQUENCE.next_value()))
+            ).scalar_one()
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(TASKS)
+                        .where(TASKS.c.task_id == current.task_id)
+                        .values(
+                            version=current.version + 1,
+                            task_failure_count=current.task_failure_count + 1,
+                            next_attempt_at=command.next_attempt_at,
+                            retry_scheduled_by_attempt=command.grant.attempt_number,
+                            retry_command_digest=digest,
+                            lease_expires_at=command.next_attempt_at,
+                            fencing_token=token,
+                        )
+                        .returning(TASKS)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            await _append_audit_events(
+                connection,
+                task_id=current.task_id,
+                events=command.audit_events,
+            )
+            return RetryResult(
+                decision=RetryDecision.SCHEDULED,
+                winner=row_to_record(_as_row(row)),
+            )
 
     # --- 写 -------------------------------------------------------------------
 
@@ -465,22 +778,10 @@ class PostgresTaskStore:
             raise UnscopedAuditEventError("audit event has no task_id")
         task_id = event.task_id
         async with self._engine.begin() as connection:
-            await _serialise_on_task(connection, task_id)
-            seq = (
-                await connection.execute(
-                    sa.insert(TASK_AUDIT_EVENTS)
-                    .values(
-                        task_id=task_id,
-                        seq=_next_seq(TASK_AUDIT_EVENTS, task_id),
-                        stage=event.stage.value,
-                        outcome=event.outcome.value,
-                        occurred_at=event.occurred_at,
-                        event=dump_contract(event),
-                    )
-                    .returning(TASK_AUDIT_EVENTS.c.seq)
-                )
-            ).scalar_one()
-        return int(seq)
+            seqs = await _append_audit_events(
+                connection, task_id=task_id, events=(event,)
+            )
+        return seqs[0]
 
 
 class PostgresPlanStore:

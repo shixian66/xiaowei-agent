@@ -20,8 +20,11 @@ import uuid
 from typing import Final, TypeVar
 
 from xiaowei_agent.contracts import (
+    TERMINAL_STATUSES,
     ApprovalRequest,
     LeaseGrant,
+    RetryDecision,
+    TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
     TaskStatus,
@@ -31,8 +34,12 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
+    classify_task_attempt,
     classify_transition,
     context_matches_envelope,
+    dispatch_sort_key,
+    grant_is_current,
+    is_dispatchable,
     is_stale_lease,
     may_acquire_lease,
     may_renew_lease,
@@ -42,13 +49,24 @@ from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
+    DispatchQuery,
     IdempotencyConflictError,
     LeaseCommand,
+    RetryCommand,
+    RetryResult,
     StaleLeaseQuery,
+    TaskAttemptCommand,
+    TaskAttemptGrant,
+    TaskAttemptResult,
     TaskNotFoundError,
     TransitionCommand,
     UnscopedAuditEventError,
+    attempt_terminal_event,
     request_dedup_digest,
+    retry_command_digest,
+    submission_digest,
+    submission_matches_record,
+    validate_task_failure_limit,
 )
 
 _EntryT = TypeVar("_EntryT")
@@ -59,9 +77,14 @@ IS_FAKE: Final[bool] = True
 
 class InMemoryTaskStore:
     def __init__(
-        self, *, clock: Clock, state: InMemoryPersistenceState | None = None
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+        task_failure_limit: int = 3,
     ) -> None:
         self._clock = clock
+        self._task_failure_limit = validate_task_failure_limit(task_failure_limit)
         self._state = InMemoryPersistenceState() if state is None else state
         self._records = self._state.tasks
         self._by_key = self._state.task_ids_by_key
@@ -112,6 +135,7 @@ class InMemoryTaskStore:
             self._state.next_created_seq += 1
             self._records[record.task_id] = record
             self._state.submissions[record.task_id] = submission
+            self._state.submission_digests[record.task_id] = submission_digest(submission)
             self._by_key[scope] = record.task_id
             return record
 
@@ -237,3 +261,157 @@ class InMemoryTaskStore:
             raise UnscopedAuditEventError("audit event has no task_id")
         async with self._lock:
             return self._append(self._audit_events, event.task_id, event)
+
+    async def list_dispatchable_tasks(
+        self, *, query: DispatchQuery
+    ) -> tuple[TaskRecord, ...]:
+        async with self._lock:
+            now = self._clock()
+            candidates = [
+                record
+                for record in self._records.values()
+                if is_dispatchable(record, query, now=now)
+            ]
+        return tuple(sorted(candidates, key=dispatch_sort_key)[: query.limit])
+
+    def _terminalize_attempt_rejection(
+        self,
+        *,
+        current: TaskRecord,
+        command: TaskAttemptCommand,
+        rejection: TaskAttemptRejection,
+        now: _dt.datetime,
+    ) -> TaskAttemptResult:
+        winner = current.model_copy(
+            update={
+                "status": TaskStatus.FAILED,
+                "version": current.version + 1,
+                "terminal_reason": rejection.value,
+            }
+        )
+        event = attempt_terminal_event(command=command, winner=winner, now=now)
+        self._records[current.task_id] = winner
+        self._append(self._audit_events, current.task_id, event)
+        return TaskAttemptResult(
+            applied=False,
+            winner=winner,
+            rejection=rejection,
+            committed_audit_events=(event,),
+        )
+
+    async def begin_task_attempt(
+        self, *, command: TaskAttemptCommand
+    ) -> TaskAttemptResult:
+        async with self._lock:
+            current = self._require(command.task_id)
+            now = self._clock()
+            rejection = classify_task_attempt(
+                current,
+                intent=command.intent,
+                now=now,
+                task_failure_limit=self._task_failure_limit,
+            )
+            if rejection is TaskAttemptRejection.RETRY_EXHAUSTED:
+                return self._terminalize_attempt_rejection(
+                    current=current,
+                    command=command,
+                    rejection=rejection,
+                    now=now,
+                )
+            if rejection is not None:
+                return TaskAttemptResult(
+                    applied=False, winner=current, rejection=rejection
+                )
+
+            submission = self._state.submissions.get(current.task_id)
+            stored_digest = self._state.submission_digests.get(current.task_id)
+            if (
+                submission is None
+                or stored_digest is None
+                or not submission_matches_record(
+                    current, submission, stored_digest=stored_digest
+                )
+            ):
+                return self._terminalize_attempt_rejection(
+                    current=current,
+                    command=command,
+                    rejection=TaskAttemptRejection.SUBMISSION_INVARIANT_VIOLATION,
+                    now=now,
+                )
+
+            token = self._state.next_fencing_token
+            expires_at = now + _dt.timedelta(seconds=command.ttl_seconds)
+            winner = current.model_copy(
+                update={
+                    "attempt_number": current.attempt_number + 1,
+                    "next_attempt_at": None,
+                    "lease_owner": command.owner,
+                    "lease_expires_at": expires_at,
+                    "fencing_token": token,
+                }
+            )
+            grant = TaskAttemptGrant(
+                lease=LeaseGrant(
+                    task_id=current.task_id,
+                    owner=command.owner,
+                    expires_at=expires_at,
+                    fencing_token=token,
+                ),
+                attempt_number=winner.attempt_number,
+            )
+            self._records[current.task_id] = winner
+            self._state.next_fencing_token += 1
+            return TaskAttemptResult(
+                applied=True,
+                winner=winner,
+                grant=grant,
+                submission=submission,
+            )
+
+    async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
+        digest = retry_command_digest(command)
+        async with self._lock:
+            current = self._require(command.grant.task_id)
+            if current.status in TERMINAL_STATUSES:
+                return RetryResult(
+                    decision=RetryDecision.TERMINAL_PROTECTED, winner=current
+                )
+            if (
+                current.retry_scheduled_by_attempt == command.grant.attempt_number
+                and current.attempt_number == command.grant.attempt_number
+            ):
+                decision = (
+                    RetryDecision.ALREADY_SCHEDULED
+                    if current.retry_command_digest == digest
+                    else RetryDecision.COMMAND_MISMATCH
+                )
+                return RetryResult(decision=decision, winner=current)
+
+            grant_rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=frozenset(
+                    {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
+                ),
+            )
+            if grant_rejection is not None:
+                return RetryResult(decision=RetryDecision.STALE_FENCING, winner=current)
+
+            token = self._state.next_fencing_token
+            winner = current.model_copy(
+                update={
+                    "version": current.version + 1,
+                    "task_failure_count": current.task_failure_count + 1,
+                    "next_attempt_at": command.next_attempt_at,
+                    "retry_scheduled_by_attempt": command.grant.attempt_number,
+                    "retry_command_digest": digest,
+                    "lease_expires_at": command.next_attempt_at,
+                    "fencing_token": token,
+                }
+            )
+            self._records[current.task_id] = winner
+            self._state.next_fencing_token += 1
+            for event in command.audit_events:
+                self._append(self._audit_events, current.task_id, event)
+            return RetryResult(decision=RetryDecision.SCHEDULED, winner=winner)

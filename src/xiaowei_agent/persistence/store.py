@@ -10,31 +10,39 @@ M2/M3 修正契约和测试，而不是在 adapter 内加兼容补丁（DEVELOPM
    ``except: pass`` 后继续用本地旧对象——正是 ARCHITECTURE §7.3 明令禁止的。
 2. ``fencing_token`` 的规则是**闭合**的，不是"可选校验"：有 live lease 必须带正确
    token；无 live lease 不得带 token。留一个"不传即跳过"的口子等于没有 fencing。
-3. token 在**取得**租约时递增、续租时不变，因此"旧持有者的 token < 当前 token"
-   恒成立，被抢占的 worker 拿旧 token 写入必然被拒。
+3. token 在**取得**租约或安排任务重试时递增、续租时不变，因此旧持有者的 token
+   严格小于当前 token，被抢占或已交接的 worker 拿旧 token 写入必然被拒。
 4. 时钟经 :data:`Clock` 注入。租约过期是本模块唯一与时间相关的语义，注入时钟才能
    不 sleep 地测试过期与抢占。
 """
 
 import datetime as _dt
 from collections.abc import Callable
-from typing import Protocol, TypeAlias
+from typing import Protocol, Self, TypeAlias
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
+    AttemptIntent,
+    AwareDatetime,
     Contract,
     LeaseGrant,
+    PipelineStage,
     RequestContext,
     RequestEnvelope,
+    RetryDecision,
+    RetryReason,
+    StageOutcome,
     StrictInt,
     StrictStr,
+    TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
     TaskStatus,
     TaskSubmission,
     TraceEvent,
+    TraceId,
     TransitionResult,
     content_digest,
 )
@@ -128,6 +136,175 @@ def submission_digest(submission: TaskSubmission) -> str:
         "envelope": dump_contract(submission.envelope),
         "context": dump_contract(submission.context),
         "as_of": submission.as_of.isoformat(),
+    }
+    return content_digest(canonical_json(payload).decode("utf-8"))
+
+
+def submission_matches_record(
+    record: TaskRecord, submission: TaskSubmission, *, stored_digest: str
+) -> bool:
+    """提交行是否仍与创建时任务事实一致；摘要只防代码缺陷，不作安全声明。"""
+    from xiaowei_agent.persistence.decisions import context_matches_envelope
+
+    return (
+        stored_digest == submission_digest(submission)
+        and record.request_digest
+        == request_dedup_digest(submission.envelope, submission.context)
+        and context_matches_envelope(submission.envelope, submission.context)
+        and record.tenant_id == submission.context.tenant_id
+        and record.environment_id == submission.context.environment_id
+        and record.actor == submission.context.actor
+    )
+
+
+def validate_task_failure_limit(value: int) -> int:
+    """校验存储实现共享的失败预算构造参数，显式拒绝 ``bool``。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("task_failure_limit must be an integer")
+    if value <= 0:
+        raise ValueError("task_failure_limit must be positive")
+    return value
+
+
+def attempt_terminal_event(
+    *, command: "TaskAttemptCommand", winner: TaskRecord, now: _dt.datetime
+) -> TraceEvent:
+    """构造 grant 之前由存储层原子终态化所需的唯一审计形状。"""
+    import uuid
+
+    return TraceEvent(
+        event_id=str(uuid.uuid4()),
+        trace_id=command.trace_id,
+        task_id=winner.task_id,
+        stage=PipelineStage.LIFECYCLE,
+        outcome=StageOutcome.FAILED,
+        occurred_at=now,
+        capability_id=None,
+        step_id=None,
+        policy_revision=None,
+        attempt_number=winner.attempt_number,
+        error=None,
+        detail={},
+    )
+
+
+class DispatchQuery(Contract):
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    limit: StrictInt = Field(gt=0)
+
+
+class TaskAttemptCommand(Contract):
+    task_id: StrictStr
+    intent: AttemptIntent
+    owner: StrictStr
+    ttl_seconds: StrictInt = Field(gt=0)
+    trace_id: TraceId
+
+
+class TaskAttemptGrant(Contract):
+    lease: LeaseGrant
+    attempt_number: StrictInt = Field(gt=0)
+
+    @property
+    def task_id(self) -> str:
+        return self.lease.task_id
+
+    @property
+    def fencing_token(self) -> int:
+        return self.lease.fencing_token
+
+
+_ATTEMPT_TERMINAL_REJECTIONS = {
+    TaskAttemptRejection.RETRY_EXHAUSTED,
+    TaskAttemptRejection.SUBMISSION_INVARIANT_VIOLATION,
+}
+
+
+class TaskAttemptResult(Contract):
+    applied: bool
+    winner: TaskRecord
+    grant: TaskAttemptGrant | None = None
+    submission: TaskSubmission | None = None
+    rejection: TaskAttemptRejection | None = None
+    committed_audit_events: tuple[TraceEvent, ...] = ()
+
+    @model_validator(mode="after")
+    def _result_is_self_consistent(self) -> Self:
+        if self.applied != (self.grant is not None):
+            raise ValueError("applied must agree with grant presence")
+        if self.applied != (self.submission is not None):
+            raise ValueError("applied must agree with submission presence")
+        if self.applied == (self.rejection is not None):
+            raise ValueError("applied and rejection must be mutually exclusive")
+        rejection = self.rejection
+        should_have_audit = rejection in _ATTEMPT_TERMINAL_REJECTIONS
+        if should_have_audit != bool(self.committed_audit_events):
+            raise ValueError("committed audit presence does not match the decision")
+        if should_have_audit and (
+            self.winner.status is not TaskStatus.FAILED
+            or rejection is None
+            or self.winner.terminal_reason != rejection.value
+        ):
+            raise ValueError("terminal rejection must return its newly failed winner")
+        for event in self.committed_audit_events:
+            if event.task_id != self.winner.task_id:
+                raise ValueError("committed audit belongs to a different task")
+            if event.attempt_number != self.winner.attempt_number:
+                raise ValueError("committed audit belongs to a different attempt")
+        if self.applied:
+            if self.grant is None or self.submission is None:
+                raise ValueError("successful result is incomplete")
+            lease = self.grant.lease
+            if (
+                lease.task_id != self.winner.task_id
+                or lease.owner != self.winner.lease_owner
+                or lease.fencing_token != self.winner.fencing_token
+                or lease.expires_at != self.winner.lease_expires_at
+                or self.grant.attempt_number != self.winner.attempt_number
+            ):
+                raise ValueError("grant does not describe the winner lease")
+            from xiaowei_agent.persistence.decisions import context_matches_envelope
+
+            submission = self.submission
+            if not context_matches_envelope(submission.envelope, submission.context):
+                raise ValueError("submission context does not match its envelope")
+            if (
+                self.winner.tenant_id != submission.context.tenant_id
+                or self.winner.environment_id != submission.context.environment_id
+                or self.winner.actor != submission.context.actor
+            ):
+                raise ValueError("submission does not belong to the winner")
+        return self
+
+
+class RetryCommand(Contract):
+    grant: TaskAttemptGrant
+    next_attempt_at: AwareDatetime
+    reason: RetryReason
+    audit_events: tuple[TraceEvent, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _audit_belongs_to_the_attempt(self) -> Self:
+        for event in self.audit_events:
+            if event.task_id != self.grant.task_id:
+                raise ValueError("retry audit belongs to a different task")
+            if event.attempt_number != self.grant.attempt_number:
+                raise ValueError("retry audit belongs to a different attempt")
+        return self
+
+
+class RetryResult(Contract):
+    decision: RetryDecision
+    winner: TaskRecord
+
+
+def retry_command_digest(command: RetryCommand) -> str:
+    """重试命令的一致性 checksum；不作为抗篡改证明。"""
+    payload = {
+        "next_attempt_at": command.next_attempt_at.isoformat(),
+        "reason": command.reason.value,
+        "attempt_number": command.grant.attempt_number,
     }
     return content_digest(canonical_json(payload).decode("utf-8"))
 
@@ -241,3 +418,16 @@ class TaskStore(Protocol):
 
         :raises UnscopedAuditEventError: ``event.task_id`` 为 ``None``。
         """
+
+    async def list_dispatchable_tasks(
+        self, *, query: DispatchQuery
+    ) -> tuple[TaskRecord, ...]:
+        """列出普通 Worker 可竞争的候选；不领取、不改变状态。"""
+
+    async def begin_task_attempt(
+        self, *, command: TaskAttemptCommand
+    ) -> TaskAttemptResult:
+        """原子竞争一次任务尝试，并随成功 grant 返回不可变提交事实。"""
+
+    async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
+        """原子结束当前尝试并安排下一次可领取时间。"""

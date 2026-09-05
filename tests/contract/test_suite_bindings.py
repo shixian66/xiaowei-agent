@@ -63,6 +63,16 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
         "terminal_protection",
         "postgres",
     ),
+    "tests.contract.test_dispatch_and_attempts": (
+        "task_store",
+        "dispatch_attempt",
+        "memory",
+    ),
+    "tests.integration.test_dispatch_and_attempts_postgres": (
+        "task_store",
+        "dispatch_attempt",
+        "postgres",
+    ),
     "tests.contract.test_plan_store": ("plan_store", "plan_store", "memory"),
     "tests.integration.test_plan_store_postgres": ("plan_store", "plan_store", "postgres"),
     "tests.contract.test_evidence_ledger": (

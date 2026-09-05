@@ -229,6 +229,8 @@ def test_row_keeps_none_columns_explicitly() -> None:
         "lease_expires_at",
         "fencing_token",
         "next_attempt_at",
+        "retry_scheduled_by_attempt",
+        "retry_command_digest",
     ):
         assert column in row
         assert row[column] is None
@@ -243,6 +245,13 @@ def test_execution_accounting_columns_are_not_lost() -> None:
     assert row["task_failure_count"] == 1
     assert row["next_attempt_at"] == next_attempt
     assert row_to_record(row) == record
+
+
+def test_retry_markers_round_trip_together() -> None:
+    record = _RECORD.model_copy(
+        update={"retry_scheduled_by_attempt": 2, "retry_command_digest": "d" * 64}
+    )
+    assert row_to_record(record_to_row(record)) == record
 
 
 def test_status_is_stored_as_its_string_value() -> None:
