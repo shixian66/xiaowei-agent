@@ -443,6 +443,8 @@ API 与 worker 可以共用一个应用镜像和 Python 包，通过进程角色
 
 API、worker 与 migrate 使用同一个应用镜像。`ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，API 不直接依赖 Engine 或 persistence。secret 只通过文件引用挂载；API 只向宿主 loopback 发布端口，PostgreSQL 与 Worker 不发布宿主端口。
 
+`/healthz` 只回答 API 进程是否存活，不触碰 TaskStore；`/readyz` 才检查数据库连接、migration head 与装配状态。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过带 lease/fencing 的唯一领取事务取得执行权。migration 是一次性前置服务，失败时 API 与 Worker 不得启动。M5 本地栈只装配确定性无模型 interpreter 与 fake/recording ToolGateway；Compose 可运行不等于获得真实模型或真实运维目标的调用许可。
+
 初始不强制 Redis。只有出现可测的队列吞吐、分布式租约或缓存需求时，才增加服务，并先更新契约、迁移和运维文档。PostgreSQL 的全文检索先满足知识/证据索引；只有 eval 和查询指标证明不足时才引入 pgvector。
 
 ## 12. LangGraph 的位置与准入

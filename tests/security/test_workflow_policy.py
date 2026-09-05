@@ -24,6 +24,7 @@ _LINES = _TEXT.splitlines()
 _EXPECTED_JOBS = (
     "tests",
     "integration",
+    "compose-smoke",
     "security-gate",
     "lint",
     "types",
@@ -36,7 +37,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "20d52f0191c40eaf28e33320ccc2d509c327f1d590e82600ce97369c82087433"
+_WORKFLOW_SHA256 = "2431b7cfb1b84163418d171cf92f68abd6088a6f91fb1a7faf1b78280601dd4d"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -50,6 +51,7 @@ _ALLOWED_RUN_COMMANDS = {
     "uv sync --extra dev --frozen",
     "python -m pytest -q",
     "python -m pytest -m security -q",
+    "python -m scripts.compose_smoke",
     "ruff check .",
     "mypy src",
     "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt",
@@ -123,7 +125,7 @@ def test_uses_references_are_a_closed_set_with_exact_shas() -> None:
 
 
 def test_uses_occurrence_counts_are_exact() -> None:
-    """每个 job 恰好一次 checkout；仅非 secret-scan 的五个 job 使用 setup-uv。"""
+    """每个 job 恰好一次 checkout；仅 secret-scan 不使用 setup-uv。"""
     assert _TEXT.count("uses: actions/checkout@") == len(_EXPECTED_JOBS)
     assert _TEXT.count("uses: astral-sh/setup-uv@") == len(_EXPECTED_JOBS) - 1
 
@@ -145,11 +147,12 @@ def test_single_line_run_commands_match_exactly() -> None:
     """精确多重集：既拒绝多余命令，也拒绝删除必需命令。"""
     single, _ = _run_commands_and_block_digests()
     expected = Counter({
-        "uv sync --extra dev --frozen": 6,
+        "uv sync --extra dev --frozen": 7,
         # 两次：tests job 与 integration job 执行**同一条**命令，差别只有一个
         # PostgreSQL service 和一个 DSN。ADR-008 的四条命令因此一字不改。
         "python -m pytest -q": 2,
         "python -m pytest -m security -q": 1,
+        "python -m scripts.compose_smoke": 1,
         "ruff check .": 1,
         "mypy src": 1,
         "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
@@ -190,7 +193,7 @@ def test_each_checkout_step_binds_persist_credentials() -> None:
     assert steps == len(_EXPECTED_JOBS)
 
 
-def test_job_set_is_exactly_the_approved_seven() -> None:
+def test_job_set_is_exactly_the_approved_eight() -> None:
     assert sorted(_job_ids()) == sorted(_EXPECTED_JOBS), f"实际 job 集合 = {_job_ids()}"
 
 
@@ -292,7 +295,7 @@ def test_runner_is_pinned_not_latest() -> None:
     assert _TEXT.count("runs-on: ubuntu-24.04") == len(_EXPECTED_JOBS)
 
 
-def test_all_seven_gates_present_with_stable_names() -> None:
+def test_all_eight_gates_present_with_stable_names() -> None:
     for job in _EXPECTED_JOBS:
         assert re.search(rf"(?m)^    name: {re.escape(job)}$", _TEXT), f"缺少 check 名 {job}"
 

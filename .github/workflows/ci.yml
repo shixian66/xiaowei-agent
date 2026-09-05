@@ -68,6 +68,22 @@ jobs:
       - run: uv sync --extra dev --frozen
       - run: python -m pytest -q
 
+  compose-smoke:
+    name: compose-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: python -m scripts.compose_smoke
+
   security-gate:
     name: security-gate
     runs-on: ubuntu-24.04

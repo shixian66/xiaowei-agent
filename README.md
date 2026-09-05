@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：已具备工程基线与 CI、M2 契约内核，以及 M3 的**第一条只读垂直闭环**——`starrocks.slow_query.diagnose` 可以从结构化意图走完 Resolver → PlanCompiler → StepAdmission → ToolGateway → Evidence → Answerability → RenderPayload，**全部使用 fake/recording 数据**。M4 已落地 PostgreSQL TaskStore、Alembic 迁移与 integration 测试（CI 上 `1442 passed`、0 skipped）。**尚未**具备可运行的 API、Worker 或容器镜像；**未连接任何真实系统**，能力状态最强为 `tests`（非部署、非 canary、非用户验收）。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M4 已验收。M5 工作分支已组装薄 FastAPI、标准库 CLI、Worker、migration 和 API/Worker/PostgreSQL Compose，并继续只使用 fake/recording 能力；本机离线测试和静态检查已覆盖这些代码，但本机没有 Docker，Compose 运行闭环仍待 CI 或有 Docker 的环境验证。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -79,7 +79,7 @@
 - `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
-当前这些是目标技术基线，不代表依赖已经安装或服务已经可启动。
+这些依赖与文件已在 M5 工作分支落地；服务能否组成真实运行闭环仍以 Compose smoke 的运行结果为准。
 
 ## 预期目录
 
@@ -97,7 +97,9 @@ agent/
 │   ├── plans/                 # 里程碑详细实施计划（M2 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # 已建立（M1）
-├── docker-compose.yml          # Compose 阶段建立（尚未创建）
+├── docker-compose.yml          # API / Worker / migration / PostgreSQL 基线
+├── docker-compose.smoke.yml    # smoke 的短租约与轮询 override
+├── docker-compose.barrier.yml  # 仅用于恢复测试的 barrier override
 ├── src/xiaowei_agent/          # 业务包
 │   ├── redaction.py            # 已建立（M2）：脱敏规则单一真源，无对内依赖的叶子
 │   ├── contracts/              # 已建立（M2）：跨模块 DTO / Protocol
@@ -113,7 +115,7 @@ agent/
 │   ├── evidence/               # 已建立（M3）：纯证据构造器
 │   ├── reflection/             # 已建立（M3）：可答性判定
 │   ├── rendering/              # 已建立（M3）：RenderPayload 投影
-│   └── interfaces/             # API / CLI / 飞书 / Web（尚未创建）
+│   └── interfaces/             # 已建立（M5）：API / CLI / Worker / migration 装配入口
 └── tests/
     ├── unit/                   # 已建立
     ├── contract/               # 已建立（M2）
@@ -185,14 +187,51 @@ python -m pytest -q
 
 - **变量名不带 `XIAOWEI_` 前缀**：它是测试 harness 配置，不是应用配置。`load_settings()` 对任何未知 `XIAOWEI_*` 变量 fail-fast，而 `tests/conftest.py` 每个用例前会清掉全部 `XIAOWEI_*`。
 - **未设置时整组跳过**；已设置时 `tests/integration/` 里**不允许有任何跳过**，否则整次运行判失败——DSN 拼错、库没起来、迁移失败都会长成「全绿」的样子。
-- 需要一个**隔离**的 PostgreSQL：用例会 `TRUNCATE` 全部表。本地可用单容器或本机已有实例；**仓库不提供 `docker-compose.yml`**，Compose 属 M5。
+- 需要一个**隔离**的 PostgreSQL：用例会 `TRUNCATE` 全部表。本地可用单容器、本机已有实例或 M5 Compose；不要指向共享数据库。
 - schema 由 Alembic 迁移建立，不由 `create_all` 建立。
 
-### 尚未完成
+### 本地 Compose（M5 候选）
 
-Docker Compose、API 和 Worker 属于后续里程碑，当前不可运行。M3 交付的闭环**只在进程内、只用 fake/recording 数据**。M4 的 PostgreSQL 实现使跨进程原子性与崩溃恢复**可被证明**，且证据已经存在：`integration` job 在 CI 上跑过并全绿。但那是 CI 里的 service container，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
+先生成仅供本地隔离数据库使用的随机 secret 文件；它被 `.gitignore` 排除，不得提交：
 
-M3 **没有**：真实 StarRocks 连接、真实模型 API 调用、任何 E1（写）能力、API/CLI/Worker 入口、`tests/integration/`。`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
+```bash
+install -d -m 700 .secrets
+(umask 077; python -c 'import pathlib,secrets; pathlib.Path(".secrets/postgres_password").write_text(secrets.token_urlsafe(32) + "\n")')
+docker compose build
+docker compose up -d --wait postgres
+docker compose up --no-deps migrate
+docker compose up -d --wait --no-deps api
+docker compose up -d --no-deps worker
+```
+
+`/healthz` 只证明 API 进程存活；`/readyz` 还检查数据库、migration head 与装配状态：
+
+```bash
+python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/readyz").read().decode())'
+xiaowei task submit --text '检查最近三十分钟慢查询' --idempotency-key local-demo-1
+xiaowei task get TASK_ID
+```
+
+停止会保留数据库 volume；清理会删除本项目的本地数据库数据。执行清理前先确认当前目录与 Compose project：
+
+```bash
+docker compose stop
+docker compose down --volumes --remove-orphans
+```
+
+完整恢复、并发与幂等验收由独立脚本创建随机 project、做碰撞预检并在 `finally` 中只清理该 project：
+
+```bash
+python -m scripts.compose_smoke
+```
+
+缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败或日志泄漏都会返回非零；脚本不允许 skip。当前开发机没有 Docker，因此上述运行步骤尚未在本机验证。
+
+### 尚未完成与能力边界
+
+M5 候选仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。Compose smoke 即使通过，也只证明本地隔离 PostgreSQL 下的提交、消费、查询、恢复与幂等闭环，**推不出任何关于生产数据库、真实负载或运维环境的结论**。
+
+当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 
 ## 旧项目关系
 
