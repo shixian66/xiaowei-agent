@@ -30,6 +30,7 @@ _NON_SUCCESS_CODES = {
 }
 _TEXT = "检查最近三十分钟慢查询"
 _PROMETHEUS_TEXT = "查告警 HostHighCpu 在 node-1.example.com:9100 的证据"
+_ASSET_TEXT = "查资产 hostname=node-1.example.com"
 _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
     ("xiaowei-migrate: database_unavailable", "SMOKE_MIGRATION_DATABASE_UNAVAILABLE"),
@@ -385,6 +386,31 @@ def _require_same_prometheus_render(
         raise SmokeError("SMOKE_PROMETHEUS_RENDER_MISMATCH")
 
 
+def _require_asset_persistence(session: ComposeSession, task_id: str) -> None:
+    observation = _psql(
+        session,
+        task_id,
+        "SELECT coalesce((SELECT plan->>'capability_id' FROM task_plans "
+        "WHERE task_id = :'task_id'), '') || '|' || "
+        "(SELECT count(*)::text FROM task_evidence "
+        "WHERE task_id = :'task_id')",
+    )
+    if observation != "asset.inventory.lookup|1":
+        raise SmokeError("SMOKE_ASSET_PERSISTENCE_MISMATCH")
+
+
+def _require_same_asset_render(
+    before: dict[str, object], after: dict[str, object]
+) -> None:
+    if (
+        before.get("status") != "succeeded"
+        or after.get("status") != "succeeded"
+        or not isinstance(before.get("render"), dict)
+        or before.get("render") != after.get("render")
+    ):
+        raise SmokeError("SMOKE_ASSET_RENDER_MISMATCH")
+
+
 def _submit(session: ComposeSession, *, key: str, text: str = _TEXT) -> str:
     return _task_id(
         _task(
@@ -576,6 +602,34 @@ def _full_workflow(session: ComposeSession) -> None:
         failure_code="SMOKE_PROMETHEUS_QUERY_FAILED",
     )
     _require_same_prometheus_render(prometheus_before, prometheus_after)
+
+    session.failure_code = "SMOKE_ASSET_COMMAND_FAILED"
+    asset_id = _submit(
+        session,
+        key=f"asset-{uuid.uuid4().hex}",
+        text=_ASSET_TEXT,
+    )
+    asset_before = _wait_task(session, asset_id, timeout=120.0)
+    _require_succeeded(asset_before)
+    _require_asset_persistence(session, asset_id)
+    session.run(
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "api",
+        timeout=60.0,
+        failure_code="SMOKE_ASSET_API_RESTART_FAILED",
+    )
+    _wait_ready(timeout=60.0)
+    asset_after = _task(
+        session,
+        "task",
+        "get",
+        asset_id,
+        failure_code="SMOKE_ASSET_QUERY_FAILED",
+    )
+    _require_same_asset_render(asset_before, asset_after)
 
     session.failure_code = "SMOKE_FINAL_AUDIT_COMMAND_FAILED"
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")

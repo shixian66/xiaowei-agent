@@ -87,9 +87,11 @@ PR 1 使用 `snapshot.m6a.starrocks-prometheus.v1`；PR 2 使用
 PR 1 把生产允许面从仅有 `readonly.starrocks.slow_query.v1` 扩展为同时包含
 `readonly.prometheus.alert.evidence.v1`，因此生产 `POLICY_REVISION` 从
 `policy-2026-09-01` 递增为 `policy-2026-09-05`。测试用字面量同时固定 revision 与
-有序 profile ID 集合；新增、删除或重排生产 profile 时必须显式评审并更新 revision，
-不能让旧任务、旧审批或审计记录静默指向新的允许面。测试 fake 的独立 revision 不代表
-生产快照，不随本次变更机械迁移。
+有序 profile ID 集合。PR 2 再加入 `readonly.asset.inventory.lookup.v1`，因此 revision
+再次递增为 `policy-2026-09-05.2`；PR 1 的 revision 不得在扩大的允许面下继续生效。
+新增、删除或重排生产 profile 时必须显式评审并更新 revision，不能让旧任务、旧审批
+或审计记录静默指向新的允许面。测试 fake 的独立 revision 不代表生产快照，不随本次
+变更机械迁移。
 
 ### D8 M6a 不实现通用 DSL
 

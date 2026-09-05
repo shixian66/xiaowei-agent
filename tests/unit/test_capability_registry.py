@@ -4,6 +4,13 @@ Registry 只给出**某一时刻的快照**：同一次请求内看到的能力�
 候选解析与分类派生会依赖调用时刻。
 """
 
+from xiaowei_agent.capabilities.asset_inventory import (
+    ASSET_INVENTORY_CAPABILITY_ID,
+    ASSET_INVENTORY_CAPABILITY_VERSION,
+    ASSET_INVENTORY_GATEWAY,
+    ASSET_INVENTORY_SPEC,
+    OP_LOOKUP_ASSET,
+)
 from xiaowei_agent.capabilities.prometheus_alert import (
     ALERTMANAGER_GATEWAY,
     PROMETHEUS_ALERT_CAPABILITY_ID,
@@ -43,10 +50,11 @@ def test_snapshot_id_and_ordered_spec_set_are_one_golden() -> None:
         snapshot.snapshot_id,
         tuple((spec.capability_id, spec.version) for spec in snapshot.specs),
     ) == (
-        "snapshot.m6a.starrocks-prometheus.v1",
+        "snapshot.m6a.starrocks-prometheus-asset.v1",
         (
             ("starrocks.slow_query.diagnose", "1.0.0"),
             ("prometheus.alert.evidence", "1.0.0"),
+            ("asset.inventory.lookup", "1.0.0"),
         ),
     )
     assert SNAPSHOT_ID == snapshot.snapshot_id
@@ -81,6 +89,17 @@ def test_prometheus_spec_declares_two_read_operations_and_gateways() -> None:
         PROMETHEUS_ALERT_CAPABILITY_ID,
         PROMETHEUS_ALERT_CAPABILITY_VERSION,
     )
+
+
+def test_asset_spec_declares_one_read_operation_and_gateway() -> None:
+    assert (ASSET_INVENTORY_SPEC.capability_id, ASSET_INVENTORY_SPEC.version) == (
+        ASSET_INVENTORY_CAPABILITY_ID,
+        ASSET_INVENTORY_CAPABILITY_VERSION,
+    )
+    assert tuple(
+        (operation.operation, operation.gateway)
+        for operation in ASSET_INVENTORY_SPEC.operations
+    ) == ((OP_LOOKUP_ASSET, ASSET_INVENTORY_GATEWAY),)
     assert tuple(
         (operation.operation, operation.gateway)
         for operation in PROMETHEUS_ALERT_SPEC.operations

@@ -7,7 +7,7 @@
 未用户验收**，也未连接任何真实系统。
 
 
-快照标识：`snapshot.m6a.starrocks-prometheus.v1`
+快照标识：`snapshot.m6a.starrocks-prometheus-asset.v1`
 
 | capability | version | domain | operation | gateway | effect_class | side_effect |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -15,6 +15,7 @@
 | `starrocks.slow_query.diagnose` | `1.0.0` | `starrocks` | `count_queries_in_window` | `starrocks` | `read` | `false` |
 | `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `get_active_alerts` | `alertmanager` | `read` | `false` |
 | `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `query_metric_range` | `prometheus` | `read` | `false` |
+| `asset.inventory.lookup` | `1.0.0` | `asset` | `lookup_asset` | `asset_inventory` | `read` | `false` |
 
 ## 契约引用
 
@@ -29,3 +30,9 @@
 - policy profile：`readonly.prometheus.alert.evidence.v1`
 - evidence contract：`evidence.prometheus.alert.v1`
 - eval：`evals.prometheus.alert.v1`
+
+### `asset.inventory.lookup`
+
+- policy profile：`readonly.asset.inventory.lookup.v1`
+- evidence contract：`evidence.asset.inventory.v1`
+- eval：`evals.asset.inventory.v1`

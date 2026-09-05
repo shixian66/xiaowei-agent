@@ -12,6 +12,7 @@ from xiaowei_agent.application.capability_runtime import (
     PreparedCapability,
 )
 from xiaowei_agent.application.default_capabilities import (
+    ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
 )
@@ -126,6 +127,12 @@ def build_test_capability_bindings(
     )
     if prometheus_key in keys:
         bindings.append(PROMETHEUS_ALERT_BINDING)
+    asset_key = (
+        ASSET_INVENTORY_BINDING.capability_id,
+        ASSET_INVENTORY_BINDING.capability_version,
+    )
+    if asset_key in keys:
+        bindings.append(ASSET_INVENTORY_BINDING)
     if (WRITE_CAP, CAP_VERSION) in keys:
         bindings.append(SYNTHETIC_WRITE_BINDING)
     return CapabilityBindingRegistry(

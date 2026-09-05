@@ -4,19 +4,20 @@ Registry 是**声明与版本索引**，不是关键词总表，也不是执行�
 的 ``CapabilitySnapshot``；Resolver 与分类派生都只看快照，因此同一次请求内看到
 的能力集合是确定的。
 
-M6a PR 1 注册 StarRocks 慢查询与 Prometheus 告警证据两个只读能力。合成写能力
-``test.synthetic.write`` 只存在于测试夹具，
+M6a 最终注册 StarRocks 慢查询、Prometheus 告警证据与资产精确查询三个只读能力。
+合成写能力 ``test.synthetic.write`` 只存在于测试夹具，
 **永远不进入本 registry**（`test_synthetic_write_capability_is_not_registered`
 承重）。
 """
 
 from typing import Final
 
+from xiaowei_agent.capabilities.asset_inventory import ASSET_INVENTORY_SPEC
 from xiaowei_agent.capabilities.prometheus_alert import PROMETHEUS_ALERT_SPEC
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SPEC
 from xiaowei_agent.contracts import CapabilitySnapshot
 
-SNAPSHOT_ID: Final[str] = "snapshot.m6a.starrocks-prometheus.v1"
+SNAPSHOT_ID: Final[str] = "snapshot.m6a.starrocks-prometheus-asset.v1"
 """快照标识。
 
 写成常量而不是按时刻生成：``snapshot_id`` 会进入 ``CandidateSet`` 与审计，
@@ -25,7 +26,8 @@ SNAPSHOT_ID: Final[str] = "snapshot.m6a.starrocks-prometheus.v1"
 """
 
 _SNAPSHOT: Final[CapabilitySnapshot] = CapabilitySnapshot(
-    snapshot_id=SNAPSHOT_ID, specs=(SLOW_QUERY_SPEC, PROMETHEUS_ALERT_SPEC)
+    snapshot_id=SNAPSHOT_ID,
+    specs=(SLOW_QUERY_SPEC, PROMETHEUS_ALERT_SPEC, ASSET_INVENTORY_SPEC),
 )
 
 

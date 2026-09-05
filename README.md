@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，独立复审无代码阻断，PR #11 首轮远程 CI 八项全绿，仍待项目负责人验收与合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 `prometheus.alert.evidence`、Evidence target seam 修复均已验收合入。PR 2 正在形成 `asset.inventory.lookup` fake/recording 送审候选，尚未合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -216,6 +216,7 @@ docker compose up -d --no-deps worker
 python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/readyz").read().decode())'
 xiaowei task submit --text '检查最近三十分钟慢查询' --idempotency-key local-demo-1
 xiaowei task submit --text '查告警 HostHighCpu 在 node-1.example.com:9100 的证据' --idempotency-key local-prom-demo-1
+xiaowei task submit --text '查资产 hostname=node-1.example.com' --idempotency-key local-asset-demo-1
 xiaowei task get TASK_ID
 ```
 
@@ -224,6 +225,10 @@ xiaowei task get TASK_ID
 真实监控系统的兼容性证明。Prometheus metric recording 只覆盖默认 30 分钟窗口和
 装配中心时刻前后 120 分钟的精确键；非默认窗口或超出该时段的请求会安全降级为
 `indeterminate`，没有 fallback。长期运行或窗口泛化不属于本轮本地样例承诺。
+
+第三条提交命令只命中内置资产 synthetic recording；同一资产还可用精确
+`asset_id=asset-1` 或 `ip=10.0.0.8` 查询。它不支持列出全部、模糊/CIDR/range、跨环境、
+拓扑、巡检或资产写入，也不能证明任何真实 CMDB/资产系统兼容性。
 
 停止会保留数据库 volume；清理会删除本项目的本地数据库数据。执行清理前先确认当前目录与 Compose project：
 
@@ -243,11 +248,11 @@ python -m scripts.compose_smoke
 ### 尚未完成与能力边界
 
 当前实现仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。M6a PR 1
-候选增加了 Alertmanager 告警读取与 Prometheus 固定模板指标取证，但本机没有 Docker
-或 PostgreSQL 测试 DSN，因此新增 Compose/PostgreSQL 路径在本机只完成代码与离线
-契约验证。M6a PR #11 的 run `33966437003` 已在 GitHub 隔离 runner 实跑 PostgreSQL
-integration 与 Compose smoke；这只把 M6a 候选提升为非生产 CI 运行证据，**不能推出
-任何真实运维系统兼容、部署、canary 或用户验收**。
+增加了 Alertmanager 告警读取与 Prometheus 固定模板指标取证；PR 2 候选增加资产精确
+查询。本机没有 Docker 或 PostgreSQL 测试 DSN，因此 PR 2 新增的 Compose/PostgreSQL
+路径目前只有代码、契约与受控 skip 证据；必须等 PR CI 实跑后再记录非生产运行证据。
+PR #11 的 run `33966437003` 已实跑 PR 1 的 PostgreSQL integration 与 Compose smoke，
+但这不能推出任何真实运维系统兼容、部署、canary 或用户验收。
 
 当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

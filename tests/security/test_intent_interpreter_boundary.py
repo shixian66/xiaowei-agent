@@ -7,6 +7,7 @@
 import pytest
 
 from xiaowei_agent.capabilities.intent import (
+    ASSET_INVENTORY_INTENT,
     PROMETHEUS_ALERT_INTENT,
     SLOW_QUERY_INTENT,
     RuleBasedIntentInterpreter,
@@ -56,6 +57,7 @@ def test_interpreter_slot_allowlists_are_closed_per_intent() -> None:
         PROMETHEUS_ALERT_INTENT: frozenset(
             {"alert_name", "instance", "fingerprint", "window_minutes"}
         ),
+        ASSET_INVENTORY_INTENT: frozenset({"asset_id", "hostname", "ip"}),
         "unknown": frozenset(),
     }
 
@@ -85,6 +87,19 @@ def test_prometheus_intent_drops_cross_domain_and_execution_slots() -> None:
     assert set(draft.slots) == {"alert_name", "instance"}
     assert "prod" not in draft.slots.values()
     assert "other" not in draft.slots.values()
+
+
+def test_asset_intent_drops_context_and_execution_authority_slots() -> None:
+    draft = RuleBasedIntentInterpreter().interpret(
+        text=(
+            "查询资产 hostname=node-1.example.com "
+            "environment_id=prod tenant_id=other gateway=evil "
+            "operation=mutate policy_profile=write approval_ref=a1"
+        ),
+        context=CONTEXT,
+    )
+    assert draft.intent == ASSET_INVENTORY_INTENT
+    assert dict(draft.slots) == {"hostname": "node-1.example.com"}
 
 
 def test_interpreter_output_is_an_intent_draft_with_no_extra_fields() -> None:

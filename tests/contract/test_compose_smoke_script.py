@@ -368,3 +368,39 @@ def test_prometheus_render_must_survive_api_restart_byte_for_byte() -> None:
             before,
             {"status": "succeeded", "render": {"answer": "changed"}},
         )
+
+
+@pytest.mark.parametrize(
+    ("observation", "fails"),
+    [
+        ("asset.inventory.lookup|1", False),
+        ("asset.inventory.lookup|0", True),
+        ("asset.inventory.lookup|2", True),
+    ],
+)
+def test_asset_smoke_requires_its_plan_and_one_persisted_evidence(
+    monkeypatch: pytest.MonkeyPatch, observation: str, fails: bool
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=RecordingRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    monkeypatch.setattr(compose_smoke, "_psql", lambda *_args, **_kwargs: observation)
+    task_id = "12345678-1234-4321-9234-123456789abc"
+    if fails:
+        with pytest.raises(SmokeError, match="SMOKE_ASSET_PERSISTENCE_MISMATCH"):
+            compose_smoke._require_asset_persistence(session, task_id)
+    else:
+        compose_smoke._require_asset_persistence(session, task_id)
+
+
+def test_asset_render_must_survive_api_restart_byte_for_byte() -> None:
+    before = {"status": "succeeded", "render": {"answer": "constant"}}
+    compose_smoke._require_same_asset_render(before, dict(before))
+    with pytest.raises(SmokeError, match="SMOKE_ASSET_RENDER_MISMATCH"):
+        compose_smoke._require_same_asset_render(
+            before,
+            {"status": "succeeded", "render": {"answer": "changed"}},
+        )

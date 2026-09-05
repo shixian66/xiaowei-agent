@@ -6,6 +6,11 @@ profile 是**声明**，判定在 ``governance.policy``。分开的理由与 cap
 
 from typing import Final
 
+from xiaowei_agent.capabilities.asset_inventory import (
+    ASSET_INVENTORY_ENVIRONMENT_IDS,
+    ASSET_INVENTORY_POLICY_PROFILE,
+    OP_LOOKUP_ASSET,
+)
 from xiaowei_agent.capabilities.prometheus_alert import (
     OP_GET_ACTIVE_ALERTS,
     OP_QUERY_METRIC_RANGE,
@@ -21,7 +26,7 @@ from xiaowei_agent.contracts import (
     RiskLevel,
 )
 
-POLICY_REVISION: Final[str] = "policy-2026-09-05"
+POLICY_REVISION: Final[str] = "policy-2026-09-05.2"
 """当前生效的 policy revision。
 
 revision 变化必须让旧审批与旧凭证失效（ARCHITECTURE §15），因此它是一个显式常量，
@@ -50,9 +55,22 @@ PROMETHEUS_ALERT_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
 )
 
+ASSET_INVENTORY_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
+    profile_id=ASSET_INVENTORY_POLICY_PROFILE,
+    allowed_operations=(OP_LOOKUP_ASSET,),
+    allowed_effect_classes=(EffectClass.READ,),
+    allowed_environment_ids=ASSET_INVENTORY_ENVIRONMENT_IDS,
+    risk=RiskLevel.LOW,
+    max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
+)
+
 ACTIVE_POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
     policy_revision=POLICY_REVISION,
-    profiles=(POLICY_PROFILE, PROMETHEUS_ALERT_POLICY_PROFILE),
+    profiles=(
+        POLICY_PROFILE,
+        PROMETHEUS_ALERT_POLICY_PROFILE,
+        ASSET_INVENTORY_POLICY_PROFILE,
+    ),
 )
 """当前注册的 profile 集合。
 

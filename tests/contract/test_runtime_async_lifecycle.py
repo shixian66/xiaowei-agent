@@ -17,6 +17,7 @@ from xiaowei_agent.application.capability_runtime import (
     PreparedCapability,
 )
 from xiaowei_agent.application.default_capabilities import (
+    ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
 )
@@ -190,7 +191,11 @@ async def test_terminal_query_uses_the_renderer_selected_by_the_stored_plan(
         CapabilityBindingRegistry(
             snapshot=harness.runtime._snapshot,
             policy_snapshot=POLICY_SNAPSHOT,
-                bindings=(selected, PROMETHEUS_ALERT_BINDING),
+            bindings=(
+                selected,
+                PROMETHEUS_ALERT_BINDING,
+                ASSET_INVENTORY_BINDING,
+            ),
         ),
     )
     view = await harness.runtime.query_task(lookup=harness.lookup)
@@ -468,7 +473,11 @@ async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
         CapabilityBindingRegistry(
             snapshot=harness.runtime._snapshot,
             policy_snapshot=POLICY_SNAPSHOT,
-                bindings=(changed_binding, PROMETHEUS_ALERT_BINDING),
+            bindings=(
+                changed_binding,
+                PROMETHEUS_ALERT_BINDING,
+                ASSET_INVENTORY_BINDING,
+            ),
         ),
     )
 

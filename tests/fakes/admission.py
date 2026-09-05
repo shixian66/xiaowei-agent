@@ -10,6 +10,7 @@ from typing import Any, Final
 
 from tests.fakes.fixtures import CAP_VERSION, SNAPSHOT, WRITE_CAP, WRITE_OP
 
+from xiaowei_agent.capabilities.asset_inventory import ASSET_INVENTORY_POLICY_PROFILE
 from xiaowei_agent.capabilities.effect import build_plan_step, derive_effect
 from xiaowei_agent.capabilities.prometheus_alert import PROMETHEUS_ALERT_POLICY_PROFILE
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
@@ -83,6 +84,7 @@ POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
     profiles=(
         POLICY_PROFILE,
         PROMETHEUS_ALERT_POLICY_PROFILE,
+        ASSET_INVENTORY_POLICY_PROFILE,
         "readonly.default",
         WRITE_PROFILE_ID,
     ),

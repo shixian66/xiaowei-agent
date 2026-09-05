@@ -1,0 +1,15 @@
+{
+  "layer": "L2",
+  "cases": [
+    {"id": "A-L2-asset-id", "scenario": "asset_id", "text": "查资产 asset_id=asset-1", "status": "succeeded", "calls": 1},
+    {"id": "A-L2-hostname", "scenario": "hostname", "text": "查资产 hostname=NODE-1.EXAMPLE.COM.", "status": "succeeded", "calls": 1},
+    {"id": "A-L2-ip", "scenario": "ip", "text": "查资产 ip=10.0.0.8", "status": "succeeded", "calls": 1},
+    {"id": "A-L2-empty", "scenario": "empty", "status": "indeterminate", "calls": 1},
+    {"id": "A-L2-duplicate", "scenario": "duplicate", "status": "indeterminate", "calls": 1},
+    {"id": "A-L2-timeout", "scenario": "timeout", "status": "indeterminate", "calls": 1},
+    {"id": "A-L2-malformed", "scenario": "malformed", "status": "indeterminate", "calls": 1},
+    {"id": "A-L2-polluted", "scenario": "polluted", "status": "succeeded", "calls": 1},
+    {"id": "A-L2-cross-scope", "scenario": "cross_scope", "status": "indeterminate", "calls": 1},
+    {"id": "A-L2-repeat", "scenario": "golden", "status": "succeeded", "calls": 1}
+  ]
+}

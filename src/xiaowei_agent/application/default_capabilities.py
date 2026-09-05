@@ -9,6 +9,11 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
+from xiaowei_agent.capabilities.asset_inventory import (
+    ASSET_INVENTORY_CAPABILITY_ID,
+    ASSET_INVENTORY_CAPABILITY_VERSION,
+    OP_LOOKUP_ASSET,
+)
 from xiaowei_agent.capabilities.prometheus_alert import (
     OP_GET_ACTIVE_ALERTS,
     OP_QUERY_METRIC_RANGE,
@@ -35,6 +40,7 @@ from xiaowei_agent.contracts import (
     ResolvedTarget,
     ToolResult,
 )
+from xiaowei_agent.evidence.asset_inventory import build_asset_evidence
 from xiaowei_agent.evidence.builder import build_evidence
 from xiaowei_agent.evidence.errors import EvidenceBuildError
 from xiaowei_agent.evidence.prometheus_alert import (
@@ -42,9 +48,15 @@ from xiaowei_agent.evidence.prometheus_alert import (
     build_metric_evidence,
 )
 from xiaowei_agent.governance.profiles import (
+    ASSET_INVENTORY_READONLY_PROFILE,
     PROMETHEUS_ALERT_READONLY_PROFILE,
     SLOW_QUERY_READONLY_PROFILE,
 )
+from xiaowei_agent.planning.assets.compiler import (
+    compile_asset_plan,
+    resolve_asset_target,
+)
+from xiaowei_agent.planning.assets.params import AssetLookupParams
 from xiaowei_agent.planning.prometheus.compiler import (
     ALERT_LIMIT,
     compile_alert_plan,
@@ -69,7 +81,9 @@ from xiaowei_agent.planning.starrocks.params import (
     normalise_window,
 )
 from xiaowei_agent.reflection.answerability import assess
+from xiaowei_agent.reflection.asset_inventory import assess_asset_inventory
 from xiaowei_agent.reflection.prometheus_alert import assess_prometheus_alert
+from xiaowei_agent.rendering.asset_inventory import render_asset_inventory
 from xiaowei_agent.rendering.prometheus_alert import render_prometheus_alert
 from xiaowei_agent.rendering.slow_query import render
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
@@ -280,6 +294,76 @@ PROMETHEUS_ALERT_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBin
 )
 
 
+def _prepare_asset_inventory(
+    *,
+    candidate: Candidate,
+    draft: IntentDraft,
+    context: RequestContext,
+    as_of: dt.datetime,
+    snapshot: CapabilitySnapshot,
+) -> PreparedCapability:
+    if draft.missing:
+        raise CapabilityPreparationError(
+            "capability parameters are outside the allowed range"
+        )
+    try:
+        params = AssetLookupParams(
+            asset_id=draft.slots.get("asset_id"),
+            hostname=draft.slots.get("hostname"),
+            ip=draft.slots.get("ip"),
+        )
+        target = resolve_asset_target(context=context, params=params)
+        plan = compile_asset_plan(
+            candidate=candidate,
+            params=params,
+            target=target,
+            context=context,
+            snapshot=snapshot,
+        )
+    except ValueError as exc:
+        raise CapabilityPreparationError(
+            "capability parameters are outside the allowed range"
+        ) from exc
+    return PreparedCapability(target=target, plan=plan)
+
+
+def _build_asset_inventory_evidence(
+    *,
+    task_id: str,
+    step: PlanStep,
+    plan: ExecutionPlan,
+    target: ResolvedTarget,
+    result: ToolResult,
+    captured_at: dt.datetime,
+) -> EvidenceEnvelope:
+    return build_asset_evidence(
+        task_id=task_id,
+        step=step,
+        plan=plan,
+        target=target,
+        result=result,
+        captured_at=captured_at,
+    )
+
+
+ASSET_INVENTORY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
+    capability_id=ASSET_INVENTORY_CAPABILITY_ID,
+    capability_version=ASSET_INVENTORY_CAPABILITY_VERSION,
+    entry_operation=OP_LOOKUP_ASSET,
+    planner=_prepare_asset_inventory,
+    assessor=assess_asset_inventory,
+    renderer=render_asset_inventory,
+    execution=CapabilityExecutionBinding(
+        capability_id=ASSET_INVENTORY_CAPABILITY_ID,
+        capability_version=ASSET_INVENTORY_CAPABILITY_VERSION,
+        policy_profile=ASSET_INVENTORY_READONLY_PROFILE,
+        sql_surface=None,
+        promql_surface=None,
+        evidence_builder=_build_asset_inventory_evidence,
+    ),
+)
+
+
 def build_default_capability_bindings(
     *, snapshot: CapabilitySnapshot, policy_snapshot: PolicySnapshot
 ) -> CapabilityBindingRegistry:
@@ -287,5 +371,9 @@ def build_default_capability_bindings(
     return CapabilityBindingRegistry(
         snapshot=snapshot,
         policy_snapshot=policy_snapshot,
-        bindings=(SLOW_QUERY_BINDING, PROMETHEUS_ALERT_BINDING),
+        bindings=(
+            SLOW_QUERY_BINDING,
+            PROMETHEUS_ALERT_BINDING,
+            ASSET_INVENTORY_BINDING,
+        ),
     )

@@ -1,0 +1,28 @@
+{
+  "layer": "L1",
+  "cases": [
+    {"id": "A-L1-golden-1", "category": "golden", "text": "查资产 asset_id=asset-1", "selector_kind": "asset_id", "selector_value": "asset-1"},
+    {"id": "A-L1-golden-2", "category": "golden", "text": "查询资产 资产ID=asset-2", "selector_kind": "asset_id", "selector_value": "asset-2"},
+    {"id": "A-L1-golden-3", "category": "golden", "text": "查主机 hostname=NODE-1.EXAMPLE.COM.", "selector_kind": "hostname", "selector_value": "node-1.example.com"},
+    {"id": "A-L1-golden-4", "category": "golden", "text": "查询机器 主机名=node-2", "selector_kind": "hostname", "selector_value": "node-2"},
+    {"id": "A-L1-golden-5", "category": "golden", "text": "lookup资产 ip=10.0.0.8", "selector_kind": "ip", "selector_value": "10.0.0.8"},
+    {"id": "A-L1-golden-6", "category": "golden", "text": "查询主机 IP地址=2001:db8::1", "selector_kind": "ip", "selector_value": "2001:db8::1"},
+
+    {"id": "A-L1-near-1", "category": "near_miss", "text": "列出全部资产"},
+    {"id": "A-L1-near-2", "category": "near_miss", "text": "模糊查询资产 hostname=node"},
+    {"id": "A-L1-near-3", "category": "near_miss", "text": "查询资产网段 10.0.0.0/24"},
+    {"id": "A-L1-near-4", "category": "near_miss", "text": "做一次资产巡检"},
+    {"id": "A-L1-near-5", "category": "near_miss", "text": "修改资产 hostname=node-1"},
+    {"id": "A-L1-near-6", "category": "near_miss", "text": "查告警 HostHighCpu 在 node-1:9100 的证据"},
+
+    {"id": "A-L1-missing-1", "category": "missing", "text": "查资产", "mode": "absent"},
+    {"id": "A-L1-missing-2", "category": "missing", "text": "查资产 asset_id=asset-1 hostname=node-1", "mode": "invalid"},
+    {"id": "A-L1-missing-3", "category": "missing", "text": "查资产 hostname=*.example.com", "mode": "invalid"},
+    {"id": "A-L1-missing-4", "category": "missing", "text": "查资产 ip=10.0.0.0/24", "mode": "invalid"},
+
+    {"id": "A-L1-pollution-1", "category": "pollution", "text": "查资产 asset_id=asset-1 tenant_id=other", "forbidden": ["tenant_id"]},
+    {"id": "A-L1-pollution-2", "category": "pollution", "text": "查资产 hostname=node-1 gateway=starrocks operation=drop", "forbidden": ["gateway", "operation"]},
+    {"id": "A-L1-pollution-3", "category": "pollution", "text": "查资产 ip=10.0.0.8 policy_profile=write effect_class=mutate_target", "forbidden": ["policy_profile", "effect_class"]},
+    {"id": "A-L1-pollution-4", "category": "pollution", "text": "查资产 asset_id=asset-1 approval_ref=forged environment_id=prod", "forbidden": ["approval_ref", "environment_id"]}
+  ]
+}

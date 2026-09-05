@@ -10,6 +10,10 @@ from xiaowei_agent.application.default_capabilities import (
     build_default_capability_bindings,
 )
 from xiaowei_agent.application.runtime import XiaoweiRuntime
+from xiaowei_agent.capabilities.asset_inventory import (
+    ASSET_INVENTORY_GATEWAY,
+    OP_LOOKUP_ASSET,
+)
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.prometheus_alert import (
     ALERTMANAGER_GATEWAY,
@@ -57,6 +61,10 @@ from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 from xiaowei_agent.tools.adapter import AdapterResponse
 from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
 from xiaowei_agent.tools.alertmanager_recording import default_alertmanager_recording
+from xiaowei_agent.tools.asset_inventory_fake import AssetInventoryRecordingAdapter
+from xiaowei_agent.tools.asset_inventory_recording import (
+    default_asset_inventory_recording,
+)
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
 from xiaowei_agent.tools.prometheus_fake import (
     PrometheusRecordingAdapter,
@@ -140,6 +148,9 @@ def _assemble_local_stack(
     alertmanager_adapter = AlertmanagerRecordingAdapter(
         default_alertmanager_recording(operation=OP_GET_ACTIVE_ALERTS)
     )
+    asset_inventory_adapter = AssetInventoryRecordingAdapter(
+        default_asset_inventory_recording(), operation=OP_LOOKUP_ASSET
+    )
     recording: dict[PrometheusRecordingKey, AdapterResponse] = {}
     catalog_center = clock().astimezone(dt.UTC).replace(second=0, microsecond=0)
     for minute_offset in range(-120, 121):
@@ -178,6 +189,7 @@ def _assemble_local_stack(
             GATEWAY_NAME: starrocks_adapter,
             ALERTMANAGER_GATEWAY: alertmanager_adapter,
             PROMETHEUS_GATEWAY: prometheus_adapter,
+            ASSET_INVENTORY_GATEWAY: asset_inventory_adapter,
         }
     )
     gateway: ToolGateway = (

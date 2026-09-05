@@ -3,6 +3,7 @@
 import pytest
 
 from xiaowei_agent.capabilities.intent import (
+    ASSET_INVENTORY_INTENT,
     PROMETHEUS_ALERT_INTENT,
     RuleBasedIntentInterpreter,
 )
@@ -84,3 +85,61 @@ def test_prometheus_slot_allowlist_is_domain_local() -> None:
     assert RuleBasedIntentInterpreter.SLOT_ALLOWLISTS[PROMETHEUS_ALERT_INTENT] == (
         frozenset({"alert_name", "instance", "fingerprint", "window_minutes"})
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("查资产 asset_id=Asset-01", {"asset_id": "Asset-01"}),
+        (
+            "查询资产 hostname=NODE-1.EXAMPLE.COM.",
+            {"hostname": "NODE-1.EXAMPLE.COM."},
+        ),
+        ("查机器 ip=10.0.0.8", {"ip": "10.0.0.8"}),
+        ("查询资产 ip=2001:db8::1", {"ip": "2001:db8::1"}),
+    ],
+)
+def test_asset_lookup_phrasings_emit_only_the_exact_selector(
+    text: str, expected: dict[str, str]
+) -> None:
+    draft = RuleBasedIntentInterpreter().interpret(text=text, context=CONTEXT)
+    assert draft.intent == ASSET_INVENTORY_INTENT
+    assert dict(draft.slots) == expected
+    assert draft.missing == ()
+
+
+def test_asset_lookup_without_a_selector_declares_the_missing_slot() -> None:
+    draft = RuleBasedIntentInterpreter().interpret(text="查询资产", context=CONTEXT)
+    assert draft.intent == ASSET_INVENTORY_INTENT
+    assert draft.slots == {}
+    assert draft.missing == ("asset_selector",)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "列出全部资产",
+        "模糊找机器",
+        "查询 10.0.0.0/24 网段资产",
+        "资产巡检",
+        "修改资产 asset_id=asset-1",
+        "查告警 HostHighCpu 在 node-1:9100 的证据",
+    ],
+)
+def test_asset_near_misses_do_not_claim_the_lookup_intent(text: str) -> None:
+    assert (
+        RuleBasedIntentInterpreter().interpret(text=text, context=CONTEXT).intent
+        != ASSET_INVENTORY_INTENT
+    )
+
+
+def test_multiple_asset_selectors_are_not_silently_reduced_to_one() -> None:
+    draft = RuleBasedIntentInterpreter().interpret(
+        text="查询资产 asset_id=asset-1 hostname=node-1.example.com",
+        context=CONTEXT,
+    )
+    assert draft.intent == ASSET_INVENTORY_INTENT
+    assert dict(draft.slots) == {
+        "asset_id": "asset-1",
+        "hostname": "node-1.example.com",
+    }

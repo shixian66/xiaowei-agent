@@ -21,6 +21,8 @@ _FAKE_MODULES = (
     "tools.alertmanager_recording",
     "tools.prometheus_fake",
     "tools.prometheus_recording",
+    "tools.asset_inventory_fake",
+    "tools.asset_inventory_recording",
     "persistence.fake",
     "runners.fake",
 )

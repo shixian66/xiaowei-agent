@@ -20,6 +20,7 @@ from xiaowei_agent.contracts import IntentDraft, IntentSource, RequestContext
 
 SLOW_QUERY_INTENT: Final[str] = "starrocks.slow_query.diagnose"
 PROMETHEUS_ALERT_INTENT: Final[str] = "prometheus.alert.evidence"
+ASSET_INVENTORY_INTENT: Final[str] = "asset.inventory.lookup"
 UNKNOWN_INTENT: Final[str] = "unknown"
 
 _IDENTIFIER: Final[str] = r"[A-Za-z0-9_][A-Za-z0-9_$-]{0,63}"
@@ -56,6 +57,12 @@ _PROMETHEUS_SLOT_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ),
 )
 
+_ASSET_SLOT_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("asset_id", re.compile(r"(?:asset_id|资产ID)\s*=\s*([^\s,，]+)", re.I)),
+    ("hostname", re.compile(r"(?:hostname|主机名)\s*=\s*([^\s,，]+)", re.I)),
+    ("ip", re.compile(r"(?:ip|IP地址)\s*=\s*([^\s,，]+)", re.I)),
+)
+
 _WINDOW_MINUTES: Final[re.Pattern[str]] = re.compile(
     r"(?:window_minutes\s*=\s*|最近\s*)(\d{1,5})\s*分钟"
 )
@@ -74,6 +81,20 @@ _PROMETHEUS_WRITE_PREFIXES: Final[tuple[str, ...]] = (
     "确认",
     "删除",
     "修改",
+)
+_ASSET_SELECTOR_SLOTS: Final[frozenset[str]] = frozenset(
+    {"asset_id", "hostname", "ip"}
+)
+_ASSET_EXCLUDED_MARKERS: Final[tuple[str, ...]] = (
+    "全部",
+    "列出",
+    "模糊",
+    "网段",
+    "巡检",
+    "拓扑",
+    "修改",
+    "删除",
+    "创建",
 )
 
 
@@ -108,6 +129,7 @@ class RuleBasedIntentInterpreter:
             PROMETHEUS_ALERT_INTENT: frozenset(
                 {"alert_name", "instance", "fingerprint", "window_minutes"}
             ),
+            ASSET_INVENTORY_INTENT: _ASSET_SELECTOR_SLOTS,
             UNKNOWN_INTENT: frozenset(),
         }
     )
@@ -121,6 +143,7 @@ class RuleBasedIntentInterpreter:
         {
             SLOW_QUERY_INTENT: frozenset({"environment_id"}),
             PROMETHEUS_ALERT_INTENT: frozenset({"alert_name", "instance"}),
+            ASSET_INVENTORY_INTENT: frozenset(),
             UNKNOWN_INTENT: frozenset(),
         }
     )
@@ -139,10 +162,13 @@ class RuleBasedIntentInterpreter:
         if intent == SLOW_QUERY_INTENT:
             slots.setdefault("environment_id", context.environment_id)
         recognised = intent != UNKNOWN_INTENT
+        missing = tuple(sorted(self.REQUIRED_SLOTS[intent] - set(slots)))
+        if intent == ASSET_INVENTORY_INTENT and not (_ASSET_SELECTOR_SLOTS & slots.keys()):
+            missing = ("asset_selector",)
         return IntentDraft(
             intent=intent,
             slots={key: slots[key] for key in sorted(slots)},
-            missing=tuple(sorted(self.REQUIRED_SLOTS[intent] - set(slots))),
+            missing=missing,
             confidence=(
                 self._RECOGNISED_CONFIDENCE if recognised else self._UNRECOGNISED_CONFIDENCE
             ),
@@ -157,6 +183,8 @@ class RuleBasedIntentInterpreter:
             matched.append(SLOW_QUERY_INTENT)
         if cls._is_prometheus_alert_evidence(text):
             matched.append(PROMETHEUS_ALERT_INTENT)
+        if cls._is_asset_inventory_lookup(text):
+            matched.append(ASSET_INVENTORY_INTENT)
         return matched[0] if len(matched) == 1 else UNKNOWN_INTENT
 
     @staticmethod
@@ -180,15 +208,25 @@ class RuleBasedIntentInterpreter:
             return False
         return "告警" in compact and "证据" in compact
 
+    @staticmethod
+    def _is_asset_inventory_lookup(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).lower()
+        if any(marker in compact for marker in _ASSET_EXCLUDED_MARKERS):
+            return False
+        subject = any(marker in compact for marker in ("资产", "机器", "主机"))
+        lookup = any(marker in compact for marker in ("查", "查询", "lookup"))
+        return subject and lookup
+
     def _extract_slots(self, text: str, *, intent: str) -> dict[str, str]:
         """逐个闭集槽位尝试填充；**先命中的规则优先**，后续规则不覆盖已填的槽位。"""
         if intent == UNKNOWN_INTENT:
             return {}
-        patterns = (
-            _SLOT_PATTERNS
-            if intent == SLOW_QUERY_INTENT
-            else _PROMETHEUS_SLOT_PATTERNS
-        )
+        if intent == SLOW_QUERY_INTENT:
+            patterns = _SLOT_PATTERNS
+        elif intent == PROMETHEUS_ALERT_INTENT:
+            patterns = _PROMETHEUS_SLOT_PATTERNS
+        else:
+            patterns = _ASSET_SLOT_PATTERNS
         slots: dict[str, str] = {}
         for name, pattern in patterns:
             if name in slots:
@@ -196,9 +234,10 @@ class RuleBasedIntentInterpreter:
             match = pattern.search(text)
             if match is not None:
                 slots[name] = match.group(1)
-        window = self._extract_window_minutes(text)
-        if window is not None:
-            slots["window_minutes"] = window
+        if intent in {SLOW_QUERY_INTENT, PROMETHEUS_ALERT_INTENT}:
+            window = self._extract_window_minutes(text)
+            if window is not None:
+                slots["window_minutes"] = window
         allowed = self.SLOT_ALLOWLISTS[intent]
         return {key: value for key, value in slots.items() if key in allowed}
 
