@@ -98,6 +98,22 @@ PR 1 建立最小显式 binding seam 并交付 Prometheus 能力；PR 2 只有�
 bindings/local stack 等注册装配改动分开计量。M6a 只形成 ADR-004 是否应立项的数据
 结论，不实现 DSL、动态 discovery 或新框架。
 
+### D9 Evidence builder 必须接收已准入目标
+
+`StepEvidenceBuilder` 的必填输入包含 `ResolvedTarget`。Runner 在首次执行时传入本步骤
+刚通过 `StepAdmission` 的同一个目标；恢复时先完成 `target_fingerprint` 漂移复核，再
+把复核后的目标传入 builder。adapter payload、`ToolResult` 与外部文本都不能提供或
+覆盖该参数。
+
+ToolPolicy 必须分别拒绝 target/context 的租户不一致与环境不一致，再判断环境
+allowlist。否则一个错误环境目标可能通过准入，并被下游误当成可信目标。Evidence
+builder 不接收完整 `RequestContext`：`ResolvedTarget` 已包含证据一致性校验所需的租户、
+环境、provider、资源类型、资源 ID 和 selector version，继续扩大输入只会增加耦合。
+
+该变更不修改 `ExecutionPlan`、`PLAN_SCHEMA_VERSION`、`plan_hash`、
+`target_fingerprint` 或 ToolCall 字节。StarRocks 与 Prometheus builder 先保持行为不变；
+资产 builder 将消费该目标校验 environment 与精确资产身份。
+
 ## 后果
 
 - 新能力仍需显式注册 planner、policy、adapter、Evidence、renderer 和 eval；这是可审
@@ -112,6 +128,8 @@ bindings/local stack 等注册装配改动分开计量。M6a 只形成 ADR-004 �
   测试和精确 composition root 审查。
 - Prometheus 本地 recording 仍是装配时刻附近的有限闭集：只含默认 30 分钟窗口，
   非默认窗口或超出中心时刻前后 120 分钟的查询会 fail-closed，不提供 fallback。
+- capability Evidence builder 可以依赖 Runner 已准入或恢复期已复核的 `ResolvedTarget`，
+  但不能从 adapter 返回值反推执行目标。
 - Reflection/renderer 通过 Evidence ID 的 `:s1`/`:s2` 后缀识别两个固定步骤；步骤名
   是本能力版本的隐式契约，改名必须同步更新 planner、可答性、渲染和回归测试。
 

@@ -22,6 +22,7 @@ from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
 from xiaowei_agent.contracts import (
     AttemptIntent,
     EvidenceEnvelope,
+    ExecutionPlan,
     ExternalSource,
     PipelineStage,
     StageOutcome,
@@ -47,11 +48,32 @@ from xiaowei_agent.persistence.store import (
     TaskAttemptGrant,
     TransitionCommand,
 )
+from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 from xiaowei_agent.runners.deterministic import (
     _STEP_RESULT_STATUS,
     LifecycleError,
     StepJournalInvariantError,
 )
+
+
+def _capture_evidence_targets(harness: RunnerHarness) -> list[object]:
+    """记录真实 Runner 交给 capability evidence builder 的可信目标。"""
+    inner = harness.runner._bindings
+    seen: list[object] = []
+
+    class CapturingEvidenceBindings:
+        def execution_for(self, *, plan: ExecutionPlan) -> CapabilityExecutionBinding:
+            execution = inner.execution_for(plan=plan)
+            original = execution.evidence_builder
+
+            def capture(**kwargs: object) -> EvidenceEnvelope:
+                seen.append(kwargs.get("target"))
+                return original(**kwargs)
+
+            return replace(execution, evidence_builder=capture)
+
+    harness.runner._bindings = CapturingEvidenceBindings()
+    return seen
 
 
 def _use_prior_result_condition(
@@ -143,6 +165,34 @@ async def test_golden_run_executes_only_the_first_step() -> None:
     assert [call.operation for call in harness.adapter.calls] == [OP_LIST]
     assert outcome.status is TaskStatus.SUCCEEDED
     assert len(outcome.evidence_refs) == 1
+
+
+async def test_start_passes_the_admitted_target_to_the_evidence_builder() -> None:
+    """Evidence 必须能复核工具行与本次已准入目标一致。"""
+    harness = RunnerHarness(GOLDEN)
+    seen = _capture_evidence_targets(harness)
+
+    await harness.start()
+
+    assert seen == [harness.target]
+
+
+async def test_resume_passes_the_drift_checked_target_to_the_evidence_builder() -> None:
+    """恢复执行同样不能在漂移复核后丢掉可信目标。"""
+    harness = RunnerHarness(GOLDEN)
+    seen = _capture_evidence_targets(harness)
+    await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+
+    await harness.runner.resume(
+        grant,
+        plan=harness.plan,
+        context=harness.context,
+        target=harness.target,
+    )
+
+    assert seen == [harness.target]
 
 
 async def test_runner_validates_and_renews_only_the_supplied_grant() -> None:

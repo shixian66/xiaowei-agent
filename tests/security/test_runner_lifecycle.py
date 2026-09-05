@@ -8,7 +8,8 @@ import pytest
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runner import RunnerHarness
 
-from xiaowei_agent.contracts import TaskStatus
+from xiaowei_agent.contracts import PolicyReason, TaskStatus
+from xiaowei_agent.governance.policy import PolicyDeniedError
 from xiaowei_agent.runners.runner import WorkflowPaused
 
 pytestmark = pytest.mark.security
@@ -105,6 +106,20 @@ async def test_read_only_run_never_touches_the_approval_gate() -> None:
     harness = RunnerHarness(GOLDEN)
     await harness.start()
     assert harness.approval_gate.calls == 0
+
+
+async def test_context_target_environment_mismatch_stops_before_evidence() -> None:
+    """错误环境目标不得调用工具，更不得进入证据构造。"""
+    harness = RunnerHarness(GOLDEN)
+    harness.target = harness.target.model_copy(update={"environment_id": "test"})
+
+    with pytest.raises(PolicyDeniedError) as err:
+        await harness.start()
+
+    assert err.value.reason is PolicyReason.ENVIRONMENT_MISMATCH
+    assert harness.gateway.invocations == 0
+    assert harness.adapter.call_count == 0
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
 
 
 async def test_runner_never_constructs_a_tool_result_or_certificate() -> None:

@@ -16,7 +16,7 @@ import pytest
 from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.persistence.store import TaskStore
-from xiaowei_agent.runners.binding import ExecutionBindingProvider
+from xiaowei_agent.runners.binding import ExecutionBindingProvider, StepEvidenceBuilder
 from xiaowei_agent.runners.runner import WorkflowRunner
 from xiaowei_agent.tools.adapter import ToolAdapter
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
@@ -89,6 +89,26 @@ def test_binding_registry_keeps_the_execution_provider_signature() -> None:
     assert _keyword_params(
         CapabilityBindingRegistry.execution_for
     ) == _keyword_params(ExecutionBindingProvider.execution_for)
+
+
+def test_evidence_builders_keep_the_target_aware_protocol_signature() -> None:
+    """所有生产 builder 都必须接收 Runner 已准入或漂移复核过的目标。"""
+    from xiaowei_agent.application.default_capabilities import (
+        PROMETHEUS_ALERT_BINDING,
+        SLOW_QUERY_BINDING,
+    )
+
+    expected = {
+        "task_id",
+        "step",
+        "plan",
+        "target",
+        "result",
+        "captured_at",
+    }
+    assert _keyword_params(StepEvidenceBuilder.__call__) == expected
+    for binding in (SLOW_QUERY_BINDING, PROMETHEUS_ALERT_BINDING):
+        assert _keyword_params(binding.execution.evidence_builder) == expected
 
 
 def _protocol_methods(protocol: type) -> tuple[str, ...]:
