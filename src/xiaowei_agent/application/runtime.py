@@ -28,6 +28,7 @@ RequestEnvelope
 
 import datetime as _dt
 import uuid
+from enum import StrEnum
 from typing import Final
 
 from xiaowei_agent.capabilities.effect import SpecResolutionError
@@ -143,6 +144,29 @@ class RetryableTaskError(TaskIdCarryingError, RuntimeError):
             raise TypeError("reason must be a RetryReason")
         super().__init__("task attempt requires retry", task_id=task_id)
         self.reason = reason
+
+
+class ApplicationFailure(StrEnum):
+    CONFLICT = "conflict"
+    NOT_FOUND = "not_found"
+    UNAVAILABLE = "unavailable"
+    INTERNAL = "internal"
+
+
+def classify_application_exception(exc: Exception) -> ApplicationFailure:
+    """把应用边界异常收敛为入口可消费的闭集，不暴露存储层类型。"""
+    from xiaowei_agent.persistence.store import (
+        IdempotencyConflictError,
+        TaskNotFoundError,
+    )
+
+    if isinstance(exc, IdempotencyConflictError):
+        return ApplicationFailure.CONFLICT
+    if isinstance(exc, TaskNotFoundError):
+        return ApplicationFailure.NOT_FOUND
+    if isinstance(exc, PersistenceUnavailableError):
+        return ApplicationFailure.UNAVAILABLE
+    return ApplicationFailure.INTERNAL
 
 
 class XiaoweiRuntime:

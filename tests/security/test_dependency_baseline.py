@@ -1,12 +1,11 @@
 """生产依赖面与类型检查严格度是同一条边界。
 
-M4 引入 SQLAlchemy / Alembic / asyncpg。两件事必须被机制钉住，而不是靠计划里的
-一句话：
+M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn。
+两件事必须被机制钉住，而不是靠计划里的一句话：
 
-1. **依赖面**。M4 计划 §3 明列「不加 FastAPI、uvicorn、Compose、pgvector、Redis、
-   任何队列、任何 Worker 框架、任何模型 SDK、LangGraph」。这些不是风格偏好——它们
-   分属 M5 及以后，或需独立准入。用集合相等表达比用禁用清单强：禁用清单挡不住
-   清单外的新依赖，集合相等挡得住。
+1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
+   httpx / PyYAML；仍不引入 Redis、队列、Worker 框架、模型 SDK 或 LangGraph。
+   用集合相等表达比用禁用清单强：禁用清单挡不住清单外的新依赖。
 
 2. **``asyncpg`` 不得被 ``src/`` 直接 import**。T0 实测：``asyncpg`` 0.30.0 **不带
    ``py.typed``**，直接 import 会让 ``mypy --strict`` 报 ``import-untyped``。M4 计划
@@ -27,10 +26,24 @@ pytestmark = pytest.mark.security
 _ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "src" / "xiaowei_agent"
 
-# ``[project].dependencies`` 的包名集合。恰为五项——新增任何一项都必须先改这里，
+# ``[project].dependencies`` 的包名集合。恰为七项——新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
-    {"pydantic", "sqlglot", "sqlalchemy", "alembic", "asyncpg"}
+    {"pydantic", "sqlglot", "sqlalchemy", "alembic", "asyncpg", "fastapi", "uvicorn"}
+)
+
+_EXPECTED_DEV_DEPENDENCIES = frozenset(
+    {
+        "pytest",
+        "pytest-asyncio",
+        "pytest-socket",
+        "ruff",
+        "mypy",
+        "pip-audit",
+        "hatchling",
+        "httpx",
+        "pyyaml",
+    }
 )
 
 
@@ -63,7 +76,7 @@ def _internal_module_imports(path: Path) -> set[str]:
     return found
 
 
-def test_runtime_dependency_set_is_exactly_the_approved_five() -> None:
+def test_runtime_dependency_set_is_exactly_the_approved_seven() -> None:
     """依赖面用集合相等钉死，不用禁用清单。
 
     禁用清单只挡得住已经想到的那些；集合相等连"想不到的"一起挡住。
@@ -75,7 +88,7 @@ def test_runtime_dependency_set_is_exactly_the_approved_five() -> None:
     assert _requirement_names(declared) == set(_EXPECTED_RUNTIME_DEPENDENCIES)
 
 
-def test_no_deferred_infrastructure_dependency_sneaks_into_dev() -> None:
+def test_dev_dependency_set_is_exactly_the_approved_tools() -> None:
     """M5+ 的基础设施依赖也不得从 ``dev`` 这条侧门进来。
 
     ``dev`` 不是"随便放"的口袋：一个只在 dev 出现的 FastAPI 同样会让人开始写
@@ -87,8 +100,8 @@ def test_no_deferred_infrastructure_dependency_sneaks_into_dev() -> None:
     assert isinstance(dev, dict)
     dev_specs = dev["dev"]
     assert isinstance(dev_specs, list)
-    deferred = {"fastapi", "uvicorn", "redis", "pgvector", "celery", "langgraph", "anthropic"}
-    assert not (_requirement_names(dev_specs) & deferred)
+    assert _requirement_names(dev_specs) == set(_EXPECTED_DEV_DEPENDENCIES)
+    assert not ({"fastapi", "uvicorn"} & _requirement_names(dev_specs))
 
 
 @pytest.mark.parametrize("package", ["sqlalchemy", "alembic"])

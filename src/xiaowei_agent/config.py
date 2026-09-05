@@ -49,6 +49,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     environment_id: StrictStr
+    actor: StrictStr = "local-developer"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     lease_ttl_seconds: int = Field(default=60, gt=0)
     heartbeat_interval_seconds: float = Field(default=10.0, gt=0)
@@ -58,6 +59,7 @@ class Settings(BaseModel):
     continuous_infrastructure_failure_window_seconds: float = Field(default=900.0, gt=0)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
     dispatch_batch_limit: int = Field(default=10, gt=0, le=100)
+    api_request_body_limit_bytes: int = Field(default=131_072, gt=0, lt=1_048_576)
     smoke_step_barrier: bool = False
 
     @model_validator(mode="after")
@@ -83,6 +85,7 @@ class Settings(BaseModel):
 
 _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "environment_id": "XIAOWEI_ENVIRONMENT_ID",
+    "actor": "XIAOWEI_ACTOR",
     "log_level": "XIAOWEI_LOG_LEVEL",
     "lease_ttl_seconds": "XIAOWEI_LEASE_TTL_SECONDS",
     "heartbeat_interval_seconds": "XIAOWEI_HEARTBEAT_INTERVAL_SECONDS",
@@ -94,6 +97,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     ),
     "worker_poll_interval_seconds": "XIAOWEI_WORKER_POLL_INTERVAL_SECONDS",
     "dispatch_batch_limit": "XIAOWEI_DISPATCH_BATCH_LIMIT",
+    "api_request_body_limit_bytes": "XIAOWEI_API_REQUEST_BODY_LIMIT_BYTES",
     "smoke_step_barrier": "XIAOWEI_SMOKE_STEP_BARRIER",
 }
 

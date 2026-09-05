@@ -94,6 +94,24 @@ _ALLOWED_INTERNAL = {
 
 _ALLOWED_INTERNAL_BY_FILE = {
     "interfaces/__init__.py": {"xiaowei_agent.interfaces"},
+    "interfaces/api.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.config",
+        "xiaowei_agent.trace",
+    },
+    "interfaces/auth.py": {
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.trace",
+    },
+    "interfaces/body_limit.py": {"xiaowei_agent.interfaces"},
+    "interfaces/http_models.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/local_stack.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.capabilities",

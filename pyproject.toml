@@ -14,12 +14,16 @@ requires-python = ">=3.11,<3.12"
 #                  这条不变量更难断言，而并发语义正是 M4 的全部承重点。
 #   alembic     —— 迁移入口随应用发布，M5 的 Compose 要调用它，故不进 dev。
 #   asyncpg     —— SQLAlchemy 2.0 的 async PostgreSQL 驱动。
+#   fastapi     —— M5 薄 HTTP gateway。
+#   uvicorn     —— M5 容器内 ASGI 进程。
 dependencies = [
     "pydantic>=2.13,<3",
     "sqlglot>=27,<31",
     "sqlalchemy[asyncio]>=2.0.44,<2.1",
     "alembic>=1.16,<2",
     "asyncpg>=0.30,<0.31",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +36,8 @@ dev = [
     "pip-audit>=2.7,<3",
     # 构建后端同时列为 dev 依赖，使其进入 uv.lock 与 pip-audit 的可复核集合。
     "hatchling==1.28.0",
+    "httpx>=0.28,<1",     # ASGITransport 契约测试；不进入运行镜像
+    "PyYAML>=6,<7",       # Compose 静态契约测试；不进入运行镜像
 ]
 
 [tool.hatch.build.targets.wheel]
