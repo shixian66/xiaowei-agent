@@ -168,6 +168,23 @@ def test_migration_logs_are_reduced_to_a_fixed_smoke_code(
     assert compose_smoke._migration_failure_code(logs) == expected
 
 
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        ("failed", "SMOKE_TASK_FAILED"),
+        ("rejected", "SMOKE_TASK_REJECTED"),
+        ("canceled", "SMOKE_TASK_CANCELED"),
+        ("indeterminate", "SMOKE_TASK_INDETERMINATE"),
+        ("hostile-status", "SMOKE_TASK_STATUS_INVALID"),
+    ],
+)
+def test_non_success_task_status_is_reduced_to_a_fixed_code(
+    status: str, code: str
+) -> None:
+    with pytest.raises(SmokeError, match=rf"^{code}$"):
+        compose_smoke._require_succeeded({"status": status})
+
+
 def test_exited_migration_is_looked_up_with_all_containers() -> None:
     runner = RecordingRunner()
     session = ComposeSession(

@@ -22,6 +22,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SECRET_PATH = _ROOT / ".secrets/postgres_password"
 _COMMAND_TIMEOUT = 180.0
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
+_NON_SUCCESS_CODES = {
+    "failed": "SMOKE_TASK_FAILED",
+    "rejected": "SMOKE_TASK_REJECTED",
+    "canceled": "SMOKE_TASK_CANCELED",
+    "indeterminate": "SMOKE_TASK_INDETERMINATE",
+}
 _TEXT = "检查最近三十分钟慢查询"
 _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
@@ -213,8 +219,11 @@ def _wait_task(session: ComposeSession, task_id: str, *, timeout: float) -> dict
 
 
 def _require_succeeded(value: dict[str, object]) -> None:
-    if value.get("status") != "succeeded":
-        raise SmokeError("SMOKE_TASK_NOT_SUCCEEDED")
+    status = value.get("status")
+    if status == "succeeded":
+        return
+    code = _NON_SUCCESS_CODES.get(status) if isinstance(status, str) else None
+    raise SmokeError(code or "SMOKE_TASK_STATUS_INVALID")
 
 
 def _wait_ready(*, timeout: float) -> None:
