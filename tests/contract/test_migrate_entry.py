@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import pytest
 import sqlalchemy as sa
+from alembic.util.exc import CommandError
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex
 
@@ -92,6 +93,39 @@ def test_main_failure_is_constant_and_does_not_echo_environment(
     assert migrate.main([], stderr=stderr) == 1
     assert stderr.getvalue() == "xiaowei-migrate: migration_failed\n"
     assert private not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            sa.exc.OperationalError(
+                "statement", {"value": "private"}, RuntimeError("private")
+            ),
+            "xiaowei-migrate: database_unavailable\n",
+        ),
+        (
+            sa.exc.ProgrammingError("statement", {}, RuntimeError()),
+            "xiaowei-migrate: database_error\n",
+        ),
+        (CommandError("private"), "xiaowei-migrate: migration_command_error\n"),
+        (PermissionError("private"), "xiaowei-migrate: io_error\n"),
+    ],
+)
+def test_main_classifies_migration_failures_without_driver_text(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected: str,
+) -> None:
+    async def fail(**_: object) -> None:
+        raise error
+
+    monkeypatch.setattr(migrate, "load_settings", lambda: Settings(environment_id="dev"))
+    monkeypatch.setattr(migrate, "execute_migration", fail)
+    stderr = io.StringIO()
+    assert migrate.main([], stderr=stderr) == 1
+    assert stderr.getvalue() == expected
+    assert "private" not in expected
 
 
 def test_m4_index_probe_precedes_downgrade_and_is_rolled_back(

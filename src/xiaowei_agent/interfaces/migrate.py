@@ -6,6 +6,8 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import TextIO
 
+import sqlalchemy as sa
+from alembic.util.exc import CommandError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei_agent.config import ConfigError, Settings, load_settings
@@ -63,6 +65,18 @@ def main(argv: Sequence[str] | None = None, *, stderr: TextIO = sys.stderr) -> i
     except (ConfigError, DatabaseConfigurationError):
         stderr.write("xiaowei-migrate: configuration_error\n")
         return 2
+    except (TimeoutError, sa.exc.TimeoutError, sa.exc.OperationalError, sa.exc.InterfaceError):
+        stderr.write("xiaowei-migrate: database_unavailable\n")
+        return 1
+    except sa.exc.SQLAlchemyError:
+        stderr.write("xiaowei-migrate: database_error\n")
+        return 1
+    except CommandError:
+        stderr.write("xiaowei-migrate: migration_command_error\n")
+        return 1
+    except OSError:
+        stderr.write("xiaowei-migrate: io_error\n")
+        return 1
     except Exception:
         stderr.write("xiaowei-migrate: migration_failed\n")
         return 1

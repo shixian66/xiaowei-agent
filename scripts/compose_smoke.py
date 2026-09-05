@@ -22,6 +22,13 @@ _SECRET_PATH = _ROOT / ".secrets/postgres_password"
 _COMMAND_TIMEOUT = 180.0
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _TEXT = "检查最近三十分钟慢查询"
+_MIGRATION_FAILURE_CODES = (
+    ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
+    ("xiaowei-migrate: database_unavailable", "SMOKE_MIGRATION_DATABASE_UNAVAILABLE"),
+    ("xiaowei-migrate: database_error", "SMOKE_MIGRATION_DATABASE_ERROR"),
+    ("xiaowei-migrate: migration_command_error", "SMOKE_MIGRATION_COMMAND_ERROR"),
+    ("xiaowei-migrate: io_error", "SMOKE_MIGRATION_IO_ERROR"),
+)
 
 
 class SmokeError(RuntimeError):
@@ -300,6 +307,14 @@ def _submit(session: ComposeSession, *, key: str, text: str = _TEXT) -> str:
     )
 
 
+def _migration_failure_code(logs: str) -> str:
+    """把迁移容器日志收敛成固定码；任何未识别文本都不向外回显。"""
+    for marker, code in _MIGRATION_FAILURE_CODES:
+        if marker in logs:
+            return code
+    return "SMOKE_MIGRATION_FAILED"
+
+
 def _full_workflow(session: ComposeSession) -> None:
     sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
     session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
@@ -320,7 +335,8 @@ def _full_workflow(session: ComposeSession) -> None:
         timeout=15.0,
     ).stdout.strip()
     if exit_code != "0":
-        raise SmokeError("SMOKE_MIGRATION_FAILED")
+        logs = session.run("logs", "--no-color", "migrate", timeout=30.0).stdout
+        raise SmokeError(_migration_failure_code(logs))
     session.failure_code = "SMOKE_API_COMMAND_FAILED"
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)

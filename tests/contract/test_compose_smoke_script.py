@@ -131,6 +131,23 @@ def test_compose_command_failure_is_attributed_to_the_current_phase() -> None:
     assert "private-driver-output" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("logs", "expected"),
+    [
+        ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
+        ("xiaowei-migrate: database_unavailable", "SMOKE_MIGRATION_DATABASE_UNAVAILABLE"),
+        ("xiaowei-migrate: database_error", "SMOKE_MIGRATION_DATABASE_ERROR"),
+        ("xiaowei-migrate: migration_command_error", "SMOKE_MIGRATION_COMMAND_ERROR"),
+        ("xiaowei-migrate: io_error", "SMOKE_MIGRATION_IO_ERROR"),
+        ("private unclassified output", "SMOKE_MIGRATION_FAILED"),
+    ],
+)
+def test_migration_logs_are_reduced_to_a_fixed_smoke_code(
+    logs: str, expected: str
+) -> None:
+    assert compose_smoke._migration_failure_code(logs) == expected
+
+
 def test_exited_migration_is_looked_up_with_all_containers() -> None:
     runner = RecordingRunner()
     session = ComposeSession(
