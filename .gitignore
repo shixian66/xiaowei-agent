@@ -35,3 +35,7 @@ htmlcov/
 reports/
 logs/
 requirements-audit.txt
+
+# Local Compose secrets and smoke evidence
+.secrets/
+.smoke/

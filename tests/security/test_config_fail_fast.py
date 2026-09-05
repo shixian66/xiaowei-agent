@@ -82,3 +82,38 @@ def test_import_does_not_load_settings() -> None:
         capture_output=True,
     )
     assert r.returncode == 0, r.stderr.decode()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("XIAOWEI_POSTGRES_PORT", "0"),
+        ("XIAOWEI_DB_CONNECT_TIMEOUT_SECONDS", "0"),
+        ("XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS", "0"),
+        ("XIAOWEI_DB_POOL_SIZE", "0"),
+        ("XIAOWEI_DB_POOL_MAX_OVERFLOW", "-1"),
+        ("XIAOWEI_API_BIND_HOST", "not-an-ip"),
+        ("XIAOWEI_API_BIND_PORT", "65536"),
+    ],
+)
+def test_m5_database_and_bind_boundaries_fail_closed(name: str, value: str) -> None:
+    with pytest.raises(ConfigError):
+        load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev", name: value})
+
+
+def test_database_timeouts_must_fit_the_command_and_lease_windows() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(
+            {
+                "XIAOWEI_ENVIRONMENT_ID": "dev",
+                "XIAOWEI_DB_CONNECT_TIMEOUT_SECONDS": "15",
+                "XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS": "15",
+            }
+        )
+    with pytest.raises(ConfigError):
+        load_settings(
+            {
+                "XIAOWEI_ENVIRONMENT_ID": "dev",
+                "XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS": "60",
+            }
+        )

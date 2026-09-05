@@ -26,9 +26,10 @@
 """
 
 import datetime as _dt
+import functools
 import uuid
-from collections.abc import Mapping
-from typing import Any, Final
+from collections.abc import Callable, Coroutine, Mapping
+from typing import Any, Final, ParamSpec, TypeVar
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -68,6 +69,12 @@ from xiaowei_agent.persistence.decisions import (
     may_acquire_lease,
     may_renew_lease,
     stale_lease_sort_key,
+)
+from xiaowei_agent.persistence.errors import (
+    PersistenceIntegrityError,
+    PersistenceUnavailableError,
+    PersistenceWriteOutcome,
+    classify_persistence_exception,
 )
 from xiaowei_agent.persistence.evidence import (
     EvidenceConflictError,
@@ -128,6 +135,47 @@ from xiaowei_agent.persistence.store import (
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _persistence_boundary(
+    *, write: bool
+) -> Callable[
+    [Callable[_P, Coroutine[Any, Any, _R]]],
+    Callable[_P, Coroutine[Any, Any, _R]],
+]:
+    """把驱动异常收敛为闭集错误，并切断可能携带 SQL/参数的异常链。"""
+
+    def decorate(
+        operation: Callable[_P, Coroutine[Any, Any, _R]],
+    ) -> Callable[_P, Coroutine[Any, Any, _R]]:
+        @functools.wraps(operation)
+        async def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            mapped: PersistenceUnavailableError | PersistenceIntegrityError | None = None
+            try:
+                return await operation(*args, **kwargs)
+            except Exception as exc:
+                mapped = classify_persistence_exception(
+                    exc,
+                    write_outcome=(
+                        PersistenceWriteOutcome.NOT_CONFIRMED if write else None
+                    ),
+                )
+                if mapped is None:
+                    raise
+            if isinstance(mapped, PersistenceUnavailableError):
+                raise PersistenceUnavailableError(
+                    category=mapped.category,
+                    write_outcome=mapped.write_outcome,
+                )
+            if isinstance(mapped, PersistenceIntegrityError):
+                raise PersistenceIntegrityError(category=mapped.category)
+            raise RuntimeError("persistence exception classification failed")
+
+        return wrapped
+
+    return decorate
 
 
 async def _serialise_on_task(connection: AsyncConnection, task_id: str) -> None:
@@ -313,6 +361,7 @@ class PostgresTaskStore:
             raise TaskNotFoundError(task_id=task_id)
         return row
 
+    @_persistence_boundary(write=False)
     async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         async with self._engine.connect() as connection:
             result = await connection.execute(
@@ -328,6 +377,7 @@ class PostgresTaskStore:
             row = _as_row(found)
         return row_to_record(row)
 
+    @_persistence_boundary(write=False)
     async def list_stale_leases(
         self, *, query: StaleLeaseQuery
     ) -> tuple[TaskRecord, ...]:
@@ -345,6 +395,7 @@ class PostgresTaskStore:
         stale = [record for record in records if is_stale_lease(record, now=now)]
         return tuple(sorted(stale, key=stale_lease_sort_key))
 
+    @_persistence_boundary(write=False)
     async def list_dispatchable_tasks(
         self, *, query: DispatchQuery
     ) -> tuple[TaskRecord, ...]:
@@ -447,6 +498,7 @@ class PostgresTaskStore:
             committed_audit_events=(event,),
         )
 
+    @_persistence_boundary(write=True)
     async def begin_task_attempt(
         self, *, command: TaskAttemptCommand
     ) -> TaskAttemptResult:
@@ -541,6 +593,7 @@ class PostgresTaskStore:
                 submission=submission,
             )
 
+    @_persistence_boundary(write=True)
     async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
         digest = retry_command_digest(command)
         async with self._engine.begin() as connection:
@@ -645,6 +698,7 @@ class PostgresTaskStore:
         ).scalar_one()
         return int(used)
 
+    @_persistence_boundary(write=True)
     async def begin_step_attempt(
         self, *, command: StepAttemptCommand
     ) -> StepAttemptResult:
@@ -772,6 +826,7 @@ class PostgresTaskStore:
                 ),
             )
 
+    @_persistence_boundary(write=True)
     async def commit_step_result(
         self, *, command: StepCommitCommand
     ) -> StepCommitResult:
@@ -880,6 +935,7 @@ class PostgresTaskStore:
                 record=row_to_step_execution(row),
             )
 
+    @_persistence_boundary(write=False)
     async def load_step_executions(
         self, *, task_id: str
     ) -> tuple[StepExecutionRecord, ...]:
@@ -899,6 +955,7 @@ class PostgresTaskStore:
 
     # --- 写 -------------------------------------------------------------------
 
+    @_persistence_boundary(write=True)
     async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
         """幂等创建。**并发重复请求只产生一个任务事实。**
 
@@ -978,6 +1035,7 @@ class PostgresTaskStore:
             raise IdempotencyConflictError("idempotency key reused for a different request")
         return record
 
+    @_persistence_boundary(write=True)
     async def transition(
         self, *, command: TransitionCommand
     ) -> TransitionResult:
@@ -1019,6 +1077,7 @@ class PostgresTaskStore:
             applied=True, winner=row_to_record(_as_row(row)), rejection=None
         )
 
+    @_persistence_boundary(write=True)
     async def acquire_lease(
         self, *, task_id: str, owner: str, ttl_seconds: int
     ) -> LeaseGrant | None:
@@ -1049,6 +1108,7 @@ class PostgresTaskStore:
             )
         return grant
 
+    @_persistence_boundary(write=True)
     async def renew_lease(
         self, *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
     ) -> LeaseGrant | None:
@@ -1078,6 +1138,7 @@ class PostgresTaskStore:
             )
         return grant
 
+    @_persistence_boundary(write=True)
     async def record_approval(self, *, request: ApprovalRequest) -> int:
         """append-only 写入。``seq`` 由 ``MAX(seq) + 1`` 分配，并发由 advisory lock 串行化。
 
@@ -1101,6 +1162,7 @@ class PostgresTaskStore:
             ).scalar_one()
         return int(seq)
 
+    @_persistence_boundary(write=True)
     async def record_audit_event(self, *, event: TraceEvent) -> int:
         """append-only 写入审计事件。形状与 :meth:`record_approval` 逐字一致。
 
@@ -1133,6 +1195,7 @@ class PostgresPlanStore:
     def __init__(self, *, engine: AsyncEngine) -> None:
         self._engine = engine
 
+    @_persistence_boundary(write=True)
     async def save(
         self, *, task_id: str, plan: ExecutionPlan, target: ResolvedTarget
     ) -> None:
@@ -1178,6 +1241,7 @@ class PostgresPlanStore:
             target=load_contract(ResolvedTarget, row["target"]),
         )
 
+    @_persistence_boundary(write=False)
     async def load(self, *, task_id: str) -> StoredPlan:
         async with self._engine.connect() as connection:
             stored = await self._load_row(connection, task_id)
@@ -1196,12 +1260,14 @@ class PostgresEvidenceLedger:
     def __init__(self, *, engine: AsyncEngine) -> None:
         self._engine = engine
 
+    @_persistence_boundary(write=True)
     async def append(self, *, task_id: str, envelope: EvidenceEnvelope) -> str:
         async with self._engine.begin() as connection:
             return await _append_evidence(
                 connection, task_id=task_id, envelope=envelope
             )
 
+    @_persistence_boundary(write=False)
     async def load(self, *, task_id: str) -> tuple[EvidenceEnvelope, ...]:
         """无证据时返回空元组，**不抛异常**——没取过数是正常状态，不是错误。"""
         async with self._engine.connect() as connection:
@@ -1218,6 +1284,7 @@ class PostgresEvidenceLedger:
             )
         return tuple(load_contract(EvidenceEnvelope, row["envelope"]) for row in rows)
 
+    @_persistence_boundary(write=False)
     async def get(self, *, task_id: str, evidence_id: str) -> EvidenceEnvelope:
         async with self._engine.connect() as connection:
             row = (

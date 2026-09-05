@@ -1,7 +1,10 @@
 """薄 FastAPI gateway：协议、受信上下文与 TaskView 序列化。"""
 
+import asyncio
+import sys
 from typing import Protocol
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -23,6 +26,8 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.interfaces.auth import Clock, trusted_submission, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import SubmitTaskRequest, error_body
+from xiaowei_agent.interfaces.local_stack import build_postgres_local_stack
+from xiaowei_agent.log import configure_logging
 from xiaowei_agent.trace import bind_trace_id
 
 
@@ -124,3 +129,47 @@ def create_app(
         return JSONResponse(content=report.model_dump(mode="json"))
 
     return app
+
+
+async def serve_api(settings: Settings) -> int:
+    """装配并运行 API 进程；退出时释放唯一 Engine。"""
+    configure_logging(settings)
+    stack = await build_postgres_local_stack(settings=settings)
+    try:
+        app = create_app(
+            runtime=stack.runtime,
+            settings=settings,
+            readiness=stack.readiness,
+            clock=stack.clock,
+            policy_revision=stack.policy_revision,
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=settings.api_bind_host,
+                port=settings.api_bind_port,
+                access_log=False,
+                log_config=None,
+            )
+        )
+        await server.serve()
+        return 0
+    finally:
+        await stack.aclose()
+
+
+def main() -> int:
+    from xiaowei_agent.config import ConfigError, load_settings
+
+    try:
+        return asyncio.run(serve_api(load_settings()))
+    except ConfigError:
+        sys.stderr.write("xiaowei-api: configuration_error\n")
+        return 2
+    except Exception:
+        sys.stderr.write("xiaowei-api: startup_failed\n")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

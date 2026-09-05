@@ -14,6 +14,7 @@
 
 import os
 from collections.abc import Mapping
+from ipaddress import ip_address
 from typing import Annotated, Final, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -22,6 +23,7 @@ from xiaowei_agent.redaction import safe_error_details
 
 ENV_PREFIX: Final[str] = "XIAOWEI_"
 DEFAULT_TENANT_ID: Final[str] = "dev-local"
+_DEFAULT_POSTGRES_SECRET_PATH: Final[str] = "/run/secrets/postgres_" + "password"
 
 
 def _strict_str(value: str) -> str:
@@ -31,6 +33,17 @@ def _strict_str(value: str) -> str:
 
 
 StrictStr = Annotated[str, AfterValidator(_strict_str)]
+
+
+def _ip_literal(value: str) -> str:
+    try:
+        ip_address(value)
+    except ValueError:
+        raise ValueError("must be an IP address literal") from None
+    return value
+
+
+IpLiteral = Annotated[StrictStr, AfterValidator(_ip_literal)]
 
 
 class ConfigError(RuntimeError):
@@ -60,6 +73,17 @@ class Settings(BaseModel):
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
     dispatch_batch_limit: int = Field(default=10, gt=0, le=100)
     api_request_body_limit_bytes: int = Field(default=131_072, gt=0, lt=1_048_576)
+    postgres_host: StrictStr = "postgres"
+    postgres_port: int = Field(default=5432, gt=0, le=65_535)
+    postgres_database: StrictStr = "xiaowei"
+    postgres_user: StrictStr = "xiaowei"
+    postgres_password_file: StrictStr = _DEFAULT_POSTGRES_SECRET_PATH
+    db_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    db_command_timeout_seconds: float = Field(default=15.0, gt=0)
+    db_pool_size: int = Field(default=5, gt=0)
+    db_pool_max_overflow: int = Field(default=0, ge=0)
+    api_bind_host: IpLiteral = "127.0.0.1"
+    api_bind_port: int = Field(default=8000, gt=0, le=65_535)
     smoke_step_barrier: bool = False
 
     @model_validator(mode="after")
@@ -75,6 +99,10 @@ class Settings(BaseModel):
             raise ValueError("infrastructure failure window must exceed the backoff cap")
         if self.worker_poll_interval_seconds > self.lease_ttl_seconds / 4:
             raise ValueError("worker poll interval must not exceed one quarter of the lease ttl")
+        if self.db_connect_timeout_seconds >= self.db_command_timeout_seconds:
+            raise ValueError("database connect timeout must be below command timeout")
+        if self.db_command_timeout_seconds >= self.lease_ttl_seconds:
+            raise ValueError("database command timeout must be below lease ttl")
         return self
 
     @property
@@ -98,6 +126,17 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "worker_poll_interval_seconds": "XIAOWEI_WORKER_POLL_INTERVAL_SECONDS",
     "dispatch_batch_limit": "XIAOWEI_DISPATCH_BATCH_LIMIT",
     "api_request_body_limit_bytes": "XIAOWEI_API_REQUEST_BODY_LIMIT_BYTES",
+    "postgres_host": "XIAOWEI_POSTGRES_HOST",
+    "postgres_port": "XIAOWEI_POSTGRES_PORT",
+    "postgres_database": "XIAOWEI_POSTGRES_DATABASE",
+    "postgres_user": "XIAOWEI_POSTGRES_USER",
+    "postgres_password_file": "XIAOWEI_POSTGRES_PASSWORD_FILE",
+    "db_connect_timeout_seconds": "XIAOWEI_DB_CONNECT_TIMEOUT_SECONDS",
+    "db_command_timeout_seconds": "XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS",
+    "db_pool_size": "XIAOWEI_DB_POOL_SIZE",
+    "db_pool_max_overflow": "XIAOWEI_DB_POOL_MAX_OVERFLOW",
+    "api_bind_host": "XIAOWEI_API_BIND_HOST",
+    "api_bind_port": "XIAOWEI_API_BIND_PORT",
     "smoke_step_barrier": "XIAOWEI_SMOKE_STEP_BARRIER",
 }
 

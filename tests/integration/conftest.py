@@ -24,11 +24,10 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from xiaowei_agent.persistence.migrations.runner import run_downgrade, run_upgrade
 from xiaowei_agent.persistence.postgres import (
     PostgresEvidenceLedger,
     PostgresPlanStore,
@@ -44,7 +43,6 @@ DSN_ENV_VAR = "PYTEST_POSTGRES_DSN"
 """**不带 ``XIAOWEI_`` 前缀**：它是测试 harness 配置，不是应用配置。见模块 docstring。"""
 
 _DSN_STASH: pytest.StashKey[str | None] = pytest.StashKey()
-_ROOT = Path(__file__).resolve().parents[2]
 _INTEGRATION_DIR = Path(__file__).resolve().parent
 
 SKIP_REASON = f"{DSN_ENV_VAR} 未设置：跳过需要真实 PostgreSQL 的用例"
@@ -135,34 +133,11 @@ async def migrated_engine(postgres_dsn: str) -> AsyncIterator[AsyncEngine]:
     """
     engine = create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool)
     async with engine.begin() as connection:
-        await connection.run_sync(_run_upgrade)
+        await connection.run_sync(run_upgrade)
     try:
         yield engine
     finally:
         await engine.dispose()
-
-
-def _alembic_config() -> Config:
-    config = Config(str(_ROOT / "alembic.ini"))
-    config.set_main_option(
-        "script_location", str(_ROOT / "src/xiaowei_agent/persistence/migrations")
-    )
-    return config
-
-
-def _run_upgrade(connection: Any, revision: str = "head") -> None:
-    config = _alembic_config()
-    config.attributes["connection"] = connection
-    command.upgrade(config, revision)
-
-
-def _run_downgrade(
-    connection: Any, revision: str = "base", allow_destructive: bool = False
-) -> None:
-    config = _alembic_config()
-    config.attributes["connection"] = connection
-    config.attributes["allow_destructive"] = allow_destructive
-    command.downgrade(config, revision)
 
 
 @pytest.fixture
@@ -237,4 +212,4 @@ async def independent_stores(
 @pytest.fixture
 def alembic_runners() -> Iterator[tuple[Any, Any]]:
     """迁移测试用的 upgrade / downgrade 可调用对象。"""
-    yield (_run_upgrade, _run_downgrade)
+    yield (run_upgrade, run_downgrade)

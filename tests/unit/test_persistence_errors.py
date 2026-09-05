@@ -11,6 +11,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceWriteOutcome,
     classify_persistence_exception,
 )
+from xiaowei_agent.persistence.postgres import _persistence_boundary
 
 
 def _statement_error(error_type: type[sa.exc.StatementError]) -> sa.exc.StatementError:
@@ -88,3 +89,32 @@ def test_mapped_errors_never_echo_driver_text() -> None:
     assert isinstance(mapped, PersistenceIntegrityError)
     assert marker not in str(mapped)
     assert marker not in repr(mapped)
+
+
+@pytest.mark.asyncio
+async def test_postgres_write_boundary_cuts_the_driver_exception_chain() -> None:
+    marker = "private-" + "statement-value"
+
+    @_persistence_boundary(write=True)
+    async def fail() -> None:
+        raise sa.exc.OperationalError(
+            "SELECT :value", {"value": marker}, ConnectionError(marker)
+        )
+
+    with pytest.raises(PersistenceUnavailableError) as caught:
+        await fail()
+    assert caught.value.write_outcome is PersistenceWriteOutcome.NOT_CONFIRMED
+    assert caught.value.__context__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_postgres_read_boundary_has_no_write_outcome() -> None:
+    @_persistence_boundary(write=False)
+    async def fail() -> None:
+        raise sa.exc.TimeoutError("constant")
+
+    with pytest.raises(PersistenceUnavailableError) as caught:
+        await fail()
+    assert caught.value.write_outcome is None

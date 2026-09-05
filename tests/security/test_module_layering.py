@@ -99,6 +99,7 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.config",
+        "xiaowei_agent.log",
         "xiaowei_agent.trace",
     },
     "interfaces/auth.py": {
@@ -134,9 +135,16 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.log",
         "xiaowei_agent.trace",
     },
+    "interfaces/migrate.py": {
+        "xiaowei_agent.config",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
     "interfaces/worker.py": {
         "xiaowei_agent.application",
+        "xiaowei_agent.config",
         "xiaowei_agent.interfaces",
+        "xiaowei_agent.log",
     },
 }
 
@@ -186,11 +194,11 @@ def test_every_interface_file_is_registered_exactly_once() -> None:
     assert set(_ALLOWED_INTERNAL_BY_FILE) == actual
 
 
-def test_only_local_stack_has_the_wide_interface_allowlist() -> None:
+def test_only_local_stack_can_import_the_tools_layer() -> None:
     broad = {
         relative
         for relative, allowed in _ALLOWED_INTERNAL_BY_FILE.items()
-        if "xiaowei_agent.persistence" in allowed or "xiaowei_agent.tools" in allowed
+        if "xiaowei_agent.tools" in allowed
     }
     assert broad == {"interfaces/local_stack.py"}
 

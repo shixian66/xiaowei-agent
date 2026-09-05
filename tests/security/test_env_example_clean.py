@@ -37,4 +37,4 @@ def test_no_secret_shaped_values() -> None:
 def test_documents_only_known_variables() -> None:
     from xiaowei_agent.config import _FIELD_TO_ENV
 
-    assert {k for k, _ in _pairs()} <= set(_FIELD_TO_ENV.values())
+    assert {k for k, _ in _pairs()} == set(_FIELD_TO_ENV.values())
