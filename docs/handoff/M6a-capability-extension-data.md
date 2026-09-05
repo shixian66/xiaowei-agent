@@ -10,10 +10,11 @@
 | base SHA | `a7dba18315b4213c8a61cdf492aca0cc951328bf` |
 | 数据采集 head SHA | `c7eca0567d5e5ca18406f2fc2a79947db67f3439` |
 | snapshot | `snapshot.m3.starrocks.slow_query.v1` → `snapshot.m6a.starrocks-prometheus.v1` |
+| production policy | `policy-2026-09-01` → `policy-2026-09-05`；与两个有序 profile ID 成对固定 |
 | 声明集合 | 新增 `prometheus.alert.evidence@1.0.0`；保留 `starrocks.slow_query.diagnose@1.0.0` |
 | 总 diff | 87 files，`+7482/-267`；包含经批准的 1262 行实施计划，不把行数当成架构质量指标 |
 | 测试文件 | 42 个新增或修改的 `tests/` 文件 |
-| 测试收集 | 当前代码快照共 2134 tests collected |
+| 测试收集 | 数据采集 head 共 2134 tests collected |
 | M6a Prom eval | L0/L1/L2 共 51 个 corpus case、58 个实际 pytest case |
 | 工时 | 未采集，无可靠来源 |
 
@@ -44,7 +45,8 @@ handoff 和本事实表的收口提交；最终送审 SHA 以 `git rev-parse HEA
 - Registry、policy profile 和 default binding 各显式登记一次能力；没有动态发现或
   adapter fallback。
 - local stack 显式装配 Alertmanager/Prometheus 两个 recording adapter；synthetic
-  metric catalog 只覆盖装配时刻前后 120 分钟的固定样例。
+  metric catalog 只覆盖默认 30 分钟窗、装配时刻前后 120 分钟的固定样例；非默认窗口
+  或过期查询 fail-closed，不提供 fallback。
 - 能力地图生成器新增 `gateway` 列；文档由 Registry 快照逐字生成。
 
 ### capability 专属规则
@@ -82,4 +84,7 @@ PR 1 只能证明最小 binding seam 可以承载第二个异质能力，尚不�
   该测试首先暴露合成写夹具自身的 gateway 错配，最终改为从同一快照派生，未放宽闸门。
 - 9 个隔离变异逐项拆掉 PromQL、gateway、条件、snapshot、恢复漂移、字段白名单、
   binding、入口中立性与 StarRocks version 承重点，对应用例均真实转红；变体已删除。
-- 外部代码审查、CI、部署、canary 与用户验收均未发生。
+- 独立审查在 `300fa2e2` 上复跑四门并做 3 个变异反证，指出 production policy
+  revision 未随 profile 集合递增这一合入前缺陷，以及 local catalog、Worker import
+  护栏和未执行 PostgreSQL/Compose 路径；本轮按根因修复并补反例。修复后的外部复审、
+  CI、部署、canary 与用户验收仍未发生。

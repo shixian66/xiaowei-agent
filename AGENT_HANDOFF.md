@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 的 `prometheus.alert.evidence` fake 候选等待代码审查与项目负责人验收；PR 2 资产能力未开始** |
+| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 的 `prometheus.alert.evidence` fake 候选已完成首轮独立审查及必修项根因修复，等待复审、远程 CI 与项目负责人验收；PR 2 资产能力未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -44,8 +44,8 @@
 | M5 工作分支 | `claude/m5-api-worker-compose` 已合入 `main`，保留备查 |
 | M5 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非产品 `user-accepted`**。运行证据来自 GitHub 隔离 runner 的 PostgreSQL service 与 Compose smoke |
 | M6a 详细计划 | [docs/plans/M6a-prometheus-asset-fake.md](docs/plans/M6a-prometheus-asset-fake.md) V1.1；首审问题回写后复审通过并获明确开工授权 |
-| M6a PR 1 | 工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；代码/测试数据采集点 `c7eca0567d5e5ca18406f2fc2a79947db67f3439`，未合并、未用户验收 |
-| 下一步 | 对 M6a PR 1 做精确 SHA 技术审查与项目负责人验收；只有验收并合入最新 `main` 后，才可另开 PR 2 `asset.inventory.lookup` |
+| M6a PR 1 | 工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；代码/测试数据采集点 `c7eca0567d5e5ca18406f2fc2a79947db67f3439`，首轮独立审查对象 `300fa2e2fa77bb2611a98e00d31830e0014d298d`，未合并、未用户验收 |
+| 下一步 | 对修复后的 M6a PR 1 精确 SHA 复审并在远程 CI 实跑 PostgreSQL/Compose；通过后等待项目负责人验收。只有验收并合入最新 `main` 后，才可另开 PR 2 `asset.inventory.lookup` |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR 1 新增的 PostgreSQL integration 因本机无 `PYTEST_POSTGRES_DSN` 而 skip，新增 Compose 路径因本机无 Docker 未运行；因此没有把 M5 的旧 CI 证据外推到 M6a 候选 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -76,6 +76,7 @@
 - **E1 分类必须确定性派生**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 派生；模型、用户输入和 adapter 都不得设置、覆盖或降级；未知分类、声明冲突、写操作误标只读一律 fail-closed。
 - **Reflection 只消费结构化 Evidence，不拥有执行权**：只输出证据充分性、限制、缺失项，以及是否降级为 `indeterminate`、是否需用户补充信息的**建议**；是否真的进入 `indeterminate` 由 Runtime/Runner 依据该结构化结论确定性决定并由 TaskStore 保护，**Reflection 不设置终态、不写 TaskStore**；不得新增/修改计划步骤、选工具、扩大目标、提高权限、生成 SQL、触发 adapter 或改写 TaskStore 事实。缺槽与初始证据需求由 `CapabilityResolver` / `PlanCompiler` 处理。确需按条件追加取数时，只能是 `ExecutionPlan` 中预编译、预算内的可选只读分支，由 Runner 依确定性条件执行并照常经过 `StepAdmission`。
 - **ADR-009 固化 hash 与准入形状**（M2）：`plan_hash` 规范输入集含 `effect_class`、`condition` 与 `budget`，`PLAN_SCHEMA_VERSION = 1`；`ExecutionPlan` 绑定**单一 capability**，步骤不携带 capability 标识；两个指纹**不作为 `ExecutionPlan` 字段**，绑定值存于 `ApprovalRequest`（含 `policy_revision`）；`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`。详见 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)。
+- **生产 policy snapshot 必须整体版本化**：M6a PR 1 新增 Prometheus 只读 profile 后，production revision 从 `policy-2026-09-01` 递增为 `policy-2026-09-05`，并与有序 profile ID 集合做成对 golden；测试 fake 的独立 revision 不随生产值机械迁移。
 - **覆盖完备性由机制承重，不由人记得**（M2）：凡"某 DTO 全部字段必须进入某 hash"一律用显式「字段 → 指纹键」映射表实现，安全测试断言映射表键集等于 `model_fields`；含嵌套 DTO（`PlanBudget`、`StepCondition`）。给 DTO 加字段却不更新映射表会立即转红。
 - **校验绕过面已封死**（M2）：`model_copy(update=...)` 与 `model_construct` 在 Pydantic v2 中完全不触发校验，均已在 `Contract` 基类封死/重新校验；未绑定的 `BaseModel.model_copy(obj, ...)` 由源码扫描禁止；不保留任何"未校验复制"的逃生口。需在校验期改写取值时一律用**字段级** `AfterValidator`——model 级 after-validator 返回非 `self` 的对象在 `__init__` 路径上会被 Pydantic 丢弃，规范化会静默失效。
 - **决策权责矩阵已显式化**（`ARCHITECTURE.md` §4.3）：LLM 只在意图提取、证据解释和澄清措辞上可建议；capability/目标/参数/步骤/SQL/工具顺序由 Resolver+PlanCompiler 决定；Policy、effect 分类、审批有效性由确定性治理组件决定；工具执行由 Runner 经 StepAdmission+ToolGateway 驱动；测试环境连接授权与 E1 审批属人工授权；生产连接与生产写当前不授权；`route_shadow` record-only。该表**不授予任何新权限、不放宽 ADR-007，也不引入 `autonomy_level` 运行字段**；自治程度提升必须有 eval、失败样本、明确授权和 ADR，**不因模型或框架升级自动提高**。
@@ -201,7 +202,8 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 
 ### 已验证
 
-- **M6a PR 1 当前工作树四条规范门全部 exit 0**：`python -m pytest -q` 为 1982 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 977 passed / 79 skipped / 1079 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。分层独立门为 unit 416 passed、contract 517 passed、security 目录 897 passed、M6a Prom + 既有 StarRocks 六组 eval 150 passed；能力文档/命令一致性 5 passed。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
+- **M6a PR 1 审查修复后四条规范门全部 exit 0**：`python -m pytest -q` 为 1986 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 979 passed / 79 skipped / 1081 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
+- **首轮独立审查的必修项已做 TDD 根因修复**：production policy revision/profile 成对 golden 在旧 revision 上先红、递增后转绿；向 `application/worker.py` 临时注入 capability import 后，新逐文件依赖护栏真实转红，移除变体后恢复；60 分钟非默认窗口端到端到达 Prometheus adapter 后以 `INDETERMINATE` 收口，证明本地 recording 无 fallback。变体未保留。
 - **M6a PR 1 做了 9 个隔离变异反证且对应用例均先转红**：分别拆掉 PromQL 重编译、operation gateway 派生、无记录结果 fail-closed、snapshot ID 联合 golden、恢复期 plan hash、Evidence 字段白名单、binding 精确查找、入口中立性，以及擅自递增 StarRocks version。变体位于临时 detached worktree、使用独立 pycache，已删除且未进入候选分支。
 - **M5 最终对象 `372c381f44ecfa1fa53961f137d0058033cbd805` 已验收、快进合入并归档**：合并后 `main` run [`33952529021`](https://github.com/shixian66/xiaowei-agent/actions/runs/33952529021) 八个 job 全绿；integration `1866 passed`、0 skipped，`compose-smoke: passed`。本机四门为 1714 passed / 152 skipped、security 923 passed / 79 skipped / 864 deselected、Ruff 通过、mypy 102 个源文件通过。详细命令、变异反证和风险见 [M5 归档](docs/handoff/archive/2026-09-05-M5-api-worker-compose.md)。
 - **M2 最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 640 passed / 3 warnings；`python -m pytest -m security -q` 499 passed / 141 deselected / 3 warnings；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..319253a` 无输出。PR #4 的 merge commit 与 head 均为 `319253a`，`main` 独立 CI run `33629416660` 为 success。更早的逐 SHA 结果见各提交信息与归档。
@@ -259,4 +261,5 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - **重编译比对在原理上无法捕获编译器自身的改动**（它用同一个编译器重算）：这正是 T4 的集合等式断言必须独立存在的理由，不要因为"已经有 A36 了"就删掉它。
 - **`application` 是依赖面最宽的一层**（除 interfaces 外的全部业务包）：其正当性由 `tests/security/test_runtime_bypass.py` 的三条 AST 断言承重（不够到 Gateway、不自签凭证、只调 Runner 的 start/resume）。
 - **PromQL 不是通用解析器验证**：M6a 只允许两个代码内固定模板并做参数重编译比对。未来新增模板、真实 Prometheus API 参数、代理路径、限流和响应形状都必须独立评审，不能把 fake 全绿当作服务端兼容。
-- **本地 Prom metric recording 是有限 synthetic catalog**：装配时只生成中心时刻前后 120 分钟、两个固定告警样例的精确键。它服务短时本地/Compose smoke，不是长时间运行的数据源，也不提供 fallback。
+- **本地 Prom metric recording 是有限 synthetic catalog**：装配时只生成默认 30 分钟窗口、中心时刻前后 120 分钟、两个固定告警样例的精确键。它服务短时本地/Compose smoke，不是长时间运行或非默认窗口的数据源；未命中会降级为 `INDETERMINATE`，不提供 fallback。
+- **Prometheus 可答性与渲染把步骤 ID 当作版本化隐式契约**：当前通过 Evidence ID 的 `:s1`/`:s2` 后缀区分告警与指标。现有 plan/answerability/render 测试固定该形状；未来改步骤命名必须同步升级并复核四层，不能只改 compiler。

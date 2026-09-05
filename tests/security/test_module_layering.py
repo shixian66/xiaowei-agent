@@ -148,6 +148,18 @@ _ALLOWED_INTERNAL_BY_FILE = {
     },
 }
 
+# application 包为了 Runtime 编排拥有宽依赖面，但 Worker 只是调度入口，不能继承
+# 这份宽权限。接口层已有上面的逐文件闭集；这里单独钉死 application 入口。
+_APPLICATION_ENTRY_ALLOWED_INTERNAL_BY_FILE = {
+    "application/worker.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.observability",
+        "xiaowei_agent.persistence",
+        "xiaowei_agent.runners",
+    },
+}
+
 
 def _existing_packages() -> set[str]:
     """``src/xiaowei_agent`` 下磁盘上真实存在的包（含 ``__init__.py`` 的目录）。"""
@@ -200,6 +212,16 @@ def test_every_interface_file_is_registered_exactly_once() -> None:
         for path in (_SRC / "interfaces").rglob("*.py")
     }
     assert set(_ALLOWED_INTERNAL_BY_FILE) == actual
+
+
+@pytest.mark.parametrize(
+    "relative", sorted(_APPLICATION_ENTRY_ALLOWED_INTERNAL_BY_FILE)
+)
+def test_application_entry_only_imports_its_explicit_allowlist(relative: str) -> None:
+    path = _SRC / relative
+    allowed = _APPLICATION_ENTRY_ALLOWED_INTERNAL_BY_FILE[relative] | _UNIVERSAL_LEAF
+    offenders = sorted(_internal_imports(path) - allowed)
+    assert not offenders, f"{relative} 出现非法入口依赖: {offenders}"
 
 
 def test_only_local_stack_can_import_the_tools_layer() -> None:

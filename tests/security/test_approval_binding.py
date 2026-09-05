@@ -7,6 +7,7 @@
 import datetime as dt
 
 import pytest
+from tests.fakes.admission import slow_query_plan
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 
 from xiaowei_agent.contracts import (
@@ -20,6 +21,7 @@ from xiaowei_agent.governance import (
     verify_approval_binding,
     verify_policy_revision,
 )
+from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 
 pytestmark = pytest.mark.security
@@ -60,6 +62,13 @@ def test_plan_with_unregistered_policy_profile_is_rejected() -> None:
 
 def test_matching_policy_revision_passes() -> None:
     verify_policy_revision(_SNAPSHOT, plan=FIXTURE_PLAN)
+
+
+def test_previous_production_policy_revision_is_rejected_after_profile_change() -> None:
+    """M5 的旧 revision 不能在 M6a 扩大的生产允许面下继续生效。"""
+    with pytest.raises(BindingError) as exc:
+        verify_policy_revision(ACTIVE_POLICY_SNAPSHOT, plan=slow_query_plan())
+    assert exc.value.rejection is BindingRejection.POLICY_REVISION_DRIFT
 
 
 def test_matching_binding_passes() -> None:

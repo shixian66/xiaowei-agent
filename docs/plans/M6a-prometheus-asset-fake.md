@@ -270,7 +270,16 @@ Runner 用 `derive_effect(...)` 返回的版本化 `OperationSpec.gateway` 构�
 
 `docs/CAPABILITIES.md` 随每个 PR 从对应 snapshot 重新生成。PR 1 和 PR 2 的扩展数据都记录 old/new snapshot ID，避免能力集合变化只体现在文档行数里。
 
-### 4.6 终态投影的 capability 选择
+### 4.6 Policy revision 与 profiles 集合绑定
+
+`governance/profiles.py::POLICY_REVISION` 是审批绑定和审计可见事实。PR 1 把生产
+profiles 从仅有 `readonly.starrocks.slow_query.v1` 扩为同时包含
+`readonly.prometheus.alert.evidence.v1`，必须把 revision 从 `policy-2026-09-01`
+递增为 `policy-2026-09-05`。`tests/unit/test_governance_profiles.py` 用
+`(POLICY_REVISION, ordered profile IDs)` 成对 golden 承重；测试 fake 自有 revision，
+不与生产 revision 机械耦合。PR 2 若再增加资产生产 profile，必须再次显式递增并评审。
+
+### 4.7 终态投影的 capability 选择
 
 `XiaoweiRuntime` 新增 `PlanStore` 和 binding registry 依赖：
 
@@ -737,14 +746,15 @@ python -m pytest tests/security/test_promql_guard.py tests/contract/test_step_ad
 - `src/xiaowei_agent/governance/profiles.py`
 - `src/xiaowei_agent/application/default_capabilities.py`
 - `tests/unit/test_capability_registry.py`
+- `tests/unit/test_governance_profiles.py`
 - `tests/unit/test_intent_interpreter.py`
 - `tests/unit/test_prometheus_alert_plan.py`
 - `tests/security/test_intent_interpreter_boundary.py`
 - `tests/security/test_intent_pollution.py`
 
-**RED**：PR 1 的成对 golden 必须精确等于 `("snapshot.m6a.starrocks-prometheus.v1", (("starrocks.slow_query.diagnose", "1.0.0"), ("prometheus.alert.evidence", "1.0.0")))`；只增 specs 不改 snapshot ID 必须红；intent 精确命中和 near-miss；缺 alert/instance；用户 env/tenant 不能改 context；gateway/profile/template 污染不能进入 draft；target 和 plan/tool hash 稳定。
+**RED**：PR 1 的 capability 成对 golden 必须精确等于 `("snapshot.m6a.starrocks-prometheus.v1", (("starrocks.slow_query.diagnose", "1.0.0"), ("prometheus.alert.evidence", "1.0.0")))`；policy 成对 golden 必须精确等于 `("policy-2026-09-05", ("readonly.starrocks.slow_query.v1", "readonly.prometheus.alert.evidence.v1"))`；只增 specs/profile 而不改对应 snapshot/revision 必须红；intent 精确命中和 near-miss；缺 alert/instance；用户 env/tenant 不能改 context；gateway/profile/template 污染不能进入 draft；target 和 plan/tool hash 稳定。
 
-**GREEN**：实现 Prom binding 和固定两步计划，把 snapshot 精确更新为 `snapshot.m6a.starrocks-prometheus.v1`；不修改 Resolver 算法，不增加关键词路由到入口。
+**GREEN**：实现 Prom binding 和固定两步计划，把 capability snapshot 精确更新为 `snapshot.m6a.starrocks-prometheus.v1`、production policy revision 精确更新为 `policy-2026-09-05`；不修改 Resolver 算法，不增加关键词路由到入口。
 
 #### Task P5：两个 fake adapter
 
@@ -1180,6 +1190,7 @@ git diff <base>...HEAD -- docs/CAPABILITIES.md
 9. PromQL 采用固定模板 + schema + escape + 重编译比对，不新增 parser 依赖。
 10. DSL 默认继续延期，M6a 只提交数据结论；执行核心复用和注册/装配成本必须分开计量。
 11. PR 1/PR 2 snapshot ID 分别固定为 `snapshot.m6a.starrocks-prometheus.v1` 与 `snapshot.m6a.starrocks-prometheus-asset.v1`，并与 ordered specs key 做成对 golden。
+12. PR 1 的 production policy revision 递增为 `policy-2026-09-05`，并与 ordered profile ID 做成对 golden；PR 2 新增生产 profile 时再次递增。
 
 ### 15.1 独立 Claude 审核问题的根因与实际影响
 

@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，正在等待代码审查与项目负责人验收。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，独立代码审查的必修项已按根因修复，仍待复审、远程 CI 与项目负责人验收。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -221,7 +221,9 @@ xiaowei task get TASK_ID
 
 第二条提交命令只命中内置 Alertmanager/Prometheus synthetic recording。当前本地样例
 还支持 `InstanceDown` + `10.0.0.8:9100`；它不是 Grafana 展示、告警静默，也不是对
-真实监控系统的兼容性证明。
+真实监控系统的兼容性证明。Prometheus metric recording 只覆盖默认 30 分钟窗口和
+装配中心时刻前后 120 分钟的精确键；非默认窗口或超出该时段的请求会安全降级为
+`indeterminate`，没有 fallback。长期运行或窗口泛化不属于本轮本地样例承诺。
 
 停止会保留数据库 volume；清理会删除本项目的本地数据库数据。执行清理前先确认当前目录与 Compose project：
 

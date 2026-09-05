@@ -101,6 +101,68 @@ async def test_packaged_prometheus_recordings_run_the_two_gateway_task() -> None
 
 
 @pytest.mark.asyncio
+async def test_packaged_prometheus_recording_has_no_nondefault_window_fallback(
+) -> None:
+    """本地 catalog 只承诺默认 30 分钟窗；60 分钟必须安全降级。"""
+    import datetime as dt
+
+    now = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
+    clock = ManualClock(start=now)
+    settings = Settings(environment_id="dev")
+    stack = build_in_memory_local_stack(settings=settings, clock=clock)
+    context = RequestContext(
+        tenant_id=settings.tenant_id,
+        actor=settings.actor,
+        environment_id=settings.environment_id,
+        trace_id="3" * 32,
+        policy_revision=stack.policy_revision,
+    )
+    pending = await stack.runtime.submit_task(
+        submission=TaskSubmission(
+            envelope=RequestEnvelope(
+                request_id="request-prometheus-nondefault-window",
+                tenant_id=context.tenant_id,
+                actor=context.actor,
+                channel=Channel.API,
+                text=(
+                    "查告警 HostHighCpu 在 node-1.example.com:9100 "
+                    "最近60分钟的证据"
+                ),
+                idempotency_key="idem-local-prometheus-nondefault-window",
+                environment_id=context.environment_id,
+            ),
+            context=context,
+            as_of=now,
+        )
+    )
+    worker = WorkerLoop(
+        runtime=stack.runtime,
+        task_store=stack.task_store,
+        clock=stack.clock,
+        monotonic=stack.monotonic,
+        settings=stack.settings,
+        sleep=asyncio.sleep,
+    )
+
+    assert await worker.poll_once() == 1
+    completed = await stack.runtime.query_task(
+        lookup=TaskLookup(
+            task_id=pending.task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+        )
+    )
+    gateway = stack.runtime._runner._gateway
+    prometheus = gateway._adapters["prometheus"]
+    evidences = await stack.evidence_ledger.load(task_id=pending.task_id)
+    assert completed.status is TaskStatus.INDETERMINATE
+    assert prometheus.call_count == 1
+    assert [item.evidence_id.rsplit(":", 1)[-1] for item in evidences] == ["s1", "s2"]
+    assert evidences[0].facts
+    assert evidences[1].facts == ()
+
+
+@pytest.mark.asyncio
 async def test_worker_interface_closes_the_stack_when_cancelled() -> None:
     closed = asyncio.Event()
     stack = build_in_memory_local_stack(
@@ -133,7 +195,7 @@ async def test_packaged_recording_runs_one_complete_task_without_tests_data() ->
         actor="local-developer",
         environment_id=settings.environment_id,
         trace_id="0" * 32,
-        policy_revision="policy-2026-09-01",
+        policy_revision=stack.policy_revision,
     )
     submission = TaskSubmission(
         envelope=RequestEnvelope(
@@ -248,7 +310,7 @@ async def test_smoke_barrier_stops_after_tool_result_before_commit(
             actor=settings.actor,
             environment_id=settings.environment_id,
             trace_id="1" * 32,
-            policy_revision="policy-2026-09-01",
+            policy_revision=stack.policy_revision,
         ),
         as_of=now,
     )

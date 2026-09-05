@@ -1,4 +1,4 @@
-"""M3 的 policy profile 实例与当前生效的 policy 快照。
+"""生产 policy profile 实例与当前生效的 policy 快照。
 
 profile 是**声明**，判定在 ``governance.policy``。分开的理由与 capability 声明
 相同：允许面必须可以被直接读出与断言，而不是散落在判定函数的 ``if`` 里。
@@ -21,7 +21,7 @@ from xiaowei_agent.contracts import (
     RiskLevel,
 )
 
-POLICY_REVISION: Final[str] = "policy-2026-09-01"
+POLICY_REVISION: Final[str] = "policy-2026-09-05"
 """当前生效的 policy revision。
 
 revision 变化必须让旧审批与旧凭证失效（ARCHITECTURE §15），因此它是一个显式常量，
