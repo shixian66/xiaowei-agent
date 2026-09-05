@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 的 `prometheus.alert.evidence` fake 候选已完成首轮独立审查及必修项根因修复，等待复审、远程 CI 与项目负责人验收；PR 2 资产能力未开始** |
+| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 的 `prometheus.alert.evidence` fake 候选已完成独立复审，PR #11 首轮远程 CI 八项全绿，等待项目负责人验收与合入；PR 2 资产能力未开始** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -44,10 +44,11 @@
 | M5 工作分支 | `claude/m5-api-worker-compose` 已合入 `main`，保留备查 |
 | M5 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非产品 `user-accepted`**。运行证据来自 GitHub 隔离 runner 的 PostgreSQL service 与 Compose smoke |
 | M6a 详细计划 | [docs/plans/M6a-prometheus-asset-fake.md](docs/plans/M6a-prometheus-asset-fake.md) V1.1；首审问题回写后复审通过并获明确开工授权 |
-| M6a PR 1 | 工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；代码/测试数据采集点 `c7eca0567d5e5ca18406f2fc2a79947db67f3439`，首轮独立审查对象 `300fa2e2fa77bb2611a98e00d31830e0014d298d`，未合并、未用户验收 |
-| 下一步 | 对修复后的 M6a PR 1 精确 SHA 复审并在远程 CI 实跑 PostgreSQL/Compose；通过后等待项目负责人验收。只有验收并合入最新 `main` 后，才可另开 PR 2 `asset.inventory.lookup` |
+| M6a PR 1 | [PR #11](https://github.com/shixian66/xiaowei-agent/pull/11)，工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；代码/测试数据采集点 `c7eca0567d5e5ca18406f2fc2a79947db67f3439`，首轮独立审查对象 `300fa2e2fa77bb2611a98e00d31830e0014d298d`，修复与复审对象 `cfd63923a35be1e5dcfe13b3dbd78c00e0bca520`，未合并、未用户验收 |
+| M6a PR 1 CI | `cfd63923` 上 run [`33966437003`](https://github.com/shixian66/xiaowei-agent/actions/runs/33966437003) 八个 job 全绿；integration `2139 passed`、0 skipped，`compose-smoke: passed` |
+| 下一步 | 等待项目负责人验收 PR #11；验收后先处理主 checkout 的同路径未跟踪计划文件，再以 fast-forward 合入。只有验收并合入最新 `main` 后，才可另开 PR 2 `asset.inventory.lookup` |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR 1 新增的 PostgreSQL integration 因本机无 `PYTEST_POSTGRES_DSN` 而 skip，新增 Compose 路径因本机无 Docker 未运行；因此没有把 M5 的旧 CI 证据外推到 M6a 候选 |
+| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR #11 已在 GitHub 隔离 runner 实跑 PostgreSQL integration 与 Compose Prometheus smoke；本机仍无 `PYTEST_POSTGRES_DSN`/Docker，未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose` 已验收并合入；`prometheus.alert.evidence` 为待验收 fake 候选；`asset.inventory.lookup` 未开始。均未连接对应真实运维系统 |
 
@@ -204,6 +205,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 
 - **M6a PR 1 审查修复后四条规范门全部 exit 0**：`python -m pytest -q` 为 1986 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 979 passed / 79 skipped / 1081 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
 - **首轮独立审查的必修项已做 TDD 根因修复**：production policy revision/profile 成对 golden 在旧 revision 上先红、递增后转绿；向 `application/worker.py` 临时注入 capability import 后，新逐文件依赖护栏真实转红，移除变体后恢复；60 分钟非默认窗口端到端到达 Prometheus adapter 后以 `INDETERMINATE` 收口，证明本地 recording 无 fallback。变体未保留。
+- **M6a PR #11 首轮远程 CI 已取得非生产运行证据**：run [`33966437003`](https://github.com/shixian66/xiaowei-agent/actions/runs/33966437003) 的 head SHA 为 `cfd63923a35be1e5dcfe13b3dbd78c00e0bca520`，八个 job 全部 success；PostgreSQL integration 实跑 `2139 passed`、0 skipped，Compose 实跑 `python -m scripts.compose_smoke` 并输出 `compose-smoke: passed`。这不是部署、canary 或真实 Prometheus/Alertmanager 兼容证据。
 - **M6a PR 1 做了 9 个隔离变异反证且对应用例均先转红**：分别拆掉 PromQL 重编译、operation gateway 派生、无记录结果 fail-closed、snapshot ID 联合 golden、恢复期 plan hash、Evidence 字段白名单、binding 精确查找、入口中立性，以及擅自递增 StarRocks version。变体位于临时 detached worktree、使用独立 pycache，已删除且未进入候选分支。
 - **M5 最终对象 `372c381f44ecfa1fa53961f137d0058033cbd805` 已验收、快进合入并归档**：合并后 `main` run [`33952529021`](https://github.com/shixian66/xiaowei-agent/actions/runs/33952529021) 八个 job 全绿；integration `1866 passed`、0 skipped，`compose-smoke: passed`。本机四门为 1714 passed / 152 skipped、security 923 passed / 79 skipped / 864 deselected、Ruff 通过、mypy 102 个源文件通过。详细命令、变异反证和风险见 [M5 归档](docs/handoff/archive/2026-09-05-M5-api-worker-compose.md)。
 - **M2 最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 640 passed / 3 warnings；`python -m pytest -m security -q` 499 passed / 141 deselected / 3 warnings；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..319253a` 无输出。PR #4 的 merge commit 与 head 均为 `319253a`，`main` 独立 CI run `33629416660` 为 success。更早的逐 SHA 结果见各提交信息与归档。
@@ -231,7 +233,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - 未部署、未 canary、未取得产品用户验收；M5 的“验收通过”是项目里程碑验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker。M6a PR 1 的 PostgreSQL integration 仅验证了无 DSN 时的受控 skip，Compose smoke 未运行；M5 的 CI 证据不是 M6a 候选证据。
+- 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker，因此本机仍只验证无 DSN 时的受控 skip；M6a PR #11 已由 GitHub 隔离 runner 补齐 PostgreSQL integration 与 Compose smoke，尚未覆盖其他 PostgreSQL/Docker/Compose 版本或长期运行。
 - 主 `main` checkout 保留一份同路径未跟踪的 `docs/plans/M6a-prometheus-asset-fake.md` Review Draft；与分支内 Approved V1.1 只在标题、状态和开工授权文字上不同。它属于用户文件且未被删除或暂存，但会阻止 Git 直接把分支中的已跟踪版本合入该 checkout；合并前必须由项目负责人选择保留/移动旧稿或采用分支获批版。
 - **`StepConditionKind` 四个成员已有三个被消费**：`ALWAYS`、`EVIDENCE_ROW_COUNT_BELOW` 与 `PRIOR_STEP_RESULT_IS`。后者由 Prom 两步计划消费，并只读取持久化 step journal 的 committed `OK`；`FAILED`/`TIMEOUT`/无记录均不运行后续步骤。`EVIDENCE_FIELD_ABSENT` 仍未消费、未验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。

@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，独立代码审查的必修项已按根因修复，仍待复审、远程 CI 与项目负责人验收。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 已形成 `prometheus.alert.evidence` fake/recording 实现候选，独立复审无代码阻断，PR #11 首轮远程 CI 八项全绿，仍待项目负责人验收与合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收；M6a 的资产能力尚未开始。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -244,9 +244,10 @@ python -m scripts.compose_smoke
 
 当前实现仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。M6a PR 1
 候选增加了 Alertmanager 告警读取与 Prometheus 固定模板指标取证，但本机没有 Docker
-或 PostgreSQL 测试 DSN，因此新增 Compose/PostgreSQL 路径只完成了代码与离线契约
-验证。M5 已通过的 Compose smoke 仍只证明其当时 SHA 在隔离 PostgreSQL 下的提交、
-消费、查询、恢复与幂等闭环，**推不出 M6a 候选或任何生产环境已经验证**。
+或 PostgreSQL 测试 DSN，因此新增 Compose/PostgreSQL 路径在本机只完成代码与离线
+契约验证。M6a PR #11 的 run `33966437003` 已在 GitHub 隔离 runner 实跑 PostgreSQL
+integration 与 Compose smoke；这只把 M6a 候选提升为非生产 CI 运行证据，**不能推出
+任何真实运维系统兼容、部署、canary 或用户验收**。
 
 当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

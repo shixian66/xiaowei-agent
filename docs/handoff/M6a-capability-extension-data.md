@@ -86,5 +86,8 @@ PR 1 只能证明最小 binding seam 可以承载第二个异质能力，尚不�
   binding、入口中立性与 StarRocks version 承重点，对应用例均真实转红；变体已删除。
 - 独立审查在 `300fa2e2` 上复跑四门并做 3 个变异反证，指出 production policy
   revision 未随 profile 集合递增这一合入前缺陷，以及 local catalog、Worker import
-  护栏和未执行 PostgreSQL/Compose 路径；本轮按根因修复并补反例。修复后的外部复审、
-  CI、部署、canary 与用户验收仍未发生。
+  护栏和未执行 PostgreSQL/Compose 路径；本轮按根因修复并补反例。修复提交形成时的
+  外部复审与 CI 状态见下一条；部署、canary 与用户验收仍未发生。
+- `cfd63923` 复审无剩余代码阻断；PR #11 run `33966437003` 八个 job 全绿，integration
+  `2139 passed`、0 skipped，Compose 输出 `compose-smoke: passed`。这只补齐 GitHub
+  隔离 runner 的非生产运行证据；部署、canary 与用户验收仍未发生。
