@@ -301,10 +301,16 @@ async def drive_to_terminal(
     store: "TaskStore", lookup: "TaskLookup", terminal: "TaskStatus"
 ) -> None:
     """把任务沿一条合法路径推到指定终态，全程采纳存储层 winner。"""
+    from xiaowei_agent.persistence.store import TransitionCommand
+
     record = await store.get(lookup=lookup)
     for status in _path_to(terminal):
         result = await store.transition(
-            task_id=lookup.task_id, expected_version=record.version, to_status=status
+            command=TransitionCommand(
+                task_id=lookup.task_id,
+                expected_version=record.version,
+                to_status=status,
+            )
         )
         assert result.applied, result.rejection
         record = result.winner

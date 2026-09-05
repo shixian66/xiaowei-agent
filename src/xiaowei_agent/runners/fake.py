@@ -19,7 +19,11 @@ from xiaowei_agent.contracts import (
     TaskOutcome,
     TaskStatus,
 )
-from xiaowei_agent.persistence.store import TaskIdCarryingError, TaskStore
+from xiaowei_agent.persistence.store import (
+    TaskIdCarryingError,
+    TaskStore,
+    TransitionCommand,
+)
 
 IS_FAKE: Final[bool] = True
 
@@ -116,11 +120,13 @@ class ScriptedRunner:
             if record.status is status:
                 continue
             result = await self._store.transition(
-                task_id=task_id,
-                expected_version=record.version,
-                to_status=status,
-                fencing_token=lease.fencing_token,
-                terminal_reason=self._reason if status is self._status else None,
+                command=TransitionCommand(
+                    task_id=task_id,
+                    expected_version=record.version,
+                    to_status=status,
+                    fencing_token=lease.fencing_token,
+                    terminal_reason=self._reason if status is self._status else None,
+                )
             )
             if not result.applied:
                 raise RuntimeError(f"transition rejected: {result.rejection}")

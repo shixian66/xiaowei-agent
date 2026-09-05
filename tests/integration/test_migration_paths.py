@@ -207,7 +207,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0004_retry_markers"
+    assert revision == "0005_step_journal"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -243,6 +243,64 @@ async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
             )
         ).one()
     assert restored == ("failed", "m5_downgrade_discarded")
+
+
+async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    """A step journal row cannot be discarded while its task still looks runnable."""
+    from tests.conftest import make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    async with clean_database.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO task_step_executions "
+                "(task_id, step_id, attempt_count, last_fencing_token, started_at) "
+                "VALUES (:task_id, 's1', 1, 1, now())"
+            ),
+            {"task_id": task.task_id},
+        )
+
+    run_upgrade, run_downgrade = alembic_runners
+    with pytest.raises(MigrationSafetyError):
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0004_retry_markers")
+
+    async with clean_database.connect() as connection:
+        revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        step_count = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_step_executions")
+        )
+    assert revision == "0005_step_journal"
+    assert step_count == 1
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0004_retry_markers", True)
+        settled = (
+            await connection.execute(
+                sa.text(
+                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+        ).one()
+        await connection.run_sync(run_upgrade)
+    assert settled == ("failed", "m5_downgrade_discarded")
+
+    async with clean_database.connect() as connection:
+        assert (
+            await connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM task_step_executions WHERE task_id = :task_id"
+                ),
+                {"task_id": task.task_id},
+            )
+            == 0
+        )
 
 
 async def test_rev_0004_retry_columns_round_trip_without_changing_task_facts(

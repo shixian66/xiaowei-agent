@@ -39,11 +39,14 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     EvidenceEnvelope,
     ExecutionPlan,
+    GrantRejection,
     LeaseGrant,
     RequestContext,
     RequestEnvelope,
     ResolvedTarget,
     RetryDecision,
+    StepAttemptDecision,
+    StepCommitRejection,
     TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
@@ -80,6 +83,8 @@ from xiaowei_agent.persistence.rows import (
     load_contract,
     record_to_row,
     row_to_record,
+    row_to_step_execution,
+    step_execution_to_row,
 )
 from xiaowei_agent.persistence.schema import (
     CREATED_SEQUENCE,
@@ -88,6 +93,7 @@ from xiaowei_agent.persistence.schema import (
     TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
     TASK_PLANS,
+    TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
 )
@@ -100,6 +106,11 @@ from xiaowei_agent.persistence.store import (
     RetryCommand,
     RetryResult,
     StaleLeaseQuery,
+    StepAttemptCommand,
+    StepAttemptResult,
+    StepCommitCommand,
+    StepCommitResult,
+    StepExecutionRecord,
     TaskAttemptCommand,
     TaskAttemptGrant,
     TaskAttemptResult,
@@ -110,6 +121,7 @@ from xiaowei_agent.persistence.store import (
     idempotency_scope_digest,
     request_dedup_digest,
     retry_command_digest,
+    step_commit_digest,
     submission_digest,
     submission_matches_record,
     validate_task_failure_limit,
@@ -176,6 +188,50 @@ async def _append_audit_events(
         ).scalar_one()
         seqs.append(int(seq))
     return tuple(seqs)
+
+
+async def _append_evidence(
+    connection: AsyncConnection,
+    *,
+    task_id: str,
+    envelope: EvidenceEnvelope,
+) -> str:
+    """在调用方事务内幂等追加 Evidence；与公开 ledger 共用同一条写路径。"""
+    await _serialise_on_task(connection, task_id)
+    next_seq = sa.select(
+        sa.func.coalesce(sa.func.max(TASK_EVIDENCE.c.seq), 0) + 1
+    ).where(TASK_EVIDENCE.c.task_id == task_id)
+    insert = (
+        sa.dialects.postgresql.insert(TASK_EVIDENCE)
+        .values(
+            task_id=task_id,
+            evidence_id=envelope.evidence_id,
+            seq=next_seq.scalar_subquery(),
+            envelope=dump_contract(envelope),
+        )
+        .on_conflict_do_nothing(index_elements=["task_id", "evidence_id"])
+        .returning(TASK_EVIDENCE.c.evidence_id)
+    )
+    inserted = (await connection.execute(insert)).first()
+    if inserted is not None:
+        return envelope.evidence_id
+    existing = (
+        (
+            await connection.execute(
+                sa.select(TASK_EVIDENCE.c.envelope).where(
+                    TASK_EVIDENCE.c.task_id == task_id,
+                    TASK_EVIDENCE.c.evidence_id == envelope.evidence_id,
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if load_contract(EvidenceEnvelope, existing["envelope"]) != envelope:
+        raise EvidenceConflictError(
+            "different evidence already recorded under this id", task_id=task_id
+        )
+    return envelope.evidence_id
 
 
 def stale_lease_statement(*, now: _dt.datetime, limit: int) -> sa.Select[Any]:
@@ -272,14 +328,15 @@ class PostgresTaskStore:
             row = _as_row(found)
         return row_to_record(row)
 
-    async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
+    async def list_stale_leases(
+        self, *, query: StaleLeaseQuery
+    ) -> tuple[TaskRecord, ...]:
         """曾被租出、租约已过期、未终态。**不加锁、不改状态。**
 
         SQL 谓词与 ``is_stale_lease`` 逐条等价，理由见 :func:`stale_lease_statement`。
         Python 侧仍再过滤一次：那是两个实现共用的权威判定，"什么算 stale"只能有一个
         答案。等价之后这一步在正常数据上是空操作，但它是 SQL 一旦漂移时的兜底。
         """
-        query = StaleLeaseQuery(limit=limit)
         now = self._clock()
         statement = stale_lease_statement(now=now, limit=query.limit)
         async with self._engine.connect() as connection:
@@ -549,6 +606,297 @@ class PostgresTaskStore:
                 winner=row_to_record(_as_row(row)),
             )
 
+    async def _load_step_row(
+        self, connection: AsyncConnection, *, task_id: str, step_id: str
+    ) -> StepExecutionRecord | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_STEP_EXECUTIONS).where(
+                        TASK_STEP_EXECUTIONS.c.task_id == task_id,
+                        TASK_STEP_EXECUTIONS.c.step_id == step_id,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_step_execution(row)
+
+    async def _load_execution_plan(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> ExecutionPlan | None:
+        payload = (
+            await connection.execute(
+                sa.select(TASK_PLANS.c.plan).where(TASK_PLANS.c.task_id == task_id)
+            )
+        ).scalar_one_or_none()
+        return None if payload is None else load_contract(ExecutionPlan, payload)
+
+    async def _step_attempts_used(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> int:
+        used = (
+            await connection.execute(
+                sa.select(
+                    sa.func.coalesce(sa.func.sum(TASK_STEP_EXECUTIONS.c.attempt_count), 0)
+                ).where(TASK_STEP_EXECUTIONS.c.task_id == task_id)
+            )
+        ).scalar_one()
+        return int(used)
+
+    async def begin_step_attempt(
+        self, *, command: StepAttemptCommand
+    ) -> StepAttemptResult:
+        async with self._engine.begin() as connection:
+            current = row_to_record(
+                await self._require_row(
+                    connection, command.grant.task_id, for_update=True
+                )
+            )
+            existing = await self._load_step_row(
+                connection, task_id=current.task_id, step_id=command.step_id
+            )
+            attempts_used = await self._step_attempts_used(
+                connection, task_id=current.task_id
+            )
+            rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=frozenset({TaskStatus.RUNNING}),
+            )
+            if rejection is not None:
+                decision = (
+                    StepAttemptDecision.NOT_RUNNABLE
+                    if rejection
+                    in {
+                        GrantRejection.TERMINAL_PROTECTED,
+                        GrantRejection.STATUS_NOT_ALLOWED,
+                    }
+                    else StepAttemptDecision.STALE_FENCING
+                )
+                return StepAttemptResult(
+                    decision=decision,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+            if existing is not None and existing.result_status is not None:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.ALREADY_COMMITTED,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+
+            plan = await self._load_execution_plan(
+                connection, task_id=current.task_id
+            )
+            if plan is None:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.NOT_RUNNABLE,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+            if command.step_id not in {step.step_id for step in plan.steps}:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.UNKNOWN_STEP,
+                    winner=current,
+                    record=None,
+                    attempts_used=attempts_used,
+                )
+
+            increments_budget = (
+                existing is None
+                or existing.last_fencing_token != command.grant.fencing_token
+            )
+            if increments_budget and attempts_used >= plan.budget.max_tool_calls:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.BUDGET_EXHAUSTED,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+
+            if existing is None:
+                candidate = StepExecutionRecord(
+                    task_id=current.task_id,
+                    step_id=command.step_id,
+                    attempt_count=1,
+                    last_fencing_token=command.grant.fencing_token,
+                    started_at=self._clock(),
+                )
+                row = (
+                    (
+                        await connection.execute(
+                            sa.insert(TASK_STEP_EXECUTIONS)
+                            .values(**step_execution_to_row(candidate))
+                            .returning(TASK_STEP_EXECUTIONS)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                record = row_to_step_execution(row)
+            elif increments_budget:
+                row = (
+                    (
+                        await connection.execute(
+                            sa.update(TASK_STEP_EXECUTIONS)
+                            .where(
+                                TASK_STEP_EXECUTIONS.c.task_id == current.task_id,
+                                TASK_STEP_EXECUTIONS.c.step_id == command.step_id,
+                            )
+                            .values(
+                                attempt_count=existing.attempt_count + 1,
+                                last_fencing_token=command.grant.fencing_token,
+                                started_at=self._clock(),
+                            )
+                            .returning(TASK_STEP_EXECUTIONS)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                record = row_to_step_execution(row)
+            else:
+                record = existing
+            return StepAttemptResult(
+                decision=StepAttemptDecision.PROCEED,
+                winner=current,
+                record=record,
+                attempts_used=await self._step_attempts_used(
+                    connection, task_id=current.task_id
+                ),
+            )
+
+    async def commit_step_result(
+        self, *, command: StepCommitCommand
+    ) -> StepCommitResult:
+        digest = step_commit_digest(command)
+        async with self._engine.begin() as connection:
+            current = row_to_record(
+                await self._require_row(
+                    connection, command.grant.task_id, for_update=True
+                )
+            )
+            existing = await self._load_step_row(
+                connection, task_id=current.task_id, step_id=command.step_id
+            )
+            rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=frozenset({TaskStatus.RUNNING}),
+            )
+            if rejection is not None:
+                decision = (
+                    StepCommitRejection.NOT_RUNNABLE
+                    if rejection
+                    in {
+                        GrantRejection.TERMINAL_PROTECTED,
+                        GrantRejection.STATUS_NOT_ALLOWED,
+                    }
+                    else StepCommitRejection.STALE_FENCING
+                )
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    record=existing,
+                    rejection=decision,
+                )
+            if (
+                existing is None
+                or existing.last_fencing_token != command.grant.fencing_token
+            ):
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    rejection=StepCommitRejection.NO_ATTEMPT_IN_FLIGHT,
+                )
+            if existing.result_status is not None:
+                if existing.commit_digest == digest:
+                    return StepCommitResult(
+                        committed=True, winner=current, record=existing
+                    )
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    record=existing,
+                    rejection=StepCommitRejection.ALREADY_COMMITTED_DIFFERENT,
+                )
+
+            plan = await self._load_execution_plan(
+                connection, task_id=current.task_id
+            )
+            if plan is None:
+                raise ValueError("step commit has no stored plan")
+            evidence = command.evidence
+            if evidence is not None and (
+                evidence.capability_id != plan.capability_id
+                or evidence.capability_version != plan.capability_version
+            ):
+                raise ValueError("step evidence does not match the stored plan")
+
+            if evidence is not None:
+                await _append_evidence(
+                    connection, task_id=current.task_id, envelope=evidence
+                )
+            committed_at = self._clock()
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(TASK_STEP_EXECUTIONS)
+                        .where(
+                            TASK_STEP_EXECUTIONS.c.task_id == current.task_id,
+                            TASK_STEP_EXECUTIONS.c.step_id == command.step_id,
+                            TASK_STEP_EXECUTIONS.c.result_status.is_(None),
+                        )
+                        .values(
+                            result_status=command.status.value,
+                            kind=command.kind.value,
+                            evidence_id=None
+                            if evidence is None
+                            else evidence.evidence_id,
+                            commit_digest=digest,
+                            committed_at=committed_at,
+                        )
+                        .returning(TASK_STEP_EXECUTIONS)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            await _append_audit_events(
+                connection,
+                task_id=current.task_id,
+                events=command.audit_events,
+            )
+            return StepCommitResult(
+                committed=True,
+                winner=current,
+                record=row_to_step_execution(row),
+            )
+
+    async def load_step_executions(
+        self, *, task_id: str
+    ) -> tuple[StepExecutionRecord, ...]:
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(TASK_STEP_EXECUTIONS)
+                        .where(TASK_STEP_EXECUTIONS.c.task_id == task_id)
+                        .order_by(TASK_STEP_EXECUTIONS.c.step_id)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(row_to_step_execution(row) for row in rows)
+
     # --- 写 -------------------------------------------------------------------
 
     async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
@@ -631,23 +979,8 @@ class PostgresTaskStore:
         return record
 
     async def transition(
-        self,
-        *,
-        task_id: str,
-        expected_version: int,
-        to_status: TaskStatus,
-        fencing_token: int | None = None,
-        terminal_reason: str | None = None,
+        self, *, command: TransitionCommand
     ) -> TransitionResult:
-        # 命令 DTO 必须在**开事务之前**构造：反过来会在参数非法时先开事务、可能已经
-        # 写入，再抛 ValidationError，留下一条带无效字段的记录。
-        command = TransitionCommand(
-            task_id=task_id,
-            expected_version=expected_version,
-            to_status=to_status,
-            fencing_token=fencing_token,
-            terminal_reason=terminal_reason,
-        )
         async with self._engine.begin() as connection:
             current = row_to_record(
                 await self._require_row(connection, command.task_id, for_update=True)
@@ -676,6 +1009,11 @@ class PostgresTaskStore:
                 )
                 .mappings()
                 .one()
+            )
+            await _append_audit_events(
+                connection,
+                task_id=command.task_id,
+                events=command.audit_events,
             )
         return TransitionResult(
             applied=True, winner=row_to_record(_as_row(row)), rejection=None
@@ -859,44 +1197,10 @@ class PostgresEvidenceLedger:
         self._engine = engine
 
     async def append(self, *, task_id: str, envelope: EvidenceEnvelope) -> str:
-        payload = dump_contract(envelope)
-        next_seq = sa.select(
-            sa.func.coalesce(sa.func.max(TASK_EVIDENCE.c.seq), 0) + 1
-        ).where(TASK_EVIDENCE.c.task_id == task_id)
-        insert = (
-            sa.dialects.postgresql.insert(TASK_EVIDENCE)
-            .values(
-                task_id=task_id,
-                evidence_id=envelope.evidence_id,
-                seq=next_seq.scalar_subquery(),
-                envelope=payload,
-            )
-            .on_conflict_do_nothing(index_elements=["task_id", "evidence_id"])
-            .returning(TASK_EVIDENCE.c.evidence_id)
-        )
         async with self._engine.begin() as connection:
-            await _serialise_on_task(connection, task_id)
-            inserted = (await connection.execute(insert)).first()
-            if inserted is not None:
-                return envelope.evidence_id
-            existing = (
-                (
-                    await connection.execute(
-                        sa.select(TASK_EVIDENCE.c.envelope).where(
-                            TASK_EVIDENCE.c.task_id == task_id,
-                            TASK_EVIDENCE.c.evidence_id == envelope.evidence_id,
-                        )
-                    )
-                )
-                .mappings()
-                .one()
+            return await _append_evidence(
+                connection, task_id=task_id, envelope=envelope
             )
-        # 内容相同的重写是幂等的（重试不该被当成篡改）；不同则一律拒绝。
-        if load_contract(EvidenceEnvelope, existing["envelope"]) != envelope:
-            raise EvidenceConflictError(
-                "different evidence already recorded under this id", task_id=task_id
-            )
-        return envelope.evidence_id
 
     async def load(self, *, task_id: str) -> tuple[EvidenceEnvelope, ...]:
         """无证据时返回空元组，**不抛异常**——没取过数是正常状态，不是错误。"""

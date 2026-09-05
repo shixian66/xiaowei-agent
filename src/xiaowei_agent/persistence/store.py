@@ -27,13 +27,19 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     AwareDatetime,
     Contract,
+    EvidenceEnvelope,
     LeaseGrant,
     PipelineStage,
     RequestContext,
     RequestEnvelope,
     RetryDecision,
     RetryReason,
+    Sha256Hex,
     StageOutcome,
+    StepAttemptDecision,
+    StepCommitRejection,
+    StepOutcomeKind,
+    StepResultStatus,
     StrictInt,
     StrictStr,
     TaskAttemptRejection,
@@ -309,6 +315,154 @@ def retry_command_digest(command: RetryCommand) -> str:
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
+class StepExecutionRecord(Contract):
+    task_id: StrictStr
+    step_id: StrictStr
+    attempt_count: StrictInt = Field(gt=0)
+    last_fencing_token: StrictInt = Field(gt=0)
+    result_status: StepResultStatus | None = None
+    kind: StepOutcomeKind | None = None
+    evidence_id: StrictStr | None = None
+    commit_digest: Sha256Hex | None = None
+    started_at: AwareDatetime
+    committed_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _state_is_one_of_the_persistable_shapes(self) -> Self:
+        terminal_fields = (
+            self.result_status,
+            self.kind,
+            self.commit_digest,
+            self.committed_at,
+        )
+        if len({value is None for value in terminal_fields}) != 1:
+            raise ValueError("step terminal fields must be set or cleared together")
+        has_evidence = self.evidence_id is not None
+        is_tool_result = self.kind is StepOutcomeKind.TOOL_RESULT
+        if has_evidence != is_tool_result:
+            raise ValueError("only tool-result steps carry evidence")
+        if self.result_status is StepResultStatus.SKIPPED:
+            raise ValueError("skipped steps are derived and cannot be journaled")
+        if is_tool_result and self.result_status not in {
+            StepResultStatus.OK,
+            StepResultStatus.FAILED,
+            StepResultStatus.TIMEOUT,
+        }:
+            raise ValueError("tool-result step has an invalid status")
+        if (
+            self.kind is StepOutcomeKind.MALFORMED_ADAPTER
+            and self.result_status is not StepResultStatus.FAILED
+        ):
+            raise ValueError("malformed adapter steps must fail")
+        return self
+
+
+class StepAttemptCommand(Contract):
+    grant: TaskAttemptGrant
+    step_id: StrictStr
+
+
+class StepAttemptResult(Contract):
+    decision: StepAttemptDecision
+    winner: TaskRecord
+    record: StepExecutionRecord | None = None
+    attempts_used: StrictInt = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _record_presence_matches_the_decision(self) -> Self:
+        if self.decision in {
+            StepAttemptDecision.PROCEED,
+            StepAttemptDecision.ALREADY_COMMITTED,
+        } and self.record is None:
+            raise ValueError("this decision requires a step record")
+        if self.decision is StepAttemptDecision.UNKNOWN_STEP and self.record is not None:
+            raise ValueError("an unknown step cannot have a journal row")
+        return self
+
+
+class StepCommitCommand(Contract):
+    grant: TaskAttemptGrant
+    step_id: StrictStr
+    kind: StepOutcomeKind
+    status: StepResultStatus
+    evidence: EvidenceEnvelope | None = None
+    audit_events: tuple[TraceEvent, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _shape_and_ownership_are_closed(self) -> Self:
+        has_evidence = self.evidence is not None
+        is_tool_result = self.kind is StepOutcomeKind.TOOL_RESULT
+        if has_evidence != is_tool_result:
+            raise ValueError("only tool-result commits carry evidence")
+        if self.status is StepResultStatus.SKIPPED:
+            raise ValueError("skipped steps are derived and cannot be committed")
+        if is_tool_result and self.status not in {
+            StepResultStatus.OK,
+            StepResultStatus.FAILED,
+            StepResultStatus.TIMEOUT,
+        }:
+            raise ValueError("tool-result commit has an invalid status")
+        if (
+            self.kind is StepOutcomeKind.MALFORMED_ADAPTER
+            and self.status is not StepResultStatus.FAILED
+        ):
+            raise ValueError("malformed adapter commits must fail")
+        from xiaowei_agent.contracts import evidence_id
+
+        if self.evidence is not None and self.evidence.evidence_id != evidence_id(
+            task_id=self.grant.task_id, step_id=self.step_id
+        ):
+            raise ValueError("evidence does not belong to this task and step")
+        event_ids: set[str] = set()
+        for event in self.audit_events:
+            if (
+                event.task_id != self.grant.task_id
+                or event.step_id != self.step_id
+                or event.attempt_number != self.grant.attempt_number
+            ):
+                raise ValueError("step audit belongs to a different execution")
+            if event.event_id in event_ids:
+                raise ValueError("step audit event ids must be unique")
+            event_ids.add(event.event_id)
+        return self
+
+
+class StepCommitResult(Contract):
+    committed: bool
+    winner: TaskRecord
+    record: StepExecutionRecord | None = None
+    rejection: StepCommitRejection | None = None
+
+    @model_validator(mode="after")
+    def _result_is_self_consistent(self) -> Self:
+        if self.committed == (self.rejection is not None):
+            raise ValueError("committed and rejection must be mutually exclusive")
+        if self.committed and self.record is None:
+            raise ValueError("a committed result requires its journal row")
+        if (
+            self.rejection is StepCommitRejection.NO_ATTEMPT_IN_FLIGHT
+            and self.record is not None
+        ):
+            raise ValueError("no-attempt rejection cannot return a journal row")
+        return self
+
+
+def step_commit_digest(command: StepCommitCommand) -> str:
+    """步骤提交内容的顺序无关审计多重集 checksum。"""
+    payload = {
+        "status": command.status.value,
+        "kind": command.kind.value,
+        "evidence": None
+        if command.evidence is None
+        else dump_contract(command.evidence),
+        "audit": sorted(
+            content_digest(canonical_json(dump_contract(event)).decode("utf-8"))
+            for event in command.audit_events
+        ),
+    }
+    return content_digest(canonical_json(payload).decode("utf-8"))
+
+
 class TransitionCommand(Contract):
     """``transition`` 的入参 DTO。
 
@@ -322,6 +476,13 @@ class TransitionCommand(Contract):
     to_status: TaskStatus
     fencing_token: StrictInt | None = Field(default=None, gt=0)
     terminal_reason: StrictStr | None = None
+    audit_events: tuple[TraceEvent, ...] = ()
+
+    @model_validator(mode="after")
+    def _audit_belongs_to_the_task(self) -> Self:
+        if any(event.task_id != self.task_id for event in self.audit_events):
+            raise ValueError("transition audit belongs to a different task")
+        return self
 
 
 class StaleLeaseQuery(Contract):
@@ -356,13 +517,7 @@ class TaskStore(Protocol):
         """:raises TaskNotFoundError: 任务不存在或不属于指定作用域。"""
 
     async def transition(
-        self,
-        *,
-        task_id: str,
-        expected_version: int,
-        to_status: TaskStatus,
-        fencing_token: int | None = None,
-        terminal_reason: str | None = None,
+        self, *, command: TransitionCommand
     ) -> TransitionResult:
         """CAS 状态迁移。**永远返回存储层 winner**，调用方必须采纳它。"""
 
@@ -380,7 +535,9 @@ class TaskStore(Protocol):
     ) -> LeaseGrant | None:
         """续租保持同一 token；非持有者、token 陈旧或租约已过期时返回 ``None``。"""
 
-    async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
+    async def list_stale_leases(
+        self, *, query: StaleLeaseQuery
+    ) -> tuple[TaskRecord, ...]:
         """列出曾被租出、租约已过期、且未处于终态的任务。
 
         按 ``(lease_expires_at, task_id)`` 稳定排序，最多返回 ``limit`` 条。
@@ -431,3 +588,18 @@ class TaskStore(Protocol):
 
     async def schedule_retry(self, *, command: RetryCommand) -> RetryResult:
         """原子结束当前尝试并安排下一次可领取时间。"""
+
+    async def begin_step_attempt(
+        self, *, command: StepAttemptCommand
+    ) -> StepAttemptResult:
+        """在当前 grant 下原子预留一次工具调用预算。"""
+
+    async def commit_step_result(
+        self, *, command: StepCommitCommand
+    ) -> StepCommitResult:
+        """原子提交步骤终局、Evidence 与审计。"""
+
+    async def load_step_executions(
+        self, *, task_id: str
+    ) -> tuple[StepExecutionRecord, ...]:
+        """读取已存在的步骤行；缺行表示步骤从未开始。"""

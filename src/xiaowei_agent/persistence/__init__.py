@@ -16,6 +16,11 @@ from xiaowei_agent.persistence.store import (
     RetryCommand,
     RetryResult,
     StaleLeaseQuery,
+    StepAttemptCommand,
+    StepAttemptResult,
+    StepCommitCommand,
+    StepCommitResult,
+    StepExecutionRecord,
     TaskAttemptCommand,
     TaskAttemptGrant,
     TaskAttemptResult,
@@ -26,6 +31,7 @@ from xiaowei_agent.persistence.store import (
     idempotency_scope_digest,
     request_dedup_digest,
     retry_command_digest,
+    step_commit_digest,
     submission_digest,
 )
 
@@ -43,6 +49,11 @@ __all__ = [
     "RetryCommand",
     "RetryResult",
     "StaleLeaseQuery",
+    "StepAttemptCommand",
+    "StepAttemptResult",
+    "StepCommitCommand",
+    "StepCommitResult",
+    "StepExecutionRecord",
     "TaskAttemptCommand",
     "TaskAttemptGrant",
     "TaskAttemptResult",
@@ -53,5 +64,6 @@ __all__ = [
     "idempotency_scope_digest",
     "request_dedup_digest",
     "retry_command_digest",
+    "step_commit_digest",
     "submission_digest",
 ]

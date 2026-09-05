@@ -60,7 +60,7 @@ from xiaowei_agent.governance.step_admission import admit_step
 from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanStore
-from xiaowei_agent.persistence.store import Clock, TaskStore
+from xiaowei_agent.persistence.store import Clock, TaskStore, TransitionCommand
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 from xiaowei_agent.runners.runner import WorkflowPaused
@@ -333,10 +333,12 @@ class DeterministicStepRunner:
         self, task_id: str, version: int, status: TaskStatus, fencing_token: int
     ) -> TaskRecord:
         result = await self._tasks.transition(
-            task_id=task_id,
-            expected_version=version,
-            to_status=status,
-            fencing_token=fencing_token,
+            command=TransitionCommand(
+                task_id=task_id,
+                expected_version=version,
+                to_status=status,
+                fencing_token=fencing_token,
+            )
         )
         if not result.applied:
             # 必须采纳 winner 并停下，不能用本地旧对象继续推进。

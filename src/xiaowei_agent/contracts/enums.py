@@ -125,6 +125,27 @@ class GrantRejection(StrEnum):
     STALE_FENCING = "stale_fencing"
 
 
+class StepAttemptDecision(StrEnum):
+    PROCEED = "proceed"
+    ALREADY_COMMITTED = "already_committed"
+    STALE_FENCING = "stale_fencing"
+    NOT_RUNNABLE = "not_runnable"
+    UNKNOWN_STEP = "unknown_step"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+class StepOutcomeKind(StrEnum):
+    TOOL_RESULT = "tool_result"
+    MALFORMED_ADAPTER = "malformed_adapter"
+
+
+class StepCommitRejection(StrEnum):
+    STALE_FENCING = "stale_fencing"
+    NOT_RUNNABLE = "not_runnable"
+    ALREADY_COMMITTED_DIFFERENT = "already_committed_different"
+    NO_ATTEMPT_IN_FLIGHT = "no_attempt_in_flight"
+
+
 class RetryReason(StrEnum):
     UNCLASSIFIED_ERROR = "unclassified_error"
 

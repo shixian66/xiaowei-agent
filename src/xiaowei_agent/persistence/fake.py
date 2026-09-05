@@ -22,8 +22,11 @@ from typing import Final, TypeVar
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ApprovalRequest,
+    GrantRejection,
     LeaseGrant,
     RetryDecision,
+    StepAttemptDecision,
+    StepCommitRejection,
     TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
@@ -55,6 +58,11 @@ from xiaowei_agent.persistence.store import (
     RetryCommand,
     RetryResult,
     StaleLeaseQuery,
+    StepAttemptCommand,
+    StepAttemptResult,
+    StepCommitCommand,
+    StepCommitResult,
+    StepExecutionRecord,
     TaskAttemptCommand,
     TaskAttemptGrant,
     TaskAttemptResult,
@@ -64,6 +72,7 @@ from xiaowei_agent.persistence.store import (
     attempt_terminal_event,
     request_dedup_digest,
     retry_command_digest,
+    step_commit_digest,
     submission_digest,
     submission_matches_record,
     validate_task_failure_limit,
@@ -93,6 +102,7 @@ class InMemoryTaskStore:
         # "本任务第几条"这个概念，两个实现会对同一次写入给出不同的序号。
         self._approvals = self._state.approvals
         self._audit_events = self._state.audit_events
+        self._step_executions = self._state.step_executions
         self._lock = self._state.lock
 
     def _require(self, task_id: str) -> TaskRecord:
@@ -149,24 +159,8 @@ class InMemoryTaskStore:
         return current
 
     async def transition(
-        self,
-        *,
-        task_id: str,
-        expected_version: int,
-        to_status: TaskStatus,
-        fencing_token: int | None = None,
-        terminal_reason: str | None = None,
+        self, *, command: TransitionCommand
     ) -> TransitionResult:
-        # 先把入参构造成严格 DTO：Protocol 的类型标注在运行时不拦任何东西，
-        # expected_version=False / fencing_token=True / to_status="planning"
-        # 都会被 lax 转换悄悄接受。
-        command = TransitionCommand(
-            task_id=task_id,
-            expected_version=expected_version,
-            to_status=to_status,
-            fencing_token=fencing_token,
-            terminal_reason=terminal_reason,
-        )
         async with self._lock:
             current = self._require(command.task_id)
             # ``command.expected_version`` 来自调用方，``current`` 来自存储——两侧必须
@@ -176,6 +170,8 @@ class InMemoryTaskStore:
                 return TransitionResult(applied=False, winner=current, rejection=rejection)
             updated = apply_transition(current, command)
             self._records[command.task_id] = updated
+            for event in command.audit_events:
+                self._append(self._audit_events, command.task_id, event)
             return TransitionResult(applied=True, winner=updated, rejection=None)
 
     async def acquire_lease(
@@ -230,8 +226,9 @@ class InMemoryTaskStore:
             self._records[task_id] = current.model_copy(update={"lease_expires_at": expires})
             return grant
 
-    async def list_stale_leases(self, *, limit: int) -> tuple[TaskRecord, ...]:
-        query = StaleLeaseQuery(limit=limit)
+    async def list_stale_leases(
+        self, *, query: StaleLeaseQuery
+    ) -> tuple[TaskRecord, ...]:
         async with self._lock:
             now = self._clock()
             stale = [r for r in self._records.values() if is_stale_lease(r, now=now)]
@@ -415,3 +412,204 @@ class InMemoryTaskStore:
             for event in command.audit_events:
                 self._append(self._audit_events, current.task_id, event)
             return RetryResult(decision=RetryDecision.SCHEDULED, winner=winner)
+
+    def _attempts_used(self, task_id: str) -> int:
+        return sum(
+            record.attempt_count
+            for (stored_task_id, _), record in self._step_executions.items()
+            if stored_task_id == task_id
+        )
+
+    async def begin_step_attempt(
+        self, *, command: StepAttemptCommand
+    ) -> StepAttemptResult:
+        async with self._lock:
+            current = self._require(command.grant.task_id)
+            key = (current.task_id, command.step_id)
+            existing = self._step_executions.get(key)
+            attempts_used = self._attempts_used(current.task_id)
+            rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=frozenset({TaskStatus.RUNNING}),
+            )
+            if rejection is not None:
+                decision = (
+                    StepAttemptDecision.NOT_RUNNABLE
+                    if rejection
+                    in {
+                        GrantRejection.TERMINAL_PROTECTED,
+                        GrantRejection.STATUS_NOT_ALLOWED,
+                    }
+                    else StepAttemptDecision.STALE_FENCING
+                )
+                return StepAttemptResult(
+                    decision=decision,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+            if existing is not None and existing.result_status is not None:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.ALREADY_COMMITTED,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+
+            stored = self._state.plans.get(current.task_id)
+            if stored is None:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.NOT_RUNNABLE,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+            step_ids = {step.step_id for step in stored.plan.steps}
+            if command.step_id not in step_ids:
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.UNKNOWN_STEP,
+                    winner=current,
+                    record=None,
+                    attempts_used=attempts_used,
+                )
+
+            increments_budget = (
+                existing is None
+                or existing.last_fencing_token != command.grant.fencing_token
+            )
+            if (
+                increments_budget
+                and attempts_used >= stored.plan.budget.max_tool_calls
+            ):
+                return StepAttemptResult(
+                    decision=StepAttemptDecision.BUDGET_EXHAUSTED,
+                    winner=current,
+                    record=existing,
+                    attempts_used=attempts_used,
+                )
+
+            if existing is None:
+                record = StepExecutionRecord(
+                    task_id=current.task_id,
+                    step_id=command.step_id,
+                    attempt_count=1,
+                    last_fencing_token=command.grant.fencing_token,
+                    started_at=self._clock(),
+                )
+            elif increments_budget:
+                record = existing.model_copy(
+                    update={
+                        "attempt_count": existing.attempt_count + 1,
+                        "last_fencing_token": command.grant.fencing_token,
+                        "started_at": self._clock(),
+                    }
+                )
+            else:
+                record = existing
+            self._step_executions[key] = record
+            return StepAttemptResult(
+                decision=StepAttemptDecision.PROCEED,
+                winner=current,
+                record=record,
+                attempts_used=self._attempts_used(current.task_id),
+            )
+
+    async def commit_step_result(
+        self, *, command: StepCommitCommand
+    ) -> StepCommitResult:
+        digest = step_commit_digest(command)
+        async with self._lock:
+            current = self._require(command.grant.task_id)
+            key = (current.task_id, command.step_id)
+            existing = self._step_executions.get(key)
+            rejection = grant_is_current(
+                current,
+                command.grant,
+                now=self._clock(),
+                allowed_statuses=frozenset({TaskStatus.RUNNING}),
+            )
+            if rejection is not None:
+                decision = (
+                    StepCommitRejection.NOT_RUNNABLE
+                    if rejection
+                    in {
+                        GrantRejection.TERMINAL_PROTECTED,
+                        GrantRejection.STATUS_NOT_ALLOWED,
+                    }
+                    else StepCommitRejection.STALE_FENCING
+                )
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    record=existing,
+                    rejection=decision,
+                )
+            if (
+                existing is None
+                or existing.last_fencing_token != command.grant.fencing_token
+            ):
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    rejection=StepCommitRejection.NO_ATTEMPT_IN_FLIGHT,
+                )
+            if existing.result_status is not None:
+                if existing.commit_digest == digest:
+                    return StepCommitResult(
+                        committed=True, winner=current, record=existing
+                    )
+                return StepCommitResult(
+                    committed=False,
+                    winner=current,
+                    record=existing,
+                    rejection=StepCommitRejection.ALREADY_COMMITTED_DIFFERENT,
+                )
+
+            stored = self._state.plans.get(current.task_id)
+            if stored is None:
+                raise ValueError("step commit has no stored plan")
+            evidence = command.evidence
+            if evidence is not None and (
+                evidence.capability_id != stored.plan.capability_id
+                or evidence.capability_version != stored.plan.capability_version
+            ):
+                raise ValueError("step evidence does not match the stored plan")
+            if evidence is not None:
+                evidence_bucket = self._state.evidence.setdefault(current.task_id, {})
+                previous = evidence_bucket.get(evidence.evidence_id)
+                if previous is not None and previous != evidence:
+                    raise ValueError("different evidence already exists for this step")
+
+            committed = StepExecutionRecord(
+                task_id=existing.task_id,
+                step_id=existing.step_id,
+                attempt_count=existing.attempt_count,
+                last_fencing_token=existing.last_fencing_token,
+                result_status=command.status,
+                kind=command.kind,
+                evidence_id=None if evidence is None else evidence.evidence_id,
+                commit_digest=digest,
+                started_at=existing.started_at,
+                committed_at=self._clock(),
+            )
+            if evidence is not None:
+                self._state.evidence[current.task_id][evidence.evidence_id] = evidence
+            for event in command.audit_events:
+                self._append(self._audit_events, current.task_id, event)
+            self._step_executions[key] = committed
+            return StepCommitResult(
+                committed=True, winner=current, record=committed
+            )
+
+    async def load_step_executions(
+        self, *, task_id: str
+    ) -> tuple[StepExecutionRecord, ...]:
+        async with self._lock:
+            records = [
+                record
+                for (stored_task_id, _), record in self._step_executions.items()
+                if stored_task_id == task_id
+            ]
+        return tuple(sorted(records, key=lambda record: record.step_id))

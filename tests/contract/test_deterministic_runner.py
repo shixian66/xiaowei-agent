@@ -16,6 +16,7 @@ from tests.fakes.runner import RunnerHarness
 
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
 from xiaowei_agent.contracts import TaskStatus, ToolCallStatus
+from xiaowei_agent.persistence.store import TransitionCommand
 
 
 async def test_golden_run_executes_only_the_first_step() -> None:
@@ -143,8 +144,8 @@ async def test_every_transition_carries_expected_version_and_token() -> None:
     await harness.start()
     assert harness.store.transitions
     for command in harness.store.transitions:
-        assert command["expected_version"] is not None
-        assert command["fencing_token"] is not None
+        assert command.expected_version is not None
+        assert command.fencing_token is not None
 
 
 async def test_runner_adopts_the_store_winner_on_cas_failure() -> None:
@@ -152,9 +153,11 @@ async def test_runner_adopts_the_store_winner_on_cas_failure() -> None:
     harness = RunnerHarness(GOLDEN)
     await harness.ensure_task()
     await harness.store.transition(
-        task_id=harness.task_id,
-        expected_version=(await harness.store.get(lookup=harness.lookup)).version,
-        to_status=TaskStatus.CANCELED,
+        command=TransitionCommand(
+            task_id=harness.task_id,
+            expected_version=(await harness.store.get(lookup=harness.lookup)).version,
+            to_status=TaskStatus.CANCELED,
+        )
     )
     with pytest.raises(RuntimeError):
         await harness.start()
@@ -174,9 +177,11 @@ async def test_rejected_transition_stops_the_run_with_zero_calls() -> None:
     record = await harness.store.get(lookup=harness.lookup)
     for status in (TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL):
         result = await harness.store.transition(
-            task_id=harness.task_id,
-            expected_version=record.version,
-            to_status=status,
+            command=TransitionCommand(
+                task_id=harness.task_id,
+                expected_version=record.version,
+                to_status=status,
+            )
         )
         assert result.applied
         record = result.winner

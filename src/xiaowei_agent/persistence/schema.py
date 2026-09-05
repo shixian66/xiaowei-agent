@@ -113,6 +113,48 @@ TASK_SUBMISSIONS: Final = sa.Table(
 )
 """不可变提交事实；终态 M4 历史任务是唯一允许缺少该行的任务。"""
 
+TASK_STEP_EXECUTIONS: Final = sa.Table(
+    "task_step_executions",
+    METADATA,
+    sa.Column("task_id", sa.Text, primary_key=True),
+    sa.Column("step_id", sa.Text, primary_key=True),
+    sa.Column("attempt_count", sa.BigInteger, nullable=False),
+    sa.Column("last_fencing_token", sa.BigInteger, nullable=False),
+    sa.Column("result_status", sa.Text, nullable=True),
+    sa.Column("kind", sa.Text, nullable=True),
+    sa.Column("evidence_id", sa.Text, nullable=True),
+    sa.Column("commit_digest", sa.CHAR(64), nullable=True),
+    sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("committed_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint(
+        "attempt_count > 0", name="ck_task_steps_attempt_count_positive"
+    ),
+    sa.CheckConstraint(
+        "last_fencing_token > 0", name="ck_task_steps_fencing_token_positive"
+    ),
+    sa.CheckConstraint(
+        "(result_status IS NULL AND kind IS NULL AND commit_digest IS NULL"
+        " AND committed_at IS NULL) OR (result_status IS NOT NULL"
+        " AND kind IS NOT NULL AND commit_digest IS NOT NULL"
+        " AND committed_at IS NOT NULL)",
+        name="ck_task_steps_terminal_fields_consistent",
+    ),
+    sa.CheckConstraint(
+        "(evidence_id IS NOT NULL AND kind = 'tool_result')"
+        " OR (evidence_id IS NULL AND kind IS DISTINCT FROM 'tool_result')",
+        name="ck_task_steps_evidence_kind_consistent",
+    ),
+    sa.CheckConstraint(
+        "result_status IS NULL OR "
+        "(kind = 'tool_result' AND result_status IN ('step_ok', 'step_failed',"
+        " 'step_timeout') AND evidence_id IS NOT NULL) OR "
+        "(kind = 'malformed_adapter' AND result_status = 'step_failed'"
+        " AND evidence_id IS NULL)",
+        name="ck_task_steps_result_shape",
+    ),
+)
+"""每个计划步骤的 in-flight 或不可变终局；缺行表示该步骤从未开始。"""
+
 TASK_PLANS: Final = sa.Table(
     "task_plans",
     METADATA,
@@ -177,6 +219,7 @@ TASK_AUDIT_EVENTS: Final = sa.Table(
 ALL_TABLES: Final = (
     TASKS,
     TASK_SUBMISSIONS,
+    TASK_STEP_EXECUTIONS,
     TASK_PLANS,
     TASK_EVIDENCE,
     TASK_APPROVALS,

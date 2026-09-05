@@ -27,6 +27,7 @@ from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
+    TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
 )
@@ -163,6 +164,41 @@ def test_retry_markers_are_nullable_but_pairwise_constrained() -> None:
     names = {item.name for item in TASKS.constraints if item.name is not None}
     assert "ck_tasks_retry_markers_consistent" in names
     assert "ck_tasks_retry_attempt_not_future" in names
+
+
+def test_rev_0005_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0005_step_journal as revision,
+    )
+
+    assert revision.revision == "0005_step_journal"
+    assert revision.down_revision == "0004_retry_markers"
+
+
+def test_step_journal_has_the_complete_self_describing_shape() -> None:
+    assert set(TASK_STEP_EXECUTIONS.columns.keys()) == {
+        "task_id",
+        "step_id",
+        "attempt_count",
+        "last_fencing_token",
+        "result_status",
+        "kind",
+        "evidence_id",
+        "commit_digest",
+        "started_at",
+        "committed_at",
+    }
+    assert TASK_STEP_EXECUTIONS.primary_key.columns.keys() == ["task_id", "step_id"]
+    names = {
+        item.name for item in TASK_STEP_EXECUTIONS.constraints if item.name is not None
+    }
+    assert names >= {
+        "ck_task_steps_attempt_count_positive",
+        "ck_task_steps_fencing_token_positive",
+        "ck_task_steps_terminal_fields_consistent",
+        "ck_task_steps_evidence_kind_consistent",
+        "ck_task_steps_result_shape",
+    }
 
 
 def test_submission_table_has_one_row_per_task_and_complete_facts() -> None:

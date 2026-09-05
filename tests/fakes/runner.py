@@ -41,6 +41,7 @@ from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
+from xiaowei_agent.persistence.store import TransitionCommand
 from xiaowei_agent.planning.starrocks.compiler import PLAN_BUDGET
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
@@ -94,12 +95,12 @@ class RecordingTaskStore(InMemoryTaskStore):
         self, *, clock: ManualClock, state: InMemoryPersistenceState | None = None
     ) -> None:
         super().__init__(clock=clock, state=state)
-        self.transitions: list[dict[str, Any]] = []
+        self.transitions: list[TransitionCommand] = []
         self.approvals: list[Any] = []
 
-    async def transition(self, **kwargs: Any) -> Any:
-        self.transitions.append(dict(kwargs))
-        return await super().transition(**kwargs)
+    async def transition(self, *, command: TransitionCommand) -> Any:
+        self.transitions.append(command)
+        return await super().transition(command=command)
 
     async def record_approval(self, *, request: Any) -> int:
         self.approvals.append(request)

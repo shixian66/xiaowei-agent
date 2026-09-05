@@ -101,9 +101,9 @@ def test_every_task_store_implementation_keeps_the_protocol_keyword_arguments(
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(TaskStore)
-    # 11：M5 Task 3 在 M4 的 8 条上增加 dispatch / begin-attempt / retry。
+    # 14：M5 Task 4 再增加 begin-step / commit-step / load-step，方法集到此闭合。
     # 这个数字是刻意写死的哨兵：下一次扩约必须让评审者明确看到。
-    assert len(methods) == 11, f"TaskStore 的方法集变了：{methods}"
+    assert len(methods) == 14, f"TaskStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(TaskStore, method)

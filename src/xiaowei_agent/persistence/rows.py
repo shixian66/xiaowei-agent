@@ -21,9 +21,18 @@ python 校验模式下 ``str`` 不能转 ``StrEnum``、ISO 字符串不能转 ``
 
 import json
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
-from xiaowei_agent.contracts import Contract, TaskRecord, TaskStatus
+from xiaowei_agent.contracts import (
+    Contract,
+    StepOutcomeKind,
+    StepResultStatus,
+    TaskRecord,
+    TaskStatus,
+)
+
+if TYPE_CHECKING:
+    from xiaowei_agent.persistence.store import StepExecutionRecord
 
 _C = TypeVar("_C", bound=Contract)
 
@@ -105,4 +114,42 @@ def row_to_record(row: Mapping[str, Any]) -> TaskRecord:
         lease_owner=row["lease_owner"],
         lease_expires_at=row["lease_expires_at"],
         fencing_token=row["fencing_token"],
+    )
+
+
+def step_execution_to_row(record: "StepExecutionRecord") -> dict[str, Any]:
+    """步骤 journal 契约到列；可空终局字段一律显式保留。"""
+    return {
+        "task_id": record.task_id,
+        "step_id": record.step_id,
+        "attempt_count": record.attempt_count,
+        "last_fencing_token": record.last_fencing_token,
+        "result_status": None
+        if record.result_status is None
+        else record.result_status.value,
+        "kind": None if record.kind is None else record.kind.value,
+        "evidence_id": record.evidence_id,
+        "commit_digest": record.commit_digest,
+        "started_at": record.started_at,
+        "committed_at": record.committed_at,
+    }
+
+
+def row_to_step_execution(row: Mapping[Any, Any]) -> "StepExecutionRecord":
+    """数据库列到自描述步骤 journal 契约。"""
+    from xiaowei_agent.persistence.store import StepExecutionRecord
+
+    status = row["result_status"]
+    kind = row["kind"]
+    return StepExecutionRecord(
+        task_id=row["task_id"],
+        step_id=row["step_id"],
+        attempt_count=row["attempt_count"],
+        last_fencing_token=row["last_fencing_token"],
+        result_status=None if status is None else StepResultStatus(status),
+        kind=None if kind is None else StepOutcomeKind(kind),
+        evidence_id=row["evidence_id"],
+        commit_digest=row["commit_digest"],
+        started_at=row["started_at"],
+        committed_at=row["committed_at"],
     )

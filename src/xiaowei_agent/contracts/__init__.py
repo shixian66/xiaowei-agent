@@ -48,7 +48,10 @@ from xiaowei_agent.contracts.enums import (
     RiskLevel,
     SqlGuardRejection,
     StageOutcome,
+    StepAttemptDecision,
+    StepCommitRejection,
     StepConditionKind,
+    StepOutcomeKind,
     StepResultStatus,
     TargetRejection,
     TaskAttemptRejection,
@@ -58,7 +61,7 @@ from xiaowei_agent.contracts.enums import (
     TrustLevel,
 )
 from xiaowei_agent.contracts.errors import AgentError
-from xiaowei_agent.contracts.evidence import EvidenceEnvelope
+from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.external_input import ExternalInput
 from xiaowei_agent.contracts.intent import IntentDraft
@@ -153,8 +156,11 @@ __all__ = [
     "SqlGuardRejection",
     "SqlSurface",
     "StageOutcome",
+    "StepAttemptDecision",
+    "StepCommitRejection",
     "StepCondition",
     "StepConditionKind",
+    "StepOutcomeKind",
     "StepResultStatus",
     "StrictInt",
     "StrictStr",
@@ -174,5 +180,6 @@ __all__ = [
     "TransitionResult",
     "TrustLevel",
     "content_digest",
+    "evidence_id",
     "frozen_map",
 ]

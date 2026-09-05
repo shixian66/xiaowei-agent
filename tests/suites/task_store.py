@@ -33,6 +33,7 @@ from tests.conftest import (
     make_lookup,
     make_submission,
 )
+from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET
 from tests.fakes.sinks import make_event
 
 from xiaowei_agent.contracts import (
@@ -40,7 +41,13 @@ from xiaowei_agent.contracts import (
     ApprovalRequest,
     ApprovalState,
     AttemptIntent,
+    EvidenceEnvelope,
+    ExternalSource,
     PipelineStage,
+    StepAttemptDecision,
+    StepCommitRejection,
+    StepOutcomeKind,
+    StepResultStatus,
     TaskStatus,
     TransitionRejection,
 )
@@ -55,11 +62,25 @@ from xiaowei_agent.persistence.store import (
     RetryCommand,
     RetryDecision,
     RetryReason,
+    StaleLeaseQuery,
+    StepAttemptCommand,
+    StepCommitCommand,
     TaskAttemptCommand,
     TaskAttemptRejection,
+    TransitionCommand,
 )
 
 _APPROVAL_AT = _dt.datetime(2026, 9, 3, 12, 0, tzinfo=_dt.UTC)
+
+
+async def _transition(store: Any, **values: Any) -> Any:
+    """Keep the shared cases focused on outcomes while exercising the command DTO."""
+    return await store.transition(command=TransitionCommand(**values))
+
+
+async def _list_stale(store: Any, *, limit: object) -> Any:
+    """Construct the public query DTO so its strict validation stays under test."""
+    return await store.list_stale_leases(query=StaleLeaseQuery(limit=limit))
 
 
 def make_approval(task_id: str, *, step_id: str = "s1") -> ApprovalRequest:
@@ -228,7 +249,7 @@ async def test_bare_task_id_is_not_a_supported_read_shape(store, task) -> None:
 
 
 async def test_cas_success_bumps_version(store, task) -> None:
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
     )
     assert result.applied is True
@@ -238,10 +259,10 @@ async def test_cas_success_bumps_version(store, task) -> None:
 
 async def test_cas_failure_returns_the_storage_winner(store, task) -> None:
     """调用方必须能拿到 winner，而不是只知道"失败了"。"""
-    await store.transition(
+    await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
     )
-    stale = await store.transition(
+    stale = await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.RUNNING
     )
     assert stale.applied is False
@@ -251,7 +272,7 @@ async def test_cas_failure_returns_the_storage_winner(store, task) -> None:
 
 
 async def test_illegal_transition_is_rejected(store, task) -> None:
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.SUCCEEDED
     )
     assert result.applied is False
@@ -268,7 +289,7 @@ async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task
     这条同时是 M4 的跨实现约束：PostgreSQL 实现必须同样无条件 ``SET``，包括
     ``SET terminal_reason = NULL``，不得写成"有值才进 SET 子句"。
     """
-    marked = await store.transition(
+    marked = await _transition(store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -277,7 +298,7 @@ async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task
     assert marked.applied
     assert marked.winner.terminal_reason == "transient.upstream_timeout"
 
-    resumed = await store.transition(
+    resumed = await _transition(store,
         task_id=task.task_id,
         expected_version=marked.winner.version,
         to_status=TaskStatus.RUNNING,
@@ -371,7 +392,7 @@ async def test_stale_token_write_is_rejected(store, task, clock) -> None:
     clock.advance(seconds=31)
     await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
     current = await store.get(lookup=lookup_for(task))
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -385,7 +406,7 @@ async def test_write_without_token_under_live_lease_is_rejected(store, task) -> 
     """不传 token 即跳过 fencing 校验，等于没有 fencing。"""
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     current = await store.get(lookup=lookup_for(task))
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -396,7 +417,7 @@ async def test_write_without_token_under_live_lease_is_rejected(store, task) -> 
 
 async def test_token_without_any_live_lease_is_rejected(store, task) -> None:
     """持有一个不存在的租约同样是违规。"""
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -408,7 +429,7 @@ async def test_token_without_any_live_lease_is_rejected(store, task) -> None:
 
 async def test_transition_without_any_lease_is_allowed(store, task) -> None:
     """created → planning 发生在取租约之前，必须放行，否则任务无法启动。"""
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -418,7 +439,7 @@ async def test_transition_without_any_lease_is_allowed(store, task) -> None:
 
 async def test_terminal_task_cannot_acquire_lease(store, task) -> None:
     """已终态的任务不应再被任何 worker 领走。"""
-    await store.transition(
+    await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
     )
     assert await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30) is None
@@ -429,7 +450,7 @@ async def test_stale_token_is_reported_before_version_mismatch(store, task, cloc
     old = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=999,
         to_status=TaskStatus.PLANNING,
@@ -449,7 +470,7 @@ async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -465,7 +486,7 @@ async def test_expired_lease_cannot_be_used_with_its_old_token_either(
     granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -481,7 +502,7 @@ async def test_expired_lease_cannot_be_used_with_its_old_token_either(
 async def test_expected_version_rejects_bool(store, task) -> None:
     """False 会匹配版本 0，True 会匹配版本 1。"""
     with pytest.raises(ValidationError):
-        await store.transition(
+        await _transition(store,
             task_id=task.task_id, expected_version=False, to_status=TaskStatus.PLANNING
         )
 
@@ -489,7 +510,7 @@ async def test_expected_version_rejects_bool(store, task) -> None:
 async def test_fencing_token_rejects_bool(store, task) -> None:
     """True 会匹配 token 1。"""
     with pytest.raises(ValidationError):
-        await store.transition(
+        await _transition(store,
             task_id=task.task_id,
             expected_version=task.version,
             to_status=TaskStatus.PLANNING,
@@ -499,7 +520,7 @@ async def test_fencing_token_rejects_bool(store, task) -> None:
 
 async def test_to_status_rejects_a_plain_string(store, task) -> None:
     with pytest.raises(ValidationError):
-        await store.transition(
+        await _transition(store,
             task_id=task.task_id, expected_version=task.version, to_status="planning"
         )
 
@@ -549,19 +570,19 @@ async def _leased_task(store, context, key: str, owner: str):
 
 async def test_a_task_that_was_never_leased_is_not_stale(store, task) -> None:
     """从未租出的任务没有"接管"可言——它还没开始。"""
-    assert await store.list_stale_leases(limit=10) == ()
+    assert await _list_stale(store, limit=10) == ()
 
 
 async def test_a_live_lease_is_not_stale(store, task) -> None:
     """仍在有效期内的任务有活着的持有者，列出它等于邀请抢占。"""
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
-    assert await store.list_stale_leases(limit=10) == ()
+    assert await _list_stale(store, limit=10) == ()
 
 
 async def test_an_expired_lease_is_stale(store, task, clock) -> None:
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
-    stale = await store.list_stale_leases(limit=10)
+    stale = await _list_stale(store, limit=10)
     assert [record.task_id for record in stale] == [task.task_id]
 
 
@@ -574,7 +595,7 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -582,7 +603,7 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     assert result.applied is False  # 过期租约下写入被拒，任务仍非终态
     taken = await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
     assert taken is not None
-    done = await store.transition(
+    done = await _transition(store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -590,7 +611,7 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     )
     assert done.applied is True
     clock.advance(seconds=31)
-    assert await store.list_stale_leases(limit=10) == ()
+    assert await _list_stale(store, limit=10) == ()
 
 
 async def test_stale_leases_are_ordered_by_expiry_then_task_id(store, context, clock) -> None:
@@ -599,7 +620,7 @@ async def test_stale_leases_are_ordered_by_expiry_then_task_id(store, context, c
     clock.advance(seconds=5)
     second, _ = await _leased_task(store, context, "idem-b", "w2")
     clock.advance(seconds=31)
-    stale = await store.list_stale_leases(limit=10)
+    stale = await _list_stale(store, limit=10)
     assert [record.task_id for record in stale] == [first.task_id, second.task_id]
 
 
@@ -618,7 +639,7 @@ async def test_stale_leases_with_the_same_expiry_are_ordered_by_task_id(
     first, _ = await _leased_task(store, context, "idem-a", "w1")
     second, _ = await _leased_task(store, context, "idem-b", "w2")
     clock.advance(seconds=31)
-    stale = await store.list_stale_leases(limit=10)
+    stale = await _list_stale(store, limit=10)
     assert len(stale) == 2
     assert [record.lease_expires_at for record in stale] == [
         stale[0].lease_expires_at,
@@ -634,8 +655,8 @@ async def test_stale_leases_respect_the_limit(store, context, clock) -> None:
     clock.advance(seconds=5)
     await _leased_task(store, context, "idem-b", "w2")
     clock.advance(seconds=31)
-    assert len(await store.list_stale_leases(limit=10)) == 2
-    assert len(await store.list_stale_leases(limit=1)) == 1
+    assert len(await _list_stale(store, limit=10)) == 2
+    assert len(await _list_stale(store, limit=1)) == 1
 
 
 async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, clock) -> None:
@@ -654,7 +675,7 @@ async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, cloc
     pending, _ = await _leased_task(store, context, "idem-pending", "w2")
 
     current = await store.get(lookup=lookup_for(finished))
-    done = await store.transition(
+    done = await _transition(store,
         task_id=finished.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -674,8 +695,8 @@ async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, cloc
         "前提不成立：终态任务应当更早过期，否则它排不到前面，挤不掉任何东西"
     )
 
-    assert [r.task_id for r in await store.list_stale_leases(limit=1)] == [pending.task_id]
-    assert [r.task_id for r in await store.list_stale_leases(limit=10)] == [pending.task_id]
+    assert [r.task_id for r in await _list_stale(store, limit=1)] == [pending.task_id]
+    assert [r.task_id for r in await _list_stale(store, limit=10)] == [pending.task_id]
 
 
 async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
@@ -686,7 +707,7 @@ async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     before = await store.get(lookup=lookup_for(task))
-    assert await store.list_stale_leases(limit=10)
+    assert await _list_stale(store, limit=10)
     assert await store.get(lookup=lookup_for(task)) == before
 
 
@@ -694,7 +715,7 @@ async def test_listing_stale_leases_claims_nothing(store, task, clock) -> None:
 async def test_list_stale_leases_rejects_a_bad_limit(store, bad_limit: object) -> None:
     """``limit=True`` 在运行时会被当作 1；参数少不代表不会写错。"""
     with pytest.raises(ValidationError):
-        await store.list_stale_leases(limit=bad_limit)
+        await _list_stale(store, limit=bad_limit)
 
 
 # --- 终态保护 -----------------------------------------------------------------
@@ -707,7 +728,7 @@ async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -
     await drive_to_terminal(store, lookup_for(task), terminal)
     current = await store.get(lookup=lookup_for(task))
     for target in TaskStatus:
-        result = await store.transition(
+        result = await _transition(store,
             task_id=task.task_id, expected_version=current.version, to_status=target
         )
         assert result.applied is False
@@ -717,10 +738,10 @@ async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -
 
 async def test_terminal_protection_wins_over_version_mismatch(store, task) -> None:
     """拒绝原因必须指向最具体的违规，否则真实原因会被掩盖。"""
-    await store.transition(
+    await _transition(store,
         task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
     )
-    result = await store.transition(
+    result = await _transition(store,
         task_id=task.task_id, expected_version=999, to_status=TaskStatus.RUNNING
     )
     assert result.rejection is TransitionRejection.TERMINAL_PROTECTED
@@ -883,7 +904,7 @@ def _retry_command(grant, *, next_attempt_at: _dt.datetime, event_id: str = "ret
 async def _move(store, record, *statuses: TaskStatus):
     current = record
     for status in statuses:
-        result = await store.transition(
+        result = await _transition(store,
             task_id=current.task_id,
             expected_version=current.version,
             to_status=status,
@@ -1014,7 +1035,7 @@ async def test_schedule_retry_is_idempotent_and_immediately_fences_the_grant(
     assert first.winner.task_failure_count == 1
     assert first.winner.fencing_token > started.grant.fencing_token
     assert first.winner.lease_expires_at == command.next_attempt_at
-    stale_write = await store.transition(
+    stale_write = await _transition(store,
         task_id=task.task_id,
         expected_version=first.winner.version,
         to_status=TaskStatus.PLANNING,
@@ -1070,7 +1091,7 @@ async def test_retry_accepts_a_grant_that_failed_during_planning(
 ) -> None:
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
-    planning = await store.transition(
+    planning = await _transition(store,
         task_id=task.task_id,
         expected_version=started.winner.version,
         to_status=TaskStatus.PLANNING,
@@ -1137,6 +1158,414 @@ async def test_terminal_attempt_rejection_never_mutates_the_winner(store, task) 
     assert result.rejection is TaskAttemptRejection.TERMINAL_PROTECTED
     assert result.winner == terminal
     assert result.submission is None
+
+
+# --- M5 步骤 journal ----------------------------------------------------------
+
+
+async def _running_attempt(store, plan_store, context, *, plan=FIXTURE_PLAN):
+    task = await store.create_task(submission=make_submission(context))
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    await plan_store.save(task_id=task.task_id, plan=plan, target=FIXTURE_TARGET)
+    planning = await _transition(store,
+        task_id=task.task_id,
+        expected_version=started.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    assert planning.applied
+    running = await _transition(store,
+        task_id=task.task_id,
+        expected_version=planning.winner.version,
+        to_status=TaskStatus.RUNNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    assert running.applied
+    return started.grant, running.winner
+
+
+def _step_event(grant, *, event_id: str = "step-event-1"):
+    return make_event(
+        stage=PipelineStage.GATEWAY,
+        task_id=grant.task_id,
+        event_id=event_id,
+    ).model_copy(
+        update={
+            "attempt_number": grant.attempt_number,
+            "step_id": "s1",
+        }
+    )
+
+
+def _step_evidence(grant, *, value: str = "q1") -> EvidenceEnvelope:
+    return EvidenceEnvelope(
+        evidence_id=f"{grant.task_id}:s1",
+        capability_id=FIXTURE_PLAN.capability_id,
+        capability_version=FIXTURE_PLAN.capability_version,
+        facts=({"query_id": value},),
+        source="starrocks-fake",
+        source_kind=ExternalSource.TOOL,
+        captured_at=_APPROVAL_AT,
+        sampled=False,
+        limitations=("deterministic fixture",),
+    )
+
+
+async def test_step_begin_is_idempotent_within_one_grant(
+    store, plan_store, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    command = StepAttemptCommand(grant=grant, step_id="s1")
+    first = await store.begin_step_attempt(command=command)
+    second = await store.begin_step_attempt(command=command)
+    assert first.decision is StepAttemptDecision.PROCEED
+    assert second.decision is StepAttemptDecision.PROCEED
+    assert first.record == second.record
+    assert first.attempts_used == second.attempts_used == 1
+
+
+async def test_unknown_step_and_missing_plan_create_no_journal_rows(
+    store, plan_store, context
+) -> None:
+    task = await store.create_task(submission=make_submission(context))
+    started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
+    assert started.grant is not None
+    planning = await _transition(store,
+        task_id=task.task_id,
+        expected_version=started.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    running = await _transition(store,
+        task_id=task.task_id,
+        expected_version=planning.winner.version,
+        to_status=TaskStatus.RUNNING,
+        fencing_token=started.grant.fencing_token,
+    )
+    assert running.applied
+    missing = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=started.grant, step_id="s1")
+    )
+    assert missing.decision is StepAttemptDecision.NOT_RUNNABLE
+    assert await store.load_step_executions(task_id=task.task_id) == ()
+
+    await plan_store.save(task_id=task.task_id, plan=FIXTURE_PLAN, target=FIXTURE_TARGET)
+    unknown = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=started.grant, step_id="unknown")
+    )
+    assert unknown.decision is StepAttemptDecision.UNKNOWN_STEP
+    assert await store.load_step_executions(task_id=task.task_id) == ()
+
+
+async def test_step_commit_atomically_exposes_evidence_and_is_idempotent(
+    store, plan_store, evidence_ledger, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    command = StepCommitCommand(
+        grant=grant,
+        step_id="s1",
+        kind=StepOutcomeKind.TOOL_RESULT,
+        status=StepResultStatus.OK,
+        evidence=_step_evidence(grant),
+        audit_events=(_step_event(grant),),
+    )
+    committed = await store.commit_step_result(command=command)
+    replay = await store.commit_step_result(command=command)
+    assert committed.committed
+    assert replay.committed
+    assert replay.record == committed.record
+    assert await evidence_ledger.load(task_id=grant.task_id) == (command.evidence,)
+
+    changed = command.model_copy(
+        update={"audit_events": (_step_event(grant, event_id="different"),)}
+    )
+    conflict = await store.commit_step_result(command=changed)
+    assert conflict.rejection is StepCommitRejection.ALREADY_COMMITTED_DIFFERENT
+    assert await evidence_ledger.load(task_id=grant.task_id) == (command.evidence,)
+
+
+async def test_malformed_adapter_commit_is_terminal_without_evidence(
+    store, plan_store, evidence_ledger, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    result = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.MALFORMED_ADAPTER,
+            status=StepResultStatus.FAILED,
+            evidence=None,
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert result.committed
+    assert result.record is not None
+    assert result.record.kind is StepOutcomeKind.MALFORMED_ADAPTER
+    assert result.record.evidence_id is None
+    assert await evidence_ledger.load(task_id=grant.task_id) == ()
+
+
+async def test_commit_without_a_matching_begin_is_rejected(
+    store, plan_store, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    result = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.OK,
+            evidence=_step_evidence(grant),
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert result.rejection is StepCommitRejection.NO_ATTEMPT_IN_FLIGHT
+    assert result.record is None
+
+
+async def test_step_budget_is_derived_from_the_stored_plan(
+    store, plan_store, context, two_step_plan
+) -> None:
+    plan = two_step_plan.model_copy(
+        update={
+            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
+        }
+    )
+    grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
+    first = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    exhausted = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s2")
+    )
+    assert first.decision is StepAttemptDecision.PROCEED
+    assert exhausted.decision is StepAttemptDecision.BUDGET_EXHAUSTED
+    assert exhausted.attempts_used == 1
+    assert [record.step_id for record in await store.load_step_executions(
+        task_id=grant.task_id
+    )] == ["s1"]
+
+
+async def test_new_grant_takeover_consumes_budget_and_old_grant_is_stale(
+    store, plan_store, context, clock
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    first = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    assert first.record is not None
+    clock.advance(seconds=61)
+    takeover = await store.begin_task_attempt(
+        command=_attempt_command(grant.task_id, owner="worker-2")
+    )
+    assert takeover.grant is not None
+    resumed = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=takeover.grant, step_id="s1")
+    )
+    assert resumed.decision is StepAttemptDecision.PROCEED
+    assert resumed.attempts_used == 2
+    assert resumed.record is not None
+    assert resumed.record.attempt_count == 2
+
+    stale = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.OK,
+            evidence=_step_evidence(grant),
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert stale.rejection is StepCommitRejection.STALE_FENCING
+
+
+async def test_stale_fencing_and_not_runnable_can_return_no_step_row(
+    store, plan_store, context
+) -> None:
+    grant, running = await _running_attempt(store, plan_store, context)
+    forged = grant.model_copy(
+        update={
+            "lease": grant.lease.model_copy(
+                update={"fencing_token": grant.fencing_token + 1}
+            )
+        }
+    )
+    stale_begin = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=forged, step_id="s1")
+    )
+    stale_commit = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=forged,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.OK,
+            evidence=_step_evidence(forged),
+            audit_events=(_step_event(forged),),
+        )
+    )
+    assert stale_begin.decision is StepAttemptDecision.STALE_FENCING
+    assert stale_begin.record is None
+    assert stale_commit.rejection is StepCommitRejection.STALE_FENCING
+    assert stale_commit.record is None
+
+    terminal = await _transition(
+        store,
+        task_id=grant.task_id,
+        expected_version=running.version,
+        to_status=TaskStatus.FAILED,
+        fencing_token=grant.fencing_token,
+    )
+    assert terminal.applied
+    not_runnable_begin = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    not_runnable_commit = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.OK,
+            evidence=_step_evidence(grant),
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert not_runnable_begin.decision is StepAttemptDecision.NOT_RUNNABLE
+    assert not_runnable_begin.record is None
+    assert not_runnable_commit.rejection is StepCommitRejection.NOT_RUNNABLE
+    assert not_runnable_commit.record is None
+    assert await store.load_step_executions(task_id=grant.task_id) == ()
+
+
+async def test_full_budget_allows_paid_reentry_and_commit(
+    store, plan_store, context, two_step_plan
+) -> None:
+    plan = two_step_plan.model_copy(
+        update={
+            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
+        }
+    )
+    grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
+    command = StepAttemptCommand(grant=grant, step_id="s1")
+    first = await store.begin_step_attempt(command=command)
+    reentry = await store.begin_step_attempt(command=command)
+    assert first.decision is StepAttemptDecision.PROCEED
+    assert reentry.decision is StepAttemptDecision.PROCEED
+    assert reentry.attempts_used == 1
+
+    committed = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.OK,
+            evidence=_step_evidence(grant),
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert committed.committed
+
+
+async def test_full_budget_blocks_a_new_grant_takeover(
+    store, plan_store, context, clock, two_step_plan
+) -> None:
+    plan = two_step_plan.model_copy(
+        update={
+            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
+        }
+    )
+    grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
+    first = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    assert first.record is not None
+    clock.advance(seconds=61)
+    takeover = await store.begin_task_attempt(
+        command=_attempt_command(grant.task_id, owner="worker-2")
+    )
+    assert takeover.grant is not None
+    exhausted = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=takeover.grant, step_id="s1")
+    )
+    assert exhausted.decision is StepAttemptDecision.BUDGET_EXHAUSTED
+    assert exhausted.attempts_used == 1
+    assert exhausted.record == first.record
+
+
+async def test_committed_step_replays_and_rejects_each_semantic_change(
+    store, plan_store, evidence_ledger, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    command = StepCommitCommand(
+        grant=grant,
+        step_id="s1",
+        kind=StepOutcomeKind.TOOL_RESULT,
+        status=StepResultStatus.OK,
+        evidence=_step_evidence(grant),
+        audit_events=(
+            _step_event(grant, event_id="step-event-a"),
+            _step_event(grant, event_id="step-event-b"),
+        ),
+    )
+    committed = await store.commit_step_result(command=command)
+    assert committed.committed
+
+    changes = (
+        command.model_copy(update={"status": StepResultStatus.FAILED}),
+        command.model_copy(update={"evidence": _step_evidence(grant, value="q2")}),
+        command.model_copy(update={"audit_events": command.audit_events[:1]}),
+        command.model_copy(
+            update={
+                "audit_events": (
+                    *command.audit_events,
+                    _step_event(grant, event_id="step-event-c"),
+                )
+            }
+        ),
+    )
+    for changed in changes:
+        replay = await store.commit_step_result(command=changed)
+        assert replay.rejection is StepCommitRejection.ALREADY_COMMITTED_DIFFERENT
+        assert replay.record == committed.record
+
+    already = await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    assert already.decision is StepAttemptDecision.ALREADY_COMMITTED
+    assert already.record == committed.record
+    assert await evidence_ledger.load(task_id=grant.task_id) == (command.evidence,)
+
+
+async def test_timeout_is_a_distinct_persisted_step_outcome(
+    store, plan_store, context
+) -> None:
+    grant, _ = await _running_attempt(store, plan_store, context)
+    await store.begin_step_attempt(
+        command=StepAttemptCommand(grant=grant, step_id="s1")
+    )
+    result = await store.commit_step_result(
+        command=StepCommitCommand(
+            grant=grant,
+            step_id="s1",
+            kind=StepOutcomeKind.TOOL_RESULT,
+            status=StepResultStatus.TIMEOUT,
+            evidence=_step_evidence(grant),
+            audit_events=(_step_event(grant),),
+        )
+    )
+    assert result.committed
+    assert result.record is not None
+    assert result.record.result_status is StepResultStatus.TIMEOUT
 
 
 # --- 分组 ---------------------------------------------------------------------
@@ -1225,9 +1654,25 @@ DISPATCH_ATTEMPT_CASES = (
     test_terminal_attempt_rejection_never_mutates_the_winner,
 )
 
+STEP_EXECUTION_CASES = (
+    test_step_begin_is_idempotent_within_one_grant,
+    test_unknown_step_and_missing_plan_create_no_journal_rows,
+    test_step_commit_atomically_exposes_evidence_and_is_idempotent,
+    test_malformed_adapter_commit_is_terminal_without_evidence,
+    test_commit_without_a_matching_begin_is_rejected,
+    test_step_budget_is_derived_from_the_stored_plan,
+    test_new_grant_takeover_consumes_budget_and_old_grant_is_stale,
+    test_stale_fencing_and_not_runnable_can_return_no_step_row,
+    test_full_budget_allows_paid_reentry_and_commit,
+    test_full_budget_blocks_a_new_grant_takeover,
+    test_committed_step_replays_and_rejects_each_semantic_change,
+    test_timeout_is_a_distinct_persisted_step_outcome,
+)
+
 ALL_GROUPS = {
     "contract": CONTRACT_CASES,
     "lease_fencing": LEASE_FENCING_CASES,
     "terminal_protection": TERMINAL_PROTECTION_CASES,
     "dispatch_attempt": DISPATCH_ATTEMPT_CASES,
+    "step_execution": STEP_EXECUTION_CASES,
 }

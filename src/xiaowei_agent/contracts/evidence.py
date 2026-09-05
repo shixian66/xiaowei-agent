@@ -17,6 +17,13 @@ from xiaowei_agent.contracts.base import (
 )
 from xiaowei_agent.contracts.enums import ExternalSource
 
+_EVIDENCE_ID_SEPARATOR = ":"
+
+
+def evidence_id(*, task_id: str, step_id: str) -> str:
+    """跨 builder、journal 与 outcome 共用的确定性证据引用。"""
+    return f"{task_id}{_EVIDENCE_ID_SEPARATOR}{step_id}"
+
 
 class EvidenceEnvelope(Contract):
     evidence_id: StrictStr

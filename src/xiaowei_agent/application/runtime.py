@@ -55,7 +55,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.observability.sink import TraceSink
 from xiaowei_agent.persistence.evidence import EvidenceLedger
-from xiaowei_agent.persistence.store import Clock, TaskStore
+from xiaowei_agent.persistence.store import Clock, TaskStore, TransitionCommand
 from xiaowei_agent.planning.starrocks.compiler import compile_plan
 from xiaowei_agent.planning.starrocks.params import (
     DEFAULT_MIN_QUERY_TIME_MS,
@@ -324,11 +324,13 @@ class XiaoweiRuntime:
         )
         if current.status not in _TERMINAL:
             result = await self._tasks.transition(
-                task_id=task_id,
-                expected_version=current.version,
-                to_status=status,
-                fencing_token=current.fencing_token,
-                terminal_reason=outcome.terminal_reason,
+                command=TransitionCommand(
+                    task_id=task_id,
+                    expected_version=current.version,
+                    to_status=status,
+                    fencing_token=current.fencing_token,
+                    terminal_reason=outcome.terminal_reason,
+                )
             )
             # 采纳存储层 winner：终态由存储保护，不由调用方自觉。
             status = result.winner.status

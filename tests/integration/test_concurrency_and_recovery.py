@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.conftest import lookup_for, make_envelope, make_submission
 
 from xiaowei_agent.contracts import TaskStatus, TransitionRejection
+from xiaowei_agent.persistence.store import TransitionCommand
 
 pytestmark = pytest.mark.security
 
@@ -43,9 +44,11 @@ async def test_exactly_one_writer_wins_a_concurrent_cas(
     results = await asyncio.gather(
         *(
             writer.transition(
-                task_id=task.task_id,
-                expected_version=task.version,
-                to_status=TaskStatus.PLANNING,
+                command=TransitionCommand(
+                    task_id=task.task_id,
+                    expected_version=task.version,
+                    to_status=TaskStatus.PLANNING,
+                )
             )
             for writer in writers
         )
@@ -112,10 +115,12 @@ async def test_preempted_worker_cannot_write_with_its_old_token(
 
     current = await store.get(lookup=lookup_for(task))
     rejected = await old_worker.transition(
-        task_id=task.task_id,
-        expected_version=current.version,
-        to_status=TaskStatus.PLANNING,
-        fencing_token=old.fencing_token,
+        command=TransitionCommand(
+            task_id=task.task_id,
+            expected_version=current.version,
+            to_status=TaskStatus.PLANNING,
+            fencing_token=old.fencing_token,
+        )
     )
     assert rejected.applied is False
     assert rejected.rejection is TransitionRejection.STALE_FENCING_TOKEN
@@ -127,13 +132,19 @@ async def test_a_late_event_cannot_reopen_a_terminal_task(
     """终态之后到达的事件必须被拒，且终态不变。"""
     (latecomer,) = independent_stores(1)
     done = await store.transition(
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
+        command=TransitionCommand(
+            task_id=task.task_id,
+            expected_version=task.version,
+            to_status=TaskStatus.CANCELED,
+        )
     )
     assert done.applied is True
     late = await latecomer.transition(
-        task_id=task.task_id,
-        expected_version=done.winner.version,
-        to_status=TaskStatus.RUNNING,
+        command=TransitionCommand(
+            task_id=task.task_id,
+            expected_version=done.winner.version,
+            to_status=TaskStatus.RUNNING,
+        )
     )
     assert late.applied is False
     assert late.rejection is TransitionRejection.TERMINAL_PROTECTED

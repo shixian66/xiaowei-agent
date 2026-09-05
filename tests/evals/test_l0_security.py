@@ -26,6 +26,7 @@ from xiaowei_agent.contracts import (
     TransitionRejection,
 )
 from xiaowei_agent.governance.sqlguard import SqlGuardError, verify_sql
+from xiaowei_agent.persistence.store import TransitionCommand
 from xiaowei_agent.planning import compute_plan_hash
 from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1, compile_sql
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
@@ -333,9 +334,11 @@ async def test_a29_a_written_terminal_state_is_not_overwritten() -> None:
     assert record.status is TaskStatus.SUCCEEDED
 
     result = await harness.store.transition(
-        task_id=harness.task_id,
-        expected_version=record.version,
-        to_status=TaskStatus.INDETERMINATE,
+        command=TransitionCommand(
+            task_id=harness.task_id,
+            expected_version=record.version,
+            to_status=TaskStatus.INDETERMINATE,
+        )
     )
     assert result.applied is False
     assert result.rejection is TransitionRejection.TERMINAL_PROTECTED

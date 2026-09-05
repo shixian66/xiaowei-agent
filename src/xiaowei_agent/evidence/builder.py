@@ -28,8 +28,7 @@ from xiaowei_agent.contracts import (
     SqlSurface,
     ToolResult,
 )
-
-_EVIDENCE_ID_SEPARATOR: Final[str] = ":"
+from xiaowei_agent.contracts.evidence import evidence_id as evidence_id
 
 
 class SlowQueryScope(Protocol):
@@ -60,15 +59,6 @@ class SlowQueryScope(Protocol):
 
     @property
     def query_id(self) -> str | None: ...
-
-
-def evidence_id(*, task_id: str, step_id: str) -> str:
-    """证据的可寻址标识。
-
-    确定性、可复现，同时是 ``EvidenceLedger`` 的键与 ``TaskOutcome.evidence_refs``
-    的元素——三处用同一个函数，引用才不会各自拼一份而悄悄漂移。
-    """
-    return f"{task_id}{_EVIDENCE_ID_SEPARATOR}{step_id}"
 
 
 def _filtered(row: FrozenMap, surface: SqlSurface) -> dict[str, JsonScalar]:

@@ -25,5 +25,6 @@ class InMemoryPersistenceState:
         self.evidence: dict[str, dict[str, EvidenceEnvelope]] = {}
         self.approvals: dict[str, list[ApprovalRequest]] = {}
         self.audit_events: dict[str, list[TraceEvent]] = {}
+        self.step_executions: dict[tuple[str, str], Any] = {}
         self.next_fencing_token = 1
         self.next_created_seq = 1

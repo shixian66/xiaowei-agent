@@ -43,8 +43,11 @@ from xiaowei_agent.persistence.rows import (
     load_contract,
     record_to_row,
     row_to_record,
+    row_to_step_execution,
+    step_execution_to_row,
 )
 from xiaowei_agent.persistence.schema import ALL_TABLES
+from xiaowei_agent.persistence.store import StepExecutionRecord
 
 _NOW = _dt.datetime(2026, 9, 3, 12, 34, 56, 789012, tzinfo=_dt.UTC)
 
@@ -252,6 +255,22 @@ def test_retry_markers_round_trip_together() -> None:
         update={"retry_scheduled_by_attempt": 2, "retry_command_digest": "d" * 64}
     )
     assert row_to_record(record_to_row(record)) == record
+
+
+def test_step_execution_record_round_trips_through_columns() -> None:
+    record = StepExecutionRecord(
+        task_id="t1",
+        step_id="s1",
+        attempt_count=2,
+        last_fencing_token=9,
+        result_status=None,
+        kind=None,
+        evidence_id=None,
+        commit_digest=None,
+        started_at=_NOW,
+        committed_at=None,
+    )
+    assert row_to_step_execution(step_execution_to_row(record)) == record
 
 
 def test_status_is_stored_as_its_string_value() -> None:
