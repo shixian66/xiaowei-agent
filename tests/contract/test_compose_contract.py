@@ -45,6 +45,26 @@ def test_compose_exposes_only_api_on_host_loopback() -> None:
         assert "/var/run/docker.sock" not in str(service.get("volumes", ()))
 
 
+def test_compose_resources_remain_project_scoped_named_resources() -> None:
+    compose = _yaml("docker-compose.yml")
+    for section in ("volumes", "networks"):
+        resources = compose.get(section, {})
+        assert isinstance(resources, dict)
+        for definition in resources.values():
+            options = definition or {}
+            assert isinstance(options, dict)
+            assert "name" not in options
+            assert options.get("external") is not True
+
+    mount = compose["services"]["postgres"]["volumes"]
+    assert len(mount) == 1
+    assert isinstance(mount[0], str)
+    source, target = mount[0].split(":", maxsplit=1)
+    assert target == "/var/lib/postgresql/data"
+    assert source in compose["volumes"]
+    assert not source.startswith((".", "/"))
+
+
 def test_secrets_are_file_references_and_never_environment_values() -> None:
     compose = _yaml("docker-compose.yml")
     assert compose["secrets"] == {

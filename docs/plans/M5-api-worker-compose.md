@@ -363,6 +363,8 @@ Worker 进程 owner 必须含每次启动生成的随机 nonce，不能来自静
 - 已 `OK` 提交的步骤：跳过，不重复调用工具（由 `begin_step_attempt` 返回 `ALREADY_COMMITTED` 兜底，两层独立表达）；
 - 已 `FAILED` 或 `TIMEOUT` 提交的步骤：同样跳过、放回 `failed_steps`、**并置 `degraded = True`**。
 
+实现允许两条等价防线同时存在：循环前从完整 journal 快照预加载 `failed_steps/degraded`，以及逐步收到 `ALREADY_COMMITTED` 时再次采纳同一条不可变记录。在合法计划顺序与不可变 journal 下，删掉任意一条后外部行为仍然正确，因此不能写一个只为锁住私有结构而失败的测试；证明责任是**同时删掉两条等价防线时**，下述恢复行为测试必须转红。若以后删除其中一条冗余实现，剩余路径自然成为唯一承重点，不需要改外部契约。
+
 `ToolCallStatus` 到 `StepResultStatus` 的映射是闭表，不允许在实现里合并：
 
 | gateway 返回 | step result | Evidence |
@@ -1795,9 +1797,9 @@ dispatch 谓词、排序键与 retry 判定必须是 `decisions.py` 的纯函数
 
 - **断言 s2 仍然不执行**、Gateway 调用次数为 0；
 - **断言恢复后的最终状态恰为 `INDETERMINATE`**，不是只断言"s2 没跑"——这是 `degraded` 重建的唯一承重点，缺了它，一个只重建 `failed_steps` 的实现照样全绿；
-- **反证 A**：删掉重建 `failed_steps` 的那几行 → s2 会执行，Gateway 调用次数断言转红；
-- **反证 B**：删掉重建 `degraded` 的那一行 → s2 仍不执行、Gateway 仍为 0，但**最终状态变成 `SUCCEEDED`**，上一条断言转红。两条反证必须分开写：它们证明的是两个不同的缺陷，合成一条就会有一个永远不被证明；
-- **反证 C**：在 Runner 里保留一个进程内 `tool_calls_used` 并用它做预算判定 → 构造"重启前已用满预算"的场景，重启后该步骤必须仍被 `BUDGET_EXHAUSTED` 拒绝；保留局部计数器时它会被放行；
+- **失败上下文反证**：同时删掉快照预加载与 `ALREADY_COMMITTED` 采纳中的 `failed_steps` 恢复 → s2 会执行，Gateway 调用次数断言转红；两处是对同一不可变 journal 的等价防线，单删一处后行为仍正确，不要求测试锁住私有实现位置；
+- **降级状态反证**：同时删掉快照预加载与 `ALREADY_COMMITTED` 采纳中的 `degraded` 恢复 → s2 仍不执行、Gateway 仍为 0，但**最终状态变成 `SUCCEEDED`**，上一条断言转红；同理只对两条等价防线同时退化承重；
+- **工具预算反证**：在 Runner 里保留一个进程内 `tool_calls_used` 并用它做预算判定 → 构造"重启前已用满预算"的场景，重启后该步骤必须仍被 `BUDGET_EXHAUSTED` 拒绝；保留局部计数器时它会被放行；
 - 已 `OK` 提交的步骤恢复后被判 `ALREADY_COMMITTED`；未执行步骤的条件重新求值与首次结果一致；`start()` 在 `load_step_executions` 非空时按不变量破坏失败。
 
 `ToolCallStatus → StepResultStatus` 闭表逐行一条，含"超时落成 `TIMEOUT` 而非 `FAILED`"。
@@ -2003,7 +2005,7 @@ CI 从 7 jobs 增为 8 jobs，Compose smoke 是独立 job；checkout 8 次、set
 | 逐切片迁移 | 每个 Task 结束时 `test_schema_matches_migration.py` 成立 | `rev_0002..0005` 各自 up/down/up |
 | 有效 grant 判据 | 六条反例（CREATED / PLANNING / 恰好过期 / owner 不同 / 旧 token / 未来 token）三类行计数均不变；改成只比 token 后必须转红 | 两实现共跑；真实租约过期窗口 |
 | 审批恢复入口 | `DISPATCH` 与 `APPROVAL_RESUME` 的可领取集合不相交；租约已过期的暂停任务可被 `APPROVAL_RESUME` 领取 | M4 的三组审批恢复用例在 grant 契约下仍绿 |
-| 恢复重建三份状态 | 最终状态恰为 `INDETERMINATE`；反证 A/B/C 各自转红 | 重启后 Gateway 调用不增加且状态不是 SUCCEEDED |
+| 恢复重建三份状态 | 最终状态恰为 `INDETERMINATE`；`failed_steps/degraded` 各自同时删两条等价防线时转红，工具预算反证独立转红 | 重启后 Gateway 调用不增加且状态不是 SUCCEEDED |
 | 提交形状可判别 | 唯一命名矩阵 `STEP_COMMIT_INVALID_CASES` 同时驱动 command/record 两层；malformed 正例单列；`StepExecutionRecord.kind` 使行自描述 | 两实现绑定同一矩阵，恢复时无需猜"当初是不是 malformed" |
 | step 真值表 | begin 8 行、commit 6 行逐行一条；含无 step row 的 stale/not-runnable、满预算下重入可 PROCEED 与接管为 BUDGET_EXHAUSTED、fencing 比 task 行而计数比 step 行 | 两实现共跑同一 suite |
 | step 结果消费 | 存储 case id 直接驱动 Runner 消费闭表；逐行断言 Gateway/terminal/Evidence/audit 次数；ALREADY_COMMITTED 重建 failed/degraded | 重启读取既存终局不重复调用工具或写子行 |
@@ -2252,7 +2254,7 @@ M5 只有同时满足以下条件才可以提交给用户验收：
 6. §4.2.1 的两张存储真值表及 Runner 消费闭表逐行有用例；`PROCEED` 是唯一 Gateway 分支，`ALREADY_COMMITTED` 不重跑且重建失败上下文，预算/未知 step 的终态 reason 正确，commit 两个不变量破坏分支 fail-stop；§4.2.2 的 grant 反例三类行计数均不变；提交非法形状只由 `STEP_COMMIT_INVALID_CASES` 驱动且两实现绑定同一矩阵；
 7. task/submission、step/evidence/audit、**状态改动与其审计**三处原子性各有真实 PostgreSQL 证据，其中第三处有 insert 故障注入反证；step 行**五种**合法状态逐行可构造（含 in-flight 四项同时为 `None`，以及 **malformed 终局可构造**——它是形状 B 的唯一落点），`commit_digest` 的四条差异反例（含 audit 子集与超集）全部通过；
 8. `schedule_retry` 的幂等重放、命令不匹配与旧 grant 立即失效各有反例；`RetryClass` 不存在于代码中；
-9. `CREATED`（有/无 plan）、`PLANNING`、`RUNNING` 三个崩溃点各有恢复反例；跨重启的三份进程内状态各有独立反证（A/B/C），其中**恢复后最终状态恰为 `INDETERMINATE`** 必须被断言；`AWAITING_APPROVAL` 经 `APPROVAL_RESUME` 可在租约已过期后恢复，M4 的三组审批恢复用例仍绿；
+9. `CREATED`（有/无 plan）、`PLANNING`、`RUNNING` 三个崩溃点各有恢复反例；跨重启时，`failed_steps/degraded` 的快照预加载与 `ALREADY_COMMITTED` 采纳是等价防线，分别对两处同时退化做行为反证，不用测试锁死任一私有实现位置；工具预算仍有独立反证；其中**恢复后最终状态恰为 `INDETERMINATE`** 必须被断言；`AWAITING_APPROVAL` 经 `APPROVAL_RESUME` 可在租约已过期后恢复，M4 的三组审批恢复用例仍绿；
 10. 重复提交、并发 Worker、Worker 重启、retry handoff 与 fencing loser 均有反例；`_finish` 的既有 fencing 绕过已修复且有行为反例与 AST 反证；
 11. §3.5 的异常闭表逐行有用例且每行断言调用次数；§4.7 的两分类各有反例，`DisconnectionError` 与 invalidated DBAPIError 先于 `StatementError` 映射为 unavailable，非连接失效 SQLAlchemy 尾部归 systemic；写路径的 `PersistenceWriteOutcome` 能区分 confirmed rollback/not-confirmed，异常与日志均不含 SQL/参数/DSN；
 12. 四个有序 revision 各自有 up/down/up 用例，且每个 Task 结束时 schema 与 migration 一致；降到 `0001_initial` 前先做 SAVEPOINT old-index compatibility probe：兼容数据完成 M4 SQL 契约插入，不兼容的超大合法 scope 在默认/强制两种模式都于任何变更前失败且 schema/revision/data 不变；该证据不冒充跨镜像；
