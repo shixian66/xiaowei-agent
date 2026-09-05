@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 `prometheus.alert.evidence`、Evidence target seam 修复均已验收合入。PR 2 已形成 `asset.inventory.lookup` fake/recording 本地送审候选，尚待独立复审、远程 CI 与项目负责人验收，未合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M5 已验收并合入 `main`；M6a PR 1 `prometheus.alert.evidence`、Evidence target seam 修复均已验收合入。PR 2 已形成 `asset.inventory.lookup` fake/recording 送审候选，[PR #14](https://github.com/shixian66/xiaowei-agent/pull/14) 首轮远程 CI 八项全绿，尚待独立复审与项目负责人验收，未合入。**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -249,10 +249,10 @@ python -m scripts.compose_smoke
 
 当前实现仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。M6a PR 1
 增加了 Alertmanager 告警读取与 Prometheus 固定模板指标取证；PR 2 候选增加资产精确
-查询。本机没有 Docker 或 PostgreSQL 测试 DSN，因此 PR 2 新增的 Compose/PostgreSQL
-路径目前只有代码、契约与受控 skip 证据；必须等 PR CI 实跑后再记录非生产运行证据。
-PR #11 的 run `33966437003` 已实跑 PR 1 的 PostgreSQL integration 与 Compose smoke，
-但这不能推出任何真实运维系统兼容、部署、canary 或用户验收。
+查询。本机没有 Docker 或 PostgreSQL 测试 DSN；PR #14 的 run `33972562736` 已在 GitHub
+隔离 runner 实跑 PR 2 的 PostgreSQL integration 与三能力 Compose smoke，补齐非生产
+运行证据。PR #11 的 run `33966437003` 则承载 PR 1 的对应证据。两者都不能推出任何
+真实运维系统兼容、部署、canary 或用户验收。
 
 当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 

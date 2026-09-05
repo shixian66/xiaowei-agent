@@ -1,8 +1,8 @@
 # M6a capability 扩展数据
 
 > 本文件只记录可复核的扩展成本事实，不是验收报告。PR 1 已验收并合入；PR 2 已形成
-> 本地数据采集提交，但尚未通过独立复审、远程 CI 或项目负责人验收。两个 PR 均未部署、
-> 未 canary，也未连接真实 Alertmanager、Prometheus 或资产系统。
+> 数据采集提交并取得首轮远程 CI，但尚未通过独立复审或项目负责人验收。两个 PR 均未
+> 部署、未 canary，也未连接真实 Alertmanager、Prometheus 或资产系统。
 
 ## PR 1：`prometheus.alert.evidence`
 
@@ -184,3 +184,7 @@ PromQL 与时序摘要；StarRocks 独有的是 SQL AST 与慢查询诊断。
   恢复期 plan hash、回退 policy revision，依次得到 2/1/1/1/1 条失败；还原后临时工作树
   干净并已删除。第一次 scope 变异误加载主 worktree 的 editable package 而全绿，随后用
   显式 `PYTHONPATH` 核对模块路径并得到预期 2 红；该次全绿不是覆盖结论。
+- PR #14 run [`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736)
+  在 `c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿，包含 PostgreSQL
+  integration 与三能力 Compose smoke。后续事实收口只改文档；最终 HEAD 的 CI 以
+  `gh pr checks 14` 为准。

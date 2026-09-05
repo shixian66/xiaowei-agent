@@ -9,7 +9,7 @@
 > 还会形成后续提交，所以最终候选 SHA 由交接时的 `git rev-parse HEAD` 提供，不在文件内
 > 写一个必然落后的自引用值。
 >
-> **状态：本地候选，等待独立复审、GitHub CI 与项目负责人验收。未合入、未归档。**
+> **状态：PR #14 首轮 CI 全绿，等待独立复审与项目负责人验收。未合入、未归档。**
 
 ## 1. 已验证
 
@@ -67,7 +67,15 @@ mypy src
 154 个 skip 保持既有受控语义；其中 M6a PostgreSQL 集成路径因本机无 DSN 跳过，不能当作
 真实 PostgreSQL 运行证据。
 
-### 1.4 隔离变异反证
+### 1.4 远程 CI
+
+[PR #14](https://github.com/shixian66/xiaowei-agent/pull/14) 的 run
+[`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736) 在
+`c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿：tests、security-gate、
+lint、types、secret-scan、deps-audit、integration、compose-smoke。后两项补齐本机缺失的
+隔离 PostgreSQL 与三能力 Compose 运行证据；仍不是任何真实运维目标验证。
+
+### 1.5 隔离变异反证
 
 均在 `5a2bdec` 的 detached 临时 worktree、独立 pycache 与显式 `PYTHONPATH` 下执行；每项
 撤掉保护后确认红灯，再还原，最终临时工作树无 diff 并删除。
@@ -84,7 +92,7 @@ mypy src
 `__file__`，用显式 `PYTHONPATH` 确认加载 detached 变体后得到预期 2 红。前一次结果只说明
 测试环境指向错误，不被计作保护未承重。
 
-### 1.5 扩展成本
+### 1.6 扩展成本
 
 - base → 数据 head：45 files，`+3002/-31`；27 个测试文件；资产 eval 53 个 corpus case、
   59 个实际 pytest case。
@@ -107,7 +115,8 @@ mypy src
 - 本机未提供 PostgreSQL DSN，新增资产 persistence/reprojection integration 实际为 skip；
   本报告没有声称它在真实 PostgreSQL 上运行。
 - 本机没有 Docker，新增资产 Compose task、持久化计数与 API 重启投影没有容器实跑。
-- PR 尚未推送，GitHub CI、0-skip integration 与 Compose smoke 尚无本 PR exact-SHA 证据。
+- `c373ad6` 已有 GitHub CI、integration 与 Compose smoke 证据；其后的事实收口只改文档，
+  最终 PR HEAD 的 exact-SHA 结果以 `gh pr checks 14` 为准。
 - 未连接真实资产系统、StarRocks、Prometheus、Alertmanager 或模型 API；没有任何 E1 调用。
 - 未部署、未 canary、未做真实用户问法验收，也未获得项目负责人 M6a 退出验收。
 - 未实现列举、模糊/CIDR/range、跨环境选择、标签搜索、拓扑、巡检、写入、Grafana 或

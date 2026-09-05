@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 `prometheus.alert.evidence` 与 Evidence target seam 修复已验收合入。PR 2 `asset.inventory.lookup` 已形成仅本地验证的送审候选，等待独立复审与远程 CI；未合入、未归档** |
+| 阶段 | **M0–M5 已验收并以 fast-forward 合入 `main`；M6a 计划已获批。PR 1 `prometheus.alert.evidence` 与 Evidence target seam 修复已验收合入。PR 2 `asset.inventory.lookup` 已形成送审候选，PR #14 首轮 CI 八项全绿，等待独立复审与项目负责人验收；未合入、未归档** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -46,14 +46,15 @@
 | M6a 详细计划 | [docs/plans/M6a-prometheus-asset-fake.md](docs/plans/M6a-prometheus-asset-fake.md) V1.1；首审问题回写后复审通过并获明确开工授权 |
 | M6a PR 1 | [PR #11](https://github.com/shixian66/xiaowei-agent/pull/11)，工作分支 `claude/m6a-prometheus-alert-evidence`，base `a7dba18315b4213c8a61cdf492aca0cc951328bf`；最终复审对象 `cfd63923a35be1e5dcfe13b3dbd78c00e0bca520` 已获项目负责人验收，并以 fast-forward 合入 `main`；合入后 `main` SHA 为 `ffd58ef09f13d983fb63fd3c8e106cabe60d4977` |
 | M6a PR 1 CI | 候选 `cfd63923` 上 run [`33966437003`](https://github.com/shixian66/xiaowei-agent/actions/runs/33966437003) 八个 job 全绿；合入后 `main` run [`33967274727`](https://github.com/shixian66/xiaowei-agent/actions/runs/33967274727) 八个 job 全绿，integration `2139 passed`、`compose-smoke: passed` |
-| M6a PR 2 | 分支 `claude/m6a-asset-inventory-lookup` 已快进到最新 `main@32826af1ae70c7d88e3e7406d4cf2570f1157d2f`；代码/测试数据点 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959` 已完成 A1–A4 与本地四门，A5 验收报告/扩展数据在后续纯文档提交。最终候选 SHA 以 `git rev-parse HEAD` 为准；尚未推送 PR、未跑本 PR CI、未获验收 |
+| M6a PR 2 | [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)，分支 `claude/m6a-asset-inventory-lookup`，base `32826af1ae70c7d88e3e7406d4cf2570f1157d2f`；代码/测试数据点 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`，首轮 CI 对象 `c373ad616ff213c5656375138425453aa797a82c`。最终候选 SHA 以 `git rev-parse HEAD` 为准；尚未独立复审、未获验收、未合入 |
+| M6a PR 2 CI | run [`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736) 在 `c373ad6` 上八个 job 全绿，包含 PostgreSQL integration 与三能力 Compose smoke；事实收口后的最终 HEAD 以 `gh pr checks 14` 为准 |
 | M6a 上游 seam 修复 | [PR #12](https://github.com/shixian66/xiaowei-agent/pull/12)，分支 `claude/m6a-evidence-target-seam`，base `ffd58ef09f13d983fb63fd3c8e106cabe60d4977`，候选 `b8a16705f16c7400a0accb8131a1d4a25f3a6b3d`；以 rebase 方式合入后 `main` SHA 为 `8bac76aec5acf6eea82fcff2d3efaedd232c77ee`。PR run [`33970097354`](https://github.com/shixian66/xiaowei-agent/actions/runs/33970097354) 与 main run [`33970187056`](https://github.com/shixian66/xiaowei-agent/actions/runs/33970187056) 均八个 job 全绿 |
 | M6a seam closure | [PR #13](https://github.com/shixian66/xiaowei-agent/pull/13) 已合入，`main` 前进到 `32826af1ae70c7d88e3e7406d4cf2570f1157d2f`；合入后 run [`33970461034`](https://github.com/shixian66/xiaowei-agent/actions/runs/33970461034) 八个 job 全绿 |
-| 下一步 | 对 PR 2 的最终 HEAD 做独立 SHA 级复审；推送并创建 PR 后等待八项 CI，重点核对 PostgreSQL integration 0 skip 与三能力 Compose smoke。未通过前不合入、不归档、不开始 M6b |
+| 下一步 | 等待事实收口后的 PR #14 八项 CI，再对最终 HEAD 做独立 SHA 级复审。复审与负责人验收前不合入、不归档、不开始 M6b |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR #11 已在 GitHub 隔离 runner 实跑 PostgreSQL integration 与 Compose Prometheus smoke；PR 2 资产路径目前只有本地单元/契约/eval 与受控 skip 证据，尚无 PR2 PostgreSQL/Compose 实跑。未连接任何真实运维目标 |
+| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已合入 `main`。M6a PR #11 与 PR #14 均在 GitHub 隔离 runner 实跑 PostgreSQL integration/Compose smoke；PR #14 已覆盖资产任务。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
-| 能力闭环 | `starrocks.slow_query.diagnose` 与 `prometheus.alert.evidence` 已验收并合入，证据等级均为 `tests`；`asset.inventory.lookup` 已形成 PR 2 本地候选，最强证据同为 `tests`，但尚未独立复审、CI 或验收合入。三者均未连接对应真实运维系统 |
+| 能力闭环 | `starrocks.slow_query.diagnose` 与 `prometheus.alert.evidence` 已验收并合入，证据等级均为 `tests`；`asset.inventory.lookup` 已形成 PR #14 候选并通过首轮远程 CI，最强证据同为 `tests`，但尚未独立复审或验收合入。三者均未连接对应真实运维系统 |
 
 旧项目 `ivor_aiops` 只提供历史边界和问题样本。本项目不把旧项目的分支、SHA、能力地图、线上状态或遗留待办当作自身事实。
 
@@ -207,6 +208,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 ### 已验证
 
 - **M6a PR 2 本地候选四条规范门全部 exit 0**：数据点 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959` 上，`python -m pytest -q` 为 2168 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1011 passed / 79 skipped / 1232 deselected / 5 warnings；Ruff 通过；mypy 为 133 个源文件通过。资产 L0/L1/L2 共 53 个 corpus case、59 个 pytest case；全项目收集 2322 项。完整事实与五个隔离变异见 [M6a PR 2 验收报告](docs/handoff/M6a-acceptance-report.md)。以上没有 PostgreSQL/Compose 或真实资产系统运行证据。
+- **M6a PR #14 首轮远程 CI 已补齐非生产运行证据**：run [`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736) 在 `c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿，integration 与三能力 Compose smoke 均通过。这不包含真实资产系统/运维目标，也不是部署、canary 或用户验收。
 - **M6a PR 2 未修改执行核心**：相对 `main@32826af`，Runtime、Runner、Gateway、StepAdmission、持久化、跨边界 contracts 与 canonical hash 共 0 文件改动；五个注册/装配真源加生成能力地图为 6 文件、`+183/-17`。这证明 seam 复用成功，但不隐藏注册成本；DSL 依据数据继续延期，详见 [扩展数据](docs/handoff/M6a-capability-extension-data.md)。
 - **M6a Evidence target seam 已独立合入并取得本地与远程验证**：PR #12 新增 start/resume 真实 Runner 用例证明 `StepEvidenceBuilder` 收到已准入/已复核 `ResolvedTarget`；准入与安全用例证明 target/context 环境不一致以 `policy.environment_mismatch` 在 Gateway/Evidence 前拒绝。两项保护均做隔离变异反证：撤掉 target 传递时 2 条 Runner 用例转红，撤掉环境一致性检查时契约与安全用例各 1 条转红；还原后关键 4 条全绿。本地全量为 1991 passed / 153 skipped / 5 warnings，security gate 为 980 passed / 79 skipped / 1085 deselected / 5 warnings，Ruff 与 mypy（124 个源文件）通过；PR run `33970097354` 与合入后 main run `33970187056` 均八个 job 全绿。以上仍是 fake/recording、隔离 PostgreSQL 与 Compose 证据，不是部署或真实运维系统验证。
 - **M6a PR 1 审查修复后四条规范门全部 exit 0**：`python -m pytest -q` 为 1986 passed / 153 skipped / 5 warnings；`python -m pytest -m security -q` 为 979 passed / 79 skipped / 1081 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 为 124 个源文件通过。skip 均保留原语义，其中 M6a PostgreSQL integration 因无 DSN skip。
@@ -239,7 +241,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - 未部署、未 canary、未取得产品用户验收；M5 的“验收通过”是项目里程碑验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker，因此 PR 2 的资产 PostgreSQL integration 仍是受控 skip，三能力 Compose smoke 只有契约测试、没有容器实跑；必须等本 PR CI 补证。PR #11 的 Prometheus 路径已有一次 GitHub 隔离 runner 证据，但不能外推到资产路径或其他 PostgreSQL/Docker/Compose 版本。
+- 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker，因此本机 PR 2 的资产 PostgreSQL integration 是受控 skip、Compose 未实跑；PR #14 run `33972562736` 已在 GitHub 隔离 runner 补证。单次 CI 仍不能外推到其他 PostgreSQL/Docker/Compose 版本或长期运行。
 - 主 `main` checkout 的旧 M6a 同路径计划稿已在 PR 1 合入前移到临时目录备份；当前仍保留两份与本任务无关的用户未跟踪文档 `docs/plans/development-route-v3-proposal.md` 与 `docs/plans/legacy-capability-migration-matrix.md`，本任务不读取、不修改、不暂存。
 - **`StepConditionKind` 四个成员已有三个被消费**：`ALWAYS`、`EVIDENCE_ROW_COUNT_BELOW` 与 `PRIOR_STEP_RESULT_IS`。后者由 Prom 两步计划消费，并只读取持久化 step journal 的 committed `OK`；`FAILED`/`TIMEOUT`/无记录均不运行后续步骤。`EVIDENCE_FIELD_ABSENT` 仍未消费、未验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
