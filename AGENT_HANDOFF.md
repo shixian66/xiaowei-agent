@@ -230,6 +230,7 @@ M5 的 23 个受审提交、复审补修、PostgreSQL integration 与 Compose sm
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
 - 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker。M6a PR 1 的 PostgreSQL integration 仅验证了无 DSN 时的受控 skip，Compose smoke 未运行；M5 的 CI 证据不是 M6a 候选证据。
+- 主 `main` checkout 保留一份同路径未跟踪的 `docs/plans/M6a-prometheus-asset-fake.md` Review Draft；与分支内 Approved V1.1 只在标题、状态和开工授权文字上不同。它属于用户文件且未被删除或暂存，但会阻止 Git 直接把分支中的已跟踪版本合入该 checkout；合并前必须由项目负责人选择保留/移动旧稿或采用分支获批版。
 - **`StepConditionKind` 四个成员已有三个被消费**：`ALWAYS`、`EVIDENCE_ROW_COUNT_BELOW` 与 `PRIOR_STEP_RESULT_IS`。后者由 Prom 两步计划消费，并只读取持久化 step journal 的 committed `OK`；`FAILED`/`TIMEOUT`/无记录均不运行后续步骤。`EVIDENCE_FIELD_ABSENT` 仍未消费、未验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
