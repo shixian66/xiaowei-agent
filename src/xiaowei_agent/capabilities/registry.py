@@ -11,10 +11,11 @@ M3 只注册一个能力。合成写能力 ``test.synthetic.write`` 只存在于
 
 from typing import Final
 
+from xiaowei_agent.capabilities.prometheus_alert import PROMETHEUS_ALERT_SPEC
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SPEC
 from xiaowei_agent.contracts import CapabilitySnapshot
 
-SNAPSHOT_ID: Final[str] = "snapshot.m3.starrocks.slow_query.v1"
+SNAPSHOT_ID: Final[str] = "snapshot.m6a.starrocks-prometheus.v1"
 """快照标识。
 
 写成常量而不是按时刻生成：``snapshot_id`` 会进入 ``CandidateSet`` 与审计，
@@ -23,7 +24,7 @@ SNAPSHOT_ID: Final[str] = "snapshot.m3.starrocks.slow_query.v1"
 """
 
 _SNAPSHOT: Final[CapabilitySnapshot] = CapabilitySnapshot(
-    snapshot_id=SNAPSHOT_ID, specs=(SLOW_QUERY_SPEC,)
+    snapshot_id=SNAPSHOT_ID, specs=(SLOW_QUERY_SPEC, PROMETHEUS_ALERT_SPEC)
 )
 
 

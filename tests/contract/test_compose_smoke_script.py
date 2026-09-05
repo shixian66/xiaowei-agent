@@ -336,3 +336,35 @@ def test_worker_scale_rejects_missing_or_duplicate_containers(stdout: str) -> No
     )
     with pytest.raises(SmokeError, match="SMOKE_WORKER_SCALE_INVALID"):
         compose_smoke._require_worker_scale(session)
+
+
+@pytest.mark.parametrize(
+    ("observation", "fails"),
+    [("prometheus.alert.evidence|2", False), ("prometheus.alert.evidence|1", True)],
+)
+def test_prometheus_smoke_requires_its_plan_and_two_persisted_evidences(
+    monkeypatch: pytest.MonkeyPatch, observation: str, fails: bool
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=RecordingRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+    )
+    monkeypatch.setattr(compose_smoke, "_psql", lambda *_args, **_kwargs: observation)
+    task_id = "12345678-1234-4321-9234-123456789abc"
+    if fails:
+        with pytest.raises(SmokeError, match="SMOKE_PROMETHEUS_PERSISTENCE_MISMATCH"):
+            compose_smoke._require_prometheus_persistence(session, task_id)
+    else:
+        compose_smoke._require_prometheus_persistence(session, task_id)
+
+
+def test_prometheus_render_must_survive_api_restart_byte_for_byte() -> None:
+    before = {"status": "succeeded", "render": {"answer": "constant"}}
+    compose_smoke._require_same_prometheus_render(before, dict(before))
+    with pytest.raises(SmokeError, match="SMOKE_PROMETHEUS_RENDER_MISMATCH"):
+        compose_smoke._require_same_prometheus_render(
+            before,
+            {"status": "succeeded", "render": {"answer": "changed"}},
+        )

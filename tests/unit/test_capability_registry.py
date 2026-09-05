@@ -4,7 +4,14 @@ Registry 只给出**某一时刻的快照**：同一次请求内看到的能力�
 候选解析与分类派生会依赖调用时刻。
 """
 
-from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
+from xiaowei_agent.capabilities.prometheus_alert import (
+    ALERTMANAGER_GATEWAY,
+    PROMETHEUS_ALERT_CAPABILITY_ID,
+    PROMETHEUS_ALERT_CAPABILITY_VERSION,
+    PROMETHEUS_ALERT_SPEC,
+    PROMETHEUS_GATEWAY,
+)
+from xiaowei_agent.capabilities.registry import SNAPSHOT_ID, StaticCapabilityRegistry
 from xiaowei_agent.capabilities.specs import (
     CAPABILITY_ID,
     CAPABILITY_VERSION,
@@ -30,10 +37,19 @@ def test_snapshot_id_is_stable_across_instances() -> None:
     )
 
 
-def test_snapshot_contains_only_the_m3_capability() -> None:
-    assert {s.capability_id for s in StaticCapabilityRegistry().snapshot().specs} == {
-        "starrocks.slow_query.diagnose"
-    }
+def test_snapshot_id_and_ordered_spec_set_are_one_golden() -> None:
+    snapshot = StaticCapabilityRegistry().snapshot()
+    assert (
+        snapshot.snapshot_id,
+        tuple((spec.capability_id, spec.version) for spec in snapshot.specs),
+    ) == (
+        "snapshot.m6a.starrocks-prometheus.v1",
+        (
+            ("starrocks.slow_query.diagnose", "1.0.0"),
+            ("prometheus.alert.evidence", "1.0.0"),
+        ),
+    )
+    assert SNAPSHOT_ID == snapshot.snapshot_id
 
 
 def test_synthetic_write_capability_is_not_registered() -> None:
@@ -58,6 +74,20 @@ def test_spec_declares_exactly_the_two_m3_operations() -> None:
         CAPABILITY_VERSION,
     )
     assert SLOW_QUERY_SPEC.policy_profile == POLICY_PROFILE
+
+
+def test_prometheus_spec_declares_two_read_operations_and_gateways() -> None:
+    assert (PROMETHEUS_ALERT_SPEC.capability_id, PROMETHEUS_ALERT_SPEC.version) == (
+        PROMETHEUS_ALERT_CAPABILITY_ID,
+        PROMETHEUS_ALERT_CAPABILITY_VERSION,
+    )
+    assert tuple(
+        (operation.operation, operation.gateway)
+        for operation in PROMETHEUS_ALERT_SPEC.operations
+    ) == (
+        ("get_active_alerts", ALERTMANAGER_GATEWAY),
+        ("query_metric_range", PROMETHEUS_GATEWAY),
+    )
 
 
 def test_surface_caps_are_the_same_object_as_the_declared_limits() -> None:

@@ -17,6 +17,10 @@ _FAKE_MODULES = (
     "tools.fake",
     "tools.starrocks_fake",
     "tools.starrocks_recording",
+    "tools.alertmanager_fake",
+    "tools.alertmanager_recording",
+    "tools.prometheus_fake",
+    "tools.prometheus_recording",
     "persistence.fake",
     "runners.fake",
 )

@@ -9,6 +9,9 @@ from typing import Annotated, Any, Final, Self
 from pydantic import AfterValidator, Field, model_validator
 
 from xiaowei_agent.contracts import (
+    MAX_PROMQL_POINTS_PER_SERIES,
+    MAX_PROMQL_SERIES,
+    MAX_PROMQL_WINDOW_MINUTES,
     AwareDatetime,
     Contract,
     JsonScalar,
@@ -17,10 +20,10 @@ from xiaowei_agent.contracts import (
 )
 
 ALERT_NAMES: Final[frozenset[str]] = frozenset({"HostHighCpu", "InstanceDown"})
-MAX_WINDOW_MINUTES: Final[int] = 360
+DEFAULT_WINDOW_MINUTES: Final[int] = 30
 STEP_SECONDS: Final[int] = 60
-MAX_SERIES: Final[int] = 5
-MAX_POINTS_PER_SERIES: Final[int] = 361
+MAX_SERIES: Final[int] = MAX_PROMQL_SERIES
+MAX_POINTS_PER_SERIES: Final[int] = MAX_PROMQL_POINTS_PER_SERIES
 PROMQL_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset(
     {"promql", "promql_template_id"}
 )
@@ -117,7 +120,7 @@ class PrometheusAlertParams(Contract):
         if self.window_end <= self.window_start:
             raise ValueError("window_end must be strictly after window_start")
         window = self.window_end - self.window_start
-        if window > dt.timedelta(minutes=MAX_WINDOW_MINUTES):
+        if window > dt.timedelta(minutes=MAX_PROMQL_WINDOW_MINUTES):
             raise ValueError("window exceeds the maximum span")
         if self.step_seconds != STEP_SECONDS:
             raise ValueError("step_seconds is fixed")
@@ -157,3 +160,15 @@ class PrometheusAlertParams(Contract):
                 except ValueError:
                     pass
         return cls.model_validate(payload)
+
+
+def normalise_window(
+    *, as_of: dt.datetime, window_minutes: int
+) -> tuple[dt.datetime, dt.datetime]:
+    """把查询窗口规范为 UTC 整分钟的 ``[start, end]``。"""
+    if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
+        raise ValueError("as_of must be timezone-aware")
+    if not 0 < window_minutes <= MAX_PROMQL_WINDOW_MINUTES:
+        raise ValueError("window span is outside the allowed range")
+    end = as_of.astimezone(dt.UTC).replace(second=0, microsecond=0)
+    return end - dt.timedelta(minutes=window_minutes), end

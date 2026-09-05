@@ -29,6 +29,7 @@ _NON_SUCCESS_CODES = {
     "indeterminate": "SMOKE_TASK_INDETERMINATE",
 }
 _TEXT = "检查最近三十分钟慢查询"
+_PROMETHEUS_TEXT = "查告警 HostHighCpu 在 node-1.example.com:9100 的证据"
 _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
     ("xiaowei-migrate: database_unavailable", "SMOKE_MIGRATION_DATABASE_UNAVAILABLE"),
@@ -357,6 +358,33 @@ def _normalised_evidence(session: ComposeSession, task_id: str) -> object:
         raise SmokeError("SMOKE_EVIDENCE_PROTOCOL_ERROR") from None
 
 
+def _require_prometheus_persistence(
+    session: ComposeSession, task_id: str
+) -> None:
+    observation = _psql(
+        session,
+        task_id,
+        "SELECT coalesce((SELECT plan->>'capability_id' FROM task_plans "
+        "WHERE task_id = :'task_id'), '') || '|' || "
+        "(SELECT count(*)::text FROM task_evidence "
+        "WHERE task_id = :'task_id')",
+    )
+    if observation != "prometheus.alert.evidence|2":
+        raise SmokeError("SMOKE_PROMETHEUS_PERSISTENCE_MISMATCH")
+
+
+def _require_same_prometheus_render(
+    before: dict[str, object], after: dict[str, object]
+) -> None:
+    if (
+        before.get("status") != "succeeded"
+        or after.get("status") != "succeeded"
+        or not isinstance(before.get("render"), dict)
+        or before.get("render") != after.get("render")
+    ):
+        raise SmokeError("SMOKE_PROMETHEUS_RENDER_MISMATCH")
+
+
 def _submit(session: ComposeSession, *, key: str, text: str = _TEXT) -> str:
     return _task_id(
         _task(
@@ -520,6 +548,34 @@ def _full_workflow(session: ComposeSession) -> None:
         )
         if execution_shape != "t|t|t":
             raise SmokeError("SMOKE_CONCURRENT_EXECUTION_MISMATCH")
+
+    session.failure_code = "SMOKE_PROMETHEUS_COMMAND_FAILED"
+    prometheus_id = _submit(
+        session,
+        key=f"prometheus-{uuid.uuid4().hex}",
+        text=_PROMETHEUS_TEXT,
+    )
+    prometheus_before = _wait_task(session, prometheus_id, timeout=120.0)
+    _require_succeeded(prometheus_before)
+    _require_prometheus_persistence(session, prometheus_id)
+    session.run(
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "api",
+        timeout=60.0,
+        failure_code="SMOKE_PROMETHEUS_API_RESTART_FAILED",
+    )
+    _wait_ready(timeout=60.0)
+    prometheus_after = _task(
+        session,
+        "task",
+        "get",
+        prometheus_id,
+        failure_code="SMOKE_PROMETHEUS_QUERY_FAILED",
+    )
+    _require_same_prometheus_render(prometheus_before, prometheus_after)
 
     session.failure_code = "SMOKE_FINAL_AUDIT_COMMAND_FAILED"
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")

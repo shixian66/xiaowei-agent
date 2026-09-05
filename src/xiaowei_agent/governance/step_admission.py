@@ -2,7 +2,7 @@
 
 ```text
 1 verify_policy_revision     计划依据的 revision 与 profile 是否当前生效
-2 verify_plan_effects        分类从快照重算，与步骤标记双向比对
+2 verify_plan_declaration    分类从快照重算，并核对步骤标记与 ToolCall gateway
 3 ToolPolicy.evaluate        允许面判定
 4 QueryGuard                 携带 SQL/PromQL 的步骤走对应重编译闸门
 5 ApprovalGate.require       副作用步骤才做
@@ -13,13 +13,18 @@
 判定排在分类重算之前时，一个被伪标成只读的写步骤会以"operation 不在允许面内"
 被拒——理由正确，但掩盖了"计划被篡改"这个真正的事实。
 
-**分类必须在准入边界重算**（第 2 段），不能依赖 Runner 记得调用：计划会经存储
-往返、进程重启与并发抢占，只有重算才能覆盖持久化之后被篡改的情形。
+**operation 声明必须在准入边界重算**（第 2 段），不能依赖 Runner 记得调用：计划会
+经存储往返、进程重启与并发抢占，只有重算才能覆盖持久化之后被篡改的分类或错误
+gateway。
 """
 
 import datetime as _dt
 
-from xiaowei_agent.capabilities.effect import derive_effect, verify_plan_effects
+from xiaowei_agent.capabilities.effect import (
+    SpecResolutionError,
+    derive_effect,
+    verify_plan_effects,
+)
 from xiaowei_agent.contracts import (
     AdmissionCertificate,
     ApprovalRequest,
@@ -133,7 +138,7 @@ def admit_step(
 
     :returns: 与**本次调用内容**绑定的凭证；``ToolGateway`` 消费它。
     :raises BindingError: policy revision 漂移，或审批绑定不成立。
-    :raises SpecResolutionError: 分类无法派生，或与步骤标记冲突。
+    :raises SpecResolutionError: 声明无法派生，或分类/gateway 与调用冲突。
     :raises PolicyDeniedError: 允许面判定拒绝。
     :raises SqlGuardError: SQL 未通过 AST 校验或重编译比对。
     :raises PromqlGuardError: PromQL 信封或重编译比对不成立。
@@ -147,6 +152,8 @@ def admit_step(
         capability_version=plan.capability_version,
         operation=step.operation,
     )
+    if call.gateway != declared.gateway:
+        raise SpecResolutionError("call gateway differs from operation declaration")
     decision = evaluate_tool_policy(
         profile=profile,
         plan=plan,

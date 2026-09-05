@@ -81,20 +81,31 @@ class RuntimeHarness:
 
     def __init__(
         self,
-        recording: Mapping[Any, Any],
+        recording: Mapping[Any, Any] | None,
         *,
+        adapters: Mapping[str, Any] | None = None,
+        as_of: dt.datetime = _AS_OF,
         synthetic_write: bool = False,
         clear_ledger_before_render: bool = False,
     ) -> None:
-        self.clock = ManualClock(start=_AS_OF)
+        self.clock = ManualClock(start=as_of)
+        self.as_of = as_of
         self.state = InMemoryPersistenceState()
         self.store = _TrackingTaskStore(clock=self.clock, state=self.state)
         self.plan_store = InMemoryPlanStore(state=self.state)
         self.ledger = InMemoryEvidenceLedger(state=self.state)
-        self.adapter = StarRocksRecordingAdapter(recording)
+        if adapters is not None and recording is not None:
+            raise ValueError("pass recording or adapters, not both")
+        if adapters is None:
+            if recording is None:
+                raise ValueError("a recording or explicit adapters are required")
+            adapters = {"starrocks": StarRocksRecordingAdapter(recording)}
+        self.adapters = dict(adapters)
+        self.adapter = self.adapters.get("starrocks")
         self.gateway = CountingGateway(
-            DeterministicToolGateway(adapters={"starrocks": self.adapter})
+            DeterministicToolGateway(adapters=self.adapters)
         )
+        self.calls = self.gateway.calls
         self.approval_gate = CountingApprovalGate()
         self.sink = RecordingTraceSink()
         self.context = CONTEXT
@@ -155,7 +166,7 @@ class RuntimeHarness:
         text: str,
         *,
         idempotency_key: str = "idem-1",
-        as_of: dt.datetime = _AS_OF,
+        as_of: dt.datetime | None = None,
     ) -> TaskSubmission:
         envelope = RequestEnvelope(
             request_id="r1",
@@ -169,7 +180,7 @@ class RuntimeHarness:
         return TaskSubmission(
             envelope=envelope,
             context=self.context,
-            as_of=as_of,
+            as_of=self.as_of if as_of is None else as_of,
         )
 
     @property

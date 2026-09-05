@@ -112,6 +112,8 @@ class DeterministicToolGateway:
         :raises LookupError: adapter 未注册。
         :raises MalformedAdapterResponseError: adapter 返回值不是 ``AdapterResponse``。
         """
+        if not isinstance(admission, AdmissionCertificate):
+            raise PermissionError("admission certificate does not match this step")
         if admission.step_id != call.step_id or admission.operation != call.operation:
             raise PermissionError("admission certificate does not match this step")
         if admission.tool_call_hash != compute_tool_call_hash(call):

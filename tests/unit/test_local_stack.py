@@ -32,6 +32,11 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
     stack = build_in_memory_local_stack(settings=Settings(environment_id="dev"))
     assert isinstance(stack, LocalStack)
     assert isinstance(stack.runtime._runner._gateway, DeterministicToolGateway)
+    assert set(stack.runtime._runner._gateway._adapters) == {
+        "starrocks",
+        "alertmanager",
+        "prometheus",
+    }
     assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
     assert stack.runtime._runner._bindings is stack.runtime._bindings
     assert await stack.readiness.check() == ReadinessReport(
@@ -40,6 +45,59 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         assembled=True,
     )
     await stack.aclose()
+
+
+@pytest.mark.asyncio
+async def test_packaged_prometheus_recordings_run_the_two_gateway_task() -> None:
+    import datetime as dt
+
+    now = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
+    clock = ManualClock(start=now)
+    settings = Settings(environment_id="dev")
+    stack = build_in_memory_local_stack(settings=settings, clock=clock)
+    context = RequestContext(
+        tenant_id=settings.tenant_id,
+        actor=settings.actor,
+        environment_id=settings.environment_id,
+        trace_id="2" * 32,
+        policy_revision=stack.policy_revision,
+    )
+    pending = await stack.runtime.submit_task(
+        submission=TaskSubmission(
+            envelope=RequestEnvelope(
+                request_id="request-prometheus",
+                tenant_id=context.tenant_id,
+                actor=context.actor,
+                channel=Channel.API,
+                text="查告警 HostHighCpu 在 node-1.example.com:9100 的证据",
+                idempotency_key="idem-local-prometheus",
+                environment_id=context.environment_id,
+            ),
+            context=context,
+            as_of=now,
+        )
+    )
+    worker = WorkerLoop(
+        runtime=stack.runtime,
+        task_store=stack.task_store,
+        clock=stack.clock,
+        monotonic=stack.monotonic,
+        settings=stack.settings,
+        sleep=asyncio.sleep,
+    )
+
+    assert await worker.poll_once() == 1
+    completed = await stack.runtime.query_task(
+        lookup=TaskLookup(
+            task_id=pending.task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+        )
+    )
+    evidences = await stack.evidence_ledger.load(task_id=pending.task_id)
+    assert completed.status is TaskStatus.SUCCEEDED
+    assert completed.render is not None
+    assert [item.evidence_id.rsplit(":", 1)[-1] for item in evidences] == ["s1", "s2"]
 
 
 @pytest.mark.asyncio

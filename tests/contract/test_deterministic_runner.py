@@ -5,6 +5,7 @@ Runner 拥有租约、CAS 推进与暂停，但**不拥有领域安全规则**�
 """
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from tests.fakes.recordings import (
@@ -35,6 +36,7 @@ from xiaowei_agent.contracts import (
     TraceEvent,
     TransitionRejection,
 )
+from xiaowei_agent.evidence.prometheus_alert import EvidenceBuildError
 from xiaowei_agent.persistence.plans import PlanNotFoundError
 from xiaowei_agent.persistence.store import (
     StepAttemptCommand,
@@ -606,6 +608,35 @@ async def test_tool_failures_never_look_like_empty_success(recording: object) ->
     assert [call.operation for call in harness.adapter.calls] == [OP_LIST]
     for envelope in await harness.ledger.load(task_id=harness.task_id):
         assert envelope.facts == ()
+
+
+async def test_malformed_evidence_is_committed_as_a_failed_step() -> None:
+    """语义不合法的标量行不得冒充空成功，也不得在重启后反复调用。"""
+    harness = RunnerHarness(GOLDEN)
+    inner = harness.runner._bindings
+
+    def reject_evidence(**_: object) -> EvidenceEnvelope:
+        raise EvidenceBuildError
+
+    class RejectingEvidenceBindings:
+        def execution_for(self, *, plan: object) -> object:
+            execution = inner.execution_for(plan=plan)
+            return replace(execution, evidence_builder=reject_evidence)
+
+    harness.runner._bindings = RejectingEvidenceBindings()  # type: ignore[assignment]
+    outcome = await harness.start()
+
+    assert outcome.status is TaskStatus.INDETERMINATE
+    assert [call.operation for call in harness.adapter.calls] == [OP_LIST]
+    journal = await harness.store.load_step_executions(task_id=harness.task_id)
+    assert journal[0].result_status is StepResultStatus.FAILED
+    assert journal[0].kind is StepOutcomeKind.MALFORMED_ADAPTER
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
+    assert any(
+        event.stage is PipelineStage.EVIDENCE
+        and event.outcome is StageOutcome.FAILED
+        for event in harness.sink.events
+    )
 
 
 @pytest.mark.parametrize(

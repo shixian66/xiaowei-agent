@@ -1,10 +1,14 @@
 """一个 capability 允许使用的 PromQL 模板与查询预算。"""
 
-from typing import Self
+from typing import Final, Self
 
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+
+MAX_PROMQL_WINDOW_MINUTES: Final[int] = 360
+MAX_PROMQL_SERIES: Final[int] = 5
+MAX_PROMQL_POINTS_PER_SERIES: Final[int] = 361
 
 
 class PromqlSurface(Contract):

@@ -168,6 +168,32 @@ def test_registered_promql_envelope_is_admitted() -> None:
     assert certificate.step_id == step.step_id
 
 
+@pytest.mark.parametrize("gateway", ["prometheus", "unregistered"])
+def test_call_gateway_must_match_the_declared_operation(gateway: str) -> None:
+    step = slow_query_step()
+    with pytest.raises(SpecResolutionError, match="gateway"):
+        admit(
+            step=step,
+            plan=slow_query_plan(steps=(step,)),
+            call=slow_query_call(gateway=gateway),
+        )
+
+
+def test_promql_envelope_call_cannot_be_redirected_to_alertmanager() -> None:
+    step = _promql_step()
+    call = slow_query_call(
+        gateway="alertmanager", typed_args=dict(step.typed_arguments)
+    )
+    with pytest.raises(SpecResolutionError, match="gateway"):
+        admit(
+            step=step,
+            plan=slow_query_plan(steps=(step,)),
+            call=call,
+            sql_surface=None,
+            promql_surface=PROMQL_SURFACE,
+        )
+
+
 @pytest.mark.parametrize(
     "typed_arguments",
     [

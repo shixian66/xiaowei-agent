@@ -1,0 +1,15 @@
+{
+  "layer": "L2",
+  "cases": [
+    {"id": "P-L2-golden", "scenario": "golden", "status": "succeeded", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-silenced", "scenario": "silenced", "status": "succeeded", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-empty-metric", "scenario": "empty_metric", "status": "indeterminate", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-empty-alert", "scenario": "empty_alert", "status": "indeterminate", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-multiple-alerts", "scenario": "multiple_alerts", "status": "indeterminate", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-alert-timeout", "scenario": "alert_timeout", "status": "indeterminate", "alert_calls": 1, "metric_calls": 0},
+    {"id": "P-L2-prometheus-timeout", "scenario": "prometheus_timeout", "status": "indeterminate", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-malformed", "scenario": "malformed", "status": "indeterminate", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-polluted", "scenario": "polluted", "status": "succeeded", "alert_calls": 1, "metric_calls": 1},
+    {"id": "P-L2-repeat", "scenario": "golden", "status": "succeeded", "alert_calls": 1, "metric_calls": 1}
+  ]
+}

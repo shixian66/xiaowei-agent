@@ -11,7 +11,10 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
-from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
+from xiaowei_agent.application.default_capabilities import (
+    PROMETHEUS_ALERT_BINDING,
+    SLOW_QUERY_BINDING,
+)
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     Candidate,
@@ -115,6 +118,12 @@ def build_test_capability_bindings(
             execution=replace(SLOW_QUERY_BINDING.execution, policy_profile=profile),
         )
     bindings = [slow_binding]
+    prometheus_key = (
+        PROMETHEUS_ALERT_BINDING.capability_id,
+        PROMETHEUS_ALERT_BINDING.capability_version,
+    )
+    if prometheus_key in keys:
+        bindings.append(PROMETHEUS_ALERT_BINDING)
     if (WRITE_CAP, CAP_VERSION) in keys:
         bindings.append(SYNTHETIC_WRITE_BINDING)
     return CapabilityBindingRegistry(

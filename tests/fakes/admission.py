@@ -10,7 +10,8 @@ from typing import Any, Final
 
 from tests.fakes.fixtures import CAP_VERSION, SNAPSHOT, WRITE_CAP, WRITE_OP
 
-from xiaowei_agent.capabilities.effect import build_plan_step
+from xiaowei_agent.capabilities.effect import build_plan_step, derive_effect
+from xiaowei_agent.capabilities.prometheus_alert import PROMETHEUS_ALERT_POLICY_PROFILE
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.capabilities.specs import (
@@ -78,7 +79,12 @@ REGISTRY_SNAPSHOT = StaticCapabilityRegistry().snapshot()
 
 POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
     policy_revision=POLICY_REVISION,
-    profiles=(POLICY_PROFILE, "readonly.default", WRITE_PROFILE_ID),
+    profiles=(
+        POLICY_PROFILE,
+        PROMETHEUS_ALERT_POLICY_PROFILE,
+        "readonly.default",
+        WRITE_PROFILE_ID,
+    ),
 )
 
 # 合成写 profile 只在测试里存在：它允许 MUTATE_TARGET，正是为了证明**即使策略层
@@ -170,8 +176,14 @@ def synthetic_write_plan(*, steps: tuple[PlanStep, ...] | None = None) -> Execut
 
 
 def synthetic_write_call(**overrides: Any) -> ToolCall:
+    declared = derive_effect(
+        SNAPSHOT,
+        capability_id=WRITE_CAP,
+        capability_version=CAP_VERSION,
+        operation=WRITE_OP,
+    )
     base: dict[str, Any] = {
-        "gateway": GATEWAY_NAME,
+        "gateway": declared.gateway,
         "operation": WRITE_OP,
         "step_id": "s1",
         "typed_args": {"probe": "noop"},

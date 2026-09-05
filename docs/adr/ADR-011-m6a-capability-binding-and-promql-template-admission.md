@@ -34,6 +34,8 @@ application registry 的候选选择职责。
 `OperationSpec.gateway` 为必填非空字段，是 `ToolCall.gateway` 的唯一声明来源。Runner
 按计划的 capability key 与 step operation 从当前 snapshot 重新派生 gateway；
 `IntentDraft`、step arguments、adapter 与单独 mapping 均不能设置或覆盖它。
+StepAdmission 在签发凭证前再次从同一 snapshot 派生声明并逐字比对
+`ToolCall.gateway`；Runner 派生正确不替代准入边界的独立 fail-closed 校验。
 
 给 `starrocks.slow_query.diagnose@1.0.0` 的两个既有 operation 补
 `gateway="starrocks"` 是本 ADR 唯一的一次性迁移例外：它只把 Runner 已使用的同一

@@ -65,6 +65,7 @@ class CountingGateway:
         self._inner = inner
         self.invocations = 0
         self.side_effect_invocations = 0
+        self.calls: list[ToolCall] = []
         self.results: list[ToolResult] = []
 
     async def invoke(
@@ -75,6 +76,7 @@ class CountingGateway:
         admission: AdmissionCertificate,
     ) -> ToolResult:
         self.invocations += 1
+        self.calls.append(call)
         if admission.effect_class is not EffectClass.READ:
             self.side_effect_invocations += 1
         result = await self._inner.invoke(call, context=context, admission=admission)

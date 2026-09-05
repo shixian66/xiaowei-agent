@@ -34,6 +34,14 @@ from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
 
+def _single_capability_snapshot() -> CapabilitySnapshot:
+    snapshot = StaticCapabilityRegistry().snapshot()
+    slow_query = next(
+        spec for spec in snapshot.specs if spec.capability_id == CAPABILITY_ID
+    )
+    return CapabilitySnapshot(snapshot_id=snapshot.snapshot_id, specs=(slow_query,))
+
+
 def _never_prepare(
     *,
     candidate: Candidate,
@@ -102,7 +110,7 @@ def _binding(
 
 
 def _candidate_set(*items: Candidate, snapshot_id: str | None = None) -> CandidateSet:
-    snapshot = StaticCapabilityRegistry().snapshot()
+    snapshot = _single_capability_snapshot()
     return CandidateSet(
         resolver_version="resolver.test.v1",
         snapshot_id=snapshot.snapshot_id if snapshot_id is None else snapshot_id,
@@ -112,7 +120,7 @@ def _candidate_set(*items: Candidate, snapshot_id: str | None = None) -> Candida
 
 
 def _resolved_candidates() -> CandidateSet:
-    snapshot = StaticCapabilityRegistry().snapshot()
+    snapshot = _single_capability_snapshot()
     return DeterministicCapabilityResolver().resolve(
         draft=DRAFT, context=CONTEXT, snapshot=snapshot
     )
@@ -120,7 +128,7 @@ def _resolved_candidates() -> CandidateSet:
 
 def _registry(*bindings: CapabilityRuntimeBinding) -> CapabilityBindingRegistry:
     return CapabilityBindingRegistry(
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        snapshot=_single_capability_snapshot(),
         policy_snapshot=POLICY_SNAPSHOT,
         bindings=bindings or (_binding(),),
     )
@@ -147,7 +155,7 @@ def test_registry_rejects_a_binding_set_that_differs_from_the_snapshot(
 ) -> None:
     with pytest.raises(CapabilityBindingError):
         CapabilityBindingRegistry(
-            snapshot=StaticCapabilityRegistry().snapshot(),
+            snapshot=_single_capability_snapshot(),
             policy_snapshot=POLICY_SNAPSHOT,
             bindings=bindings,
         )
@@ -169,7 +177,7 @@ def test_registry_rejects_a_profile_that_differs_from_the_capability_spec() -> N
 def test_registry_rejects_a_profile_absent_from_the_active_policy_snapshot() -> None:
     with pytest.raises(CapabilityBindingError):
         CapabilityBindingRegistry(
-            snapshot=StaticCapabilityRegistry().snapshot(),
+            snapshot=_single_capability_snapshot(),
             policy_snapshot=PolicySnapshot(
                 policy_revision=POLICY_SNAPSHOT.policy_revision,
                 profiles=(),

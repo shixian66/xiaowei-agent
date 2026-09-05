@@ -11,6 +11,13 @@ from xiaowei_agent.application.default_capabilities import (
 )
 from xiaowei_agent.application.runtime import XiaoweiRuntime
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
+from xiaowei_agent.capabilities.prometheus_alert import (
+    ALERTMANAGER_GATEWAY,
+    OP_GET_ACTIVE_ALERTS,
+    OP_QUERY_METRIC_RANGE,
+    PROMETHEUS_GATEWAY,
+    PROMQL_SURFACE,
+)
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.capabilities.specs import GATEWAY_NAME, OP_COUNT, OP_LIST
@@ -40,8 +47,22 @@ from xiaowei_agent.persistence.postgres import (
     PostgresTaskStore,
 )
 from xiaowei_agent.persistence.store import Clock, TaskStore
+from xiaowei_agent.planning.prometheus.compiler import compile_promql
+from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
+from xiaowei_agent.planning.prometheus.templates import (
+    metric_name_for_template,
+    template_for_alert,
+)
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
+from xiaowei_agent.tools.adapter import AdapterResponse
+from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
+from xiaowei_agent.tools.alertmanager_recording import default_alertmanager_recording
 from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
+from xiaowei_agent.tools.prometheus_fake import (
+    PrometheusRecordingAdapter,
+    PrometheusRecordingKey,
+)
+from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
 from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
 from xiaowei_agent.tools.starrocks_recording import default_recording
 
@@ -113,10 +134,52 @@ def _assemble_local_stack(
     clock: Clock,
     monotonic: MonotonicClock,
 ) -> LocalStack:
-    adapter = StarRocksRecordingAdapter(
+    starrocks_adapter = StarRocksRecordingAdapter(
         default_recording(list_operation=OP_LIST, count_operation=OP_COUNT)
     )
-    base_gateway = DeterministicToolGateway(adapters={GATEWAY_NAME: adapter})
+    alertmanager_adapter = AlertmanagerRecordingAdapter(
+        default_alertmanager_recording(operation=OP_GET_ACTIVE_ALERTS)
+    )
+    recording: dict[PrometheusRecordingKey, AdapterResponse] = {}
+    catalog_center = clock().astimezone(dt.UTC).replace(second=0, microsecond=0)
+    for minute_offset in range(-120, 121):
+        window_end = catalog_center + dt.timedelta(minutes=minute_offset)
+        for alert_name, instance, values in (
+            ("HostHighCpu", "node-1.example.com:9100", (82.0, 91.5)),
+            ("InstanceDown", "10.0.0.8:9100", (0.0, 0.0)),
+        ):
+            params = PrometheusAlertParams(
+                alert_name=alert_name,
+                instance=instance,
+                window_start=window_end - dt.timedelta(minutes=30),
+                window_end=window_end,
+            )
+            template_id = template_for_alert(alert_name)
+            recording.update(
+                default_prometheus_recording(
+                    operation=OP_QUERY_METRIC_RANGE,
+                    promql=compile_promql(
+                        template_id=template_id,
+                        params=params,
+                        surface=PROMQL_SURFACE,
+                    ),
+                    template_id=template_id,
+                    alert_name=alert_name,
+                    instance=instance,
+                    metric_name=metric_name_for_template(template_id),
+                    values=values,
+                    window_start=params.window_start.isoformat(),
+                    window_end=params.window_end.isoformat(),
+                )
+            )
+    prometheus_adapter = PrometheusRecordingAdapter(recording)
+    base_gateway = DeterministicToolGateway(
+        adapters={
+            GATEWAY_NAME: starrocks_adapter,
+            ALERTMANAGER_GATEWAY: alertmanager_adapter,
+            PROMETHEUS_GATEWAY: prometheus_adapter,
+        }
+    )
     gateway: ToolGateway = (
         _PostResultBarrierGateway(base_gateway)
         if settings.smoke_step_barrier

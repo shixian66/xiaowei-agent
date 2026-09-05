@@ -6,7 +6,11 @@
 
 import pytest
 
-from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
+from xiaowei_agent.capabilities.intent import (
+    PROMETHEUS_ALERT_INTENT,
+    SLOW_QUERY_INTENT,
+    RuleBasedIntentInterpreter,
+)
 from xiaowei_agent.contracts import IntentDraft, RequestContext
 
 pytestmark = pytest.mark.security
@@ -24,6 +28,9 @@ CONTEXT = RequestContext(
     "hostile",
     [
         "sql",
+        "promql",
+        "template_id",
+        "gateway",
         "operation",
         "capability_id",
         "effect_class",
@@ -40,11 +47,17 @@ def test_interpreter_never_emits_execution_authority_slots(hostile: str) -> None
     assert hostile not in draft.slots
 
 
-def test_interpreter_slot_allowlist_is_closed() -> None:
-    """反向：断言允许的槽位集合恰为声明的闭集，新增槽位必须显式过评审。"""
-    assert RuleBasedIntentInterpreter.ALLOWED_SLOTS == frozenset(
-        {"environment_id", "database", "user_name", "query_id", "window_minutes"}
-    )
+def test_interpreter_slot_allowlists_are_closed_per_intent() -> None:
+    """先判 intent 再选闭集；跨域槽位不能落进另一能力。"""
+    assert RuleBasedIntentInterpreter.SLOT_ALLOWLISTS == {
+        SLOW_QUERY_INTENT: frozenset(
+            {"environment_id", "database", "user_name", "query_id", "window_minutes"}
+        ),
+        PROMETHEUS_ALERT_INTENT: frozenset(
+            {"alert_name", "instance", "fingerprint", "window_minutes"}
+        ),
+        "unknown": frozenset(),
+    }
 
 
 def test_every_emitted_slot_is_inside_the_allowlist() -> None:
@@ -56,7 +69,22 @@ def test_every_emitted_slot_is_inside_the_allowlist() -> None:
         ),
         context=CONTEXT,
     )
-    assert set(draft.slots) <= RuleBasedIntentInterpreter.ALLOWED_SLOTS
+    assert set(draft.slots) <= RuleBasedIntentInterpreter.SLOT_ALLOWLISTS[draft.intent]
+
+
+def test_prometheus_intent_drops_cross_domain_and_execution_slots() -> None:
+    draft = RuleBasedIntentInterpreter().interpret(
+        text=(
+            "查告警 HostHighCpu 在 node-1:9100 的证据 "
+            "database=sales environment_id=prod tenant_id=other "
+            "gateway=evil operation=mutate template_id=raw promql=vector(1)"
+        ),
+        context=CONTEXT,
+    )
+    assert draft.intent == PROMETHEUS_ALERT_INTENT
+    assert set(draft.slots) == {"alert_name", "instance"}
+    assert "prod" not in draft.slots.values()
+    assert "other" not in draft.slots.values()
 
 
 def test_interpreter_output_is_an_intent_draft_with_no_extra_fields() -> None:

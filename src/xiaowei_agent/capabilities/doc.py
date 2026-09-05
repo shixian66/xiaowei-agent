@@ -19,8 +19,8 @@ _HEADER: Final[str] = """# 能力地图
 """
 
 _TABLE_HEAD: Final[str] = (
-    "| capability | version | domain | operation | effect_class | side_effect |\n"
-    "| --- | --- | --- | --- | --- | --- |"
+    "| capability | version | domain | operation | gateway | effect_class | side_effect |\n"
+    "| --- | --- | --- | --- | --- | --- | --- |"
 )
 
 
@@ -31,7 +31,8 @@ def render_capabilities_doc(snapshot: CapabilitySnapshot) -> str:
         for operation in spec.operations:
             lines.append(
                 f"| `{spec.capability_id}` | `{spec.version}` | `{spec.domain}` "
-                f"| `{operation.operation}` | `{operation.effect_class.value}` "
+                f"| `{operation.operation}` | `{operation.gateway}` "
+                f"| `{operation.effect_class.value}` "
                 f"| `{str(operation.side_effect).lower()}` |"
             )
     lines.extend(

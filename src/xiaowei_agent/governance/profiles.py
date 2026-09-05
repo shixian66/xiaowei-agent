@@ -6,6 +6,12 @@ profile 是**声明**，判定在 ``governance.policy``。分开的理由与 cap
 
 from typing import Final
 
+from xiaowei_agent.capabilities.prometheus_alert import (
+    OP_GET_ACTIVE_ALERTS,
+    OP_QUERY_METRIC_RANGE,
+    PROMETHEUS_ALERT_POLICY_PROFILE,
+    PROMETHEUS_ENVIRONMENT_IDS,
+)
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST, POLICY_PROFILE
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
 from xiaowei_agent.contracts import (
@@ -35,8 +41,18 @@ SLOW_QUERY_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
 )
 
+PROMETHEUS_ALERT_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
+    profile_id=PROMETHEUS_ALERT_POLICY_PROFILE,
+    allowed_operations=(OP_GET_ACTIVE_ALERTS, OP_QUERY_METRIC_RANGE),
+    allowed_effect_classes=(EffectClass.READ,),
+    allowed_environment_ids=PROMETHEUS_ENVIRONMENT_IDS,
+    risk=RiskLevel.LOW,
+    max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
+)
+
 ACTIVE_POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
-    policy_revision=POLICY_REVISION, profiles=(POLICY_PROFILE,)
+    policy_revision=POLICY_REVISION,
+    profiles=(POLICY_PROFILE, PROMETHEUS_ALERT_POLICY_PROFILE),
 )
 """当前注册的 profile 集合。
 

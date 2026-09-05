@@ -58,6 +58,7 @@ from xiaowei_agent.contracts import (
     ToolResult,
     TraceEvent,
 )
+from xiaowei_agent.evidence.errors import EvidenceBuildError
 from xiaowei_agent.governance.approval import (
     ApprovalGate,
     ApprovalRequiredError,
@@ -682,9 +683,38 @@ class DeterministicStepRunner:
                 attempt_number=grant.attempt_number,
                 error=result.error,
             )
-            evidence = self._build_evidence(
-                task_id=task_id, step=step, plan=plan, result=result
-            )
+            try:
+                evidence = self._build_evidence(
+                    task_id=task_id, step=step, plan=plan, result=result
+                )
+            except EvidenceBuildError:
+                evidence_event = self._event(
+                    stage=PipelineStage.EVIDENCE,
+                    outcome=StageOutcome.FAILED,
+                    context=context,
+                    task_id=task_id,
+                    plan=plan,
+                    step_id=step.step_id,
+                    attempt_number=grant.attempt_number,
+                )
+                record = await self._commit_step(
+                    StepCommitCommand(
+                        grant=grant,
+                        step_id=step.step_id,
+                        kind=StepOutcomeKind.MALFORMED_ADAPTER,
+                        status=StepResultStatus.FAILED,
+                        evidence=None,
+                        audit_events=(gateway_event, evidence_event),
+                    ),
+                    events=(gateway_event, evidence_event),
+                )
+                degraded = self._adopt_step_record(
+                    record,
+                    failed_steps=failed_steps,
+                    result_by_step=result_by_step,
+                    degraded=degraded,
+                )
+                continue
             evidence_event = self._event(
                 stage=PipelineStage.EVIDENCE,
                 outcome=StageOutcome.OK,

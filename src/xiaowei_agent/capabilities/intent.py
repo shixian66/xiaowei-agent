@@ -12,11 +12,14 @@ M3 的实现是规则式的，不调用任何模型（ADR-007 D4：M0-M6a 禁止
 """
 
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final, Protocol
 
 from xiaowei_agent.contracts import IntentDraft, IntentSource, RequestContext
 
 SLOW_QUERY_INTENT: Final[str] = "starrocks.slow_query.diagnose"
+PROMETHEUS_ALERT_INTENT: Final[str] = "prometheus.alert.evidence"
 UNKNOWN_INTENT: Final[str] = "unknown"
 
 _IDENTIFIER: Final[str] = r"[A-Za-z0-9_][A-Za-z0-9_$-]{0,63}"
@@ -37,12 +40,41 @@ _SLOT_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ("environment_id", re.compile(rf"(?:environment_id|env)\s*=\s*({_IDENTIFIER})")),
 )
 
+_PROMETHEUS_SLOT_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    (
+        "alert_name",
+        re.compile(
+            r"(?:告警名\s*=\s*|告警\s+)(HostHighCpu|InstanceDown)(?=\s|在|$)"
+        ),
+    ),
+    ("instance", re.compile(r"instance\s*=\s*([^\s,，]+)")),
+    ("instance", re.compile(r"在\s*([A-Za-z0-9.\-\[\]:]+)(?=\s|$)")),
+    ("instance", re.compile(r"查\s*([A-Za-z0-9.\-\[\]:]+)\s*的告警")),
+    (
+        "fingerprint",
+        re.compile(r"fingerprint\s*=\s*([A-Za-z0-9][A-Za-z0-9._:-]{0,127})"),
+    ),
+)
+
 _WINDOW_MINUTES: Final[re.Pattern[str]] = re.compile(
     r"(?:window_minutes\s*=\s*|最近\s*)(\d{1,5})\s*分钟"
 )
 _WINDOW_HOURS: Final[re.Pattern[str]] = re.compile(r"最近\s*(\d{1,3})\s*小时")
 
 _MINUTES_PER_HOUR: Final[int] = 60
+_PROMETHEUS_OTHER_SURFACES: Final[tuple[str, ...]] = (
+    "grafana",
+    "dashboard",
+    "巡检",
+)
+_PROMETHEUS_WRITE_PREFIXES: Final[tuple[str, ...]] = (
+    "静默",
+    "创建",
+    "关闭",
+    "确认",
+    "删除",
+    "修改",
+)
 
 
 class IntentInterpreter(Protocol):
@@ -62,19 +94,36 @@ class RuleBasedIntentInterpreter:
     在链路最上游的前提。
     """
 
-    ALLOWED_SLOTS: Final[frozenset[str]] = frozenset(
-        {"environment_id", "database", "user_name", "query_id", "window_minutes"}
+    SLOT_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+        {
+            SLOW_QUERY_INTENT: frozenset(
+                {
+                    "environment_id",
+                    "database",
+                    "user_name",
+                    "query_id",
+                    "window_minutes",
+                }
+            ),
+            PROMETHEUS_ALERT_INTENT: frozenset(
+                {"alert_name", "instance", "fingerprint", "window_minutes"}
+            ),
+            UNKNOWN_INTENT: frozenset(),
+        }
     )
-    """槽位闭集。
+    """每个意图各自的槽位闭集。
 
-    新增槽位必须显式改这个集合并过评审（``test_interpreter_slot_allowlist_is_closed``
-    反向承重）。``sql`` / ``operation`` / ``capability_id`` / ``effect_class`` /
-    ``side_effect`` / ``policy_profile`` / ``approval_ref`` 这类执行权字段永远
-    不在其中。
+    先判唯一意图，再只运行该意图的提取器。这样资产或 SQL 槽位不会因为全局扫描
+    混入 Prometheus 草案；执行权字段在所有集合中都不存在。
     """
 
-    REQUIRED_SLOTS: Final[frozenset[str]] = frozenset({"environment_id"})
-    """必须被填上的槽位；填不上即进 ``missing``，由 Runtime 决定是否向用户追问。"""
+    REQUIRED_SLOTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+        {
+            SLOW_QUERY_INTENT: frozenset({"environment_id"}),
+            PROMETHEUS_ALERT_INTENT: frozenset({"alert_name", "instance"}),
+            UNKNOWN_INTENT: frozenset(),
+        }
+    )
 
     _RECOGNISED_CONFIDENCE: Final[float] = 0.9
     _UNRECOGNISED_CONFIDENCE: Final[float] = 0.0
@@ -85,19 +134,30 @@ class RuleBasedIntentInterpreter:
         :param text: 用户原文，按不可信外部文本处理。
         :param context: 执行上下文；``environment_id`` 在原文未指定时由它兜底。
         """
-        slots = self._extract_slots(text)
-        slots.setdefault("environment_id", context.environment_id)
-        recognised = self._is_slow_query(text)
+        intent = self._recognise_intent(text)
+        slots = self._extract_slots(text, intent=intent)
+        if intent == SLOW_QUERY_INTENT:
+            slots.setdefault("environment_id", context.environment_id)
+        recognised = intent != UNKNOWN_INTENT
         return IntentDraft(
-            intent=SLOW_QUERY_INTENT if recognised else UNKNOWN_INTENT,
+            intent=intent,
             slots={key: slots[key] for key in sorted(slots)},
-            missing=tuple(sorted(self.REQUIRED_SLOTS - set(slots))),
+            missing=tuple(sorted(self.REQUIRED_SLOTS[intent] - set(slots))),
             confidence=(
                 self._RECOGNISED_CONFIDENCE if recognised else self._UNRECOGNISED_CONFIDENCE
             ),
             # 规则式解释器的输入是用户原文本身，没有模型参与。
             source=IntentSource.USER,
         )
+
+    @classmethod
+    def _recognise_intent(cls, text: str) -> str:
+        matched = []
+        if cls._is_slow_query(text):
+            matched.append(SLOW_QUERY_INTENT)
+        if cls._is_prometheus_alert_evidence(text):
+            matched.append(PROMETHEUS_ALERT_INTENT)
+        return matched[0] if len(matched) == 1 else UNKNOWN_INTENT
 
     @staticmethod
     def _is_slow_query(text: str) -> bool:
@@ -111,10 +171,26 @@ class RuleBasedIntentInterpreter:
             return True
         return "慢" in compact and "查询" in compact
 
-    def _extract_slots(self, text: str) -> dict[str, str]:
+    @staticmethod
+    def _is_prometheus_alert_evidence(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).lower()
+        if any(marker in compact for marker in _PROMETHEUS_OTHER_SURFACES):
+            return False
+        if compact.startswith(_PROMETHEUS_WRITE_PREFIXES):
+            return False
+        return "告警" in compact and "证据" in compact
+
+    def _extract_slots(self, text: str, *, intent: str) -> dict[str, str]:
         """逐个闭集槽位尝试填充；**先命中的规则优先**，后续规则不覆盖已填的槽位。"""
+        if intent == UNKNOWN_INTENT:
+            return {}
+        patterns = (
+            _SLOT_PATTERNS
+            if intent == SLOW_QUERY_INTENT
+            else _PROMETHEUS_SLOT_PATTERNS
+        )
         slots: dict[str, str] = {}
-        for name, pattern in _SLOT_PATTERNS:
+        for name, pattern in patterns:
             if name in slots:
                 continue
             match = pattern.search(text)
@@ -123,7 +199,8 @@ class RuleBasedIntentInterpreter:
         window = self._extract_window_minutes(text)
         if window is not None:
             slots["window_minutes"] = window
-        return {key: value for key, value in slots.items() if key in self.ALLOWED_SLOTS}
+        allowed = self.SLOT_ALLOWLISTS[intent]
+        return {key: value for key, value in slots.items() if key in allowed}
 
     @staticmethod
     def _extract_window_minutes(text: str) -> str | None:

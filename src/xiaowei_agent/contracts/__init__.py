@@ -74,7 +74,12 @@ from xiaowei_agent.contracts.plan import (
     StepCondition,
 )
 from xiaowei_agent.contracts.policy import PolicyDecision, PolicyProfile, PolicySnapshot
-from xiaowei_agent.contracts.promql_surface import PromqlSurface
+from xiaowei_agent.contracts.promql_surface import (
+    MAX_PROMQL_POINTS_PER_SERIES,
+    MAX_PROMQL_SERIES,
+    MAX_PROMQL_WINDOW_MINUTES,
+    PromqlSurface,
+)
 from xiaowei_agent.contracts.readiness import ReadinessProbe, ReadinessReport
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
@@ -101,6 +106,9 @@ from xiaowei_agent.contracts.trace_events import TraceEvent
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "MAX_PROMQL_POINTS_PER_SERIES",
+    "MAX_PROMQL_SERIES",
+    "MAX_PROMQL_WINDOW_MINUTES",
     "MAX_ROW_LIMIT",
     "MAX_WINDOW_MINUTES",
     "PLAN_SCHEMA_VERSION",
