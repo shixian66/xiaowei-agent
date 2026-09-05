@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` |
 | 截止时间 | 2026-09-05（Asia/Shanghai） |
-| 阶段 | **M0–M4 已验收并合入 `main`；M4 已归档；M5 首轮精确 SHA 外部复审已完成并补修，等待新 SHA 复审及 CI 的 PostgreSQL/Compose 运行证据** |
+| 阶段 | **M0–M4 已验收并合入 `main`；M4 已归档；M5 候选实现、首轮外部复审补修、真实 PostgreSQL integration 与 Compose smoke 均已完成，等待新 SHA 终审和项目负责人验收** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -38,11 +38,12 @@
 | M4 能力状态 | `tests`——**非 `deployed SHA`、非 `canary`、非 `user-accepted`**。跑绿的是 CI 里一次性的 PostgreSQL service container |
 | CI 第七个 job | `integration`：PostgreSQL service（`POSTGRES_HOST_AUTH_METHOD=trust`，**CI 不持有任何凭证**）+ `PYTEST_POSTGRES_DSN`，仍执行 `python -m pytest -q`。**不新增第五条命令**，ADR-008 四条不变。镜像已钉 digest（`postgres:16.10@sha256:21f6013…c3c1`）。该 job **不是** GitHub 强制的 required status check——分支保护仍不可用 |
 | M5 详细计划 | [docs/plans/M5-api-worker-compose.md](docs/plans/M5-api-worker-compose.md) V5.4.1，经 Claude 最终复审批准开工 |
-| M5 工作分支 | `claude/m5-api-worker-compose`，从 `fa6039bfbce680c0720606b2c34e556ce06c18f4` 创建；API/CLI/Worker/migration/Compose 已实现，`28e03b0` 首轮复审仅发现两项测试/证据口径缺口并已补修，等待新 SHA 复审及 CI |
-| 下一里程碑 | **先完成 M5 新 SHA 复审、真实 PostgreSQL integration 与 Compose smoke 运行验收**；未通过前不进入 M6a |
+| M5 工作分支 | `claude/m5-api-worker-compose`，从 `fa6039bfbce680c0720606b2c34e556ce06c18f4` 创建；API/CLI/Worker/migration/Compose 已实现，`28e03b0` 首轮复审指出的测试/证据缺口及 CI 暴露的真实 PostgreSQL/Compose 问题均已按根因补修；PR [#9](https://github.com/shixian66/xiaowei-agent/pull/9) 只用于运行验收，未合并 |
+| M5 CI 运行证据 | 分支代码/测试对象 `c9c0fcfccf03e37c9b8a2d987a09fc2e7f5984bb` 对应 run [`33951408313`](https://github.com/shixian66/xiaowei-agent/actions/runs/33951408313) **八个 job 全绿**；`integration` 为 1866 passed / 0 skipped，`compose-smoke` 输出 `compose-smoke: passed` |
+| 下一里程碑 | **先完成 M5 新 SHA 终审与项目负责人验收**；验收通过前不合并、不归档、不进入 M6a |
 
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已落代码并通过离线测试；**当前开发机既无可用 PostgreSQL 测试 DSN，也无 Docker，尚无本分支的真实 PostgreSQL integration 或 Compose 运行证据**，因此不声明本地闭环已运行 |
+| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与 fake local stack 已落代码；GitHub 隔离 runner 已实际通过真实 PostgreSQL integration 与不可跳过的 Compose smoke。**当前开发机仍无可用 PostgreSQL 测试 DSN、也无 Docker**，所以这不是本机运行、部署、canary 或用户验收证据 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 首个闭环 | `starrocks.slow_query.diagnose`——**已实现并合入 `main`**，仅 fake/recording 数据，未连接真实 StarRocks |
 
@@ -130,7 +131,7 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 6. ~~M3 实现与验收~~ **已完成**：首轮 Codex 深档验收打回一条阻断项（`WorkflowRunner` 契约未闭合），按根因修复后复审通过；以 `--ff-only` 合入 `main`（`64d295c`），CI run `33708913738` 六项全绿，逐条提交历史已归档。
 7. ~~M4 详细计划编写与审批~~ **已完成**：V1–V1.2 经 Codex 审核批准开工。
 8. ~~M4 实现与验收~~ **已完成**：四轮打回后以 `--ff-only` 合入 `main`（`714df07`），CI run `33842205710` 七项全绿，逐条提交历史已归档。
-9. **待外部复审与运行验收：M5** `28e03b0` 首轮复审已完成，资源归属守卫与恢复反证口径已补修；下一步是推送新精确 SHA，让 CI 分别产出真实 PostgreSQL integration 与不可跳过的 Compose smoke 证据，再做终审。三项未齐前不得写成 M5 已完成。
+9. **待终审与项目负责人验收：M5** `28e03b0` 首轮复审完成后，资源归属守卫、恢复反证口径与 handoff 未覆盖范围已补修；run `33951408313` 又补齐真实 PostgreSQL integration 与不可跳过的 Compose smoke 证据。下一步只做新 SHA 终审与项目负责人验收，未通过前不合并、不归档、不进入 M6a。
 10. M6a 完成两个 fake 能力；M6b 在单独授权下做 StarRocks 非生产真实只读验证。
 
 ## 6. 仍需拍板的事项
@@ -140,7 +141,7 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 - 生产写的独立授权与独立验收计划（不由 M8 推导）。
 - 真实模型 API 网络调用所属的独立里程碑，及其 ADR、凭证引用、数据范围和保留策略授权。
 - 证据、报告和大产物的存储位置及保留周期（M6b 前）。
-- M5 候选的真实 PostgreSQL integration 与 Compose smoke 两块隔离运行验收。
+- M5 候选的新 SHA 终审与项目负责人验收。
 - M6b 连接测试环境 StarRocks 真实只读的单独授权（环境、账号 secret reference、范围、时窗、脱敏、recording 删除方式）。
 - 具备条件（升级套餐或改为 public）时补齐分支保护。
 - 发布环境（M5 后）。
@@ -190,11 +191,13 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 
 ### 已验证
 
-- **M5 候选在 `claude/m5-api-worker-compose` 上完成离线收口验证**：`python -m pytest -q` 为 1686 passed / 152 skipped / 5 warnings；`python -m pytest -m security -q` 为 923 passed / 79 skipped / 836 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 通过（102 个源文件）；文档一致性门 5 passed。152 个全量 skip 均属于未提供 PostgreSQL DSN 的 integration，用例不是 Compose 运行证据。
+- **M5 候选在 `claude/m5-api-worker-compose` 上完成本机离线收口验证**：`python -m pytest -q` 为 1714 passed / 152 skipped / 5 warnings；`python -m pytest -m security -q` 为 923 passed / 79 skipped / 864 deselected / 5 warnings；`ruff check .` 通过；`mypy src` 通过（102 个源文件）；文档一致性门 5 passed。152 个全量 skip 均属于本机未提供 PostgreSQL DSN 的 integration，用例本身不是 Compose 运行证据。
 - **M5 自审沿五条纵向路径补齐根因与反例**：恢复时将重新编译的当前 plan 与存储 plan 比对，避免同源比较恒真；PostgreSQL 写事务区分已确认回滚与提交结果未知，且成功提交正常返回、系统性完整性错误保留 write outcome；Worker 只吞结构化租约输家结果，其余生命周期异常 fail-stop；无请求上下文的 Worker 日志保留事件自身 `trace_id`；并发 smoke 在断言幂等前先证明两个不同 Worker 容器实际运行。
 - **M5 Worker 异常分类做过变异反证**：临时把 `ILLEGAL_TRANSITION` 加入可忽略输家集合后，专用不变量用例按预期转红；还原保护后通过。该证据只证明离线测试能承重，不替代真实多 Worker 运行。
 - **M5 Compose smoke 是硬失败门而非跳过门**：当前开发机执行 `python -m scripts.compose_smoke` 以 exit 1 返回 `compose-smoke: docker_not_found`，因此没有把 Docker 缺失伪装成绿色验收。
 - **M5 首轮外部复审补修已完成本地反证**：Compose 资源守卫对顶层 `name:` 与 PostgreSQL bind mount 两种变异分别转红；恢复行为测试在同时删除快照预加载与 `ALREADY_COMMITTED` 采纳两条等价防线后，从 `INDETERMINATE` 退化为 `SUCCEEDED` 并转红，恢复后通过。
+- **M5 真实 PostgreSQL 与 Compose 两块证据已由同一 CI run 独立补齐**：run [`33951408313`](https://github.com/shixian66/xiaowei-agent/actions/runs/33951408313) 的 `integration` 为 1866 passed / 0 skipped；`compose-smoke` 在 1 分 26 秒内输出 `compose-smoke: passed`。smoke 实际穿过 build、PostgreSQL health、完整 revision chain migration、API health/readiness、容器内 CLI 提交/查询、Worker 消费、工具返回后 SIGKILL、租约到期接管恢复、Evidence 等价、两个并发 Worker、重复幂等键与日志 canary 断言，最后按随机 project 执行 `down --volumes --remove-orphans`。
+- **CI 暴露的四类本机不可见根因已留下回归门**：migration 入口将非法调用方 DTO 与数据库异常分开；Compose file-backed secret 使用宿主隔离目录 + 容器可读文件权限；本地环境改用目标目录已登记的 `dev`（固定租户仍为 `dev-local`）；psql `-c` 观测使用规范 UUID 的服务端可解析字面量，不再依赖 `-c` 内不会发生的 psql 变量插值。
 - **M2 最终验收对象 `319253aec7bbdda1bd4f7b661dc8938ae58ac18e` 在 `main` 上四条命令全绿，GitHub CI 六项全绿（含 `secret-scan`）**：`python -m pytest -q` 640 passed / 3 warnings；`python -m pytest -m security -q` 499 passed / 141 deselected / 3 warnings；`ruff check .` 与 `mypy src` 均通过；`git diff --check d0971666..319253a` 无输出。PR #4 的 merge commit 与 head 均为 `319253a`，`main` 独立 CI run `33629416660` 为 success。更早的逐 SHA 结果见各提交信息与归档。
 - **M2 的 TDD 反证逐条先转红后还原转绿**，条目见各任务提交信息；本文件不维护会随修订漂移的总数。
 - **T1 是纯迁移**：M1 的 48 条脱敏/日志测试未改一行，输出与迁移前逐字相同。
@@ -219,11 +222,11 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未用户验收。
-- 未连接任何外部系统：StarRocks、Prometheus、资产系统、PostgreSQL、Docker Compose、任何模型 API；**E1 调用恒为 0**。
+- 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- ~~`docker-compose.yml`、API、CLI、Worker 不存在~~：M5 工作分支已建立这些入口、同镜像装配、migration/readiness 与 fake Compose smoke；**尚缺有 Docker 环境中的实际运行证据与外部复审**，因此只算候选实现，不算验收完成。
-- M5 当前开发机未提供 `PYTEST_POSTGRES_DSN`，152 个 integration 用例全部跳过；因此 task/submission、step/evidence/audit 原子性、四个 revision 的 up/down/up、降级兼容 probe，以及并发 Worker/retry handoff/fencing loser 均没有本分支的真实 PostgreSQL 证据。
-- M5 当前开发机没有 Docker，未运行 Compose migration、health/readiness、API 提交、Worker 消费、重启恢复、双 Worker 并发和 CLI 容器调用；CI、部署、canary 与用户验收也均未执行。
+- ~~`docker-compose.yml`、API、CLI、Worker 不存在~~：M5 工作分支已建立这些入口、同镜像装配、migration/readiness 与 fake Compose smoke，并已在 GitHub 隔离 runner 实际运行；**尚缺新 SHA 外部终审与项目负责人验收**，因此仍是候选实现，不写成 M5 已验收。
+- M5 当前开发机未提供 `PYTEST_POSTGRES_DSN`，本机全量中的 152 个 integration 用例全部跳过；真实 PostgreSQL 证据来自 CI run `33951408313` 的独立 `integration` job，不是本机证据，也不能推出生产数据库兼容性。
+- M5 当前开发机没有 Docker；Compose 的 migration、health/readiness、API 提交、Worker 消费、重启恢复、双 Worker 并发和 CLI 容器调用仅在 GitHub 隔离 runner 验证。未部署、未 canary、未用户验收，未连接任何真实运维目标或模型服务。
 - **`StepConditionKind` 四个成员 M3 只消费了两个**：`ALWAYS` 与 `EVIDENCE_ROW_COUNT_BELOW` 已被真实闭环消费；`EVIDENCE_FIELD_ABSENT` 与 `PRIOR_STEP_RESULT_IS` **未被消费、未被验证**，不要误以为四个都已验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
@@ -232,8 +235,8 @@ M3 的 19 个受审提交、首轮打回的根因与修复、以及四段验收�
 
 ### 残余风险
 
-- M5 的 `up --wait`、one-shot migration、healthcheck argv、`--force-recreate --no-deps` 重启语义及容器 secret 引用只经过静态契约；必须在具备 Docker 的隔离环境跑完整 smoke 后才能关闭风险。
-- M5 的事务结果未知分类与 fencing/接管由 fake、单元和契约测试承重；真实 PostgreSQL integration 尚未运行，当前本机未给出数据库连接中断、并发锁竞争的运行证据；进程 SIGKILL 与恢复则还需要 Compose smoke。
+- M5 的 `up --wait`、one-shot migration、healthcheck argv、`--force-recreate --no-deps` 重启语义及容器 secret 引用已在 GitHub 隔离 runner 的一次完整 smoke 中通过；单次 CI 不能证明跨 Docker/Compose 版本兼容、长期稳定性、高可用或生产安全性。
+- M5 的事务结果未知分类与 fencing/接管已有真实 PostgreSQL integration，进程 SIGKILL 与恢复已有 Compose smoke；但数据库进程在提交确认边界精确断连、长时间锁竞争和资源耗尽仍主要由故障注入/契约测试承重，未做持续压力或 chaos 验证。
 - 本文件所在提交的 SHA 不写在文件内，由每轮验收报告提供。
 - Git 初始化之前发生的所有文档修订永久没有 commit SHA 证据。
 - **分支保护缺失（已知并被显式接受）**：private + GitHub Free 无法启用（API 实证 403）。项目负责人已批准延后并据此修订 M1 退出标准。后果是**红灯 PR 仍可被人工合并、可强推 `main`、可绕过 PR 流程**，合并纪律完全依赖人工。具备条件后应优先补齐。
