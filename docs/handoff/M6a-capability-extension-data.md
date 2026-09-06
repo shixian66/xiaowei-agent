@@ -1,8 +1,9 @@
 # M6a capability 扩展数据
 
-> 本文件只记录可复核的扩展成本事实，不是验收报告。PR 1 已验收并合入；PR 2 已形成
-> 数据采集提交并取得首轮远程 CI，但尚未通过独立复审或项目负责人验收。两个 PR 均未
-> 部署、未 canary，也未连接真实 Alertmanager、Prometheus 或资产系统。
+> 本文件只记录可复核的扩展成本事实，不是验收报告。M6a 的实现已通过独立复审和
+> 项目负责人里程碑验收，最终基线 `e2032fdff958d2309973458d5c762a54b3a4f855`
+> 已合入 `main`。全部证据仍止于 fake/recording、隔离 PostgreSQL 与 Compose tests；
+> 未部署、未 canary，也未连接真实 Alertmanager、Prometheus 或资产系统。
 
 ## PR 1：`prometheus.alert.evidence`
 
@@ -98,7 +99,8 @@ PR 1 只能证明最小 binding seam 可以承载第二个异质能力，尚不�
 | 项目 | 事实 |
 | --- | --- |
 | base SHA | `9d9380c41af1f059b02025a008b5e44879657dcf`（含 PR #12/#13 seam closure 与 PR #15 CI 确定性修复） |
-| 数据采集 head SHA | 历史 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`；当前 base 上的等价提交 `9a2cadc` |
+| 数据采集 head SHA | 历史 `5a2bdec9902f5955b9e61a7fae3ffeb9daae8959`；当时新 base 上的等价提交 `9a2cadc` |
+| 最终实现/合入 SHA | `e2032fdff958d2309973458d5c762a54b3a4f855`；PR #14 的 `mergeCommit` 与该 SHA 相同 |
 | snapshot | `snapshot.m6a.starrocks-prometheus.v1` → `snapshot.m6a.starrocks-prometheus-asset.v1` |
 | production policy | `policy-2026-09-05` → `policy-2026-09-05.2`；与三个有序 profile ID 成对固定 |
 | 声明集合 | 新增 `asset.inventory.lookup@1.0.0`；保留 StarRocks 与 Prometheus 既有版本 |
@@ -188,5 +190,25 @@ PromQL 与时序摘要；StarRocks 独有的是 SQL AST 与慢查询诊断。
   显式 `PYTHONPATH` 核对模块路径并得到预期 2 红；该次全绿不是覆盖结论。
 - PR #14 run [`33972562736`](https://github.com/shixian66/xiaowei-agent/actions/runs/33972562736)
   在重放前的 `c373ad616ff213c5656375138425453aa797a82c` 上八个 job 全绿，包含 PostgreSQL
-  integration 与三能力 Compose smoke。最终 HEAD 已更换 base，CI 以 `gh pr checks 14`
-  为准。
+  integration 与三能力 Compose smoke。最终送审 SHA `e2032fdff958d2309973458d5c762a54b3a4f855`
+  的 PR run [`33975532006`](https://github.com/shixian66/xiaowei-agent/actions/runs/33975532006)
+  与合入后 main run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909)
+  均八个 job 全绿。
+
+## 归档后的验证债务与决策点
+
+以下项目不阻断 M6a 归档，但必须保留到后续能力演进；其中 StarRocks 事项才进入 M6b，
+真实资产 adapter 仍需另行立项和授权：
+
+1. `tests/security/test_asset_scope_isolation.py` 需要增加同一测试内的 in-scope 成功对照。
+   独立复审的变异证明：若 recording key 的 tenant/environment 被常量化，该文件现有负向
+   用例会因全部 miss 而空过；当前正向承重点在 unit 测试中，两个文件合起来才有效。
+2. `evidence/asset_inventory.py` 中 capability/version、selector version、field set、limit、
+   environment allowlist 等六个副本需要与真源做 pairing 测试，或改成 Prometheus builder
+   的装配层传参模式。当前漂移会 fail-closed，但会造成难定位的功能故障。
+3. `asset_id` 是否限制为 ASCII 要等未来单独批准的真实资产 adapter 取得权威契约后决定；
+   不把该工作塞进只负责 StarRocks 真实只读的 M6b。当前 Unicode NFC + 精确匹配不会放宽
+   权限，但可能出现视觉同形而查询 miss 的可用性问题。
+4. 资产返回两行时 `needs_user_input=False` 是有意语义：用户已给出精确 selector，没有可补的
+   槽位，继续追问不能消歧；Prometheus 多告警仍可补 fingerprint，因此设为 `True`。两者不是
+   同一交互条件，不应机械统一。
