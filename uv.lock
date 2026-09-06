@@ -608,6 +608,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pymysql"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/bc/1c6a92f385940f727daeecf3bacaf186e03875dff57197801046c583bcf0/pymysql-1.2.0.tar.gz", hash = "sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33", size = 49021, upload-time = "2026-05-19T08:26:22.302Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/bd/2534e130295c8cfd4f0a2e31623baab7502278f1e97bcfe61db75656a77f/pymysql-1.2.0-py3-none-any.whl", hash = "sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0", size = 45716, upload-time = "2026-05-19T08:26:20.974Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -820,6 +829,15 @@ wheels = [
 ]
 
 [[package]]
+name = "types-pymysql"
+version = "1.2.0.20260807"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/71/f2d9cf554a59396c9dcf7cd902d1c187b6d4762dc7650e25a02c4ca2cf9c/types_pymysql-1.2.0.20260807.tar.gz", hash = "sha256:7fd4a7767925dbb0fd3e73fd488184fcd98b7612f8066cda280453b17864264f", size = 22768, upload-time = "2026-08-07T04:17:29.272Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/79/83/37e485e7ad3404aa018b6740d759b74665669c61c9c154f81d890b2ccd3a/types_pymysql-1.2.0.20260807-py3-none-any.whl", hash = "sha256:2a722284451649e1c2564655cba4963c0661851d04cc10195b7c002fab8e55f6", size = 23327, upload-time = "2026-08-07T04:17:28.318Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -871,6 +889,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "pydantic" },
+    { name = "pymysql" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlglot" },
     { name = "uvicorn" },
@@ -887,6 +906,7 @@ dev = [
     { name = "pytest-socket" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "types-pymysql" },
 ]
 
 [package.metadata]
@@ -899,6 +919,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20,<2" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7,<3" },
     { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "pymysql", specifier = ">=1.2,<1.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3,<10" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0,<2" },
     { name = "pytest-socket", marker = "extra == 'dev'", specifier = ">=0.8,<0.9" },
@@ -906,6 +927,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<0.17" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.44,<2.1" },
     { name = "sqlglot", specifier = ">=27,<31" },
+    { name = "types-pymysql", marker = "extra == 'dev'", specifier = ">=1.2,<1.3" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
 provides-extras = ["dev"]

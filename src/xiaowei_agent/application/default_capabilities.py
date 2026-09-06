@@ -1,6 +1,7 @@
 """生产 capability bindings 的显式装配；不做动态发现。"""
 
 import datetime as dt
+from dataclasses import dataclass, replace
 from typing import Final
 
 from xiaowei_agent.application.capability_runtime import (
@@ -41,7 +42,7 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.evidence.asset_inventory import build_asset_evidence
-from xiaowei_agent.evidence.builder import build_evidence
+from xiaowei_agent.evidence.builder import SlowQueryEvidencePolicy, build_evidence
 from xiaowei_agent.evidence.errors import EvidenceBuildError
 from xiaowei_agent.evidence.prometheus_alert import (
     build_alert_evidence,
@@ -146,11 +147,39 @@ def _build_slow_query_evidence(
         task_id=task_id,
         step=step,
         plan=plan,
+        target=target,
         result=result,
         surface=SLOW_QUERY_SURFACE,
         params=SlowQueryParams.from_typed_arguments(step.typed_arguments),
         captured_at=captured_at,
     )
+
+
+@dataclass(frozen=True)
+class _LiveSlowQueryEvidenceBuilder:
+    policy: SlowQueryEvidencePolicy
+
+    def __call__(
+        self,
+        *,
+        task_id: str,
+        step: PlanStep,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        result: ToolResult,
+        captured_at: dt.datetime,
+    ) -> EvidenceEnvelope:
+        return build_evidence(
+            task_id=task_id,
+            step=step,
+            plan=plan,
+            target=target,
+            result=result,
+            surface=SLOW_QUERY_SURFACE,
+            params=SlowQueryParams.from_typed_arguments(step.typed_arguments),
+            captured_at=captured_at,
+            live_policy=self.policy,
+        )
 
 
 SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
@@ -365,14 +394,26 @@ ASSET_INVENTORY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBind
 
 
 def build_default_capability_bindings(
-    *, snapshot: CapabilitySnapshot, policy_snapshot: PolicySnapshot
+    *,
+    snapshot: CapabilitySnapshot,
+    policy_snapshot: PolicySnapshot,
+    slow_query_live_policy: SlowQueryEvidencePolicy | None = None,
 ) -> CapabilityBindingRegistry:
     """构造生产 binding 闭集；新增能力必须在此显式登记。"""
+    slow_query_binding = SLOW_QUERY_BINDING
+    if slow_query_live_policy is not None:
+        slow_query_binding = replace(
+            SLOW_QUERY_BINDING,
+            execution=replace(
+                SLOW_QUERY_BINDING.execution,
+                evidence_builder=_LiveSlowQueryEvidenceBuilder(slow_query_live_policy),
+            ),
+        )
     return CapabilityBindingRegistry(
         snapshot=snapshot,
         policy_snapshot=policy_snapshot,
         bindings=(
-            SLOW_QUERY_BINDING,
+            slow_query_binding,
             PROMETHEUS_ALERT_BINDING,
             ASSET_INVENTORY_BINDING,
         ),

@@ -1,6 +1,8 @@
 """LocalStack 装配根不依赖 tests/ 语料。"""
 
 import asyncio
+import datetime as dt
+from types import MappingProxyType
 
 import pytest
 from tests.fakes.clock import ManualClock
@@ -20,11 +22,13 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
     LocalStack,
+    StarRocksLiveAssembly,
     build_in_memory_local_stack,
     build_postgres_local_stack,
 )
 from xiaowei_agent.persistence.postgres import PostgresTaskStore
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
+from xiaowei_agent.tools.starrocks import PhysicalIdentityProbe
 
 
 @pytest.mark.asyncio
@@ -46,6 +50,127 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         assembled=True,
     )
     await stack.aclose()
+
+
+def _live_settings(**updates: object) -> Settings:
+    values: dict[str, object] = {
+        "environment_id": "test",
+        "actor": "m6b-operator",
+        "starrocks_adapter_mode": "test_readonly",
+        "starrocks_host": "starrocks.test.invalid",
+        "starrocks_port": 9030,
+        "starrocks_database": "audit_db",
+        "starrocks_user": "audit_reader",
+        "starrocks_password_file": "/approved/database-credential",
+        "starrocks_tls_mode": "verify_identity",
+        "starrocks_ca_file": "/approved/ca.pem",
+        "starrocks_server_name": "starrocks.test.invalid",
+        "starrocks_resource_id": "approved-test-cluster",
+        "starrocks_expected_grants_sha256": "a" * 64,
+        "starrocks_expected_ddl_sha256": "b" * 64,
+        "starrocks_expected_identity_sha256": "c" * 64,
+        "starrocks_expected_metadata_source_ref": "approval-ref:m6b-1",
+        "starrocks_physical_identity_ref": "identity-ref:test-cluster",
+        "starrocks_authorized_actor": "m6b-operator",
+        "starrocks_active_from": dt.datetime(2026, 9, 7, 9, tzinfo=dt.UTC),
+        "starrocks_active_until": dt.datetime(2026, 9, 7, 11, tzinfo=dt.UTC),
+        "starrocks_connect_timeout_seconds": 5,
+        "starrocks_read_timeout_seconds": 25,
+        "starrocks_write_timeout_seconds": 5,
+        "starrocks_query_timeout_seconds": 20,
+    }
+    return Settings(**(values | updates))
+
+
+class _NeverConnectFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, password: str) -> object:
+        del password
+        self.calls += 1
+        raise AssertionError("composition must not connect")
+
+
+def _live_assembly(factory: _NeverConnectFactory) -> StarRocksLiveAssembly:
+    return StarRocksLiveAssembly(
+        identity_probe=PhysicalIdentityProbe(
+            statement=(
+                "SELECT `cluster_identity` FROM "
+                "`xiaowei_meta`.`cluster_identity_v` LIMIT 1"
+            ),
+            result_column="cluster_identity",
+        ),
+        connection_factory=factory,
+        driver_version="1.2.0-test-double",
+        unredacted_rows_approved=True,
+    )
+
+
+def _install_approved_test_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "xiaowei_agent.capabilities.target._ENVIRONMENT_DIRECTORY",
+        MappingProxyType(
+            {
+                "dev": ("starrocks-dev-1",),
+                "test": ("approved-test-cluster",),
+            }
+        ),
+    )
+
+
+def test_test_readonly_stack_requires_code_owned_live_assembly() -> None:
+    with pytest.raises(ValueError):
+        build_in_memory_local_stack(settings=_live_settings())
+
+
+def test_test_readonly_stack_rejects_current_ambiguous_target_before_connect() -> None:
+    factory = _NeverConnectFactory()
+    with pytest.raises(ValueError):
+        build_in_memory_local_stack(
+            settings=_live_settings(),
+            starrocks_live_assembly=_live_assembly(factory),
+        )
+    assert factory.calls == 0
+
+
+def test_test_readonly_stack_registers_only_exact_target_without_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_approved_test_directory(monkeypatch)
+    factory = _NeverConnectFactory()
+    now = dt.datetime(2026, 9, 7, 10, tzinfo=dt.UTC)
+
+    stack = build_in_memory_local_stack(
+        settings=_live_settings(),
+        starrocks_live_assembly=_live_assembly(factory),
+        clock=lambda: now,
+    )
+
+    gateway = stack.runtime._runner._gateway
+    assert isinstance(gateway, DeterministicToolGateway)
+    assert "starrocks" not in gateway._adapters
+    assert set(gateway._adapters) == {"alertmanager", "prometheus", "asset_inventory"}
+    assert len(gateway._target_adapters) == 1
+    ((gateway_name, fingerprint), binding) = next(iter(gateway._target_adapters.items()))
+    assert gateway_name == "starrocks"
+    assert len(fingerprint) == 64
+    assert binding.config_revision
+    assert binding.physical_identity_ref == "identity-ref:test-cluster"
+    assert factory.calls == 0
+
+
+def test_test_readonly_stack_rejects_resource_config_directory_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_approved_test_directory(monkeypatch)
+    factory = _NeverConnectFactory()
+    with pytest.raises(ValueError):
+        build_in_memory_local_stack(
+            settings=_live_settings(starrocks_resource_id="other-cluster"),
+            starrocks_live_assembly=_live_assembly(factory),
+        )
+    assert factory.calls == 0
 
 
 @pytest.mark.asyncio

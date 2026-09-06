@@ -1,0 +1,48 @@
+# 仅在 M6b 现场 GO 后显式叠加；必须使用独立的 Compose project name。
+# 本文件不提供物理身份 SQL：它只能来自已评审的 StarRocksLiveAssembly。
+x-m6b-starrocks-environment: &m6b-starrocks-environment
+  XIAOWEI_ENVIRONMENT_ID: test
+  XIAOWEI_ACTOR: ${M6B_AUTHORIZED_ACTOR:?required}
+  XIAOWEI_STARROCKS_ADAPTER_MODE: test_readonly
+  XIAOWEI_STARROCKS_HOST: ${M6B_STARROCKS_HOST:?required}
+  XIAOWEI_STARROCKS_PORT: ${M6B_STARROCKS_PORT:?required}
+  XIAOWEI_STARROCKS_DATABASE: ${M6B_STARROCKS_DATABASE:?required}
+  XIAOWEI_STARROCKS_USER: ${M6B_STARROCKS_USER:?required}
+  XIAOWEI_STARROCKS_PASSWORD_FILE: /run/secrets/m6b_starrocks_password
+  XIAOWEI_STARROCKS_TLS_MODE: ${M6B_STARROCKS_TLS_MODE:?required}
+  XIAOWEI_STARROCKS_CA_FILE: /run/secrets/m6b_starrocks_ca
+  XIAOWEI_STARROCKS_SERVER_NAME: ${M6B_STARROCKS_SERVER_NAME:?required}
+  XIAOWEI_STARROCKS_RESOURCE_ID: ${M6B_STARROCKS_RESOURCE_ID:?required}
+  XIAOWEI_STARROCKS_EXPECTED_GRANTS_SHA256: ${M6B_EXPECTED_GRANTS_SHA256:?required}
+  XIAOWEI_STARROCKS_EXPECTED_DDL_SHA256: ${M6B_EXPECTED_DDL_SHA256:?required}
+  XIAOWEI_STARROCKS_EXPECTED_IDENTITY_SHA256: ${M6B_EXPECTED_IDENTITY_SHA256:?required}
+  XIAOWEI_STARROCKS_EXPECTED_METADATA_SOURCE_REF: ${M6B_METADATA_SOURCE_REF:?required}
+  XIAOWEI_STARROCKS_PHYSICAL_IDENTITY_REF: ${M6B_PHYSICAL_IDENTITY_REF:?required}
+  XIAOWEI_STARROCKS_AUTHORIZED_ACTOR: ${M6B_AUTHORIZED_ACTOR:?required}
+  XIAOWEI_STARROCKS_ACTIVE_FROM: ${M6B_ACTIVE_FROM:?required}
+  XIAOWEI_STARROCKS_ACTIVE_UNTIL: ${M6B_ACTIVE_UNTIL:?required}
+  XIAOWEI_STARROCKS_CONNECT_TIMEOUT_SECONDS: ${M6B_CONNECT_TIMEOUT_SECONDS:?required}
+  XIAOWEI_STARROCKS_READ_TIMEOUT_SECONDS: ${M6B_READ_TIMEOUT_SECONDS:?required}
+  XIAOWEI_STARROCKS_WRITE_TIMEOUT_SECONDS: ${M6B_WRITE_TIMEOUT_SECONDS:?required}
+  XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS: ${M6B_QUERY_TIMEOUT_SECONDS:?required}
+
+x-m6b-starrocks-secrets: &m6b-starrocks-secrets
+  - postgres_password
+  - m6b_starrocks_password
+  - m6b_starrocks_ca
+
+services:
+  api:
+    environment:
+      <<: *m6b-starrocks-environment
+    secrets: *m6b-starrocks-secrets
+  worker:
+    environment:
+      <<: *m6b-starrocks-environment
+    secrets: *m6b-starrocks-secrets
+
+secrets:
+  m6b_starrocks_password:
+    file: ${M6B_STARROCKS_PASSWORD_SOURCE:?required}
+  m6b_starrocks_ca:
+    file: ${M6B_STARROCKS_CA_SOURCE:?required}

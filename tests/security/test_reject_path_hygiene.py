@@ -83,6 +83,7 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         # test_rejection_message_never_echoes_the_environment_id 反向承重。
         "TargetRejection.UNKNOWN_ENVIRONMENT",
         "TargetRejection.EMPTY_ENVIRONMENT_DIRECTORY",
+        "TargetRejection.AMBIGUOUS_ENVIRONMENT_DIRECTORY",
         # --- BindingRejection 枚举成员：取值域是代码里的闭集 ---
         "BindingRejection.POLICY_REVISION_DRIFT",
         "BindingRejection.APPROVAL_EXPIRED",

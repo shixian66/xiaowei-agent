@@ -8,10 +8,16 @@ import pytest
 
 from xiaowei_agent.capabilities.target import (
     KNOWN_ENVIRONMENT_IDS,
+    SELECTOR_VERSION,
     TargetResolutionError,
     resolve_target,
 )
-from xiaowei_agent.contracts import IntentDraft, IntentSource, RequestContext
+from xiaowei_agent.contracts import (
+    IntentDraft,
+    IntentSource,
+    RequestContext,
+    TargetRejection,
+)
 from xiaowei_agent.planning import compute_target_fingerprint
 
 
@@ -43,10 +49,11 @@ def test_same_context_yields_identical_fingerprint() -> None:
     assert compute_target_fingerprint(first) == compute_target_fingerprint(second)
 
 
-def test_environment_change_changes_the_fingerprint() -> None:
-    dev = resolve_target(context=_context(environment_id="dev"), draft=_draft())
-    test = resolve_target(context=_context(environment_id="test"), draft=_draft())
-    assert compute_target_fingerprint(dev) != compute_target_fingerprint(test)
+def test_selector_version_is_incremented_for_the_target_directory_change() -> None:
+    target = resolve_target(context=_context(environment_id="dev"), draft=_draft())
+
+    assert SELECTOR_VERSION == "2"
+    assert target.selector_version == "2"
 
 
 def test_tenant_change_changes_the_fingerprint() -> None:
@@ -69,13 +76,14 @@ def test_resolved_target_carries_the_declared_provider_and_kind() -> None:
     assert target.environment_id == "dev"
 
 
-def test_every_known_environment_resolves() -> None:
-    """环境目录里的每一项都必须真的能解析出目标，否则目录本身是错的。"""
-    for environment_id in KNOWN_ENVIRONMENT_IDS:
-        target = resolve_target(
-            context=_context(environment_id=environment_id), draft=_draft()
-        )
-        assert target.environment_id == environment_id
+def test_test_environment_remains_closed_until_one_resource_is_approved() -> None:
+    """不能替负责人从两个占位资源中任选其一。"""
+    assert "test" in KNOWN_ENVIRONMENT_IDS
+
+    with pytest.raises(TargetResolutionError) as error:
+        resolve_target(context=_context(environment_id="test"), draft=_draft())
+
+    assert error.value.rejection is TargetRejection.AMBIGUOUS_ENVIRONMENT_DIRECTORY
 
 
 def test_unresolvable_environment_fails_closed() -> None:

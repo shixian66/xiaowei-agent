@@ -6,8 +6,20 @@ import pytest
 from tests.fakes.admission import PARAMS, REGISTRY_SNAPSHOT, TARGET, slow_query_plan
 
 from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE as SURFACE
-from xiaowei_agent.contracts import AdapterStatus, ExternalSource, ToolResult
-from xiaowei_agent.evidence.builder import build_evidence, evidence_id
+from xiaowei_agent.contracts import (
+    AdapterStatus,
+    ExternalSource,
+    RequestContext,
+    ResolvedTarget,
+    ToolResult,
+)
+from xiaowei_agent.evidence.builder import (
+    SlowQueryEvidencePolicy,
+    build_evidence,
+    evidence_id,
+)
+from xiaowei_agent.evidence.errors import EvidenceBuildError
+from xiaowei_agent.planning import compute_target_fingerprint
 from xiaowei_agent.tools.adapter import AdapterResponse
 from xiaowei_agent.tools.fake import RecordingToolAdapter
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
@@ -62,6 +74,7 @@ def _build(rows: tuple[dict[str, object], ...] = (_ROW,)) -> object:
         task_id=_TASK,
         step=plan.steps[0],
         plan=plan,
+        target=TARGET,
         result=_result(rows),
         surface=SURFACE,
         params=PARAMS,
@@ -160,6 +173,7 @@ def test_naive_captured_at_is_rejected() -> None:
             task_id=_TASK,
             step=plan.steps[0],
             plan=plan,
+            target=TARGET,
             result=_result((_ROW,)),
             surface=SURFACE,
             params=PARAMS,
@@ -167,12 +181,11 @@ def test_naive_captured_at_is_rejected() -> None:
         )
 
 
-def test_builder_does_not_depend_on_the_target() -> None:
-    """构造器签名里没有 target：证据描述"取到了什么"，目标由指纹绑定承载。"""
+def test_builder_requires_the_admitted_target() -> None:
+    """M6b 后 target 是真实证据归属核对的必需输入。"""
     import inspect
 
-    assert "target" not in inspect.signature(build_evidence).parameters
-    assert TARGET is not None  # 夹具存在，只是刻意不进构造器
+    assert "target" in inspect.signature(build_evidence).parameters
 
 
 def test_snapshot_is_not_needed_to_build_evidence() -> None:
@@ -180,3 +193,184 @@ def test_snapshot_is_not_needed_to_build_evidence() -> None:
 
     assert "snapshot" not in inspect.signature(build_evidence).parameters
     assert REGISTRY_SNAPSHOT is not None
+
+
+_LIVE_TARGET = ResolvedTarget(
+    tenant_id="dev-local",
+    environment_id="test",
+    provider="starrocks",
+    resource_kind="cluster",
+    resource_ids=("approved-test-cluster",),
+    selector_version="2",
+)
+_LIVE_CONTEXT = RequestContext(
+    tenant_id="dev-local",
+    actor="m6b-operator",
+    environment_id="test",
+    trace_id="1" * 32,
+    policy_revision="policy-2026-09-01",
+)
+_LIVE_POLICY = SlowQueryEvidencePolicy(
+    approved_target=_LIVE_TARGET,
+    target_fingerprint=compute_target_fingerprint(_LIVE_TARGET),
+    evidence_source_ref="approval-ref:m6b-1",
+    config_revision="a" * 64,
+    physical_identity_ref="identity-ref:test-cluster",
+    driver_version="1.2.0",
+    redaction_ref=None,
+)
+
+
+def _live_result(
+    rows: tuple[dict[str, object], ...] = (_ROW,),
+    *,
+    source_ref: str = _LIVE_POLICY.evidence_source_ref,
+    status: AdapterStatus = AdapterStatus.OK,
+) -> ToolResult:
+    import asyncio
+
+    from tests.conftest import make_certificate
+    from tests.fakes.admission import slow_query_call
+
+    from xiaowei_agent.tools.gateway import TargetBoundAdapterBinding
+
+    adapter = RecordingToolAdapter(
+        responses=(
+            AdapterResponse(
+                status=status,
+                payload=rows,
+                source="untrusted-adapter-source",
+                error=None,
+                elapsed_ms=3,
+            ),
+        )
+    )
+    call = slow_query_call()
+    fingerprint = compute_target_fingerprint(_LIVE_TARGET)
+    binding = TargetBoundAdapterBinding(
+        adapter=adapter,
+        authorized_tenant_id=_LIVE_CONTEXT.tenant_id,
+        authorized_environment_id=_LIVE_CONTEXT.environment_id,
+        authorized_actor=_LIVE_CONTEXT.actor,
+        active_from=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        active_until=dt.datetime(2026, 9, 30, tzinfo=dt.UTC),
+        evidence_source_ref=source_ref,
+        config_revision=_LIVE_POLICY.config_revision,
+        physical_identity_ref=_LIVE_POLICY.physical_identity_ref,
+        driver_version=_LIVE_POLICY.driver_version,
+    )
+    gateway = DeterministicToolGateway(
+        adapters={},
+        target_adapters={("starrocks", fingerprint): binding},
+        clock=lambda: _AT,
+    )
+    return asyncio.run(
+        gateway.invoke(
+            call,
+            context=_LIVE_CONTEXT,
+            admission=make_certificate(call, target_fingerprint=fingerprint),
+        )
+    )
+
+
+def test_verified_test_evidence_preserves_only_gateway_signed_metadata() -> None:
+    plan = slow_query_plan()
+    result = _live_result()
+
+    envelope = build_evidence(
+        task_id=_TASK,
+        step=plan.steps[0],
+        plan=plan,
+        target=_LIVE_TARGET,
+        result=result,
+        surface=SURFACE,
+        params=PARAMS,
+        captured_at=_AT,
+        live_policy=_LIVE_POLICY,
+    )
+
+    assert envelope.source == _LIVE_POLICY.evidence_source_ref
+    assert envelope.limitations[-5:] == result.limitations
+    assert envelope.redaction_ref is None
+    assert "untrusted-adapter-source" not in envelope.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _LIVE_TARGET.model_copy(update={"environment_id": "dev"}),
+        _LIVE_TARGET.model_copy(update={"resource_ids": ("other-test-cluster",)}),
+        _LIVE_TARGET.model_copy(
+            update={"resource_ids": ("approved-test-cluster", "another")}
+        ),
+    ],
+)
+def test_verified_test_evidence_rejects_wrong_or_non_unique_target(
+    target: ResolvedTarget,
+) -> None:
+    plan = slow_query_plan()
+    with pytest.raises(EvidenceBuildError):
+        build_evidence(
+            task_id=_TASK,
+            step=plan.steps[0],
+            plan=plan,
+            target=target,
+            result=_live_result(),
+            surface=SURFACE,
+            params=PARAMS,
+            captured_at=_AT,
+            live_policy=_LIVE_POLICY,
+        )
+
+
+def test_verified_test_evidence_rejects_metadata_or_source_drift() -> None:
+    plan = slow_query_plan()
+    result = _live_result()
+    changed_pairs = (
+        (_live_result(source_ref="other-source"), _LIVE_POLICY),
+        (
+            result,
+            SlowQueryEvidencePolicy(
+                approved_target=_LIVE_TARGET,
+                target_fingerprint=_LIVE_POLICY.target_fingerprint,
+                evidence_source_ref=_LIVE_POLICY.evidence_source_ref,
+                config_revision="b" * 64,
+                physical_identity_ref=_LIVE_POLICY.physical_identity_ref,
+                driver_version=_LIVE_POLICY.driver_version,
+                redaction_ref=None,
+            ),
+        ),
+    )
+    for changed, policy in changed_pairs:
+        with pytest.raises(EvidenceBuildError):
+            build_evidence(
+                task_id=_TASK,
+                step=plan.steps[0],
+                plan=plan,
+                target=_LIVE_TARGET,
+                result=changed,
+                surface=SURFACE,
+                params=PARAMS,
+                captured_at=_AT,
+                live_policy=policy,
+            )
+
+
+def test_verified_test_failure_evidence_is_attributed_but_not_verified() -> None:
+    plan = slow_query_plan()
+    result = _live_result(rows=(), status=AdapterStatus.ERROR)
+
+    envelope = build_evidence(
+        task_id=_TASK,
+        step=plan.steps[0],
+        plan=plan,
+        target=_LIVE_TARGET,
+        result=result,
+        surface=SURFACE,
+        params=PARAMS,
+        captured_at=_AT,
+        live_policy=_LIVE_POLICY,
+    )
+
+    assert envelope.facts == ()
+    assert envelope.limitations[-1] == "preflight=unverified"

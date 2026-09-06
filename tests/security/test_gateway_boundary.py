@@ -23,7 +23,11 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.tools.adapter import AdapterResponse
 from xiaowei_agent.tools.fake import RecordingToolAdapter
-from xiaowei_agent.tools.gateway import _E1_EXECUTION_ENABLED, DeterministicToolGateway
+from xiaowei_agent.tools.gateway import (
+    _E1_EXECUTION_ENABLED,
+    DeterministicToolGateway,
+    TargetBoundAdapterBinding,
+)
 
 pytestmark = pytest.mark.security
 
@@ -108,6 +112,206 @@ async def test_unregistered_adapter_fails_closed(
 def test_gateway_requires_at_least_one_adapter() -> None:
     with pytest.raises(ValueError):
         DeterministicToolGateway(adapters={})
+
+
+def _target_bound_gateway(
+    *,
+    adapter: RecordingToolAdapter,
+    target_fingerprint: str,
+    now: dt.datetime = _AT,
+) -> DeterministicToolGateway:
+    binding = TargetBoundAdapterBinding(
+        adapter=adapter,
+        authorized_tenant_id="dev-local",
+        authorized_environment_id="dev",
+        authorized_actor="alice",
+        active_from=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        active_until=dt.datetime(2026, 9, 30, tzinfo=dt.UTC),
+        evidence_source_ref="source-ref:m6b",
+        config_revision="a" * 64,
+        physical_identity_ref="identity-ref:test-cluster",
+        driver_version="1.2.0",
+    )
+    return DeterministicToolGateway(
+        adapters={},
+        target_adapters={("starrocks", target_fingerprint): binding},
+        clock=lambda: now,
+    )
+
+
+def test_gateway_refuses_generic_and_target_registration_for_the_same_gateway(
+    recording_adapter,
+    admission,
+) -> None:
+    binding = TargetBoundAdapterBinding(
+        adapter=recording_adapter,
+        authorized_tenant_id="dev-local",
+        authorized_environment_id="dev",
+        authorized_actor="alice",
+        active_from=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        active_until=dt.datetime(2026, 9, 30, tzinfo=dt.UTC),
+        evidence_source_ref="source-ref:m6b",
+        config_revision="a" * 64,
+        physical_identity_ref="identity-ref:test-cluster",
+        driver_version="1.2.0",
+    )
+
+    with pytest.raises(ValueError):
+        DeterministicToolGateway(
+            adapters={"starrocks": recording_adapter},
+            target_adapters={("starrocks", admission.target_fingerprint): binding},
+        )
+
+
+async def test_target_bound_gateway_requires_exact_fingerprint(
+    ok_call,
+    context,
+    admission,
+    recording_adapter,
+) -> None:
+    gateway = _target_bound_gateway(
+        adapter=recording_adapter,
+        target_fingerprint=admission.target_fingerprint,
+    )
+    wrong = make_certificate(ok_call, target_fingerprint="f" * 64)
+
+    with pytest.raises(LookupError):
+        await gateway.invoke(ok_call, context=context, admission=wrong)
+
+    assert recording_adapter.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tenant_id", "other-tenant"),
+        ("environment_id", "test"),
+        ("actor", "mallory"),
+    ],
+)
+async def test_target_bound_gateway_checks_context_before_adapter(
+    ok_call,
+    context,
+    admission,
+    recording_adapter,
+    field: str,
+    value: str,
+) -> None:
+    gateway = _target_bound_gateway(
+        adapter=recording_adapter,
+        target_fingerprint=admission.target_fingerprint,
+    )
+    changed_context = context.model_copy(update={field: value})
+
+    with pytest.raises(PermissionError):
+        await gateway.invoke(ok_call, context=changed_context, admission=admission)
+
+    assert recording_adapter.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        dt.datetime(2026, 8, 31, 23, 59, tzinfo=dt.UTC),
+        dt.datetime(2026, 9, 30, tzinfo=dt.UTC),
+    ],
+)
+async def test_target_bound_gateway_checks_activation_window_before_adapter(
+    ok_call,
+    context,
+    admission,
+    recording_adapter,
+    now: dt.datetime,
+) -> None:
+    gateway = _target_bound_gateway(
+        adapter=recording_adapter,
+        target_fingerprint=admission.target_fingerprint,
+        now=now,
+    )
+
+    with pytest.raises(PermissionError):
+        await gateway.invoke(ok_call, context=context, admission=admission)
+
+    assert recording_adapter.call_count == 0
+
+
+async def test_target_bound_gateway_issues_only_trusted_binding_metadata(
+    ok_call,
+    context,
+    admission,
+    recording_adapter,
+) -> None:
+    gateway = _target_bound_gateway(
+        adapter=recording_adapter,
+        target_fingerprint=admission.target_fingerprint,
+    )
+
+    result = await gateway.invoke(ok_call, context=context, admission=admission)
+
+    assert recording_adapter.call_count == 1
+    assert result.source == "source-ref:m6b"
+    assert result.limitations == (
+        f"target_fingerprint={admission.target_fingerprint}",
+        "config_revision=" + "a" * 64,
+        "physical_identity_ref=identity-ref:test-cluster",
+        "driver_version=1.2.0",
+        "preflight=verified",
+    )
+    assert "starrocks-fake" not in result.model_dump_json()
+
+
+async def test_target_bound_gateway_marks_failed_preflight_as_unverified(
+    ok_call,
+    context,
+    admission,
+) -> None:
+    adapter = RecordingToolAdapter(
+        responses=(
+            AdapterResponse(
+                status=AdapterStatus.ERROR,
+                payload=(),
+                source="untrusted-adapter-source",
+                error=None,
+                elapsed_ms=3,
+            ),
+        )
+    )
+    gateway = _target_bound_gateway(
+        adapter=adapter,
+        target_fingerprint=admission.target_fingerprint,
+    )
+
+    result = await gateway.invoke(ok_call, context=context, admission=admission)
+
+    assert result.status is ToolCallStatus.ERROR
+    assert result.source == "source-ref:m6b"
+    assert result.limitations[-1] == "preflight=unverified"
+    assert "untrusted-adapter-source" not in result.model_dump_json()
+
+
+def test_target_binding_requires_an_aware_increasing_window(recording_adapter) -> None:
+    base = {
+        "adapter": recording_adapter,
+        "authorized_tenant_id": "dev-local",
+        "authorized_environment_id": "dev",
+        "authorized_actor": "alice",
+        "evidence_source_ref": "source-ref:m6b",
+        "config_revision": "a" * 64,
+        "physical_identity_ref": "identity-ref:test-cluster",
+        "driver_version": "1.2.0",
+    }
+    with pytest.raises(ValueError):
+        TargetBoundAdapterBinding(
+            **base,
+            active_from=dt.datetime(2026, 9, 1),
+            active_until=dt.datetime(2026, 9, 2),
+        )
+    with pytest.raises(ValueError):
+        TargetBoundAdapterBinding(
+            **base,
+            active_from=dt.datetime(2026, 9, 2, tzinfo=dt.UTC),
+            active_until=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        )
 
 
 async def test_non_conforming_adapter_return_is_refused(ok_call, context, admission) -> None:

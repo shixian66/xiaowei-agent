@@ -145,6 +145,52 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
     }
 
 
+def test_m6b_override_is_explicit_parameterized_and_mounts_file_credentials() -> None:
+    override = _yaml("docker-compose.m6b-test.yml")
+    assert set(override["services"]) == {"api", "worker"}
+    for name in ("api", "worker"):
+        service = override["services"][name]
+        assert set(service) == {"environment", "secrets"}
+        environment = service["environment"]
+        assert environment["XIAOWEI_ENVIRONMENT_ID"] == "test"
+        assert environment["XIAOWEI_STARROCKS_ADAPTER_MODE"] == "test_readonly"
+        assert environment["XIAOWEI_STARROCKS_PASSWORD_FILE"] == (
+            "/run/secrets/m6b_starrocks_" + "password"
+        )
+        assert environment["XIAOWEI_STARROCKS_CA_FILE"] == (
+            "/run/secrets/m6b_starrocks_ca"
+        )
+        parameterized = {
+            value
+            for key, value in environment.items()
+            if key
+            not in {
+                "XIAOWEI_ENVIRONMENT_ID",
+                "XIAOWEI_STARROCKS_ADAPTER_MODE",
+                "XIAOWEI_STARROCKS_PASSWORD_FILE",
+                "XIAOWEI_STARROCKS_CA_FILE",
+            }
+        }
+        assert parameterized
+        assert all(
+            isinstance(value, str) and value.startswith("${M6B_") and ":?" in value
+            for value in parameterized
+        )
+        assert service["secrets"] == [
+            "postgres_password",
+            "m6b_starrocks_password",
+            "m6b_starrocks_ca",
+        ]
+    assert set(override["secrets"]) == {
+        "m6b_starrocks_password",
+        "m6b_starrocks_ca",
+    }
+    assert all(
+        definition["file"].startswith("${M6B_")
+        for definition in override["secrets"].values()
+    )
+
+
 def test_dockerfile_is_reproducible_non_root_and_excludes_tests() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
