@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent`；当前 M6b 隔离 worktree 为 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-07（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b V1.1 计划已获批准，正在 `claude/m6b-starrocks-test-readonly` 做离线实现；尚未连接真实 StarRocks，能力证据等级仍为 `tests`** |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；项目负责人已明确将真实测试环境验证延期，M6b 证据等级仍为 `tests`，尚未通过里程碑验收、尚未归档** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -48,10 +48,10 @@
 | M6a 最终实现基线 | `e2032fdff958d2309973458d5c762a54b3a4f855`；PR #14 的 `mergeCommit` 与该 SHA 相同，无合并提交 |
 | M6a 合并后 CI | main push run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909) 精确绑定最终实现基线，八个 job 全绿 |
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
-| M6b 开发基线与分支 | `e8128c8c364e1e5ba560c916044dfae0409dd490` / `claude/m6b-starrocks-test-readonly`；候选 SHA 由本轮复审对象提供，不在本文件内自指 |
-| 下一步 | 对 M6b 修复候选做独立精确 SHA 审查；随后补齐唯一 canonical target、物理 identity、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、字段处置/保留/销毁和明确“现场 GO”，再进行受控真实只读验证 |
+| M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
+| 下一步 | **M6b 暂停在真实验证前并完成交接**。以后恢复时先核对最新 `main` 与授权是否漂移，再补齐唯一 canonical target、物理 identity、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、字段处置/保留/销毁，并取得新的明确“现场 GO”；未恢复前不得连接真实 StarRocks |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose 与三能力 fake local stack 已合入 `main`；M6b 真实 adapter 仅有离线注入测试，真实激活保持 fail-closed。仍未连接任何真实运维目标 |
+| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
@@ -153,7 +153,7 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 8. ~~M4 实现与验收~~ **已完成**：四轮打回后以 `--ff-only` 合入 `main`（`714df07`），CI run `33842205710` 七项全绿，逐条提交历史已归档。
 9. ~~M5 实现与验收~~ **已完成**：最终对象 `372c381` 经终审与项目负责人验收，以 fast-forward 合入 `main`；合并后 run `33952529021` 八项全绿，逐条提交历史已归档。
 10. ~~M6a 实现与验收~~ **已完成**：PR #11、#12、#13、#15、#14 均已合入；最终实现基线 `e2032fd` 的 main push CI 八项全绿，里程碑已获负责人验收并归档。
-11. **M6b 离线实现中**：V1.1 计划已批准；只允许实现默认关闭的真实 adapter 与离线测试。唯一目标、物理身份、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、证据处置和“现场 GO”未全部落定前不连接真实服务。
+11. **M6b 真实验证前暂停**：默认关闭的真实 adapter 已经 PR #17 审查并合入 `main`，合入后八项 CI 全绿；项目负责人明确将测试环境验证延期。恢复时必须从最新 `main` 重新核对授权和配置，唯一目标、物理身份、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、证据处置和新的“现场 GO”未全部落定前不连接真实服务。M6b 仍未验收、未归档。
 
 ## 6. 仍需拍板的事项
 
@@ -161,8 +161,8 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 - M8 受控 E1 的三项开放条件是否齐备：ADR-005 定稿、项目负责人批准、ADR-007 明确例外或修订。
 - 生产写的独立授权与独立验收计划（不由 M8 推导）。
 - 真实模型 API 网络调用所属的独立里程碑，及其 ADR、凭证引用、数据范围和保留策略授权。
-- M6b 现场验证的唯一 canonical target、物理 identity 探针、带外 version/grants/DDL/identity digest、账号 secret reference、actor/时窗、允许字段、临时 Evidence/recording 销毁方式和脱敏证据保留周期。
-- M6b 离线候选经审查后的单独“现场 GO”；离线开发批准不等于真实网络调用许可。
+- M6b 现场验证已由项目负责人明确延期。以后恢复时仍需拍板唯一 canonical target、物理 identity 探针、带外 version/grants/DDL/identity digest、账号 secret reference、actor/时窗、允许字段、临时 Evidence/recording 销毁方式和脱敏证据保留周期。
+- M6b 恢复真实验证前的单独“现场 GO”；既有离线开发批准与合入事实均不等于真实网络调用许可。
 - 具备条件（升级套餐或改为 public）时补齐分支保护。
 - 发布环境（M5 后）。
 
@@ -211,6 +211,7 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 
 ### 已验证
 
+- **M6b 离线实现已合入 `main`**：PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入；PR 与合入后 main push CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 的 tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项均成功。该证据只把状态推进到 `tests`，不构成 `test-env verified`。
 - **M6b 独立审查修复后的离线工作树四门全绿**：`python -m pytest -q` 为 2330 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1085 passed / 79 skipped / 1320 deselected / 5 warnings；Ruff 通过；mypy 134 个源文件通过；`git diff --check` 无输出。154 个 skip 沿用无 `PYTEST_POSTGRES_DSN` 的本机口径，未提供新的 PostgreSQL/Compose 或真实 StarRocks 运行证据。修复覆盖 version digest、preflight 顺序/列契约/count 形状、driver timeout 内外层约束，以及 generic Gateway 失败与 target-bound metadata 的 Evidence 归因。
 - **M6b 六组隔离变异反证均按预期转红**：分别拆掉 Gateway exact fingerprint、ToolCall 连接参数污染拒绝、list 行数上限、identity digest、DDL digest 与异常路径 connection close；对应测试均非零退出。另以先红后绿补严 physical identity AST：错列、无 database、`WHERE SLEEP(...)` 与 `ORDER BY` 不再能进入受审探针闭集。所有变体只位于 `/private/tmp/m6b-mutation.I2tKU9`，未进入工作树。
 - **M6b 独立审查修复新增六组隔离变异反证**：分别移除 version digest 比对、恢复“任意 limitation 都是 Evidence 错位”、禁用跨能力保留 metadata 拒绝、恢复空 count/宽松列契约、放宽 driver timeout、把 `SET query_timeout` 移到 version 之后；对应测试分别以 1、2、2、3、3、1 条失败转红。变体确认从 `/private/tmp/m6b-review-mutation.Bujb3l/*/src` 加载，未进入工作树。
@@ -257,7 +258,7 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
 - ADR-001 至 ADR-006 尚未编写。
 - Multi-Agent 准入条件仍只有文档约束；M9 也只评估 Runner，不授予 Multi-Agent 权限。
-- M6b 只有离线实现与注入测试，尚无测试环境 StarRocks 的真实连接、凭证引用 readback、
+- M6b 已完成离线实现、审查、合入和合入后 CI，但项目负责人已将真实测试环境验证延期；尚无测试环境 StarRocks 的真实连接、凭证引用 readback、
   physical identity、DDL/grants 或数据处置证据，因此不能标记 `test-env verified`。
 
 ### 残余风险
