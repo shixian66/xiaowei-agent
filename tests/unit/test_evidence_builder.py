@@ -68,6 +68,30 @@ def _result(rows: tuple[dict[str, object], ...]) -> ToolResult:
     )
 
 
+def _generic_gateway_failure_result(*, timeout: bool) -> ToolResult:
+    import asyncio
+
+    from tests.conftest import make_certificate
+    from tests.fakes.admission import CONTEXT, slow_query_call
+
+    class _FailingAdapter:
+        async def execute(self, call, *, context):
+            del call, context
+            if timeout:
+                await asyncio.sleep(0.02)
+                raise AssertionError("wait_for should cancel the adapter")
+            raise RuntimeError("synthetic upstream failure")
+
+    call = slow_query_call(timeout_seconds=0.001 if timeout else 30.0)
+    return asyncio.run(
+        DeterministicToolGateway(adapters={"starrocks": _FailingAdapter()}).invoke(
+            call,
+            context=CONTEXT,
+            admission=make_certificate(call),
+        )
+    )
+
+
 def _build(rows: tuple[dict[str, object], ...] = (_ROW,)) -> object:
     plan = slow_query_plan()
     return build_evidence(
@@ -158,6 +182,36 @@ def test_empty_result_produces_empty_facts_not_a_missing_envelope() -> None:
     assert envelope.facts == ()
     assert envelope.sampled is False
     assert envelope.limitations
+
+
+@pytest.mark.parametrize(
+    ("timeout", "expected_limitation"),
+    [
+        (False, "adapter raised an unexpected exception"),
+        (True, "adapter timed out"),
+    ],
+)
+def test_generic_gateway_failure_remains_tool_result_evidence(
+    timeout: bool,
+    expected_limitation: str,
+) -> None:
+    """固定 gateway 失败文案不是 target metadata，不能破坏错误归因。"""
+    plan = slow_query_plan()
+    result = _generic_gateway_failure_result(timeout=timeout)
+    assert result.limitations == (expected_limitation,)
+    envelope = build_evidence(
+        task_id=_TASK,
+        step=plan.steps[0],
+        plan=plan,
+        target=TARGET,
+        result=result,
+        surface=SURFACE,
+        params=PARAMS,
+        captured_at=_AT,
+    )
+
+    assert envelope.facts == ()
+    assert envelope.source == "starrocks"
 
 
 def test_captured_at_is_injected_not_read_from_the_clock() -> None:

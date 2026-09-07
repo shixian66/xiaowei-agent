@@ -27,6 +27,7 @@ from xiaowei_agent.redaction import safe_error_details
 ENV_PREFIX: Final[str] = "XIAOWEI_"
 DEFAULT_TENANT_ID: Final[str] = "dev-local"
 _DEFAULT_POSTGRES_SECRET_PATH: Final[str] = "/run/secrets/postgres_" + "password"
+_STARROCKS_GATEWAY_TIMEOUT_SECONDS: Final[int] = 30
 
 
 def _strict_str(value: str) -> str:
@@ -109,6 +110,7 @@ class Settings(BaseModel):
     starrocks_ca_file: StrictStr | None = None
     starrocks_server_name: StrictStr | None = None
     starrocks_resource_id: StrictStr | None = None
+    starrocks_expected_version_sha256: Sha256Hex | None = None
     starrocks_expected_grants_sha256: Sha256Hex | None = None
     starrocks_expected_ddl_sha256: Sha256Hex | None = None
     starrocks_expected_identity_sha256: Sha256Hex | None = None
@@ -118,7 +120,11 @@ class Settings(BaseModel):
     starrocks_active_from: datetime | None = None
     starrocks_active_until: datetime | None = None
     starrocks_connect_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
-    starrocks_read_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
+    starrocks_read_timeout_seconds: int | None = Field(
+        default=None,
+        gt=0,
+        lt=_STARROCKS_GATEWAY_TIMEOUT_SECONDS,
+    )
     starrocks_write_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
     starrocks_query_timeout_seconds: int | None = Field(default=None, gt=0, le=25)
 
@@ -153,6 +159,7 @@ class Settings(BaseModel):
             "ca_file": self.starrocks_ca_file,
             "server_name": self.starrocks_server_name,
             "resource_id": self.starrocks_resource_id,
+            "expected_version_sha256": self.starrocks_expected_version_sha256,
             "expected_grants_sha256": self.starrocks_expected_grants_sha256,
             "expected_ddl_sha256": self.starrocks_expected_ddl_sha256,
             "expected_identity_sha256": self.starrocks_expected_identity_sha256,
@@ -283,6 +290,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "starrocks_ca_file": "XIAOWEI_STARROCKS_CA_FILE",
     "starrocks_server_name": "XIAOWEI_STARROCKS_SERVER_NAME",
     "starrocks_resource_id": "XIAOWEI_STARROCKS_RESOURCE_ID",
+    "starrocks_expected_version_sha256": "XIAOWEI_STARROCKS_EXPECTED_VERSION_SHA256",
     "starrocks_expected_grants_sha256": "XIAOWEI_STARROCKS_EXPECTED_GRANTS_SHA256",
     "starrocks_expected_ddl_sha256": "XIAOWEI_STARROCKS_EXPECTED_DDL_SHA256",
     "starrocks_expected_identity_sha256": "XIAOWEI_STARROCKS_EXPECTED_IDENTITY_SHA256",

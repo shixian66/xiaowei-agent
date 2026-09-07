@@ -30,6 +30,7 @@ _DDL = (
 )
 _GRANT = "GRANT SELECT ON audit_db.audit_table TO audit_reader"
 _IDENTITY = "cluster-identity-1"
+_EXPECTED_VERSION = "93e431573473f4fe63ecec99929bf3cb879540f81dc44f60e375c089ec6f183b"
 _EXPECTED_GRANTS = "36e4233b85c65cfc23079af20150001b1a78006cba77c9ecfcc0a46536cdca1b"
 _EXPECTED_DDL = "a6ea5b35f94a2093fb53917b1659560b95104117a2f519c5119a095b216298ab"
 _EXPECTED_IDENTITY = "4b3402d8d058a7df949d28068cd9f2ad40961a0a075cf86be5fbfd4135abfed9"
@@ -106,6 +107,7 @@ def _config(password_file: Path, **overrides: object) -> StarRocksReadonlyAdapte
     values: dict[str, object] = {
         "password_file": str(password_file),
         "query_timeout_seconds": 20,
+        "expected_version_sha256": _EXPECTED_VERSION,
         "expected_grants_sha256": _EXPECTED_GRANTS,
         "expected_ddl_sha256": _EXPECTED_DDL,
         "expected_identity_sha256": _EXPECTED_IDENTITY,
@@ -201,6 +203,7 @@ class _TickingMonotonic:
 
 def test_preflight_digest_has_independent_golden_and_order_insensitive_grants() -> None:
     assert NORMALIZER_VERSION == "1"
+    assert preflight_digest(("4.0.0",), order_insensitive=False) == _EXPECTED_VERSION
     assert preflight_digest((_GRANT,), order_insensitive=True) == _EXPECTED_GRANTS
     assert preflight_digest((_DDL,), order_insensitive=False) == _EXPECTED_DDL
     assert preflight_digest((_IDENTITY,), order_insensitive=False) == _EXPECTED_IDENTITY
@@ -301,6 +304,8 @@ async def test_list_call_runs_fixed_preflight_then_returns_bounded_rows(tmp_path
     assert response.payload == (dict(zip(_LIST_COLUMNS, _ROW, strict=True)),)
     assert factory.calls == ["fixture-credential"]
     assert connection.events == [
+        ("execute", "SET query_timeout = 20", None),
+        ("query", "SHOW VARIABLES LIKE 'query_timeout'", 2),
         ("query", "SELECT VERSION()", 2),
         ("query", "SHOW GRANTS", 513),
         (
@@ -309,27 +314,27 @@ async def test_list_call_runs_fixed_preflight_then_returns_bounded_rows(tmp_path
             2,
         ),
         ("query", _IDENTITY_SQL, 2),
-        ("execute", "SET query_timeout = 20", None),
-        ("query", "SHOW VARIABLES LIKE 'query_timeout'", 2),
         ("query", _call().typed_args["sql"], 21),
     ]
     assert connection.closed is True
 
 
-async def test_count_call_accepts_zero_or_one_row_and_rejects_more(tmp_path: Path) -> None:
+async def test_count_call_accepts_exactly_one_row_and_rejects_other_counts(
+    tmp_path: Path,
+) -> None:
     password_file = tmp_path / "database-credential"
     _write_password(password_file)
-    for rows, expected in [
-        ((), ()),
-        (((7,),), ({"query_count": 7},)),
+    for rows, expected_status, expected_payload in [
+        ((), AdapterStatus.ERROR, ()),
+        (((7,),), AdapterStatus.OK, ({"query_count": 7},)),
     ]:
         adapter, _, connection = _adapter(
             password_file,
             StarRocksQueryBatch(columns=("query_count",), rows=rows),
         )
         response = await adapter.execute(_call(OP_COUNT), context=_CONTEXT)
-        assert response.status is AdapterStatus.OK
-        assert response.payload == expected
+        assert response.status is expected_status
+        assert response.payload == expected_payload
         assert connection.closed is True
 
     adapter, _, connection = _adapter(
@@ -339,6 +344,70 @@ async def test_count_call_accepts_zero_or_one_row_and_rejects_more(tmp_path: Pat
     response = await adapter.execute(_call(OP_COUNT), context=_CONTEXT)
     assert response.status is AdapterStatus.ERROR
     assert response.payload == ()
+    assert connection.closed is True
+
+
+async def test_version_drift_prevents_the_main_query(tmp_path: Path) -> None:
+    password_file = tmp_path / "database-credential"
+    _write_password(password_file)
+    main = StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,))
+    connection = _Connection(
+        _batches(main)
+        | {
+            "SELECT VERSION()": StarRocksQueryBatch(
+                columns=("VERSION()",), rows=(("5.7.44-other-server",),)
+            )
+        }
+    )
+    adapter = StarRocksReadonlyAdapter(
+        config=_config(password_file),
+        connection_factory=_Factory(connection),
+        monotonic=_TickingMonotonic(),
+    )
+
+    response = await adapter.execute(_call(), context=_CONTEXT)
+
+    assert response.status is AdapterStatus.ERROR
+    assert not any(event[1] == _call().typed_args["sql"] for event in connection.events)
+    assert connection.closed is True
+
+
+@pytest.mark.parametrize(
+    ("statement", "batch"),
+    [
+        (
+            "SELECT VERSION()",
+            StarRocksQueryBatch(columns=("server_version",), rows=(("4.0.0",),)),
+        ),
+        (
+            "SHOW CREATE TABLE `starrocks_audit_db__`.`starrocks_audit_tbl__`",
+            StarRocksQueryBatch(
+                columns=("name", "ddl"),
+                rows=(("starrocks_audit_tbl__", _DDL),),
+            ),
+        ),
+    ],
+    ids=["version_columns", "show_create_columns"],
+)
+async def test_preflight_rejects_unexpected_column_contracts(
+    tmp_path: Path,
+    statement: str,
+    batch: StarRocksQueryBatch,
+) -> None:
+    password_file = tmp_path / "database-credential"
+    _write_password(password_file)
+    main = StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,))
+    connection = _Connection(_batches(main) | {statement: batch})
+    adapter = StarRocksReadonlyAdapter(
+        config=_config(password_file),
+        connection_factory=_Factory(connection),
+        monotonic=_TickingMonotonic(),
+    )
+
+    response = await adapter.execute(_call(), context=_CONTEXT)
+
+    assert response.status is AdapterStatus.ERROR
+    assert not any(event[1] == _call().typed_args["sql"] for event in connection.events)
     assert connection.closed is True
 
 
@@ -594,6 +663,9 @@ def test_pymysql_factory_uses_the_closed_driver_profile(
         {"server_name": "another.test.invalid"},
         {"port": 0},
         {"connect_timeout_seconds": 31},
+        {"read_timeout_seconds": 30},
+        {"connect_timeout_seconds": 26},
+        {"write_timeout_seconds": 26},
         {"read_timeout_seconds": 1.5},
     ],
 )

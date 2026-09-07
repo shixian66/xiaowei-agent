@@ -66,6 +66,7 @@ def _live_settings(**updates: object) -> Settings:
         "starrocks_ca_file": "/approved/ca.pem",
         "starrocks_server_name": "starrocks.test.invalid",
         "starrocks_resource_id": "approved-test-cluster",
+        "starrocks_expected_version_sha256": "d" * 64,
         "starrocks_expected_grants_sha256": "a" * 64,
         "starrocks_expected_ddl_sha256": "b" * 64,
         "starrocks_expected_identity_sha256": "c" * 64,

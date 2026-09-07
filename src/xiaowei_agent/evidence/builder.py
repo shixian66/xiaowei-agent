@@ -32,7 +32,10 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.contracts.evidence import evidence_id as evidence_id
-from xiaowei_agent.evidence.errors import EvidenceBuildError
+from xiaowei_agent.evidence.errors import (
+    EvidenceBuildError,
+    reject_unapproved_target_metadata,
+)
 
 
 def _valid_sha256(value: str) -> bool:
@@ -187,9 +190,8 @@ def build_evidence(
             raise EvidenceBuildError
         trusted_limitations = result.limitations
         redaction_ref = live_policy.redaction_ref
-    elif result.limitations:
-        # Generic/recording Gateway 不签发 target metadata；出现即说明装配错位。
-        raise EvidenceBuildError
+    else:
+        reject_unapproved_target_metadata(result)
 
     facts = tuple(_filtered(row, surface) for row in result.data_view)
     sampled = params.row_limit > 0 and len(facts) >= params.row_limit

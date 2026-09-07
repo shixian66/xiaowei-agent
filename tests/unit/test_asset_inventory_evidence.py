@@ -29,7 +29,10 @@ from xiaowei_agent.planning.assets.compiler import (
 from xiaowei_agent.planning.assets.params import AssetLookupParams
 from xiaowei_agent.tools.adapter import AdapterResponse
 from xiaowei_agent.tools.fake import RecordingToolAdapter
-from xiaowei_agent.tools.gateway import DeterministicToolGateway
+from xiaowei_agent.tools.gateway import (
+    DeterministicToolGateway,
+    TargetBoundAdapterBinding,
+)
 
 AT = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
 CONTEXT = RequestContext(
@@ -76,7 +79,9 @@ def _asset_row(**overrides: object) -> dict[str, object]:
     return row | overrides
 
 
-def _result(rows: tuple[dict[str, object], ...]) -> ToolResult:
+def _result(
+    rows: tuple[dict[str, object], ...], *, target_bound: bool = False
+) -> ToolResult:
     step = PLAN.steps[0]
     call = ToolCall(
         gateway="asset_inventory",
@@ -97,22 +102,53 @@ def _result(rows: tuple[dict[str, object], ...]) -> ToolResult:
             ),
         )
     )
+    fingerprint = "a" * 64
+    gateway = (
+        DeterministicToolGateway(
+            adapters={},
+            target_adapters={
+                (call.gateway, fingerprint): TargetBoundAdapterBinding(
+                    adapter=adapter,
+                    authorized_tenant_id=CONTEXT.tenant_id,
+                    authorized_environment_id=CONTEXT.environment_id,
+                    authorized_actor=CONTEXT.actor,
+                    active_from=AT - dt.timedelta(minutes=1),
+                    active_until=AT + dt.timedelta(minutes=1),
+                    evidence_source_ref="approval-ref:unexpected",
+                    config_revision="b" * 64,
+                    physical_identity_ref="identity-ref:unexpected",
+                    driver_version="test-double",
+                )
+            },
+            clock=lambda: AT,
+        )
+        if target_bound
+        else DeterministicToolGateway(adapters={call.gateway: adapter})
+    )
     return asyncio.run(
-        DeterministicToolGateway(adapters={call.gateway: adapter}).invoke(
-            call, context=CONTEXT, admission=make_certificate(call)
+        gateway.invoke(
+            call,
+            context=CONTEXT,
+            admission=make_certificate(
+                call,
+                **({"target_fingerprint": fingerprint} if target_bound else {}),
+            ),
         )
     )
 
 
 def _build(
-    rows: tuple[dict[str, object], ...], *, target: ResolvedTarget = TARGET
+    rows: tuple[dict[str, object], ...],
+    *,
+    target: ResolvedTarget = TARGET,
+    target_bound: bool = False,
 ):
     return build_asset_evidence(
         task_id="task-1",
         step=PLAN.steps[0],
         plan=PLAN,
         target=target,
-        result=_result(rows),
+        result=_result(rows, target_bound=target_bound),
         captured_at=AT,
     )
 
@@ -143,6 +179,11 @@ def test_asset_evidence_keeps_only_the_nine_field_allowlist() -> None:
     assert not (set(evidence.facts[0]) & set(sensitive_keys))
     assert evidence.capability_id == ASSET_INVENTORY_CAPABILITY_ID
     assert evidence.evidence_id == "task-1:s1"
+
+
+def test_asset_builder_rejects_unapproved_target_binding_metadata() -> None:
+    with pytest.raises(EvidenceBuildError):
+        _build((_asset_row(),), target_bound=True)
 
 
 @pytest.mark.parametrize(

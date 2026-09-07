@@ -120,6 +120,9 @@ def _settings(password_file: str) -> Settings:
         starrocks_ca_file="/approved/ca.pem",
         starrocks_server_name="starrocks.test.invalid",
         starrocks_resource_id="approved-test-cluster",
+        starrocks_expected_version_sha256=preflight_digest(
+            ("4.0.0",), order_insensitive=False
+        ),
         starrocks_expected_grants_sha256=preflight_digest(
             (_GRANT,), order_insensitive=True
         ),

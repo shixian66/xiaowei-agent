@@ -22,6 +22,7 @@ def _test_readonly_env(password_file: Path) -> dict[str, str]:
         "XIAOWEI_STARROCKS_CA_FILE": "/approved/ca.pem",
         "XIAOWEI_STARROCKS_SERVER_NAME": "starrocks.test.invalid",
         "XIAOWEI_STARROCKS_RESOURCE_ID": "approved-test-cluster",
+        "XIAOWEI_STARROCKS_EXPECTED_VERSION_SHA256": "d" * 64,
         "XIAOWEI_STARROCKS_EXPECTED_GRANTS_SHA256": "a" * 64,
         "XIAOWEI_STARROCKS_EXPECTED_DDL_SHA256": "b" * 64,
         "XIAOWEI_STARROCKS_EXPECTED_IDENTITY_SHA256": "c" * 64,
@@ -124,6 +125,7 @@ def test_starrocks_config_revision_is_stable_and_never_reads_password(
         ("XIAOWEI_STARROCKS_RESOURCE_ID", "approved-test-cluster-2"),
         ("XIAOWEI_STARROCKS_TLS_MODE", "verify_ca"),
         ("XIAOWEI_STARROCKS_READ_TIMEOUT_SECONDS", "24"),
+        ("XIAOWEI_STARROCKS_EXPECTED_VERSION_SHA256", "e" * 64),
         ("XIAOWEI_STARROCKS_PASSWORD_FILE", "/approved/rotated-credential-ref"),
     ],
 )

@@ -62,6 +62,7 @@ def _adapter(factory: _NoConnectionFactory) -> StarRocksReadonlyAdapter:
         config=StarRocksReadonlyAdapterConfig(
             password_file=str(Path("/not/read/on/l0/rejection")),
             query_timeout_seconds=20,
+            expected_version_sha256="d" * 64,
             expected_grants_sha256="a" * 64,
             expected_ddl_sha256="b" * 64,
             expected_identity_sha256="c" * 64,

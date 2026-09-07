@@ -244,6 +244,9 @@ def _starrocks_gateway_registration(
         config=StarRocksReadonlyAdapterConfig(
             password_file=cast(str, settings.starrocks_password_file),
             query_timeout_seconds=cast(int, settings.starrocks_query_timeout_seconds),
+            expected_version_sha256=cast(
+                str, settings.starrocks_expected_version_sha256
+            ),
             expected_grants_sha256=cast(
                 str, settings.starrocks_expected_grants_sha256
             ),

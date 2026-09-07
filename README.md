@@ -258,7 +258,8 @@ PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证�
 
 M6b 已实现默认关闭的 StarRocks 测试环境只读 adapter、精确 target binding、固定 preflight、
 证据归属与离线 Eval。当前测试目标仍故意保持歧义，生产 API/Worker 也未注入获批的物理身份探针，
-所以环境变量不能单独激活真实连接。只有离线候选经审查、唯一目标、identity、secret reference、
+所以 `test` 环境会在目标解析阶段拒绝 recording 和真实装配；`dev` recording 仍可用，且环境变量
+不能单独激活真实连接。只有离线候选经审查、唯一目标、identity、secret reference、
 证据处置与窗口全部获批、负责人再次明确“现场 GO”后，才允许补齐激活并运行
 `docker-compose.m6b-test.yml`。当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1
 （写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。

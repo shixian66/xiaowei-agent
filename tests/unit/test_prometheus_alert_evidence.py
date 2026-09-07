@@ -31,7 +31,10 @@ from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
 from xiaowei_agent.planning.prometheus.target import resolve_prometheus_alert_target
 from xiaowei_agent.tools.adapter import AdapterResponse
 from xiaowei_agent.tools.fake import RecordingToolAdapter
-from xiaowei_agent.tools.gateway import DeterministicToolGateway
+from xiaowei_agent.tools.gateway import (
+    DeterministicToolGateway,
+    TargetBoundAdapterBinding,
+)
 
 AT = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
 CONTEXT = RequestContext(
@@ -72,7 +75,12 @@ PLAN = compile_alert_plan(
 )
 
 
-def _result(rows: tuple[dict[str, object], ...], *, step_index: int) -> ToolResult:
+def _result(
+    rows: tuple[dict[str, object], ...],
+    *,
+    step_index: int,
+    target_bound: bool = False,
+) -> ToolResult:
     step = PLAN.steps[step_index]
     call = ToolCall(
         gateway="alertmanager" if step_index == 0 else "prometheus",
@@ -93,9 +101,37 @@ def _result(rows: tuple[dict[str, object], ...], *, step_index: int) -> ToolResu
             ),
         )
     )
+    fingerprint = "a" * 64
+    gateway = (
+        DeterministicToolGateway(
+            adapters={},
+            target_adapters={
+                (call.gateway, fingerprint): TargetBoundAdapterBinding(
+                    adapter=adapter,
+                    authorized_tenant_id=CONTEXT.tenant_id,
+                    authorized_environment_id=CONTEXT.environment_id,
+                    authorized_actor=CONTEXT.actor,
+                    active_from=AT - dt.timedelta(minutes=1),
+                    active_until=AT + dt.timedelta(minutes=1),
+                    evidence_source_ref="approval-ref:unexpected",
+                    config_revision="b" * 64,
+                    physical_identity_ref="identity-ref:unexpected",
+                    driver_version="test-double",
+                )
+            },
+            clock=lambda: AT,
+        )
+        if target_bound
+        else DeterministicToolGateway(adapters={call.gateway: adapter})
+    )
     return asyncio.run(
-        DeterministicToolGateway(adapters={call.gateway: adapter}).invoke(
-            call, context=CONTEXT, admission=make_certificate(call)
+        gateway.invoke(
+            call,
+            context=CONTEXT,
+            admission=make_certificate(
+                call,
+                **({"target_fingerprint": fingerprint} if target_bound else {}),
+            ),
         )
     )
 
@@ -126,12 +162,12 @@ def _metric_row(**overrides: object) -> dict[str, object]:
     return row | overrides
 
 
-def _build_alert(rows: tuple[dict[str, object], ...]):
+def _build_alert(rows: tuple[dict[str, object], ...], *, target_bound: bool = False):
     return build_alert_evidence(
         task_id="task-1",
         step=PLAN.steps[0],
         plan=PLAN,
-        result=_result(rows, step_index=0),
+        result=_result(rows, step_index=0, target_bound=target_bound),
         captured_at=AT,
         expected_alert_name=PARAMS.alert_name,
         expected_instance=PARAMS.instance,
@@ -140,12 +176,12 @@ def _build_alert(rows: tuple[dict[str, object], ...]):
     )
 
 
-def _build_metric(rows: tuple[dict[str, object], ...]):
+def _build_metric(rows: tuple[dict[str, object], ...], *, target_bound: bool = False):
     return build_metric_evidence(
         task_id="task-1",
         step=PLAN.steps[1],
         plan=PLAN,
-        result=_result(rows, step_index=1),
+        result=_result(rows, step_index=1, target_bound=target_bound),
         captured_at=AT,
         expected_instance=PARAMS.instance,
         expected_metric_name="node_cpu_percent",
@@ -172,6 +208,13 @@ def test_alert_evidence_filters_extra_fields_and_keeps_exact_state() -> None:
     }
     assert evidence.facts[0]["state"] == "firing"
     assert "annotation" not in evidence.facts[0]
+
+
+def test_prometheus_builders_reject_unapproved_target_binding_metadata() -> None:
+    with pytest.raises(EvidenceBuildError):
+        _build_alert((_alert_row(),), target_bound=True)
+    with pytest.raises(EvidenceBuildError):
+        _build_metric((_metric_row(),), target_bound=True)
 
 
 @pytest.mark.parametrize(

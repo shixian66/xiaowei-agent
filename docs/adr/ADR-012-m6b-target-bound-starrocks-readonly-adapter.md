@@ -43,12 +43,17 @@ secret。selector version 从 `1` 升为 `2`；恢复中的旧 fingerprint 按�
 在 canonical resource ID 尚未由负责人明确给值前，测试环境保持不可唯一解析，真实装配必须
 fail-closed；不得由实现者选择现有两个占位 ID 中的任意一个。
 
+该歧义拒绝发生在目标解析层，因此会阻断 `test` 环境的 generic recording 与 target-bound
+真实装配，不只是阻断网络连接。离线 recording 继续使用可唯一解析的 `dev` 环境；在负责人
+批准唯一 canonical resource ID 前，不把 `test` 环境不可用误判为 recording adapter 回归。
+
 ### D3 默认关闭与配置绑定
 
 StarRocks adapter 默认模式为 `recording`。`test_readonly` 需要完整的进程级受信配置，并且只
 允许 `environment_id=test`、获批 actor、带时区且递增的激活窗口、TLS 验证、file-backed
-credential reference、三个带外批准 digest 及来源引用。半配置、明文 password 变量、未知
-字段或超过现有 30 秒 ToolPolicy 上限的 timeout 均启动失败。
+credential reference、version/grants/DDL/identity 四个带外批准 digest 及来源引用。半配置、
+明文 password 变量、未知字段、超过现有 30 秒 ToolPolicy 上限的 timeout，或不严格小于该
+上限的任一 driver socket timeout 均启动失败；connect/write timeout 也不得超过 read timeout。
 
 配置 revision 是对非 secret connector 配置、credential reference、目标、窗口、TLS、timeout、
 driver version、normalizer version 和 SQL surface reference 的 canonical SHA-256；不读取或
@@ -60,11 +65,11 @@ driver version、normalizer version 和 SQL surface reference 的 canonical SHA-
 `count_queries_in_window`。它只执行已经过 `StepAdmission` 的确定性主 SQL，并额外执行下列
 固定闭集：
 
-1. `SELECT VERSION()`；
-2. `SHOW GRANTS`；
-3. 对批准 AuditLoader 表的 `SHOW CREATE TABLE`；
-4. 批准的单行 identity 查询；
-5. 固定 session `query_timeout` 设置与 readback。
+1. 固定 session `query_timeout` 设置与 readback；
+2. `SELECT VERSION()`；
+3. `SHOW GRANTS`；
+4. 对批准 AuditLoader 表的 `SHOW CREATE TABLE`；
+5. 批准的单行 identity 查询。
 
 这些语句只读取服务端/会话事实或设置本连接的只读查询超时，不修改被管目标的持久状态，按
 E0 处理；它们必须由受审代码固定生成并经闭集/AST 规则验证，不能来自用户、模型、ToolCall
@@ -75,11 +80,15 @@ E0 处理；它们必须由受审代码固定生成并经闭集/AST 规则验证
 超量、列漂移、类型异常、权限/认证/连接/超时错误均结构化失败，不把部分结果当成功，也不
 暴露上游错误正文。
 
+`query_timeout` readback、version、`SHOW CREATE TABLE` 与 identity 必须逐字节匹配受审列名；
+`SHOW GRANTS` 的列标签可能包含账号且随版本变化，因此只要求恰一列并对规范化值做批准
+digest 比对，不把动态列标签当成身份真源。
+
 ### D5 preflight、证据与物理身份
 
-每次调用在同一连接重新比对 version、grants digest、DDL digest/本地 surface、identity digest
-和 session timeout；任何漂移都在主查询前失败。expected digest 只能来自负责人/DBA 批准的
-带外材料，或另行批准的独立 discovery 阶段，禁止由同一次待验证连接自产自证。
+每次调用在同一连接重新比对 version digest、grants digest、DDL digest/本地 surface、identity
+digest 和 session timeout；任何漂移都在主查询前失败。expected digest 只能来自负责人/DBA
+批准的带外材料，或另行批准的独立 discovery 阶段，禁止由同一次待验证连接自产自证。
 
 Gateway 为成功结果提供脱敏的 target fingerprint、config revision、evidence source reference、
 physical identity reference、driver version 和 preflight verdict。adapter rows 和上游文本不能
@@ -103,6 +112,8 @@ hash canonicalization、Runner、Policy profile 或 `_E1_EXECUTION_ENABLED=False
 
 - 真实 connector 无法再仅凭相同 gateway 名称消费另一目标的准入凭证。
 - selector v2 会让旧任务在恢复时明确产生目标漂移，不能静默兼容。
+- 唯一 test 目标未批准前，该环境的 recording 与真实装配都会在目标解析阶段拒绝；`dev`
+  recording 不受影响。
 - 每次调用都重新 preflight，增加固定小开销，但避免在短窗口内复用已漂移的权限或身份。
 - 小结果 adapter 保持现有 DTO；后续通用 SQL、流式结果和导出仍需独立 ADR 与里程碑。
 - 物理 identity、带外 digest、唯一 resource ID 和真实 Evidence 处置未获批时，离线代码可以完成，

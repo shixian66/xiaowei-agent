@@ -40,6 +40,7 @@ _MAX_PREFLIGHT_TEXT_BYTES: Final[int] = 1_048_576
 _MAX_PASSWORD_BYTES: Final[int] = 4_096
 _MAX_GRANT_ROWS: Final[int] = 512
 _MAX_LIST_ROWS: Final[int] = 200
+_M6B_GATEWAY_TIMEOUT_SECONDS: Final[int] = 30
 _SOURCE: Final[str] = "starrocks-test-readonly"
 _COUNT_COLUMN: Final[str] = "query_count"
 _FORBIDDEN_TOOL_ARGUMENTS: Final[frozenset[str]] = frozenset(
@@ -135,6 +136,7 @@ class StarRocksReadonlyAdapterConfig:
 
     password_file: str
     query_timeout_seconds: int
+    expected_version_sha256: str
     expected_grants_sha256: str
     expected_ddl_sha256: str
     expected_identity_sha256: str
@@ -157,6 +159,7 @@ class StarRocksReadonlyAdapterConfig:
         ):
             _require_text(value)
         for digest in (
+            self.expected_version_sha256,
             self.expected_grants_sha256,
             self.expected_ddl_sha256,
             self.expected_identity_sha256,
@@ -435,10 +438,11 @@ class StarRocksReadonlyAdapter:
                     expected_columns=(_COUNT_COLUMN,),
                     max_rows=1,
                 )
-                if payload:
-                    count = payload[0][_COUNT_COLUMN]
-                    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                        raise ValueError("count result is not a non-negative integer")
+                if len(payload) != 1:
+                    raise ValueError("count result must contain exactly one row")
+                count = payload[0][_COUNT_COLUMN]
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    raise ValueError("count result is not a non-negative integer")
             return AdapterResponse(
                 status=AdapterStatus.OK,
                 payload=payload,
@@ -450,7 +454,23 @@ class StarRocksReadonlyAdapter:
             connection.close()
 
     def _preflight(self, connection: StarRocksConnection) -> None:
-        _single_text(connection.query("SELECT VERSION()", max_rows=2))
+        connection.execute(f"SET query_timeout = {self._config.query_timeout_seconds}")
+        timeout = _single_text(
+            connection.query("SHOW VARIABLES LIKE 'query_timeout'", max_rows=2),
+            expected_columns=("Variable_name", "Value"),
+            value_index=1,
+        )
+        if timeout != str(self._config.query_timeout_seconds):
+            raise ValueError("StarRocks query_timeout readback drifted")
+
+        version = _single_text(
+            connection.query("SELECT VERSION()", max_rows=2),
+            expected_columns=("VERSION()",),
+        )
+        if preflight_digest((version,), order_insensitive=False) != (
+            self._config.expected_version_sha256
+        ):
+            raise ValueError("StarRocks version digest drifted")
 
         grants = _validate_batch(connection.query("SHOW GRANTS", max_rows=_MAX_GRANT_ROWS + 1))
         if len(grants.columns) != 1 or not 1 <= len(grants.rows) <= _MAX_GRANT_ROWS:
@@ -463,6 +483,7 @@ class StarRocksReadonlyAdapter:
 
         ddl = _single_text(
             connection.query(_show_create_statement(self._config.audit_table), max_rows=2),
+            expected_columns=("Table", "Create Table"),
             value_index=1,
         )
         if preflight_digest((ddl,), order_insensitive=False) != self._config.expected_ddl_sha256:
@@ -481,15 +502,6 @@ class StarRocksReadonlyAdapter:
             self._config.expected_identity_sha256
         ):
             raise ValueError("StarRocks identity digest drifted")
-
-        connection.execute(f"SET query_timeout = {self._config.query_timeout_seconds}")
-        timeout = _single_text(
-            connection.query("SHOW VARIABLES LIKE 'query_timeout'", max_rows=2),
-            expected_columns=("Variable_name", "Value"),
-            value_index=1,
-        )
-        if timeout != str(self._config.query_timeout_seconds):
-            raise ValueError("StarRocks query_timeout readback drifted")
 
     def _failure(
         self,
@@ -593,8 +605,16 @@ class PyMySQLConnectionFactory:
             read_timeout_seconds,
             write_timeout_seconds,
         ):
-            if not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 < timeout <= 30:
+            if (
+                not isinstance(timeout, int)
+                or isinstance(timeout, bool)
+                or not 0 < timeout < _M6B_GATEWAY_TIMEOUT_SECONDS
+            ):
                 raise ValueError("StarRocks driver timeout is invalid")
+        if connect_timeout_seconds > read_timeout_seconds:
+            raise ValueError("StarRocks connect timeout must not exceed read timeout")
+        if write_timeout_seconds > read_timeout_seconds:
+            raise ValueError("StarRocks write timeout must not exceed read timeout")
         self._connect_timeout_seconds = connect_timeout_seconds
         self._read_timeout_seconds = read_timeout_seconds
         self._write_timeout_seconds = write_timeout_seconds

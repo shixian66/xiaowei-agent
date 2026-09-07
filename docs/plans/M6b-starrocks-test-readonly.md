@@ -168,7 +168,8 @@ Review Draft 不占用正式编号。后续路线正式采纳时应顺延为 ADR
    只读查询；不注册成用户 capability。
 9. 调用窗口：开始/结束时间、时区、唯一批准操作者、最大场景数。
 10. 超时：建议候选为 connect 5 秒、write 5 秒、read 25 秒、server `query_timeout` 20 秒、
-    ToolCall 30 秒；最终以批准值为准，且 ToolCall 不能超过现有 profile 的 30 秒。
+    ToolCall 30 秒；最终以批准值为准，三个 driver socket timeout 都必须严格小于 ToolCall
+    预算，connect/write 不得超过 read，且 ToolCall 不能超过现有 profile 的 30 秒。
 11. 最大结果：list 仍默认 20、硬上限 200；count 一行；不得扩大。
 12. 脱敏：13 个字段中哪些允许进入 Evidence、CLI 和验收摘要；未批准默认不落真实 rows。
 13. 原始 recording：是否允许产生；建议“不生成 driver packet/raw-row recording”。若必须产生，
@@ -178,10 +179,11 @@ Review Draft 不占用正式编号。后续路线正式采纳时应顺延为 ADR
 15. 网络：来源主机/容器、目标 IP/DNS allowlist、端口、是否经代理、TLS CA file reference。
 16. 可选 driver 流式探针是否单独授权；未批准时记录“未授权”，不阻塞 M6b。
 
-expected grants/DDL/identity 的来源在真实连接前固定为以下主路径：
+expected version/grants/DDL/identity 的来源在真实连接前固定为以下主路径：
 
-1. 负责人或 DBA 在小维调用窗口之外，通过批准的安全带外渠道提供 `SHOW GRANTS`、
-   `SHOW CREATE TABLE` 与权威 identity 原始值/文件；不进入仓库、聊天记录或普通日志。
+1. 负责人或 DBA 在小维调用窗口之外，通过批准的安全带外渠道提供 `SELECT VERSION()`、
+   `SHOW GRANTS`、`SHOW CREATE TABLE` 与权威 identity 原始值/文件；不进入仓库、聊天记录或
+   普通日志。
 2. 计划批准后先通过离线 TDD 实现 normalizer；操作者再使用运行时**同一个** normalizer
    离线计算 digest，只输出 digest 与获批的
    脱敏 schema 差异，不连接 StarRocks。
@@ -272,6 +274,8 @@ target_adapters: Mapping[tuple[str, str], TargetBoundAdapterBinding]
 - capability version 不因单纯 target 目录迁移递增；若现场 DDL 导致 SQL/字段/谓词语义改变，
   按第 7 节单独递增 capability version。
 - `dev` 仍是 fake/recording；`prod` 继续不存在。
+- 目标解析先于 adapter 选择，所以目录仍歧义时 `test` 环境的 recording 与真实装配都会拒绝；
+  这不是网络激活信号，也不影响 `dev` recording。
 
 ### 4.4 配置与默认关闭
 
@@ -291,6 +295,7 @@ XIAOWEI_STARROCKS_TLS_MODE
 XIAOWEI_STARROCKS_CA_FILE
 XIAOWEI_STARROCKS_SERVER_NAME
 XIAOWEI_STARROCKS_RESOURCE_ID
+XIAOWEI_STARROCKS_EXPECTED_VERSION_SHA256
 XIAOWEI_STARROCKS_EXPECTED_GRANTS_SHA256
 XIAOWEI_STARROCKS_EXPECTED_DDL_SHA256
 XIAOWEI_STARROCKS_EXPECTED_IDENTITY_SHA256
@@ -315,7 +320,7 @@ XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS
   不能代码自动降级。
 - config revision 对非 secret 连接配置、secret reference、目标 ID、超时、TLS policy、driver
   版本和 schema surface 做 canonical SHA-256；不包含 password 字节，不展示 host/user。
-- expected grants/DDL/identity digest 必须带有已批准的来源引用与 normalizer version；
+- expected version/grants/DDL/identity digest 必须带有已批准的来源引用与 normalizer version；
   `test_readonly` 不接受“尚未知，首次连接后再填”的配置。
 - 所有真实字段只可来自进程级受信配置，ToolCall/IntentDraft/外部文本不能覆盖。
 - `.env.example` 只写空引用/安全示例，不写真实 endpoint、账号、identity 或 digest。
@@ -362,13 +367,18 @@ adapter 内部需要发送的 `SET query_timeout` 与 preflight SQL 都必须在
 ### 4.7 preflight 与 evidence metadata
 
 每个 call-local connection 都在同一个 Gateway 受控执行内完成 preflight，不跨调用缓存
-grants、DDL 或 identity 结论，避免短窗口内权限/目标漂移仍沿用旧结果。preflight 包含：
+version、grants、DDL 或 identity 结论，避免短窗口内权限/目标漂移仍沿用旧结果。preflight
+按固定顺序包含：
 
-1. `SELECT VERSION()`；
-2. `SHOW GRANTS`，规范化后与批准 digest 比较；
-3. `SHOW CREATE TABLE`，规范化后与批准 digest 及本地 `SqlSurface` 比较；
-4. 固定 identity view 查询或批准的等价身份核对；
-5. session `query_timeout` readback。
+1. 设置 session `query_timeout` 并 readback；
+2. `SELECT VERSION()`，规范化后与批准 digest 比较；
+3. `SHOW GRANTS`，规范化后与批准 digest 比较；
+4. `SHOW CREATE TABLE`，规范化后与批准 digest 及本地 `SqlSurface` 比较；
+5. 固定 identity view 查询或批准的等价身份核对。
+
+version、`SHOW CREATE TABLE`、identity 与 timeout readback 必须符合受审的精确列契约；
+`SHOW GRANTS` 只接受恰一列并比对值 digest，其可能包含账号/版本差异的动态列标签不作为
+身份或权限判断输入。
 
 任何不匹配都在主查询前失败，不进入成功 Evidence。原始 grant、DDL、identity、host、user 和
 异常文本只在内存中比较并立即丢弃，不写日志、TaskStore、Evidence、recording 或报告。
@@ -381,8 +391,8 @@ target-bound Gateway 在成功 `ToolResult` 中签发可信、脱敏 metadata：
 - driver version；
 - preflight verdict。
 
-服务端版本只作为 adapter 取得的、经过有界格式校验的外部观测进入现场报告；它不参与控制
-决策，也不冒充 Gateway 签发的可信配置。上述可信 metadata 使用现有 `source` /
+服务端版本只在内存中规范化并与批准 digest 比较；原值不进入现场报告，也不冒充 Gateway
+签发的可信配置。上述可信 metadata 使用现有 `source` /
 `limitations` 可表达的安全引用，不给 `EvidenceEnvelope`
 机械增加字段。慢查询 Evidence builder 必须消费同一个已准入 `ResolvedTarget`，验证 test +
 单资源形状，并保留 Gateway 签发的安全限制；adapter payload 不能覆盖来源或目标。
@@ -564,7 +574,7 @@ ADR 审核前不写 Gateway 实现。
 - 缺列、额外列、重复列、列顺序、NULL、datetime/Decimal/int/string 类型边界。
 - permission/auth/connect/read/write/server timeout/断连/异常 `__str__` 均映射为结构化错误，
   原始文本只成 ExternalContent digest，不进可信 message/facts/log。
-- grants、DDL、identity、query_timeout 任一漂移时主 SQL 执行次数 0。
+- version、grants、DDL、identity、query_timeout 任一漂移时主 SQL 执行次数 0。
 - 离线 digest 工具与 adapter preflight 调用同一个 normalizer；相同输入/version 产生相同
   digest，stdout/stderr 不出现原文，执行期间 socket 调用为 0。
 
@@ -583,6 +593,8 @@ close，确认对应安全/单元测试真实转红。
 - API/Worker 相同配置产生同 config revision/target binding；readiness 不以启动时真实联网冒充健康。
 - 真实 shaped adapter response 经 Runner 形成 Evidence/Outcome/Render；target/config/identity 安全
   metadata 可复核，host/user/secret/DDL/grants 不可见。
+- generic Gateway 的固定 timeout/exception limitation 保持为工具失败证据；只有 target-bound
+  保留前缀能触发装配错位拒绝，且 StarRocks/Prometheus/资产 builder 口径一致。
 - Evidence target 不是 test、不是单资源或与 binding 不符时 fail-closed。
 - golden、empty-with-traffic、empty-without-traffic、timeout、permission、malformed 各自维持现有
   succeeded/indeterminate 语义。
@@ -668,13 +680,13 @@ mypy src
 
 ### 10.1 启动前 readback
 
-1. 确认 expected grants/DDL/identity 的原始材料来自第 3.3 节批准的带外来源，不来自本次
+1. 确认 expected version/grants/DDL/identity 的原始材料来自第 3.3 节批准的带外来源，不来自本次
    connector；用实现中的同一 normalizer 离线计算 digest，记录 normalizer version。
 2. 由负责人/DBA 复核 digest 与脱敏 schema 差异并留下批准引用；未批准不得继续。
 3. 记录候选 commit SHA、parent、diff 和 lock 中 driver 精确版本。
 4. 再次确认时间位于批准窗口、操作者一致、environment=`test`。
 5. 对配置文件/secret file 只检查 owner、mode、大小和 reference；不输出内容/路径实值。
-6. 比对 target fingerprint、config revision、已批准的 expected grants/DDL/identity digest。
+6. 比对 target fingerprint、config revision、已批准的 expected version/grants/DDL/identity digest。
 7. 用唯一 Compose project name 启动临时 PostgreSQL/API/Worker；普通
    `docker-compose.yml` 默认模式仍 recording。
 8. `/readyz` 只表示本地 DB/migration/assembly 就绪，不把它当 StarRocks 连通证明。
@@ -683,7 +695,7 @@ mypy src
 
 经相同 Gateway exact binding 触发一个受控慢查询任务，让 adapter 完成：
 
-- version；
+- version digest；
 - grants digest；
 - DDL digest/本地 surface；
 - physical identity；
@@ -790,7 +802,7 @@ scope 用 driver unbuffered cursor 做一次固定查询，记录：
 - 需要修改 DTO、plan schema、hash canonicalization、Runner 生命周期或 E1 硬闸。
 - 原始 rows 无法按批准周期从临时存储清理。
 - 现场窗口过期、operator 变化或 secret reference 漂移。
-- expected grants/DDL/identity digest 不是来自获批带外来源或已批准的独立 discovery Phase A，
+- expected version/grants/DDL/identity digest 不是来自获批带外来源或已批准的独立 discovery Phase A，
   或试图用本次连接的返回值自产自证。
 
 ### 13.2 即使通过仍存在的残余风险
