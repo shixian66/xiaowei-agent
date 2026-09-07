@@ -26,7 +26,7 @@ from xiaowei_agent.contracts import (
 
 PROVIDER: Final[str] = "starrocks"
 RESOURCE_KIND: Final[str] = "cluster"
-SELECTOR_VERSION: Final[str] = "1"
+SELECTOR_VERSION: Final[str] = "2"
 
 _ENVIRONMENT_DIRECTORY: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
@@ -58,21 +58,15 @@ class TargetResolutionError(RuntimeError):
         self.rejection = rejection
 
 
-def resolve_target(*, context: RequestContext, draft: IntentDraft) -> ResolvedTarget:
-    """把执行上下文解析成唯一目标。
-
-    :param context: 执行上下文；``tenant_id`` 与 ``environment_id`` 均取自此处。
-    :param draft: 意图草案；**只作线索**，其槽位不参与目标构成。
-    :raises TargetResolutionError: 环境不在目录内，或目录项为空。
-    """
+def resolve_context_target(*, context: RequestContext) -> ResolvedTarget:
+    """只从执行上下文和代码目录解析唯一 StarRocks 目标。"""
     resource_ids = _ENVIRONMENT_DIRECTORY.get(context.environment_id)
     if resource_ids is None:
         raise TargetResolutionError(TargetRejection.UNKNOWN_ENVIRONMENT)
     if not resource_ids:
         raise TargetResolutionError(TargetRejection.EMPTY_ENVIRONMENT_DIRECTORY)
-    # draft 显式不参与：签名保留它是为了让"目标解析看得到草案但不采纳它"成为
-    # 一个可读的事实，而不是靠调用方记得不传。
-    _ = draft
+    if len(resource_ids) != 1:
+        raise TargetResolutionError(TargetRejection.AMBIGUOUS_ENVIRONMENT_DIRECTORY)
     return ResolvedTarget(
         tenant_id=context.tenant_id,
         environment_id=context.environment_id,
@@ -81,3 +75,11 @@ def resolve_target(*, context: RequestContext, draft: IntentDraft) -> ResolvedTa
         resource_ids=resource_ids,
         selector_version=SELECTOR_VERSION,
     )
+
+
+def resolve_target(*, context: RequestContext, draft: IntentDraft) -> ResolvedTarget:
+    """把执行上下文解析成唯一目标；草案只可见，不参与目标构成。"""
+    # draft 显式不参与：保留它是为了让"目标解析看得到草案但不采纳它"成为
+    # 一个可读事实，而不是靠调用方记得不传。
+    _ = draft
+    return resolve_context_target(context=context)

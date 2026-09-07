@@ -258,11 +258,21 @@ ToolGateway 是数据面唯一工具入口，负责超时、重试策略、凭�
 
 adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的 `ToolResult`，这样调用方在类型边界上不能把原始 SDK 响应伪装成可信结果。Python 无法提供绝对的语言级私有性，因此同时使用模块可见性约定、静态检查和绕过契约测试；不把“私有”描述成超出语言能力的强保证。
 
+真实 connector 必须注册为 target-bound adapter，由 Gateway 按
+`(gateway, target_fingerprint)` 精确选择；同一 gateway 不得同时注册 generic 与
+target-bound adapter，错目标不得回退 recording。Gateway 在连接前还会复核 tenant、environment、
+actor 和激活窗口。M6b 的 StarRocks connector 进一步用配置 revision 与服务端 physical identity
+preflight 闭合逻辑目标和物理集群；完整决策见
+[ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)。
+
 ### 5.9 Evidence、Memory 与 Rendering
 
 - `EvidenceEnvelope` 记录来源、来源类型、capability、时间、是否样本、是否只读、限制和脱敏引用。
 - **证据在步骤边界生成并写入 ledger**：Runner 在每个步骤的工具调用返回后构造 `EvidenceEnvelope`，并写入任务作用域的 append-only `EvidenceLedger`。`TaskOutcome.evidence_refs` 只携带引用，因此消费方（Runtime 渲染、Runner 求值可选分支的 `StepCondition`）一律按引用从 ledger 读回，**不读 Runner 的内部变量**。这使"证据是可寻址、可审计的事实"在执行期就成立，而不是事后归档；也使 M4 的跨进程恢复不必改变消费方。
 - **Evidence builder 同时取得可信执行目标与不可信工具结果**：Runner 把本步骤刚通过 `StepAdmission` 的同一个 `ResolvedTarget` 作为必填参数传入 builder；恢复路径只在 `target_fingerprint` 复核通过后传入目标。`ToolResult`、adapter payload 与外部文本均不能提供或覆盖该目标。builder 据此执行 capability 专属的环境、资源身份与字段一致性校验；无法证明一致时 fail-closed。为保持边界最窄，builder 不接收完整 `RequestContext`。
+- target-bound 真实结果还必须携带 Gateway 注入的 config revision、物理身份引用、driver version
+  与 preflight verdict；Evidence builder 逐项比对获批策略。失败结果只允许记为
+  `preflight=unverified`，不能借 adapter payload 或 limitations 把失败伪装成已验证。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
 - working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。

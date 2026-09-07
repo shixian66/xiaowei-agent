@@ -271,6 +271,7 @@ class TargetRejection(StrEnum):
 
     UNKNOWN_ENVIRONMENT = "unknown_environment"
     EMPTY_ENVIRONMENT_DIRECTORY = "empty_environment_directory"
+    AMBIGUOUS_ENVIRONMENT_DIRECTORY = "ambiguous_environment_directory"
 
 
 class BindingRejection(StrEnum):

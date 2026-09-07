@@ -12,8 +12,11 @@
 - 固定开发租户是常量，不接受任何环境入口（ADR-007 D2）。
 """
 
+import json
 import os
 from collections.abc import Mapping
+from datetime import datetime
+from hashlib import sha256
 from ipaddress import ip_address
 from typing import Annotated, Final, Literal
 
@@ -24,6 +27,7 @@ from xiaowei_agent.redaction import safe_error_details
 ENV_PREFIX: Final[str] = "XIAOWEI_"
 DEFAULT_TENANT_ID: Final[str] = "dev-local"
 _DEFAULT_POSTGRES_SECRET_PATH: Final[str] = "/run/secrets/postgres_" + "password"
+_STARROCKS_GATEWAY_TIMEOUT_SECONDS: Final[int] = 30
 
 
 def _strict_str(value: str) -> str:
@@ -33,6 +37,17 @@ def _strict_str(value: str) -> str:
 
 
 StrictStr = Annotated[str, AfterValidator(_strict_str)]
+
+
+def _sha256_hex(value: str) -> str:
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError("must be a lowercase SHA-256 digest")
+    return value
+
+
+Sha256Hex = Annotated[StrictStr, AfterValidator(_sha256_hex)]
 
 
 def _ip_literal(value: str) -> str:
@@ -85,6 +100,33 @@ class Settings(BaseModel):
     api_bind_host: IpLiteral = "127.0.0.1"
     api_bind_port: int = Field(default=8000, gt=0, le=65_535)
     smoke_step_barrier: bool = False
+    starrocks_adapter_mode: Literal["recording", "test_readonly"] = "recording"
+    starrocks_host: StrictStr | None = None
+    starrocks_port: int | None = Field(default=None, gt=0, le=65_535)
+    starrocks_database: StrictStr | None = None
+    starrocks_user: StrictStr | None = None
+    starrocks_password_file: StrictStr | None = None
+    starrocks_tls_mode: Literal["verify_ca", "verify_identity"] | None = None
+    starrocks_ca_file: StrictStr | None = None
+    starrocks_server_name: StrictStr | None = None
+    starrocks_resource_id: StrictStr | None = None
+    starrocks_expected_version_sha256: Sha256Hex | None = None
+    starrocks_expected_grants_sha256: Sha256Hex | None = None
+    starrocks_expected_ddl_sha256: Sha256Hex | None = None
+    starrocks_expected_identity_sha256: Sha256Hex | None = None
+    starrocks_expected_metadata_source_ref: StrictStr | None = None
+    starrocks_physical_identity_ref: StrictStr | None = None
+    starrocks_authorized_actor: StrictStr | None = None
+    starrocks_active_from: datetime | None = None
+    starrocks_active_until: datetime | None = None
+    starrocks_connect_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
+    starrocks_read_timeout_seconds: int | None = Field(
+        default=None,
+        gt=0,
+        lt=_STARROCKS_GATEWAY_TIMEOUT_SECONDS,
+    )
+    starrocks_write_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
+    starrocks_query_timeout_seconds: int | None = Field(default=None, gt=0, le=25)
 
     @model_validator(mode="after")
     def _worker_timings_are_consistent(self) -> "Settings":
@@ -105,10 +147,110 @@ class Settings(BaseModel):
             raise ValueError("database command timeout must be below lease ttl")
         return self
 
+    @model_validator(mode="after")
+    def _starrocks_profile_is_closed(self) -> "Settings":
+        live_fields = {
+            "host": self.starrocks_host,
+            "port": self.starrocks_port,
+            "database": self.starrocks_database,
+            "user": self.starrocks_user,
+            "password_file": self.starrocks_password_file,
+            "tls_mode": self.starrocks_tls_mode,
+            "ca_file": self.starrocks_ca_file,
+            "server_name": self.starrocks_server_name,
+            "resource_id": self.starrocks_resource_id,
+            "expected_version_sha256": self.starrocks_expected_version_sha256,
+            "expected_grants_sha256": self.starrocks_expected_grants_sha256,
+            "expected_ddl_sha256": self.starrocks_expected_ddl_sha256,
+            "expected_identity_sha256": self.starrocks_expected_identity_sha256,
+            "expected_metadata_source_ref": self.starrocks_expected_metadata_source_ref,
+            "physical_identity_ref": self.starrocks_physical_identity_ref,
+            "authorized_actor": self.starrocks_authorized_actor,
+            "active_from": self.starrocks_active_from,
+            "active_until": self.starrocks_active_until,
+            "connect_timeout_seconds": self.starrocks_connect_timeout_seconds,
+            "read_timeout_seconds": self.starrocks_read_timeout_seconds,
+            "write_timeout_seconds": self.starrocks_write_timeout_seconds,
+            "query_timeout_seconds": self.starrocks_query_timeout_seconds,
+        }
+        if self.starrocks_adapter_mode == "recording":
+            if any(value is not None for value in live_fields.values()):
+                raise ValueError("recording mode must not carry live StarRocks configuration")
+            return self
+
+        if any(value is None for value in live_fields.values()):
+            raise ValueError("test_readonly mode requires the complete StarRocks profile")
+        if self.environment_id != "test":
+            raise ValueError("test_readonly mode requires the test environment")
+        if self.actor != self.starrocks_authorized_actor:
+            raise ValueError("test_readonly mode requires the authorized actor")
+        if (
+            self.starrocks_tls_mode == "verify_identity"
+            and self.starrocks_host != self.starrocks_server_name
+        ):
+            raise ValueError("StarRocks verify_identity requires host to match server name")
+        if self.starrocks_active_from is None or self.starrocks_active_until is None:
+            raise ValueError("test_readonly mode requires an activation window")
+        if (
+            self.starrocks_active_from.utcoffset() is None
+            or self.starrocks_active_until.utcoffset() is None
+        ):
+            raise ValueError("StarRocks activation window must include a timezone")
+        if self.starrocks_active_from >= self.starrocks_active_until:
+            raise ValueError("StarRocks activation window must increase")
+        if (
+            self.starrocks_read_timeout_seconds is None
+            or self.starrocks_connect_timeout_seconds is None
+            or self.starrocks_write_timeout_seconds is None
+            or self.starrocks_query_timeout_seconds is None
+        ):
+            raise ValueError("test_readonly mode requires complete timeout settings")
+        if self.starrocks_connect_timeout_seconds > self.starrocks_read_timeout_seconds:
+            raise ValueError("StarRocks connect timeout must not exceed read timeout")
+        if self.starrocks_write_timeout_seconds > self.starrocks_read_timeout_seconds:
+            raise ValueError("StarRocks write timeout must not exceed read timeout")
+        if self.starrocks_query_timeout_seconds > self.starrocks_read_timeout_seconds:
+            raise ValueError("StarRocks server timeout must not exceed read timeout")
+        return self
+
     @property
     def tenant_id(self) -> str:
         """固定开发租户；常量，不可由环境覆盖。"""
         return DEFAULT_TENANT_ID
+
+    def starrocks_config_revision(
+        self,
+        *,
+        driver_version: str,
+        normalizer_version: str,
+        sql_surface_ref: str,
+    ) -> str:
+        """计算真实 StarRocks profile 的稳定摘要，不读取 credential 文件内容。"""
+        if self.starrocks_adapter_mode != "test_readonly":
+            raise ValueError("StarRocks config revision requires test_readonly mode")
+        runtime_refs = {
+            "driver_version": _strict_str(driver_version),
+            "normalizer_version": _strict_str(normalizer_version),
+            "sql_surface_ref": _strict_str(sql_surface_ref),
+        }
+        profile = {
+            name: value.isoformat() if isinstance(value, datetime) else value
+            for name, value in self.model_dump(mode="python").items()
+            if name.startswith("starrocks_")
+        }
+        canonical = json.dumps(
+            {
+                "actor": self.actor,
+                "environment_id": self.environment_id,
+                "profile": profile,
+                "runtime": runtime_refs,
+                "tenant_id": self.tenant_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return sha256(canonical).hexdigest()
 
 
 _FIELD_TO_ENV: Final[Mapping[str, str]] = {
@@ -138,6 +280,31 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "api_bind_host": "XIAOWEI_API_BIND_HOST",
     "api_bind_port": "XIAOWEI_API_BIND_PORT",
     "smoke_step_barrier": "XIAOWEI_SMOKE_STEP_BARRIER",
+    "starrocks_adapter_mode": "XIAOWEI_STARROCKS_ADAPTER_MODE",
+    "starrocks_host": "XIAOWEI_STARROCKS_HOST",
+    "starrocks_port": "XIAOWEI_STARROCKS_PORT",
+    "starrocks_database": "XIAOWEI_STARROCKS_DATABASE",
+    "starrocks_user": "XIAOWEI_STARROCKS_USER",
+    "starrocks_password_file": "XIAOWEI_STARROCKS_PASSWORD_FILE",
+    "starrocks_tls_mode": "XIAOWEI_STARROCKS_TLS_MODE",
+    "starrocks_ca_file": "XIAOWEI_STARROCKS_CA_FILE",
+    "starrocks_server_name": "XIAOWEI_STARROCKS_SERVER_NAME",
+    "starrocks_resource_id": "XIAOWEI_STARROCKS_RESOURCE_ID",
+    "starrocks_expected_version_sha256": "XIAOWEI_STARROCKS_EXPECTED_VERSION_SHA256",
+    "starrocks_expected_grants_sha256": "XIAOWEI_STARROCKS_EXPECTED_GRANTS_SHA256",
+    "starrocks_expected_ddl_sha256": "XIAOWEI_STARROCKS_EXPECTED_DDL_SHA256",
+    "starrocks_expected_identity_sha256": "XIAOWEI_STARROCKS_EXPECTED_IDENTITY_SHA256",
+    "starrocks_expected_metadata_source_ref": (
+        "XIAOWEI_STARROCKS_EXPECTED_METADATA_SOURCE_REF"
+    ),
+    "starrocks_physical_identity_ref": "XIAOWEI_STARROCKS_PHYSICAL_IDENTITY_REF",
+    "starrocks_authorized_actor": "XIAOWEI_STARROCKS_AUTHORIZED_ACTOR",
+    "starrocks_active_from": "XIAOWEI_STARROCKS_ACTIVE_FROM",
+    "starrocks_active_until": "XIAOWEI_STARROCKS_ACTIVE_UNTIL",
+    "starrocks_connect_timeout_seconds": "XIAOWEI_STARROCKS_CONNECT_TIMEOUT_SECONDS",
+    "starrocks_read_timeout_seconds": "XIAOWEI_STARROCKS_READ_TIMEOUT_SECONDS",
+    "starrocks_write_timeout_seconds": "XIAOWEI_STARROCKS_WRITE_TIMEOUT_SECONDS",
+    "starrocks_query_timeout_seconds": "XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS",
 }
 
 
@@ -155,7 +322,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if unknown:
         raise ConfigError(f"未知配置变量: {unknown}") from None
 
-    kwargs = {field: prefixed[name] for field, name in _FIELD_TO_ENV.items() if name in prefixed}
+    kwargs = {
+        field: prefixed[name]
+        for field, name in _FIELD_TO_ENV.items()
+        if name in prefixed and not (field.startswith("starrocks_") and not prefixed[name])
+    }
     detail: str | None = None
     try:
         return Settings.model_validate(kwargs)

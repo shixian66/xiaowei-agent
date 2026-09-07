@@ -2,7 +2,7 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M6a 已通过项目里程碑验收并归档。三个只读能力均完成 fake/recording 闭环，最强证据等级为 `tests`；M6a 最终实现基线为 `e2032fdff958d2309973458d5c762a54b3a4f855`。M6b 尚未启动，**未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 计划已批准，正在开发默认关闭的 StarRocks 测试环境只读 adapter；当前最强证据仍为离线 `tests`，**尚未连接任何真实运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 ## 先看什么
 
@@ -14,7 +14,7 @@
 4. 本文件：人类开发者的启动和导航信息。
 5. [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 
-授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)。
+授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)。
 
 ## 目标能力
 
@@ -77,6 +77,8 @@
 - 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
 - `sqlglot` 用于 SQL AST 解析和安全校验（M3 引入，是 M3 唯一新增的运行依赖）。
 - `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
+- PyMySQL 是 M6b 新增的 StarRocks MySQL 协议 driver，只允许在 `tools/starrocks.py` 的
+  connection factory 被调用时延迟导入；默认 recording 装配、CI 和离线 eval 不导入它、也不发起网络连接。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 这些依赖与文件已随 M5 合入 `main`；隔离 Compose smoke 已在合并后 CI 实际通过，生产兼容性仍需独立部署与运行证据。
@@ -93,13 +95,14 @@ agent/
 ├── .gitignore
 ├── docs/
 │   ├── CAPABILITIES.md        # 能力地图；由 Registry/代码生成并由 CI 检查
-│   ├── adr/                   # 架构决策记录（当前至 ADR-011）
+│   ├── adr/                   # 架构决策记录（当前至 ADR-012）
 │   ├── plans/                 # 里程碑详细实施计划（M2 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # 已建立（M1）
 ├── docker-compose.yml          # API / Worker / migration / PostgreSQL 基线
 ├── docker-compose.smoke.yml    # smoke 的短租约与轮询 override
 ├── docker-compose.barrier.yml  # 仅用于恢复测试的 barrier override
+├── docker-compose.m6b-test.yml # M6b 临时测试环境显式 override；默认不可激活
 ├── src/xiaowei_agent/          # 业务包
 │   ├── redaction.py            # 已建立（M2）：脱敏规则单一真源，无对内依赖的叶子
 │   ├── contracts/              # 已建立（M2）：跨模块 DTO / Protocol
@@ -247,13 +250,19 @@ python -m scripts.compose_smoke
 
 ### 尚未完成与能力边界
 
-当前实现仍只使用确定性无模型 interpreter 与 fake/recording ToolGateway。M6a 增加了
+当前实现仍只使用确定性无模型 interpreter。M6a 增加了
 Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
 已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
 PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离
 环境中的 fake 闭环，不能推出任何真实运维系统兼容、部署、canary 或产品用户验收。
 
-当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
+M6b 已实现默认关闭的 StarRocks 测试环境只读 adapter、精确 target binding、固定 preflight、
+证据归属与离线 Eval。当前测试目标仍故意保持歧义，生产 API/Worker 也未注入获批的物理身份探针，
+所以 `test` 环境会在目标解析阶段拒绝 recording 和真实装配；`dev` recording 仍可用，且环境变量
+不能单独激活真实连接。只有离线候选经审查、唯一目标、identity、secret reference、
+证据处置与窗口全部获批、负责人再次明确“现场 GO”后，才允许补齐激活并运行
+`docker-compose.m6b-test.yml`。当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1
+（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
 
 ## 旧项目关系
 

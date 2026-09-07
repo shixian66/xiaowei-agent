@@ -1,0 +1,13 @@
+{
+  "layer": "L0",
+  "cases": [
+    {"id": "M6b-L0-operation-kill", "carrier": "operation", "value": "kill_query"},
+    {"id": "M6b-L0-operation-frontends", "carrier": "operation", "value": "show_frontends"},
+    {"id": "M6b-L0-argument-host", "carrier": "argument", "value": "host"},
+    {"id": "M6b-L0-argument-password", "carrier": "argument", "value": "password"},
+    {"id": "M6b-L0-argument-target", "carrier": "argument", "value": "target"},
+    {"id": "M6b-L0-identity-multi", "carrier": "identity", "value": "SELECT `id` FROM `meta`.`identity` LIMIT 1; SELECT 1"},
+    {"id": "M6b-L0-identity-join", "carrier": "identity", "value": "SELECT `id` FROM `meta`.`identity` JOIN `meta`.`other` ON 1 = 1 LIMIT 1"},
+    {"id": "M6b-L0-target-ambiguous", "carrier": "target", "value": "test"}
+  ]
+}

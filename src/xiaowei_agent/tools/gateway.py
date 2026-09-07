@@ -18,7 +18,8 @@
 
 import asyncio
 import datetime as _dt
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Protocol
 
@@ -70,6 +71,46 @@ class MalformedAdapterResponseError(RuntimeError):
         super().__init__("adapter returned a malformed response")
 
 
+@dataclass(frozen=True)
+class TargetBoundAdapterBinding:
+    """把一个真实 adapter 绑定到获批上下文和短期激活窗口。"""
+
+    adapter: ToolAdapter
+    authorized_tenant_id: str
+    authorized_environment_id: str
+    authorized_actor: str
+    active_from: _dt.datetime
+    active_until: _dt.datetime
+    evidence_source_ref: str
+    config_revision: str
+    physical_identity_ref: str
+    driver_version: str
+
+    def __post_init__(self) -> None:
+        text_values = (
+            self.authorized_tenant_id,
+            self.authorized_environment_id,
+            self.authorized_actor,
+            self.evidence_source_ref,
+            self.config_revision,
+            self.physical_identity_ref,
+            self.driver_version,
+        )
+        if any(
+            not isinstance(value, str) or not value or value != value.strip()
+            for value in text_values
+        ):
+            raise ValueError("target binding text fields must be non-empty and unpadded")
+        if not isinstance(self.active_from, _dt.datetime) or not isinstance(
+            self.active_until, _dt.datetime
+        ):
+            raise ValueError("target binding window must use datetime values")
+        if self.active_from.utcoffset() is None or self.active_until.utcoffset() is None:
+            raise ValueError("target binding window must include a timezone")
+        if self.active_from >= self.active_until:
+            raise ValueError("target binding window must increase")
+
+
 def _map_error(status: AdapterStatus, cause: ExternalContent | None) -> AgentError | None:
     """把 adapter 状态归类为结构化错误；错误原文只留摘要引用。"""
     if status is AdapterStatus.OK:
@@ -98,10 +139,29 @@ class ToolGateway(Protocol):
 
 
 class DeterministicToolGateway:
-    def __init__(self, adapters: Mapping[str, ToolAdapter]) -> None:
-        if not adapters:
+    def __init__(
+        self,
+        adapters: Mapping[str, ToolAdapter],
+        *,
+        target_adapters: Mapping[tuple[str, str], TargetBoundAdapterBinding] | None = None,
+        clock: Callable[[], _dt.datetime] | None = None,
+    ) -> None:
+        target_bindings = {} if target_adapters is None else dict(target_adapters)
+        if not adapters and not target_bindings:
             raise ValueError("DeterministicToolGateway requires at least one adapter")
-        self._adapters = dict(adapters)
+        if any(
+            not isinstance(binding, TargetBoundAdapterBinding)
+            for binding in target_bindings.values()
+        ):
+            raise ValueError("target adapter registration is malformed")
+        generic_adapters = dict(adapters)
+        target_gateways = {gateway for gateway, _ in target_bindings}
+        if set(generic_adapters) & target_gateways:
+            raise ValueError("a gateway cannot be both generic and target-bound")
+        self._adapters = generic_adapters
+        self._target_adapters = target_bindings
+        self._target_gateways = target_gateways
+        self._clock = clock or (lambda: _dt.datetime.now(tz=_dt.UTC))
 
     async def invoke(
         self, call: ToolCall, *, context: RequestContext, admission: AdmissionCertificate
@@ -129,12 +189,24 @@ class DeterministicToolGateway:
             raise PermissionError("policy denied")
         if admission.effect_class is not EffectClass.READ and not _E1_EXECUTION_ENABLED:
             raise PermissionError("E1 execution is disabled for M0-M7")
-        adapter = self._adapters.get(call.gateway)
+        binding: TargetBoundAdapterBinding | None = None
+        adapter: ToolAdapter | None
+        if call.gateway in self._target_gateways:
+            binding = self._target_adapters.get(
+                (call.gateway, admission.target_fingerprint)
+            )
+            if binding is None:
+                raise LookupError("adapter not registered for this call")
+            self._authorize_target_binding(binding, context=context)
+            adapter = binding.adapter
+        else:
+            adapter = self._adapters.get(call.gateway)
         if adapter is None:
             # 不回显 call.gateway：网关名来自调用方，拒绝路径不得把外部输入
             # 拼进异常消息（与 ValidationError 不回显 input 同一条不变量）。
             raise LookupError("adapter not registered for this call")
 
+        result_source = binding.evidence_source_ref if binding is not None else call.gateway
         try:
             response = await asyncio.wait_for(
                 adapter.execute(call, context=context), call.timeout_seconds
@@ -144,8 +216,16 @@ class DeterministicToolGateway:
                 context,
                 status=ToolCallStatus.TIMEOUT,
                 data_view=(),
-                source=call.gateway,
-                limitations=("adapter timed out",),
+                source=result_source,
+                limitations=(
+                    self._target_limitations(
+                        binding,
+                        target_fingerprint=admission.target_fingerprint,
+                        preflight_verified=False,
+                    )
+                    if binding is not None
+                    else ("adapter timed out",)
+                ),
                 error=_map_error(AdapterStatus.TIMEOUT, None),
             )
         except Exception as exc:
@@ -170,8 +250,16 @@ class DeterministicToolGateway:
                 context,
                 status=ToolCallStatus.ERROR,
                 data_view=(),
-                source=call.gateway,
-                limitations=("adapter raised an unexpected exception",),
+                source=result_source,
+                limitations=(
+                    self._target_limitations(
+                        binding,
+                        target_fingerprint=admission.target_fingerprint,
+                        preflight_verified=False,
+                    )
+                    if binding is not None
+                    else ("adapter raised an unexpected exception",)
+                ),
                 error=_map_error(AdapterStatus.ERROR, cause),
             )
         if not isinstance(response, AdapterResponse):
@@ -180,13 +268,55 @@ class DeterministicToolGateway:
             raise MalformedAdapterResponseError
         # adapter 出错时不得返回空成功：状态与结构化错误一起传出去，且不把半截
         # payload 当作证据。
+        limitations = (
+            self._target_limitations(
+                binding,
+                target_fingerprint=admission.target_fingerprint,
+                preflight_verified=response.status is AdapterStatus.OK,
+            )
+            if binding is not None
+            else ()
+        )
         return self._issue(
             context,
             status=_STATUS_MAP[response.status],
             data_view=response.payload if response.status is AdapterStatus.OK else (),
-            source=response.source,
-            limitations=(),
+            source=binding.evidence_source_ref if binding is not None else response.source,
+            limitations=limitations,
             error=_map_error(response.status, response.error),
+        )
+
+    def _authorize_target_binding(
+        self,
+        binding: TargetBoundAdapterBinding,
+        *,
+        context: RequestContext,
+    ) -> None:
+        if (
+            context.tenant_id != binding.authorized_tenant_id
+            or context.environment_id != binding.authorized_environment_id
+            or context.actor != binding.authorized_actor
+        ):
+            raise PermissionError("request context is not authorized for target binding")
+        now = self._clock()
+        if not isinstance(now, _dt.datetime) or now.utcoffset() is None:
+            raise PermissionError("target binding clock is invalid")
+        if not (binding.active_from <= now < binding.active_until):
+            raise PermissionError("target binding is outside its activation window")
+
+    @staticmethod
+    def _target_limitations(
+        binding: TargetBoundAdapterBinding,
+        *,
+        target_fingerprint: str,
+        preflight_verified: bool,
+    ) -> tuple[str, ...]:
+        return (
+            f"target_fingerprint={target_fingerprint}",
+            f"config_revision={binding.config_revision}",
+            f"physical_identity_ref={binding.physical_identity_ref}",
+            f"driver_version={binding.driver_version}",
+            f"preflight={'verified' if preflight_verified else 'unverified'}",
         )
 
     @staticmethod

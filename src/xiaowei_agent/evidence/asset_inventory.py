@@ -15,7 +15,10 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.contracts.evidence import evidence_id
-from xiaowei_agent.evidence.errors import EvidenceBuildError
+from xiaowei_agent.evidence.errors import (
+    EvidenceBuildError,
+    reject_unapproved_target_metadata,
+)
 
 _CAPABILITY_ID: Final[str] = "asset.inventory.lookup"
 _CAPABILITY_VERSION: Final[str] = "1.0.0"
@@ -138,6 +141,7 @@ def build_asset_evidence(
     captured_at: dt.datetime,
 ) -> EvidenceEnvelope:
     """验证 scope/精确身份并只保留九个资产字段。"""
+    reject_unapproved_target_metadata(result)
     selector_kind, selector_value, limit = _validate_target_and_step(
         step=step, plan=plan, target=target
     )

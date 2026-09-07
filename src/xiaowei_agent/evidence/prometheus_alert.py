@@ -15,7 +15,10 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.contracts.evidence import evidence_id
-from xiaowei_agent.evidence.errors import EvidenceBuildError
+from xiaowei_agent.evidence.errors import (
+    EvidenceBuildError,
+    reject_unapproved_target_metadata,
+)
 
 _ALERT_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -93,6 +96,7 @@ def build_alert_evidence(
     row_limit: int,
 ) -> EvidenceEnvelope:
     """过滤并验证 Alertmanager 扁平行，不自动选择多个告警。"""
+    reject_unapproved_target_metadata(result)
     if row_limit <= 0 or len(result.data_view) > row_limit:
         raise EvidenceBuildError
     facts = tuple(
@@ -161,6 +165,7 @@ def build_metric_evidence(
     max_points_per_series: int,
 ) -> EvidenceEnvelope:
     """校验扁平点并按 series_key 生成确定性摘要。"""
+    reject_unapproved_target_metadata(result)
     if max_series <= 0 or max_points_per_series <= 0:
         raise EvidenceBuildError
     grouped: dict[str, list[tuple[int, float]]] = defaultdict(list)

@@ -1,0 +1,11 @@
+{
+  "layer": "L2",
+  "cases": [
+    {"id": "M6b-L2-golden", "scenario": "golden", "status": "succeeded", "calls": 1},
+    {"id": "M6b-L2-empty-with-traffic", "scenario": "empty_with_traffic", "status": "succeeded", "calls": 2},
+    {"id": "M6b-L2-empty-without-traffic", "scenario": "empty_without_traffic", "status": "indeterminate", "calls": 2},
+    {"id": "M6b-L2-timeout", "scenario": "timeout", "status": "indeterminate", "calls": 1},
+    {"id": "M6b-L2-permission", "scenario": "permission", "status": "indeterminate", "calls": 1},
+    {"id": "M6b-L2-malformed", "scenario": "malformed", "status": "indeterminate", "calls": 1}
+  ]
+}

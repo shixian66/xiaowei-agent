@@ -1,6 +1,7 @@
 """生产依赖面与类型检查严格度是同一条边界。
 
-M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn。
+M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn，M6b 引入
+PyMySQL 与对应 typeshed stub。
 两件事必须被机制钉住，而不是靠计划里的一句话：
 
 1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
@@ -26,10 +27,19 @@ pytestmark = pytest.mark.security
 _ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "src" / "xiaowei_agent"
 
-# ``[project].dependencies`` 的包名集合。恰为七项——新增任何一项都必须先改这里，
+# ``[project].dependencies`` 的包名集合。新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
-    {"pydantic", "sqlglot", "sqlalchemy", "alembic", "asyncpg", "fastapi", "uvicorn"}
+    {
+        "pydantic",
+        "sqlglot",
+        "sqlalchemy",
+        "alembic",
+        "asyncpg",
+        "fastapi",
+        "uvicorn",
+        "pymysql",
+    }
 )
 
 _EXPECTED_DEV_DEPENDENCIES = frozenset(
@@ -43,6 +53,7 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
         "hatchling",
         "httpx",
         "pyyaml",
+        "types-pymysql",
     }
 )
 
@@ -76,7 +87,7 @@ def _internal_module_imports(path: Path) -> set[str]:
     return found
 
 
-def test_runtime_dependency_set_is_exactly_the_approved_seven() -> None:
+def test_runtime_dependency_set_is_exactly_the_approved_set() -> None:
     """依赖面用集合相等钉死，不用禁用清单。
 
     禁用清单只挡得住已经想到的那些；集合相等连"想不到的"一起挡住。

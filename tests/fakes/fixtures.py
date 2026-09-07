@@ -83,6 +83,8 @@ FIXTURE_PLAN = ExecutionPlan(
     budget=BUDGET,
 )
 
+# 独立的 hash/契约合成值：刻意保留双资源与 selector v1，不代表
+# ``resolve_target()`` 可产生的真实目录形状。
 FIXTURE_TARGET = ResolvedTarget(
     tenant_id="dev-local",
     environment_id="dev",
