@@ -211,9 +211,10 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 
 ### 已验证
 
-- **M6b 独立审查修复后的离线工作树四门全绿**：`python -m pytest -q` 为 2328 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1084 passed / 79 skipped / 1319 deselected / 5 warnings；Ruff 通过；mypy 134 个源文件通过；`git diff --check` 无输出。154 个 skip 沿用无 `PYTEST_POSTGRES_DSN` 的本机口径，未提供新的 PostgreSQL/Compose 或真实 StarRocks 运行证据。修复覆盖 version digest、preflight 顺序/列契约/count 形状、driver timeout 内外层约束，以及 generic Gateway 失败与 target-bound metadata 的 Evidence 归因。
+- **M6b 独立审查修复后的离线工作树四门全绿**：`python -m pytest -q` 为 2330 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1085 passed / 79 skipped / 1320 deselected / 5 warnings；Ruff 通过；mypy 134 个源文件通过；`git diff --check` 无输出。154 个 skip 沿用无 `PYTEST_POSTGRES_DSN` 的本机口径，未提供新的 PostgreSQL/Compose 或真实 StarRocks 运行证据。修复覆盖 version digest、preflight 顺序/列契约/count 形状、driver timeout 内外层约束，以及 generic Gateway 失败与 target-bound metadata 的 Evidence 归因。
 - **M6b 六组隔离变异反证均按预期转红**：分别拆掉 Gateway exact fingerprint、ToolCall 连接参数污染拒绝、list 行数上限、identity digest、DDL digest 与异常路径 connection close；对应测试均非零退出。另以先红后绿补严 physical identity AST：错列、无 database、`WHERE SLEEP(...)` 与 `ORDER BY` 不再能进入受审探针闭集。所有变体只位于 `/private/tmp/m6b-mutation.I2tKU9`，未进入工作树。
 - **M6b 独立审查修复新增六组隔离变异反证**：分别移除 version digest 比对、恢复“任意 limitation 都是 Evidence 错位”、禁用跨能力保留 metadata 拒绝、恢复空 count/宽松列契约、放宽 driver timeout、把 `SET query_timeout` 移到 version 之后；对应测试分别以 1、2、2、3、3、1 条失败转红。变体确认从 `/private/tmp/m6b-review-mutation.Bujb3l/*/src` 加载，未进入工作树。
+- **M6b 合并前加固新增两组隔离变异反证**：单独把 Runner 默认 ToolCall 预算从 30 秒降为 10 秒时，跨层 timeout pairing 安全测试 1 条转红；删除 slow-query generic Evidence 分支的 target metadata 拒绝调用时，对称用例 1 条转红。变体确认从 `/private/tmp/m6b-pairing-mutation.84tLwt/*/src` 加载，未进入工作树；生产代码零改动。
 - **M6a 已验收、合入并归档**：最终实现基线 `e2032fdff958d2309973458d5c762a54b3a4f855` 的本机四门为 `python -m pytest -q` 2169 passed / 154 skipped / 5 warnings、`python -m pytest -m security -q` 1012 passed / 79 skipped / 1232 deselected / 5 warnings、Ruff 通过、mypy 133 个源文件通过。项目负责人于 2026-09-06 明确授权归档；这是项目里程碑验收，不是产品用户验收。
 - **M6a 最终远程运行证据已闭合**：PR #14 run [`33975532006`](https://github.com/shixian66/xiaowei-agent/actions/runs/33975532006) 与合入后 main push run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909) 均精确绑定 `e2032fd` 且八个 job 全绿。integration 与三能力 Compose smoke 均通过；不包含真实资产系统/运维目标，也不是部署、canary 或产品用户验收。
 - **M6a PR 2 未修改执行核心**：相对 PR 2 基线 `main@9d9380c`，Runtime、Runner、Gateway、StepAdmission、持久化、跨边界 contracts 与 canonical hash 共 0 文件改动；五个注册/装配真源加生成能力地图为 6 文件、`+183/-17`。这证明 seam 复用成功，但不隐藏注册成本；DSL 依据数据继续延期，详见 [扩展数据](docs/handoff/M6a-capability-extension-data.md)。
@@ -278,6 +279,8 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 - **`test` 目录歧义会在 adapter 选择前拒绝整个目标解析**：因此唯一 target 未批准前，该环境的 generic recording 与 target-bound 真实装配都不可用；`dev` recording 仍可用。这是 selector v2 的 fail-closed 迁移语义，不是网络激活或 recording 回归。
 - **真实结果会进入 append-only EvidenceLedger**：Render 只显示三列不等于持久化只保存三列。M6b 现场只能使用获批的独立临时 Compose project，并按精确 project/volume 销毁；未批准字段与处置前不得激活。
 - **PyMySQL 的真实缓冲、超时后服务端残留与取消行为尚未实测**：M6b 小结果仍硬限制为 200 行且不自动重试、不发 KILL；这不能外推为后续通用 SQL 的分页、流式或取消能力。
+- **M6b 仍有四项低风险 hardening 未实现**：`config_revision` 尚未覆盖 physical identity probe 的 SQL/列名；credential file 只校验非 symlink 普通文件、大小与单行格式，未校验 owner/mode；multi-statements 依赖 PyMySQL 默认关闭而没有独立参数/readback 断言；数值列若由 driver 返回 `Decimal` 会规范化成字符串，而 int/float 保持数值类型。它们不构成本轮合并阻断，但在真实激活或扩大结果契约前必须重新评估。
+- **preflight 精确列标签仍是待现场核对的 fail-closed 假设**：`("VERSION()",)`、`("Table", "Create Table")`、`("Variable_name", "Value")` 尚未在批准的真实 StarRocks 版本实测；首次连接若拒绝，应按版本事实回修并重新审核，不能临时放宽列契约。
 - **`sqlglot` 的 AST 形状随版本可能变化**：节点闭集白名单是对**当前锁定版本 30.17.0** 的断言，升级必须重跑 `tests/unit/test_sqlglot_baseline.py` 基线。
 - **`WorkflowPaused` 用异常表达暂停**是对 M2 Protocol 的一种解释（已获复审裁定接受）：`TaskOutcome` 要求终态，而 `awaiting_approval` 是非终态，暂停在返回值里不可表达。若将来 Runner 需要表达更多非终态，应重新评估返回类型而不是继续加异常。
 - **方向判断阈值来自旧项目，未在本项目的真实工作负载上校准**：因此结论一律带"疑似"，且只进渲染说明段、不进 `facts`。

@@ -327,6 +327,22 @@ def _live_result(
     )
 
 
+def test_generic_slow_query_evidence_rejects_target_bound_metadata() -> None:
+    plan = slow_query_plan()
+
+    with pytest.raises(EvidenceBuildError):
+        build_evidence(
+            task_id=_TASK,
+            step=plan.steps[0],
+            plan=plan,
+            target=_LIVE_TARGET,
+            result=_live_result(),
+            surface=SURFACE,
+            params=PARAMS,
+            captured_at=_AT,
+        )
+
+
 def test_verified_test_evidence_preserves_only_gateway_signed_metadata() -> None:
     plan = slow_query_plan()
     result = _live_result()

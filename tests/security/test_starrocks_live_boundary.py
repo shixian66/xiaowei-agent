@@ -9,8 +9,14 @@ from typing import Never
 
 import pytest
 
+from xiaowei_agent.config import _STARROCKS_GATEWAY_TIMEOUT_SECONDS
+from xiaowei_agent.governance.profiles import MAX_READONLY_TIMEOUT_SECONDS
 from xiaowei_agent.interfaces.local_stack import StarRocksLiveAssembly
-from xiaowei_agent.tools.starrocks import PhysicalIdentityProbe
+from xiaowei_agent.runners.deterministic import DEFAULT_TIMEOUT_SECONDS
+from xiaowei_agent.tools.starrocks import (
+    _M6B_GATEWAY_TIMEOUT_SECONDS,
+    PhysicalIdentityProbe,
+)
 
 pytestmark = pytest.mark.security
 
@@ -21,6 +27,16 @@ _SRC = _ROOT / "src" / "xiaowei_agent"
 def _unreachable_factory(password: str) -> Never:
     del password
     raise AssertionError("live assembly validation reached the connection factory")
+
+
+def test_m6b_timeout_bounds_match_the_call_and_policy_budget() -> None:
+    assert (
+        _M6B_GATEWAY_TIMEOUT_SECONDS
+        == _STARROCKS_GATEWAY_TIMEOUT_SECONDS
+        == DEFAULT_TIMEOUT_SECONDS
+        == MAX_READONLY_TIMEOUT_SECONDS
+        == 30
+    )
 
 
 @pytest.mark.parametrize(
