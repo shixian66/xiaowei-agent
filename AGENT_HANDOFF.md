@@ -7,9 +7,9 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent`；当前 M6b 隔离 worktree 为 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
-| 截止时间 | 2026-09-07（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；项目负责人已明确将真实测试环境验证延期，M6b 证据等级仍为 `tests`，尚未通过里程碑验收、尚未归档** |
-| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2，**已于 2026-09-01 获项目负责人批准** |
+| 截止时间 | 2026-09-08（Asia/Shanghai） |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。项目负责人已批准 M7 PR 1–8 均可离线开发，真实应用、凭据、网络、部署与 canary 继续使用独立硬门；V0.6 文档修订尚待技术复核与合入，M7 源码尚未开始** |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.2；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，不授权真实渠道激活 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
@@ -49,7 +49,8 @@
 | M6a 合并后 CI | main push run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909) 精确绑定最终实现基线，八个 job 全绿 |
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
-| 下一步 | **M6b 暂停在真实验证前并完成交接**。以后恢复时先核对最新 `main` 与授权是否漂移，再补齐唯一 canonical target、物理 identity、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、字段处置/保留/销毁，并取得新的明确“现场 GO”；未恢复前不得连接真实 StarRocks |
+| M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.5 已通过技术复核；项目负责人于 2026-09-08 明确批准 V0.6：PR 1–8 均可在 fake/recording 基础上离线实现，真实应用注册、凭据、网络连接、部署与 canary 继续由独立硬门阻塞。V0.6 基于 `main@aa2af2edcd4c30c611e0ed51d10263b26acef598`，尚待技术复核与合入 |
+| 下一步 | **先技术复核并以纯文档 PR 合入 M7 V0.6 基线；未在合入后收到新的“开始 M7 离线实现”前不进入 PR 1–8。** M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。以后恢复 M6b 时仍须核对最新 `main` 与授权，补齐唯一 canonical target、物理 identity、带外 digest、secret reference、actor/窗口、证据处置，并取得新的明确“现场 GO” |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -154,8 +155,19 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 9. ~~M5 实现与验收~~ **已完成**：最终对象 `372c381` 经终审与项目负责人验收，以 fast-forward 合入 `main`；合并后 run `33952529021` 八项全绿，逐条提交历史已归档。
 10. ~~M6a 实现与验收~~ **已完成**：PR #11、#12、#13、#15、#14 均已合入；最终实现基线 `e2032fd` 的 main push CI 八项全绿，里程碑已获负责人验收并归档。
 11. **M6b 真实验证前暂停**：默认关闭的真实 adapter 已经 PR #17 审查并合入 `main`，合入后八项 CI 全绿；项目负责人明确将测试环境验证延期。恢复时必须从最新 `main` 重新核对授权和配置，唯一目标、物理身份、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、证据处置和新的“现场 GO”未全部落定前不连接真实服务。M6b 仍未验收、未归档。
+12. **M7 PR 1–8 均开放离线窄例外**：V0.5 技术复核已通过，项目负责人于 2026-09-08
+    明确批准把 M6 代码完成与 M7 离线开发解耦。V0.6 文档技术复核、合入并再次获得明确
+    “开始 M7 离线实现”前，不创建 PR 1 实现分支。真实应用注册、凭据、网络、部署与 canary
+    仍保持独立硬门，不因任何离线 PR 完成自动解锁。
 
 ## 6. 仍需拍板的事项
+
+M7 的阶段门拆分已拍板，不再是待决项：PR 1–8 均可离线实现，且须在 V0.6 文档合入后
+再次取得明确开工口令；真实渠道激活权限没有放宽。
+
+M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保证飞书链接单任务安全详情可读。
+未来的 Admin 配置治理、真实模型 API、审批/重跑和后续运维能力须另立里程碑与 ADR，不属于 M7，
+这次范围确认也不能被推导为已实现或已连接。
 
 - 审批主体、审批渠道、审批有效期和拒绝/过期/冲突后的恢复语义（M8 前，ADR-005）。
 - M8 受控 E1 的三项开放条件是否齐备：ADR-005 定稿、项目负责人批准、ADR-007 明确例外或修订。
@@ -247,6 +259,10 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 
 ### 未覆盖
 
+- **M7 仍无源码、测试、Compose、部署、canary 或用户验收证据**：当前只有 V0.5 技术复核结论、
+  负责人对 V0.6 阶段门和产品范围的批准，以及尚待技术复核与合入的 V0.6 文档修订。未来的
+  Admin 配置治理和真实模型 API 尚无源码或运行证据。PR 1–8 尚未获得合入后的离线开工口令；
+  真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未取得产品用户验收；M5/M6a 的“验收通过”都是项目里程碑验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
