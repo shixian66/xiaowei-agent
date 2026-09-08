@@ -185,12 +185,11 @@ def _dynamic_import_call_lines(path: Path) -> set[int]:
         for node in ast.walk(tree)
         if (
             isinstance(node, ast.Import)
-            and any(alias.name == "importlib" for alias in node.names)
+            and any(alias.name.split(".", 1)[0] == "importlib" for alias in node.names)
         )
         or (
             isinstance(node, ast.ImportFrom)
-            and node.module == "importlib"
-            and any(alias.name == "import_module" for alias in node.names)
+            and (node.module or "").split(".", 1)[0] == "importlib"
         )
         or (
             isinstance(node, ast.Call)
@@ -336,6 +335,23 @@ def test_contracts_do_not_hide_dependencies_behind_dynamic_imports() -> None:
         if (lines := _dynamic_import_call_lines(path))
     }
     assert not offenders, f"contracts 不得动态加载依赖: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.util\n",
+        "from importlib.util import module_from_spec\n",
+        "from importlib import util\n",
+    ],
+)
+def test_dynamic_import_guard_catches_the_importlib_family(
+    tmp_path: Path, source: str
+) -> None:
+    path = tmp_path / "dynamic.py"
+    path.write_text(source, encoding="utf-8")
+
+    assert _dynamic_import_call_lines(path) == {1}
 
 
 def test_redaction_is_a_leaf() -> None:

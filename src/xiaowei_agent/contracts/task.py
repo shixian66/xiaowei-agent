@@ -52,21 +52,21 @@ class TaskLookup(Contract):
 
 
 class ActorTaskPageQuery(Contract):
-    """普通用户按 actor 读取任务页的明确作用域。"""
+    """普通用户按 actor 读取任务页；游标筛选 ``created_seq < before_created_seq``。"""
 
     tenant_id: StrictStr
     environment_id: StrictStr
     actor: StrictStr
-    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    before_created_seq: StrictInt | None = Field(default=None, gt=0)
     limit: StrictInt = Field(gt=0, le=100)
 
 
 class ScopeTaskPageQuery(Contract):
-    """admin 按 tenant/environment 读取任务页的明确作用域。"""
+    """admin 按 scope 读取任务页；游标筛选 ``created_seq < before_created_seq``。"""
 
     tenant_id: StrictStr
     environment_id: StrictStr
-    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    before_created_seq: StrictInt | None = Field(default=None, gt=0)
     limit: StrictInt = Field(gt=0, le=100)
 
 

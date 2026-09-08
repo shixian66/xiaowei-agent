@@ -477,14 +477,14 @@ class ActorTaskPageQuery(Contract):
     tenant_id: StrictStr
     environment_id: StrictStr
     actor: StrictStr
-    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    before_created_seq: StrictInt | None = Field(default=None, gt=0)
     limit: StrictInt = Field(gt=0, le=100)
 
 
 class ScopeTaskPageQuery(Contract):
     tenant_id: StrictStr
     environment_id: StrictStr
-    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    before_created_seq: StrictInt | None = Field(default=None, gt=0)
     limit: StrictInt = Field(gt=0, le=100)
 
 
@@ -511,7 +511,8 @@ async def list_tasks_for_actor(self, *, query: ActorTaskPageQuery) -> StoredTask
 async def list_tasks_for_scope(self, *, query: ScopeTaskPageQuery) -> StoredTaskPage: ...
 ```
 
-- 排序固定为 `created_seq DESC, task_id DESC`，游标只由服务端编码/校验。
+- 排序固定为 `created_seq DESC, task_id DESC`；续页条件固定为
+  `created_seq < before_created_seq`，游标只由服务端编码/校验。
 - 两个列表读取都由 TaskStore 在同一次查询中关联不可变 `task_submissions`；TaskAccessService 只把
   `submission.as_of` 和脱敏限长的 request preview 投成安全 `TaskSummary`，不向 handler 返回
   TaskRecord、idempotency digest、lease 或原始 submission。

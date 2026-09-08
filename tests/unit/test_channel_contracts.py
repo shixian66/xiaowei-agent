@@ -185,13 +185,13 @@ def test_task_page_queries_have_separate_actor_and_admin_scope_shapes() -> None:
         tenant_id="tenant-a",
         environment_id="dev",
         actor="alice",
-        after_created_seq=None,
+        before_created_seq=None,
         limit=100,
     )
     scope_query = ScopeTaskPageQuery(
         tenant_id="tenant-a",
         environment_id="dev",
-        after_created_seq=42,
+        before_created_seq=42,
         limit=1,
     )
 
@@ -199,17 +199,17 @@ def test_task_page_queries_have_separate_actor_and_admin_scope_shapes() -> None:
         "tenant_id",
         "environment_id",
         "actor",
-        "after_created_seq",
+        "before_created_seq",
         "limit",
     }
     assert set(ScopeTaskPageQuery.model_fields) == {
         "tenant_id",
         "environment_id",
-        "after_created_seq",
+        "before_created_seq",
         "limit",
     }
     assert actor_query.limit == 100
-    assert scope_query.after_created_seq == 42
+    assert scope_query.before_created_seq == 42
     assert set(StoredTaskRead.model_fields) == {"record", "submission"}
     assert set(StoredTaskPage.model_fields) == {"items", "next_created_seq"}
 
@@ -224,7 +224,7 @@ def test_task_page_queries_have_separate_actor_and_admin_scope_shapes() -> None:
             tenant_id="tenant-a", environment_id="dev", actor="alice", limit=101
         ),
         lambda: ScopeTaskPageQuery(
-            tenant_id="tenant-a", environment_id="dev", after_created_seq=0, limit=10
+            tenant_id="tenant-a", environment_id="dev", before_created_seq=0, limit=10
         ),
         lambda: ScopeTaskPageQuery(
             tenant_id="tenant-a", environment_id="dev", limit=True
