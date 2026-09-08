@@ -1,5 +1,1 @@
-"""应用层编排。``XiaoweiRuntime`` 是唯一入口。"""
-
-from xiaowei_agent.application.runtime import XiaoweiRuntime
-
-__all__ = ["XiaoweiRuntime"]
+"""应用层编排；调用方必须从职责明确的子模块显式导入。"""

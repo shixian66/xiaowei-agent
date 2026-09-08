@@ -1,8 +1,4 @@
-"""工作流执行。M2 只有 Protocol 与测试替身；真实 Runner 属 M3。
+"""工作流执行；调用方必须显式导入具体 Protocol 或实现子模块。
 
-**不从本入口导出 fake 实现**：``runners.fake`` 必须显式 import。
+包入口不重导出 Runner 或 fake，避免读取投影进程因导入 binding 类型而获得执行模块。
 """
-
-from xiaowei_agent.runners.runner import WorkflowRunner
-
-__all__ = ["WorkflowRunner"]

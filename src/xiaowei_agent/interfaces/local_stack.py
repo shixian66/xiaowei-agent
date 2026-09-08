@@ -1,50 +1,27 @@
-"""M5 本地装配根；fake adapter 的唯一生产代码导入点。"""
+"""本地进程装配根；按进程职责组装读取投影或完整执行依赖。"""
+
+from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.default_capabilities import (
     build_default_capability_bindings,
 )
-from xiaowei_agent.application.runtime import XiaoweiRuntime
-from xiaowei_agent.capabilities.asset_inventory import (
-    ASSET_INVENTORY_GATEWAY,
-    OP_LOOKUP_ASSET,
-)
-from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
-from xiaowei_agent.capabilities.prometheus_alert import (
-    ALERTMANAGER_GATEWAY,
-    OP_GET_ACTIVE_ALERTS,
-    OP_QUERY_METRIC_RANGE,
-    PROMETHEUS_GATEWAY,
-    PROMQL_SURFACE,
-)
+from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
-from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
-from xiaowei_agent.capabilities.specs import (
-    GATEWAY_NAME,
-    OP_COUNT,
-    OP_LIST,
-    SLOW_QUERY_SURFACE,
-)
-from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_context_target
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
-    AdmissionCertificate,
+    CapabilitySnapshot,
     ReadinessProbe,
     ReadinessReport,
-    RequestContext,
-    ToolCall,
-    ToolResult,
 )
-from xiaowei_agent.evidence.builder import SlowQueryEvidencePolicy
-from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
 from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
-from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.persistence.database import (
     PostgresReadinessProbe,
     create_database_engine,
@@ -59,42 +36,22 @@ from xiaowei_agent.persistence.postgres import (
     PostgresTaskStore,
 )
 from xiaowei_agent.persistence.store import Clock, TaskStore
-from xiaowei_agent.planning import compute_target_fingerprint
-from xiaowei_agent.planning.prometheus.compiler import compile_promql
-from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
-from xiaowei_agent.planning.prometheus.templates import (
-    metric_name_for_template,
-    template_for_alert,
-)
-from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1
-from xiaowei_agent.runners.deterministic import DeterministicStepRunner
-from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
-from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
-from xiaowei_agent.tools.alertmanager_recording import default_alertmanager_recording
-from xiaowei_agent.tools.asset_inventory_fake import AssetInventoryRecordingAdapter
-from xiaowei_agent.tools.asset_inventory_recording import (
-    default_asset_inventory_recording,
-)
-from xiaowei_agent.tools.gateway import (
-    DeterministicToolGateway,
-    TargetBoundAdapterBinding,
-    ToolGateway,
-)
-from xiaowei_agent.tools.prometheus_fake import (
-    PrometheusRecordingAdapter,
-    PrometheusRecordingKey,
-)
-from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
-from xiaowei_agent.tools.starrocks import (
-    NORMALIZER_VERSION,
-    PhysicalIdentityProbe,
-    PyMySQLConnectionFactory,
-    StarRocksConnectionFactory,
-    StarRocksReadonlyAdapter,
-    StarRocksReadonlyAdapterConfig,
-)
-from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
-from xiaowei_agent.tools.starrocks_recording import default_recording
+
+if TYPE_CHECKING:
+    from xiaowei_agent.application.runtime import XiaoweiRuntime
+    from xiaowei_agent.contracts import (
+        AdmissionCertificate,
+        RequestContext,
+        ToolCall,
+        ToolResult,
+    )
+    from xiaowei_agent.evidence.builder import SlowQueryEvidencePolicy
+    from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
+    from xiaowei_agent.tools.gateway import TargetBoundAdapterBinding, ToolGateway
+    from xiaowei_agent.tools.starrocks import (
+        PhysicalIdentityProbe,
+        StarRocksConnectionFactory,
+    )
 
 MonotonicClock = Callable[[], float]
 AsyncClose = Callable[[], Awaitable[None]]
@@ -134,6 +91,21 @@ class LocalStack:
     evidence_ledger: EvidenceLedger
     clock: Clock
     monotonic: MonotonicClock
+    settings: Settings
+    readiness: ReadinessProbe
+    aclose: AsyncClose
+    policy_revision: str
+
+
+@dataclass(frozen=True)
+class TaskViewStack:
+    """internal-api 的窄装配；只包含任务读写与终态投影依赖。"""
+
+    runtime: TaskViewRuntime
+    task_store: TaskStore
+    plan_store: PlanStore
+    evidence_ledger: EvidenceLedger
+    clock: Clock
     settings: Settings
     readiness: ReadinessProbe
     aclose: AsyncClose
@@ -184,6 +156,30 @@ def _starrocks_gateway_registration(
     dict[tuple[str, str], TargetBoundAdapterBinding],
     SlowQueryEvidencePolicy | None,
 ]:
+    from xiaowei_agent.capabilities.specs import (
+        GATEWAY_NAME,
+        OP_COUNT,
+        OP_LIST,
+        SLOW_QUERY_SURFACE,
+    )
+    from xiaowei_agent.capabilities.target import (
+        TargetResolutionError,
+        resolve_context_target,
+    )
+    from xiaowei_agent.contracts import RequestContext
+    from xiaowei_agent.evidence.builder import SlowQueryEvidencePolicy
+    from xiaowei_agent.planning import compute_target_fingerprint
+    from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1
+    from xiaowei_agent.tools.gateway import TargetBoundAdapterBinding
+    from xiaowei_agent.tools.starrocks import (
+        NORMALIZER_VERSION,
+        PyMySQLConnectionFactory,
+        StarRocksReadonlyAdapter,
+        StarRocksReadonlyAdapterConfig,
+    )
+    from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
+    from xiaowei_agent.tools.starrocks_recording import default_recording
+
     if settings.starrocks_adapter_mode == "recording":
         if live is not None:
             raise ValueError("recording mode cannot carry a live StarRocks assembly")
@@ -290,6 +286,18 @@ def _starrocks_gateway_registration(
     return {}, {(GATEWAY_NAME, fingerprint): binding}, policy
 
 
+def _build_capability_bindings(
+    *, slow_query_live_policy: SlowQueryEvidencePolicy | None = None
+) -> tuple[CapabilitySnapshot, CapabilityBindingRegistry]:
+    snapshot = StaticCapabilityRegistry().snapshot()
+    bindings = build_default_capability_bindings(
+        snapshot=snapshot,
+        policy_snapshot=ACTIVE_POLICY_SNAPSHOT,
+        slow_query_live_policy=slow_query_live_policy,
+    )
+    return snapshot, bindings
+
+
 def _assemble_local_stack(
     *,
     settings: Settings,
@@ -302,6 +310,46 @@ def _assemble_local_stack(
     monotonic: MonotonicClock,
     starrocks_live_assembly: StarRocksLiveAssembly | None,
 ) -> LocalStack:
+    from xiaowei_agent.application.runtime import XiaoweiRuntime
+    from xiaowei_agent.capabilities.asset_inventory import (
+        ASSET_INVENTORY_GATEWAY,
+        OP_LOOKUP_ASSET,
+    )
+    from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
+    from xiaowei_agent.capabilities.prometheus_alert import (
+        ALERTMANAGER_GATEWAY,
+        OP_GET_ACTIVE_ALERTS,
+        OP_QUERY_METRIC_RANGE,
+        PROMETHEUS_GATEWAY,
+        PROMQL_SURFACE,
+    )
+    from xiaowei_agent.capabilities.resolver_impl import (
+        DeterministicCapabilityResolver,
+    )
+    from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
+    from xiaowei_agent.observability.durable_sink import DurableTraceSink
+    from xiaowei_agent.planning.prometheus.compiler import compile_promql
+    from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
+    from xiaowei_agent.planning.prometheus.templates import (
+        metric_name_for_template,
+        template_for_alert,
+    )
+    from xiaowei_agent.runners.deterministic import DeterministicStepRunner
+    from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
+    from xiaowei_agent.tools.alertmanager_recording import (
+        default_alertmanager_recording,
+    )
+    from xiaowei_agent.tools.asset_inventory_fake import AssetInventoryRecordingAdapter
+    from xiaowei_agent.tools.asset_inventory_recording import (
+        default_asset_inventory_recording,
+    )
+    from xiaowei_agent.tools.gateway import DeterministicToolGateway
+    from xiaowei_agent.tools.prometheus_fake import (
+        PrometheusRecordingAdapter,
+        PrometheusRecordingKey,
+    )
+    from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
+
     starrocks_adapters, target_adapters, slow_query_live_policy = (
         _starrocks_gateway_registration(
             settings=settings,
@@ -365,10 +413,7 @@ def _assemble_local_stack(
         else base_gateway
     )
     sink = DurableTraceSink(writer=task_store)
-    snapshot = StaticCapabilityRegistry().snapshot()
-    bindings = build_default_capability_bindings(
-        snapshot=snapshot,
-        policy_snapshot=ACTIVE_POLICY_SNAPSHOT,
+    snapshot, bindings = _build_capability_bindings(
         slow_query_live_policy=slow_query_live_policy,
     )
     runner = DeterministicStepRunner(
@@ -445,6 +490,47 @@ def build_in_memory_local_stack(
         monotonic=monotonic,
         starrocks_live_assembly=starrocks_live_assembly,
     )
+
+
+async def build_postgres_task_view_stack(
+    *,
+    settings: Settings,
+    clock: Clock = _utc_now,
+) -> TaskViewStack:
+    """为 internal-api 装配只读投影栈，不导入 Runner、Gateway 或工具适配器。"""
+    engine = create_database_engine(settings)
+
+    async def close() -> None:
+        await engine.dispose()
+
+    try:
+        task_store = PostgresTaskStore(
+            engine=engine,
+            clock=clock,
+            task_failure_limit=settings.task_failure_limit,
+        )
+        plan_store = PostgresPlanStore(engine=engine)
+        ledger = PostgresEvidenceLedger(engine=engine)
+        _, bindings = _build_capability_bindings()
+        return TaskViewStack(
+            runtime=TaskViewRuntime(
+                task_store=task_store,
+                plan_store=plan_store,
+                ledger=ledger,
+                bindings=bindings,
+            ),
+            task_store=task_store,
+            plan_store=plan_store,
+            evidence_ledger=ledger,
+            clock=clock,
+            settings=settings,
+            readiness=PostgresReadinessProbe(engine=engine, assembled=True),
+            aclose=close,
+            policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
+        )
+    except Exception:
+        await engine.dispose()
+        raise
 
 
 async def build_postgres_local_stack(

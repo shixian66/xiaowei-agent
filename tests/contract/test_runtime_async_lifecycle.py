@@ -10,10 +10,11 @@ from tests.fakes.recordings import GOLDEN
 from tests.fakes.runner import RunnerHarness
 from tests.fakes.runtime import RuntimeHarness
 
-from xiaowei_agent.application import runtime as runtime_module
+from xiaowei_agent.application import task_view_runtime as task_view_module
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
     CapabilityBindingRegistry,
+    CapabilityRuntimeBinding,
     PreparedCapability,
 )
 from xiaowei_agent.application.default_capabilities import (
@@ -28,12 +29,15 @@ from xiaowei_agent.application.runtime import (
 )
 from xiaowei_agent.capabilities import SpecResolutionError
 from xiaowei_agent.contracts import (
+    AnswerabilityVerdict,
     AttemptIntent,
+    EvidenceEnvelope,
     RenderPayload,
     RetryReason,
     TaskAttemptRejection,
     TaskLookup,
     TaskOutcome,
+    TaskRecord,
     TaskStatus,
     TaskView,
 )
@@ -148,15 +152,26 @@ async def test_handle_and_query_share_the_terminal_projection(
 ) -> None:
     harness = RuntimeHarness(GOLDEN)
     first = await harness.handle("最近30分钟有哪些慢查询")
-    original = runtime_module.project_terminal
+    original = task_view_module.project_terminal
     calls = 0
 
-    def _counting_projection(**kwargs: object) -> RenderPayload:
+    def _counting_projection(
+        *,
+        record: TaskRecord,
+        evidences: tuple[EvidenceEnvelope, ...],
+        verdict: AnswerabilityVerdict,
+        binding: CapabilityRuntimeBinding,
+    ) -> RenderPayload:
         nonlocal calls
         calls += 1
-        return original(**kwargs)  # type: ignore[arg-type]
+        return original(
+            record=record,
+            evidences=evidences,
+            verdict=verdict,
+            binding=binding,
+        )
 
-    monkeypatch.setattr(runtime_module, "project_terminal", _counting_projection)
+    monkeypatch.setattr(task_view_module, "project_terminal", _counting_projection)
     queried = await harness.runtime.query_task(lookup=harness.lookup)
     repeated = await harness.handle("最近30分钟有哪些慢查询")
 
@@ -186,7 +201,7 @@ async def test_terminal_query_uses_the_renderer_selected_by_the_stored_plan(
 
     selected = replace(SLOW_QUERY_BINDING, renderer=sentinel_renderer)
     monkeypatch.setattr(
-        harness.runtime,
+        harness.runtime._task_views,
         "_bindings",
         CapabilityBindingRegistry(
             snapshot=harness.runtime._snapshot,

@@ -28,9 +28,9 @@ RequestEnvelope
 
 import datetime as _dt
 import uuid
-from enum import StrEnum
 from typing import Final
 
+from xiaowei_agent.application import task_view_runtime as task_view_module
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
     CapabilityBindingRegistry,
@@ -38,17 +38,18 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
+from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.contracts import (
+    TERMINAL_STATUSES,
     AnswerabilityVerdict,
     AttemptIntent,
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
     IntentDraft,
-    MissingItem,
     PipelineStage,
     RenderPayload,
     RequestContext,
@@ -62,7 +63,6 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
     TaskView,
     TraceEvent,
-    task_query_path,
 )
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
@@ -87,7 +87,6 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
 )
 from xiaowei_agent.reflection.status import terminal_status_for
-from xiaowei_agent.rendering.generic import render_preplan_rejection
 from xiaowei_agent.rendering.pending import render_pending
 from xiaowei_agent.runners.deterministic import (
     RECOVERY_DRIFT_REASON,
@@ -103,17 +102,6 @@ RENDER_REF: Final[None] = None
 它只由兼容的同步 ``handle()`` 返回，不另建 render store。M5 的异步查询从 TaskRecord
 与 Evidence 纯函数重建终态投影；非终态统一返回 ``render=None``。
 """
-
-_TERMINAL: Final[frozenset[TaskStatus]] = frozenset(
-    {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.REJECTED,
-        TaskStatus.CANCELED,
-        TaskStatus.INDETERMINATE,
-    }
-)
-
 
 class RequestRejectedError(RuntimeError):
     """请求在取数之前就被确定性地拒绝（无候选能力、目标不可解析、参数越界）。
@@ -143,29 +131,6 @@ class RetryableTaskError(TaskIdCarryingError, RuntimeError):
         self.reason = reason
 
 
-class ApplicationFailure(StrEnum):
-    CONFLICT = "conflict"
-    NOT_FOUND = "not_found"
-    UNAVAILABLE = "unavailable"
-    INTERNAL = "internal"
-
-
-def classify_application_exception(exc: Exception) -> ApplicationFailure:
-    """把应用边界异常收敛为入口可消费的闭集，不暴露存储层类型。"""
-    from xiaowei_agent.persistence.store import (
-        IdempotencyConflictError,
-        TaskNotFoundError,
-    )
-
-    if isinstance(exc, IdempotencyConflictError):
-        return ApplicationFailure.CONFLICT
-    if isinstance(exc, TaskNotFoundError):
-        return ApplicationFailure.NOT_FOUND
-    if isinstance(exc, PersistenceUnavailableError):
-        return ApplicationFailure.UNAVAILABLE
-    return ApplicationFailure.INTERNAL
-
-
 class XiaoweiRuntime:
     """组装依赖、驱动一次请求、产出可审计回答。"""
 
@@ -193,6 +158,12 @@ class XiaoweiRuntime:
         self._runner = runner
         self._sink = sink
         self._clock = clock
+        self._task_views = TaskViewRuntime(
+            task_store=task_store,
+            plan_store=plan_store,
+            ledger=ledger,
+            bindings=bindings,
+        )
 
     # --- trace --------------------------------------------------------------
 
@@ -247,13 +218,11 @@ class XiaoweiRuntime:
 
     async def submit_task(self, *, submission: TaskSubmission) -> TaskView:
         """只持久化提交事实并返回应用层投影，不解释或执行。"""
-        record = await self._tasks.create_task(submission=submission)
-        return await self._task_view(record=record)
+        return await self._task_views.submit_task(submission=submission)
 
     async def query_task(self, *, lookup: TaskLookup) -> TaskView:
         """按受信 scope 纯读任务；不发 trace、不改变任何任务事实。"""
-        record = await self._tasks.get(lookup=lookup)
-        return await self._task_view(record=record)
+        return await self._task_views.query_task(lookup=lookup)
 
     async def execute_task(
         self, *, grant: TaskAttemptGrant, submission: TaskSubmission
@@ -380,7 +349,7 @@ class XiaoweiRuntime:
         record = await self._tasks.create_task(
             submission=TaskSubmission(envelope=envelope, context=context, as_of=as_of)
         )
-        if record.status in _TERMINAL:
+        if record.status in TERMINAL_STATUSES:
             # 幂等：同一 idempotency_key 只产生一个任务事实。重复请求不再执行，
             # 而是按**已经落库的**证据与终态重新投影——重跑会既违反 at-most-once，
             # 也会让第二次的回答与第一次不同。
@@ -399,7 +368,7 @@ class XiaoweiRuntime:
             )
         )
         if attempt.grant is None:
-            if attempt.winner.status in _TERMINAL:
+            if attempt.winner.status in TERMINAL_STATUSES:
                 return await self._render_recorded(
                     record=attempt.winner, context=context
                 )
@@ -429,21 +398,10 @@ class XiaoweiRuntime:
             binding=binding,
         )
 
-    async def _task_view(self, *, record: TaskRecord) -> TaskView:
-        payload: RenderPayload | None = None
-        if record.status in _TERMINAL:
-            payload = await self._project_recorded(record=record)
-        return TaskView(
-            task_id=record.task_id,
-            status=record.status,
-            render=payload,
-            query_path=task_query_path(record.task_id),
-        )
-
     async def _render_recorded(
         self, *, record: TaskRecord, context: RequestContext
     ) -> RenderPayload:
-        payload = await self._project_recorded(record=record)
+        payload = await self._task_views.project_recorded(record=record)
         await self._emit(
             stage=PipelineStage.RENDERING,
             outcome=StageOutcome.OK,
@@ -569,7 +527,7 @@ class XiaoweiRuntime:
             grant=grant,
             binding=binding,
         )
-        payload = project_terminal(
+        payload = task_view_module.project_terminal(
             record=winner,
             evidences=evidences,
             verdict=verdict,
@@ -602,7 +560,9 @@ class XiaoweiRuntime:
         evidences: tuple[EvidenceEnvelope, ...] = await self._ledger.load(
             task_id=task_id
         )
-        verdict = _assess_evidence(binding=binding, evidences=evidences)
+        verdict = task_view_module._assess_evidence(
+            binding=binding, evidences=evidences
+        )
         # REFLECTION 只在**执行本身没出问题、却仍然证据不足**时记为 REJECTED。
         # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
         # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
@@ -660,24 +620,6 @@ class XiaoweiRuntime:
             )
         return result.winner, evidences, verdict
 
-    async def _project_recorded(self, *, record: TaskRecord) -> RenderPayload:
-        evidences = await self._ledger.load(task_id=record.task_id)
-        try:
-            stored = await self._plans.load(task_id=record.task_id)
-        except PlanNotFoundError:
-            if record.status is TaskStatus.REJECTED and not evidences:
-                return render_preplan_rejection(status=record.status)
-            raise
-        binding = self._bindings.runtime_for_plan(plan=stored.plan)
-        verdict = _assess_evidence(binding=binding, evidences=evidences)
-        return project_terminal(
-            record=record,
-            evidences=evidences,
-            verdict=verdict,
-            binding=binding,
-        )
-
-
 def _independent_delivery(task_id: str | None) -> Delivery:
     return Delivery.LOG_ONLY if task_id is None else Delivery.LOG_AND_DURABLE
 
@@ -692,43 +634,6 @@ def _task_outcome(
         evidence_refs=(),
         render_ref=None,
     )
-
-
-def project_terminal(
-    *,
-    record: TaskRecord,
-    evidences: tuple[EvidenceEnvelope, ...],
-    verdict: AnswerabilityVerdict,
-    binding: CapabilityRuntimeBinding,
-) -> RenderPayload:
-    """把终态持久化事实投影为回答；纯函数，不发 trace、不做 I/O。"""
-    return binding.renderer(
-        evidences=evidences, verdict=verdict, status=record.status
-    )
-
-
-def _assess_evidence(
-    *,
-    binding: CapabilityRuntimeBinding | None,
-    evidences: tuple[EvidenceEnvelope, ...],
-) -> AnswerabilityVerdict:
-    if binding is None:
-        if evidences:
-            raise CapabilityBindingError("evidence exists without a capability plan")
-        return AnswerabilityVerdict(
-            sufficient=False,
-            limitations=("request was rejected before a plan was stored",),
-            missing=(MissingItem(key="execution_plan", reason_key="plan.absent"),),
-            downgrade_suggestion=True,
-            needs_user_input=False,
-        )
-    expected = (binding.capability_id, binding.capability_version)
-    if any(
-        (item.capability_id, item.capability_version) != expected
-        for item in evidences
-    ):
-        raise CapabilityBindingError("evidence capability key differs from plan")
-    return binding.assessor(evidences=evidences)
 
 
 def _terminal_status(
