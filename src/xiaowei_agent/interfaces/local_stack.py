@@ -31,6 +31,7 @@ from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
 from xiaowei_agent.persistence.postgres import (
+    PostgresChannelStore,
     PostgresEvidenceLedger,
     PostgresPlanStore,
     PostgresTaskStore,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     # 这些执行栈类型必须保持静态导入；移到顶层会让仅 import local_stack 的
     # internal-api 一并加载完整 Runtime、Runner 与工具链。代价是 LocalStack 的
     # 延迟注解不能用 get_type_hints() 无参解析；窄进程只内省 TaskViewStack。
+    from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.contracts import (
         AdmissionCertificate,
@@ -49,6 +51,10 @@ if TYPE_CHECKING:
         ToolResult,
     )
     from xiaowei_agent.evidence.builder import SlowQueryEvidencePolicy
+    from xiaowei_agent.interfaces.feishu_identity import FeishuIdentityDirectory
+    from xiaowei_agent.interfaces.feishu_listener import FeishuListener
+    from xiaowei_agent.interfaces.feishu_sdk import FeishuInboundTransport
+    from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
     from xiaowei_agent.tools.gateway import TargetBoundAdapterBinding, ToolGateway
     from xiaowei_agent.tools.starrocks import (
@@ -108,6 +114,24 @@ class TaskViewStack:
     task_store: TaskStore
     plan_store: PlanStore
     evidence_ledger: EvidenceLedger
+    clock: Clock
+    settings: Settings
+    readiness: ReadinessProbe
+    aclose: AsyncClose
+    policy_revision: str
+
+
+@dataclass(frozen=True)
+class FeishuListenerStack:
+    """无执行权的飞书入站进程装配。"""
+
+    listener: FeishuListener
+    transport: FeishuInboundTransport
+    runtime: TaskViewRuntime
+    task_store: TaskStore
+    channel_store: ChannelStore
+    identity_directory: FeishuIdentityDirectory
+    submission_service: ChannelSubmissionService
     clock: Clock
     settings: Settings
     readiness: ReadinessProbe
@@ -525,6 +549,90 @@ async def build_postgres_task_view_stack(
             task_store=task_store,
             plan_store=plan_store,
             evidence_ledger=ledger,
+            clock=clock,
+            settings=settings,
+            readiness=PostgresReadinessProbe(engine=engine, assembled=True),
+            aclose=close,
+            policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
+        )
+    except Exception:
+        await engine.dispose()
+        raise
+
+
+async def build_postgres_feishu_listener_stack(
+    *,
+    settings: Settings,
+    clock: Clock = _utc_now,
+    transport: FeishuInboundTransport | None = None,
+) -> FeishuListenerStack:
+    """装配默认关闭的飞书入口；不创建 Runner、Gateway 或目标 adapter。"""
+    from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+    from xiaowei_agent.interfaces.feishu_identity import (
+        load_feishu_identity_directory,
+    )
+    from xiaowei_agent.interfaces.feishu_listener import FeishuListener
+    from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkInboundTransport
+
+    if not settings.feishu_listener_enabled:
+        raise ValueError("Feishu listener is disabled")
+    engine = create_database_engine(settings)
+
+    async def close() -> None:
+        await engine.dispose()
+
+    try:
+        task_store = PostgresTaskStore(
+            engine=engine,
+            clock=clock,
+            task_failure_limit=settings.task_failure_limit,
+        )
+        plan_store = PostgresPlanStore(engine=engine)
+        ledger = PostgresEvidenceLedger(engine=engine)
+        channel_store = PostgresChannelStore(engine=engine, clock=clock)
+        _, bindings = _build_capability_bindings()
+        runtime = TaskViewRuntime(
+            task_store=task_store,
+            plan_store=plan_store,
+            ledger=ledger,
+            bindings=bindings,
+        )
+        identity_directory = load_feishu_identity_directory(
+            path=cast(str, settings.feishu_identity_file),
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        )
+        submission_service = ChannelSubmissionService(
+            runtime=runtime,
+            channel_store=channel_store,
+        )
+        inbound = (
+            transport
+            if transport is not None
+            else FeishuSdkInboundTransport(
+                app_id=cast(str, settings.feishu_app_id),
+                app_secret_file=cast(str, settings.feishu_app_secret_file),
+            )
+        )
+        listener = FeishuListener(
+            app_id=cast(str, settings.feishu_app_id),
+            tenant_key=cast(str, settings.feishu_tenant_key),
+            bot_open_id=cast(str, settings.feishu_bot_open_id),
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+            identity_directory=identity_directory,
+            submission_service=submission_service,
+            policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
+            clock=clock,
+        )
+        return FeishuListenerStack(
+            listener=listener,
+            transport=inbound,
+            runtime=runtime,
+            task_store=task_store,
+            channel_store=channel_store,
+            identity_directory=identity_directory,
+            submission_service=submission_service,
             clock=clock,
             settings=settings,
             readiness=PostgresReadinessProbe(engine=engine, assembled=True),

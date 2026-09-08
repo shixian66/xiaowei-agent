@@ -68,6 +68,10 @@ PR 1–8 均可在 fake/recording 与本地隔离基础设施上离线实现和�
 离线实现不得注册真实应用、读取真实 secret、连接飞书或任何真实运维目标，也不得部署、canary
 或声称渠道可用。开始源码工作前，以下条件必须同时成立：
 
+离线门由 `pyproject.toml` 的全局 `--disable-socket` 机器强制。PR 1–8 的测试不得使用
+`allow_hosts` marker 或其他放行机制连接飞书或任何外部 host；确需放行时必须先修订并重新审核
+本计划，不能在实现中局部绕开。
+
 - [x] 渠道优先级已确认：飞书第一，Web 第二。
 - [x] V0.3 已通过 Claude 技术审核。
 - [x] V0.5（包含 V0.4 阶段门与本轮产品范围收口）已通过技术复核。
@@ -92,7 +96,7 @@ canary 前，除已满足 0.3.1 外，还必须同时成立：
 - [ ] 被验证的 M7 代码已有精确受审 SHA，离线四门、Compose smoke 与安全 eval 全绿。
 - [ ] 飞书测试企业自建应用、身份映射、所需权限、secret reference、数据范围、保留策略、调用窗口
   和回滚方式均已由项目负责人单独批准。
-- [ ] `lark-oapi` 版本、wheel digest、类型声明和实际 async API 已在 PR 4 离线实现时核验；与本文
+- [x] `lark-oapi` 版本、wheel digest、类型声明和实际 async API 已在 PR 4 离线实现时核验；与本文
   不一致时已先修订计划，没有靠兼容猜测继续。
 - [ ] canary 若展示真实运维结果，对应 capability 必须先取得其自身要求的真实运行证据；若只使用
   fake/recording，则必须显式标注，且不能提升 M6b 或该 capability 的证据等级。
@@ -818,8 +822,13 @@ TaskStore 终态本身不可回退；投影只发送“受理”和“终态”�
   `c91f00087b7977dc9059ab492e8fe435e1a873863dca1d4e660d2be5b801e4cd`。
 - wheel 不包含 `py.typed`，不能让 strict mypy 直接遍布 SDK 调用。
 - 官方 SDK 提供 `lark_oapi.ws.Client` 长连接客户端。
-- 消息 create/patch/get 路径有 async 方法，可在 channel worker 使用异步调用，不需要
-  `asyncio.to_thread` 包装出站 API。
+- 消息 create/patch/get 路径的真实 async 方法名分别为 `acreate` / `apatch` / `aget`，可在
+  channel worker 使用异步调用，不需要 `asyncio.to_thread` 包装出站 API；同步同名方法不能误作
+  async 调用。
+- `chat_members.is_in_chat` / `ais_in_chat` 的请求只有 `chat_id`，不能校验任意
+  `subject_ref`；`FeishuMembershipPort` 必须用有界分页的 `chat_members.aget`，固定
+  `member_id_type="open_id"` 后比较当前主体。分页不完整、token 不推进或触发供应商成员可见性限制时
+  一律按 adapter 异常 fail-closed，不能把“不可确认”伪装成“不在群内”。
 - 长连接客户端管理自己的事件循环，握手路径含同步调用；必须在独立 `feishu-listener` 进程运行，
   不能嵌入 FastAPI 主事件循环。
 - SDK INFO 日志可能记录完整连接 URL；必须关闭/过滤该 logger。
@@ -1205,6 +1214,7 @@ listener；依赖安装和离线 contract 测试不构成真实渠道授权。
 - Modify: `uv.lock`
 - Modify: `tests/security/test_dependency_baseline.py`
 - Modify: `src/xiaowei_agent/_conformance.py`
+- Modify: `tests/contract/test_protocol_conformance.py`
 - Modify: `src/xiaowei_agent/config.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
 - Create: `src/xiaowei_agent/interfaces/feishu_sdk.py`
@@ -1220,6 +1230,9 @@ listener；依赖安装和离线 contract 测试不构成真实渠道授权。
 - Create: `tests/security/test_feishu_ingress.py`
 - Create: `tests/security/test_feishu_sdk_boundary.py`
 - Create: `tests/security/test_feishu_log_redaction.py`
+- Modify: `README.md`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 
@@ -1230,7 +1243,10 @@ listener；依赖安装和离线 contract 测试不构成真实渠道授权。
    跨 scope 配置；每个新增字段同时登记 `_FIELD_TO_ENV` 与 `.env.example`，并运行安全测试证明两边
    集合相等。示例文件只写空值或 secret 文件路径，不写真实凭据形状。
 3. 写身份失败测试：事件字段不能覆盖 actor/tenant/environment/permissions；未知用户拒绝。
-4. 写 listener 失败测试：群聊无 mention 忽略、非文本/超限拒绝、重复 event 幂等、冲突 fail-closed。
+4. 写 listener 失败测试：群聊无 mention 忽略、非文本/超限拒绝、重复 event 幂等、冲突 fail-closed；
+   所有永久拒绝只 ACK、不回复用户，但必须记录服务端 scope 与闭集失败原因，且诊断故障不得改变
+   ACK 语义。同步 callback 到异步持久化的桥接固定为单个在途请求，超时必须取消协程且不得遗留
+   无人观察的异常；需要并发时通过增加独立进程扩容，不在单进程内无界排队。
 5. 写日志反证：伪造连接 URL、token/ticket 形状和 provider 响应体不进入捕获日志。
 6. 最小实现动态 SDK seam 和独立同步 listener 进程；模块自身提供 `main()` 与
    `if __name__ == "__main__"`，运行方式固定为

@@ -117,6 +117,23 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
+    "interfaces/feishu_identity.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
+    "interfaces/feishu_listener.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.log",
+        "xiaowei_agent.persistence",
+        "xiaowei_agent.trace",
+    },
+    "interfaces/feishu_sdk.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/local_stack.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.capabilities",
