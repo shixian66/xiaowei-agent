@@ -220,6 +220,38 @@ def test_lark_oapi_reviewed_license_and_async_surface_still_match() -> None:
     assert "register_p2_im_message_receive_v1" in dispatcher
 
 
+def test_lark_oapi_message_builder_surface_still_matches_the_typed_seam() -> None:
+    """离线读 wheel 源码核对卡片 create/patch builder，不 import 有副作用的 SDK。"""
+    spec = find_spec("lark_oapi")
+    assert spec is not None and spec.origin is not None
+    models = Path(spec.origin).parent / "api/im/v1/model"
+    required = {
+        ("create_message_request.py", "CreateMessageRequestBuilder"): {
+            "receive_id_type",
+            "request_body",
+            "build",
+        },
+        ("create_message_request_body.py", "CreateMessageRequestBodyBuilder"): {
+            "receive_id",
+            "msg_type",
+            "content",
+            "uuid",
+            "build",
+        },
+        ("patch_message_request.py", "PatchMessageRequestBuilder"): {
+            "message_id",
+            "request_body",
+            "build",
+        },
+        ("patch_message_request_body.py", "PatchMessageRequestBodyBuilder"): {
+            "content",
+            "build",
+        },
+    }
+    for (filename, class_name), methods in required.items():
+        assert methods <= set(_class_method_kinds(models / filename, class_name))
+
+
 def test_src_never_imports_asyncpg_directly() -> None:
     """驱动只经 DSN 方言字符串加载，业务代码不得 import 它的符号。
 

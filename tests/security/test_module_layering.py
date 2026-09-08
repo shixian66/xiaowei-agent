@@ -131,8 +131,16 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.trace",
     },
     "interfaces/feishu_sdk.py": {
+        "xiaowei_agent.application",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
+        "xiaowei_agent.rendering",
+    },
+    "interfaces/feishu_worker.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.config",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.log",
     },
     "interfaces/local_stack.py": {
         "xiaowei_agent.application",

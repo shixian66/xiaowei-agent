@@ -7,17 +7,36 @@ from types import SimpleNamespace
 
 import pytest
 
+from xiaowei_agent.application.channel_projection import ChannelMessageError
+from xiaowei_agent.contracts import FeishuProjectionInput, TaskStatus, TaskView, task_query_path
 from xiaowei_agent.interfaces import feishu_sdk
 from xiaowei_agent.interfaces.feishu_sdk import (
     FeishuMessageEvent,
     FeishuSdkError,
     FeishuSdkInboundTransport,
     FeishuSdkMembershipAdapter,
+    FeishuSdkMessageAdapter,
 )
+from xiaowei_agent.rendering.feishu import render_feishu_card
 
 _NEXT_PAGE = "next"
 _REPEATED_PAGE = "same"
 _FAKE_SECRET = "unit-test-" + "secret"
+
+
+def _card():
+    return render_feishu_card(
+        FeishuProjectionInput(
+            task_view=TaskView(
+                task_id="task-1",
+                status=TaskStatus.RUNNING,
+                query_path=task_query_path("task-1"),
+            ),
+            request_preview="检查任务",
+            task_version=1,
+            detail_url="https://ops.example.test/app/tasks/task-1",
+        )
+    )
 
 
 def _raw_event() -> SimpleNamespace:
@@ -179,6 +198,306 @@ def test_api_client_builder_sets_the_reviewed_five_second_timeout(
         ("app_secret", _FAKE_SECRET),
         ("timeout", 5.0),
     ]
+
+
+def test_message_client_builder_uses_the_explicit_worker_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    message_api = _MessageApi([])
+
+    class Builder:
+        def app_id(self, value: str) -> "Builder":
+            calls.append(("app_id", value))
+            return self
+
+        def app_secret(self, value: str) -> "Builder":
+            calls.append(("app_secret", value))
+            return self
+
+        def timeout(self, value: float) -> "Builder":
+            calls.append(("timeout", value))
+            return self
+
+        def build(self) -> object:
+            return SimpleNamespace(
+                im=SimpleNamespace(v1=SimpleNamespace(message=message_api))
+            )
+
+    monkeypatch.setattr(
+        feishu_sdk,
+        "_load_lark_oapi",
+        lambda: SimpleNamespace(Client=SimpleNamespace(builder=Builder)),
+    )
+
+    assert (
+        feishu_sdk._build_message_api(
+            app_id="cli_test_app",
+            secret=_FAKE_SECRET,
+            timeout_seconds=7.0,
+        )
+        is message_api
+    )
+    assert calls == [
+        ("app_id", "cli_test_app"),
+        ("app_secret", _FAKE_SECRET),
+        ("timeout", 7.0),
+    ]
+
+
+class _RecordingBuilder:
+    def __init__(self) -> None:
+        self.value = SimpleNamespace()
+
+    def __getattr__(self, name: str) -> Callable[[object], "_RecordingBuilder"]:
+        def record(value: object) -> "_RecordingBuilder":
+            setattr(self.value, name, value)
+            return self
+
+        return record
+
+    def build(self) -> object:
+        return self.value
+
+
+class _RecordingModel:
+    @staticmethod
+    def builder() -> _RecordingBuilder:
+        return _RecordingBuilder()
+
+
+def _install_request_model_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        feishu_sdk.importlib,
+        "import_module",
+        lambda _: SimpleNamespace(
+            CreateMessageRequest=_RecordingModel,
+            CreateMessageRequestBody=_RecordingModel,
+            PatchMessageRequest=_RecordingModel,
+            PatchMessageRequestBody=_RecordingModel,
+        ),
+    )
+
+
+def test_create_message_request_fixes_target_kind_card_type_and_idempotency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_request_model_fakes(monkeypatch)
+    card = _card()
+
+    request = feishu_sdk._build_create_message_request(
+        receive_id_type="chat_id",
+        receive_id="chat-1",
+        card=card,
+        idempotency_ref="delivery-1",
+    )
+
+    assert request.receive_id_type == "chat_id"
+    assert request.request_body.receive_id == "chat-1"
+    assert request.request_body.msg_type == "interactive"
+    assert request.request_body.content == card.content_json
+    assert request.request_body.uuid == "delivery-1"
+
+
+def test_patch_message_request_targets_only_the_persisted_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_request_model_fakes(monkeypatch)
+    card = _card()
+
+    request = feishu_sdk._build_patch_message_request(
+        message_ref="message-1",
+        card=card,
+    )
+
+    assert request.message_id == "message-1"
+    assert request.request_body.content == card.content_json
+
+
+class _MessageApi:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = responses
+        self.created: list[object] = []
+        self.patched: list[object] = []
+
+    async def acreate(self, request: object) -> object:
+        self.created.append(request)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    async def apatch(self, request: object) -> object:
+        self.patched.append(request)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def _message_response(
+    *,
+    success: bool,
+    status_code: int = 200,
+    message_ref: str | None = "message-1",
+    headers: dict[str, str] | None = None,
+) -> object:
+    return SimpleNamespace(
+        success=lambda: success,
+        data=(
+            None
+            if message_ref is None
+            else SimpleNamespace(message_id=message_ref)
+        ),
+        raw=SimpleNamespace(status_code=status_code, headers=headers or {}),
+    )
+
+
+def _install_message_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[object],
+) -> tuple[FeishuSdkMessageAdapter, _MessageApi]:
+    secret_file = tmp_path / "secret"
+    secret_file.write_text(_FAKE_SECRET, encoding="utf-8")
+    api = _MessageApi(responses)
+    monkeypatch.setattr(feishu_sdk, "_build_message_api", lambda **_: api)
+    _install_request_model_fakes(monkeypatch)
+    return (
+        FeishuSdkMessageAdapter(
+            app_id="cli_test_app",
+            app_secret_file=str(secret_file),
+            timeout_seconds=5.0,
+        ),
+        api,
+    )
+
+
+async def test_message_adapter_uses_explicit_chat_and_user_target_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, api = _install_message_api(
+        tmp_path,
+        monkeypatch,
+        [
+            _message_response(success=True, message_ref="group-message"),
+            _message_response(success=True, message_ref="private-message"),
+            _message_response(success=True, message_ref=None),
+        ],
+    )
+
+    group_ref = await adapter.send_to_chat(
+        conversation_ref="chat-1",
+        card=_card(),
+        idempotency_ref="delivery-group",
+    )
+    private_ref = await adapter.send_to_user(
+        subject_ref="subject-1",
+        card=_card(),
+        idempotency_ref="delivery-private",
+    )
+    await adapter.update_card(message_ref=group_ref, card=_card())
+
+    assert group_ref == "group-message"
+    assert private_ref == "private-message"
+    assert api.created[0].receive_id_type == "chat_id"
+    assert api.created[0].request_body.receive_id == "chat-1"
+    assert api.created[1].receive_id_type == "open_id"
+    assert api.created[1].request_body.receive_id == "subject-1"
+    assert api.patched[0].message_id == "group-message"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "headers", "error_code", "retry_after"),
+    [
+        (429, {"Retry-After": "12"}, "PROVIDER_RATE_LIMITED", 12.0),
+        (408, {}, "PROVIDER_TIMEOUT", None),
+        (401, {}, "PROVIDER_UNAUTHORIZED", None),
+        (403, {}, "PROVIDER_FORBIDDEN", None),
+        (400, {}, "PROVIDER_INVALID_PAYLOAD", None),
+        (503, {}, "PROVIDER_UNAVAILABLE", None),
+        (500, {}, "PROVIDER_INTERNAL", None),
+    ],
+)
+async def test_provider_http_failures_map_to_the_closed_error_taxonomy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    headers: dict[str, str],
+    error_code: str,
+    retry_after: float | None,
+) -> None:
+    adapter, _ = _install_message_api(
+        tmp_path,
+        monkeypatch,
+        [
+            _message_response(
+                success=False,
+                status_code=status_code,
+                headers=headers,
+            )
+        ],
+    )
+
+    with pytest.raises(ChannelMessageError) as caught:
+        await adapter.send_to_chat(
+            conversation_ref="chat-1",
+            card=_card(),
+            idempotency_ref="delivery-1",
+        )
+
+    assert caught.value.error_code.name == error_code
+    assert caught.value.retry_after_seconds == retry_after
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_code"),
+    [
+        (TimeoutError("provider body must not escape"), "PROVIDER_TIMEOUT"),
+        (OSError("provider body must not escape"), "PROVIDER_UNAVAILABLE"),
+        (RuntimeError("provider body must not escape"), "PROVIDER_INTERNAL"),
+    ],
+)
+async def test_provider_exceptions_map_without_retaining_raw_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    error_code: str,
+) -> None:
+    adapter, _ = _install_message_api(tmp_path, monkeypatch, [failure])
+
+    with pytest.raises(ChannelMessageError) as caught:
+        await adapter.send_to_user(
+            subject_ref="subject-1",
+            card=_card(),
+            idempotency_ref="delivery-1",
+        )
+
+    assert caught.value.error_code.name == error_code
+    assert str(caught.value) == "channel message delivery failed"
+    assert caught.value.__context__ is None
+
+
+async def test_success_without_a_message_reference_is_not_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _install_message_api(
+        tmp_path,
+        monkeypatch,
+        [_message_response(success=True, message_ref=None)],
+    )
+
+    with pytest.raises(ChannelMessageError) as caught:
+        await adapter.send_to_chat(
+            conversation_ref="chat-1",
+            card=_card(),
+            idempotency_ref="delivery-1",
+        )
+
+    assert caught.value.error_code.name == "PROVIDER_INTERNAL"
 
 
 @pytest.mark.parametrize(

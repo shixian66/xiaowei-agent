@@ -4,8 +4,9 @@
 
 > 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1
-> 渠道契约/ADR、PR 2 窄 TaskViewRuntime 与 PR 3 scoped channel access 已合入；PR 4 已形成
-> 默认关闭的飞书 SDK seam、静态身份映射和长连接 listener 离线候选，等待精确 SHA 审查。
+> 渠道契约/ADR、PR 2 窄 TaskViewRuntime、PR 3 scoped channel access 与 PR 4 默认关闭的
+> 飞书 SDK seam、静态身份映射和长连接 listener 均已审查并合入；PR 5 飞书卡片与 projection
+> worker 已形成离线候选并完成本机深档验证，等待精确 SHA 审查。
 > PR 1–8 已获离线开发口令，后续 PR 仍须逐个审查、合入。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
@@ -90,12 +91,12 @@
 - PyMySQL 是 M6b 新增的 StarRocks MySQL 协议 driver，只允许在 `tools/starrocks.py` 的
   connection factory 被调用时延迟导入；默认 recording 装配、CI 和离线 eval 不导入它、也不发起网络连接。
 - `lark-oapi==1.7.3` 是 M7 PR 4 唯一新增的直接运行依赖；它不带 `py.typed`，只有
-  `interfaces/feishu_sdk.py` 可以延迟加载。默认关闭的 listener、fake transport 和离线测试均不
-  加载 SDK 或连接飞书。
+  `interfaces/feishu_sdk.py` 可以延迟加载。默认关闭的 listener/worker、fake transport/message
+  port 和离线测试均不加载 SDK 或连接飞书。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
-截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 也已合入；M7 的
-`lark-oapi` 当前仍属于 PR 4 离线候选。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
+截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
+`lark-oapi` 也已合入。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
 兼容性仍需独立部署与运行证据。
 
 ## 预期目录
@@ -197,16 +198,18 @@ export XIAOWEI_LOG_LEVEL=INFO
 `dev` 是当前确定性目标目录中已登记的本地 fake 环境；固定开发租户仍是
 `dev-local`。两者是不同的安全维度，不应复用同一个标识。
 
-M7 PR 4 增加的飞书 listener 默认关闭：
+M7 PR 4/5 增加的飞书 listener 与 projection worker 默认关闭：
 
 ```bash
 export XIAOWEI_FEISHU_LISTENER_ENABLED=false
+export XIAOWEI_CHANNEL_WORKER_ENABLED=false
 ```
 
-关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
-`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID` 与
-`XIAOWEI_FEISHU_IDENTITY_FILE` 必须全部留空；开启时五项必须同时提供，两个文件字段必须是绝对
-路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
+两个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
+`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
+`XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_DETAIL_BASE_URL` 必须全部留空。listener 开启时
+前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
+两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
 `open_id` 精确映射，不按姓名或群角色猜权限：
 
 ```json
@@ -226,8 +229,9 @@ export XIAOWEI_FEISHU_LISTENER_ENABLED=false
 
 `operator`、`dba`、`oncall` 可查看安全任务并发起只读任务；`viewer`、`approver` 只可查看；
 `admin` 拥有当前渠道权限闭集。映射在 listener 装配时一次读取，修改后必须重启进程才生效。即使
-配置完整，仍须先满足 M7 真实渠道门并取得负责人明确口令，才允许把开关改为 `true` 并运行
-`python -m xiaowei_agent.interfaces.feishu_listener`；本 PR 的离线验证不构成该授权。
+配置完整，仍须先满足 M7 真实渠道门并取得负责人明确口令，才允许把任一开关改为 `true` 并运行
+`python -m xiaowei_agent.interfaces.feishu_listener` 或
+`python -m xiaowei_agent.interfaces.feishu_worker`；离线验证不构成该授权。
 
 ### 集成测试（M4）
 

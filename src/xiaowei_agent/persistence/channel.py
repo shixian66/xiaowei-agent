@@ -495,7 +495,7 @@ class ChannelStore(Protocol):
     async def create_projection_subscription(
         self, *, command: CreateProjectionSubscriptionCommand
     ) -> ProjectionSubscription:
-        """按任务和目的地幂等创建订阅。"""
+        """按任务和目的地幂等创建；只有已有渠道绑定的订阅才进入 due 队列。"""
 
     async def list_due_projection_subscriptions(
         self, *, query: ProjectionDueQuery

@@ -8,7 +8,10 @@ import pytest
 pytestmark = pytest.mark.security
 
 _PACKAGE = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
-_ALLOWED = {Path("application/channel_access.py")}
+_ALLOWED = {
+    Path("application/channel_access.py"),
+    Path("application/channel_projection.py"),
+}
 
 
 def _submission_read_callers() -> set[Path]:

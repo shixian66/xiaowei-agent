@@ -12,6 +12,7 @@ from tests.fakes.clock import ManualClock
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.application.channel_projection import ChannelProjectionService
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
@@ -26,16 +27,19 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
+    ChannelWorkerStack,
     FeishuListenerStack,
     LocalStack,
     StarRocksLiveAssembly,
     TaskViewStack,
     build_in_memory_local_stack,
+    build_postgres_channel_worker_stack,
     build_postgres_feishu_listener_stack,
     build_postgres_local_stack,
     build_postgres_task_view_stack,
 )
 from xiaowei_agent.persistence.postgres import PostgresChannelStore, PostgresTaskStore
+from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
 from xiaowei_agent.tools.starrocks import PhysicalIdentityProbe
 
@@ -531,6 +535,43 @@ def _feishu_settings(identity_file: Path, secret_file: Path) -> Settings:
     )
 
 
+def _channel_worker_settings(secret_file: Path) -> Settings:
+    return Settings(
+        environment_id="dev",
+        channel_worker_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file=str(secret_file),
+        web_detail_base_url="https://ops.example.test",
+    )
+
+
+class _RecordingMessages:
+    async def send_to_chat(
+        self,
+        *,
+        conversation_ref: str,
+        card: RenderedFeishuCard,
+        idempotency_ref: str,
+    ) -> str:
+        del conversation_ref, card, idempotency_ref
+        return "message-1"
+
+    async def send_to_user(
+        self,
+        *,
+        subject_ref: str,
+        card: RenderedFeishuCard,
+        idempotency_ref: str,
+    ) -> str:
+        del subject_ref, card, idempotency_ref
+        return "message-1"
+
+    async def update_card(
+        self, *, message_ref: str, card: RenderedFeishuCard
+    ) -> None:
+        del message_ref, card
+
+
 def _write_identity(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -639,6 +680,101 @@ async def test_feishu_stack_disposes_engine_when_identity_loading_fails(
                 tmp_path / "missing-identities.json", tmp_path / "missing-secret"
             ),
             transport=RecordingFeishuInboundTransport(),
+        )
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    messages = _RecordingMessages()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    stack = await build_postgres_channel_worker_stack(
+        settings=_channel_worker_settings(tmp_path / "missing-secret"),
+        message_port=messages,
+    )
+
+    assert isinstance(stack, ChannelWorkerStack)
+    assert isinstance(stack.service, ChannelProjectionService)
+    assert isinstance(stack.runtime, TaskViewRuntime)
+    assert isinstance(stack.task_store, PostgresTaskStore)
+    assert isinstance(stack.channel_store, PostgresChannelStore)
+    assert stack.message_port is messages
+    assert {field.name for field in fields(ChannelWorkerStack)} == {
+        "service",
+        "message_port",
+        "runtime",
+        "task_store",
+        "channel_store",
+        "clock",
+        "settings",
+        "readiness",
+        "aclose",
+        "policy_revision",
+    }
+    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert stack.task_store._engine is engine
+    assert stack.channel_store._engine is engine
+    await stack.aclose()
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_channel_worker_does_not_create_an_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_engine(_: object) -> object:
+        raise AssertionError("disabled worker must stop before database assembly")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine", fail_engine
+    )
+
+    with pytest.raises(ValueError, match="channel worker is disabled"):
+        await build_postgres_channel_worker_stack(
+            settings=Settings(environment_id="dev")
+        )
+
+
+@pytest.mark.asyncio
+async def test_channel_worker_stack_disposes_engine_when_port_assembly_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    def fail_port(**_: object) -> object:
+        raise RuntimeError("constant message port assembly failure")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.feishu_sdk.FeishuSdkMessageAdapter",
+        fail_port,
+    )
+
+    with pytest.raises(RuntimeError, match="constant message port assembly failure"):
+        await build_postgres_channel_worker_stack(
+            settings=_channel_worker_settings(tmp_path / "missing-secret")
         )
     assert engine.disposed is True
 

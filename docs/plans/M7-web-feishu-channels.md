@@ -1278,17 +1278,27 @@ python -m pip_audit
 - Modify: `.env.example`
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `src/xiaowei_agent/config.py`
+- Modify: `src/xiaowei_agent/interfaces/feishu_sdk.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
+- Modify: `src/xiaowei_agent/persistence/channel.py`
 - Create: `src/xiaowei_agent/rendering/feishu.py`
 - Create: `src/xiaowei_agent/application/channel_projection.py`
 - Create: `src/xiaowei_agent/interfaces/feishu_worker.py`
+- Modify: `tests/contract/test_feishu_sdk_seam.py`
+- Create: `tests/contract/test_feishu_worker.py`
+- Modify: `tests/security/test_dependency_baseline.py`
+- Modify: `tests/security/test_feishu_sdk_boundary.py`
 - Modify: `tests/security/test_module_layering.py`
 - Create: `tests/unit/test_feishu_rendering.py`
+- Modify: `tests/unit/test_feishu_config.py`
 - Modify: `tests/unit/test_local_stack.py`
 - Create: `tests/contract/test_channel_projection_worker.py`
 - Create: `tests/security/test_feishu_projection_safety.py`
 - Create: `tests/security/test_projection_fencing.py`
 - Modify: `tests/security/test_task_submission_read_boundary.py`
+- Modify: `README.md`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 

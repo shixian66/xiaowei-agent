@@ -1,16 +1,24 @@
 """唯一允许加载 ``lark_oapi`` 的 typed SDK seam。"""
 
+from __future__ import annotations
+
 import importlib
 import json
 import logging
+import math
 import os
 import stat
 from collections.abc import Callable
-from typing import Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from pydantic import Field, ValidationError
 
 from xiaowei_agent.contracts import Contract, FreeText, StrictStr
+from xiaowei_agent.contracts.enums import ProjectionErrorCode
+
+if TYPE_CHECKING:
+    from xiaowei_agent.application.channel_projection import ChannelMessageError
+    from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 
 _LOGGER = logging.getLogger(__name__)
 _SDK_LOGGER_NAME: Final[str] = "Lark"
@@ -63,6 +71,14 @@ class FeishuInboundTransport(Protocol):
 class _AsyncMemberApi(Protocol):
     async def aget(self, request: object) -> object:
         """调用 SDK 的异步群成员分页接口。"""
+
+
+class _AsyncMessageApi(Protocol):
+    async def acreate(self, request: object) -> object:
+        """调用 SDK 的异步消息创建接口。"""
+
+    async def apatch(self, request: object) -> object:
+        """调用 SDK 的异步消息更新接口。"""
 
 
 def _load_lark_oapi() -> object:
@@ -234,18 +250,45 @@ class FeishuSdkInboundTransport:
         _callable_attr(client, "start")()
 
 
-def _build_api_client(*, app_id: str, secret: str) -> _AsyncMemberApi:
+def _build_client(*, app_id: str, secret: str, timeout_seconds: float) -> object:
     _disable_lark_logging()
     sdk = _load_lark_oapi()
     builder = _callable_attr(_required_attr(sdk, "Client"), "builder")()
     builder = _callable_attr(builder, "app_id")(app_id)
     builder = _callable_attr(builder, "app_secret")(secret)
-    builder = _callable_attr(builder, "timeout")(_API_TIMEOUT_SECONDS)
-    client = _callable_attr(builder, "build")()
+    builder = _callable_attr(builder, "timeout")(timeout_seconds)
+    return _callable_attr(builder, "build")()
+
+
+def _build_api_client(
+    *,
+    app_id: str,
+    secret: str,
+    timeout_seconds: float = _API_TIMEOUT_SECONDS,
+) -> _AsyncMemberApi:
+    client = _build_client(
+        app_id=app_id,
+        secret=secret,
+        timeout_seconds=timeout_seconds,
+    )
     resource = _required_attr(
         _required_attr(_required_attr(client, "im"), "v1"), "chat_members"
     )
     return cast(_AsyncMemberApi, resource)
+
+
+def _build_message_api(
+    *, app_id: str, secret: str, timeout_seconds: float
+) -> _AsyncMessageApi:
+    client = _build_client(
+        app_id=app_id,
+        secret=secret,
+        timeout_seconds=timeout_seconds,
+    )
+    resource = _required_attr(
+        _required_attr(_required_attr(client, "im"), "v1"), "message"
+    )
+    return cast(_AsyncMessageApi, resource)
 
 
 def _build_chat_members_request(
@@ -261,6 +304,247 @@ def _build_chat_members_request(
     if page_token is not None:
         builder = _callable_attr(builder, "page_token")(page_token)
     return _callable_attr(builder, "build")()
+
+
+def _build_create_message_request(
+    *,
+    receive_id_type: str,
+    receive_id: str,
+    card: RenderedFeishuCard,
+    idempotency_ref: str,
+) -> object:
+    request_model = importlib.import_module(
+        "lark_oapi.api.im.v1.model.create_message_request"
+    )
+    body_model = importlib.import_module(
+        "lark_oapi.api.im.v1.model.create_message_request_body"
+    )
+    body = _callable_attr(
+        _required_attr(body_model, "CreateMessageRequestBody"), "builder"
+    )()
+    body = _callable_attr(body, "receive_id")(receive_id)
+    body = _callable_attr(body, "msg_type")("interactive")
+    body = _callable_attr(body, "content")(card.content_json)
+    body = _callable_attr(body, "uuid")(idempotency_ref)
+    body = _callable_attr(body, "build")()
+    request = _callable_attr(
+        _required_attr(request_model, "CreateMessageRequest"), "builder"
+    )()
+    request = _callable_attr(request, "receive_id_type")(receive_id_type)
+    request = _callable_attr(request, "request_body")(body)
+    return _callable_attr(request, "build")()
+
+
+def _build_patch_message_request(
+    *, message_ref: str, card: RenderedFeishuCard
+) -> object:
+    request_model = importlib.import_module(
+        "lark_oapi.api.im.v1.model.patch_message_request"
+    )
+    body_model = importlib.import_module(
+        "lark_oapi.api.im.v1.model.patch_message_request_body"
+    )
+    body = _callable_attr(
+        _required_attr(body_model, "PatchMessageRequestBody"), "builder"
+    )()
+    body = _callable_attr(body, "content")(card.content_json)
+    body = _callable_attr(body, "build")()
+    request = _callable_attr(
+        _required_attr(request_model, "PatchMessageRequest"), "builder"
+    )()
+    request = _callable_attr(request, "message_id")(message_ref)
+    request = _callable_attr(request, "request_body")(body)
+    return _callable_attr(request, "build")()
+
+
+def _retry_after_seconds(response: object) -> float | None:
+    raw = getattr(response, "raw", None)
+    headers = getattr(raw, "headers", None)
+    if not isinstance(headers, dict):
+        return None
+    raw_value = next(
+        (
+            value
+            for key, value in headers.items()
+            if isinstance(key, str) and key.lower() == "retry-after"
+        ),
+        None,
+    )
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    return parsed
+
+
+def _message_error(
+    *,
+    error_code: ProjectionErrorCode,
+    retry_after_seconds: float | None = None,
+) -> ChannelMessageError:
+    """只在真实出站调用路径加载应用错误类型，入站进程不携带投影模块。"""
+    from xiaowei_agent.application.channel_projection import ChannelMessageError
+
+    return ChannelMessageError(
+        error_code=error_code,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def _response_error(response: object) -> ChannelMessageError | None:
+    try:
+        if _callable_attr(response, "success")() is True:
+            return None
+        raw = _required_attr(response, "raw")
+        status_code = _required_attr(raw, "status_code")
+        if isinstance(status_code, bool) or not isinstance(status_code, int):
+            raise FeishuSdkError("feishu sdk payload invalid")
+    except Exception:
+        return _message_error(
+            error_code=ProjectionErrorCode.PROVIDER_INTERNAL
+        )
+    if status_code == 429:
+        return _message_error(
+            error_code=ProjectionErrorCode.PROVIDER_RATE_LIMITED,
+            retry_after_seconds=_retry_after_seconds(response),
+        )
+    if status_code == 408:
+        code = ProjectionErrorCode.PROVIDER_TIMEOUT
+    elif status_code == 401:
+        code = ProjectionErrorCode.PROVIDER_UNAUTHORIZED
+    elif status_code == 403:
+        code = ProjectionErrorCode.PROVIDER_FORBIDDEN
+    elif 400 <= status_code < 500:
+        code = ProjectionErrorCode.PROVIDER_INVALID_PAYLOAD
+    elif status_code in {502, 503, 504}:
+        code = ProjectionErrorCode.PROVIDER_UNAVAILABLE
+    else:
+        code = ProjectionErrorCode.PROVIDER_INTERNAL
+    return _message_error(error_code=code)
+
+
+def _exception_error(error: Exception) -> ChannelMessageError:
+    if isinstance(error, TimeoutError):
+        code = ProjectionErrorCode.PROVIDER_TIMEOUT
+    elif isinstance(error, OSError):
+        code = ProjectionErrorCode.PROVIDER_UNAVAILABLE
+    else:
+        code = ProjectionErrorCode.PROVIDER_INTERNAL
+    return _message_error(error_code=code)
+
+
+class FeishuSdkMessageAdapter:
+    """延迟读取凭据并调用 async SDK 的窄消息投递端口。"""
+
+    def __init__(
+        self,
+        *,
+        app_id: str,
+        app_secret_file: str,
+        timeout_seconds: float = _API_TIMEOUT_SECONDS,
+    ) -> None:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int | float)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a finite positive number")
+        self._app_id = app_id
+        self._app_secret_file = app_secret_file
+        self._timeout_seconds = float(timeout_seconds)
+        self._api: _AsyncMessageApi | None = None
+
+    def _message_api(self) -> _AsyncMessageApi:
+        if self._api is None:
+            self._api = _build_message_api(
+                app_id=self._app_id,
+                secret=_read_secret_file(self._app_secret_file),
+                timeout_seconds=self._timeout_seconds,
+            )
+        return self._api
+
+    async def _create(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        card: RenderedFeishuCard,
+        idempotency_ref: str,
+    ) -> str:
+        failure: ChannelMessageError
+        try:
+            response = await self._message_api().acreate(
+                _build_create_message_request(
+                    receive_id_type=receive_id_type,
+                    receive_id=receive_id,
+                    card=card,
+                    idempotency_ref=idempotency_ref,
+                )
+            )
+        except Exception as error:
+            failure = _exception_error(error)
+        else:
+            response_failure = _response_error(response)
+            if response_failure is not None:
+                raise response_failure
+            try:
+                return _required_str(_required_attr(response, "data"), "message_id")
+            except Exception as error:
+                failure = _exception_error(error)
+        raise failure
+
+    async def send_to_chat(
+        self,
+        *,
+        conversation_ref: str,
+        card: RenderedFeishuCard,
+        idempotency_ref: str,
+    ) -> str:
+        """固定 ``chat_id`` 目标类型发送群卡片。"""
+        return await self._create(
+            receive_id_type="chat_id",
+            receive_id=conversation_ref,
+            card=card,
+            idempotency_ref=idempotency_ref,
+        )
+
+    async def send_to_user(
+        self,
+        *,
+        subject_ref: str,
+        card: RenderedFeishuCard,
+        idempotency_ref: str,
+    ) -> str:
+        """固定 ``open_id`` 目标类型发送私聊卡片。"""
+        return await self._create(
+            receive_id_type="open_id",
+            receive_id=subject_ref,
+            card=card,
+            idempotency_ref=idempotency_ref,
+        )
+
+    async def update_card(
+        self, *, message_ref: str, card: RenderedFeishuCard
+    ) -> None:
+        """只按已持久化的 provider message id 更新原卡片。"""
+        failure: ChannelMessageError
+        try:
+            response = await self._message_api().apatch(
+                _build_patch_message_request(message_ref=message_ref, card=card)
+            )
+        except Exception as error:
+            failure = _exception_error(error)
+        else:
+            response_failure = _response_error(response)
+            if response_failure is None:
+                return
+            failure = response_failure
+        raise failure
 
 
 class FeishuSdkMembershipAdapter:
@@ -346,4 +630,5 @@ __all__ = [
     "FeishuSdkError",
     "FeishuSdkInboundTransport",
     "FeishuSdkMembershipAdapter",
+    "FeishuSdkMessageAdapter",
 ]
