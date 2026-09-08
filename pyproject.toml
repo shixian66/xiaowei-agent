@@ -17,6 +17,7 @@ requires-python = ">=3.11,<3.12"
 #   fastapi     —— M5 薄 HTTP gateway。
 #   uvicorn     —— M5 容器内 ASGI 进程。
 #   pymysql     —— M6b StarRocks 测试环境只读 adapter；仅在 exact binding 命中后导入。
+#   lark-oapi   —— M7 飞书长连接、消息与成员 API；仅由 interfaces/feishu_sdk.py 动态加载。
 dependencies = [
     "pydantic>=2.13,<3",
     "sqlglot>=27,<31",
@@ -26,6 +27,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
     "PyMySQL>=1.2,<1.3",
+    "lark-oapi==1.7.3",
 ]
 
 [project.scripts]

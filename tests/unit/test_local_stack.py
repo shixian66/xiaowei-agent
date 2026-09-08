@@ -2,11 +2,14 @@
 
 import asyncio
 import datetime as dt
+import json
 from dataclasses import fields
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 from tests.fakes.clock import ManualClock
+from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
@@ -23,14 +26,16 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
+    FeishuListenerStack,
     LocalStack,
     StarRocksLiveAssembly,
     TaskViewStack,
     build_in_memory_local_stack,
+    build_postgres_feishu_listener_stack,
     build_postgres_local_stack,
     build_postgres_task_view_stack,
 )
-from xiaowei_agent.persistence.postgres import PostgresTaskStore
+from xiaowei_agent.persistence.postgres import PostgresChannelStore, PostgresTaskStore
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
 from xiaowei_agent.tools.starrocks import PhysicalIdentityProbe
 
@@ -511,6 +516,130 @@ async def test_postgres_task_view_stack_disposes_engine_when_assembly_fails(
 
     with pytest.raises(RuntimeError, match="constant task-view assembly failure"):
         await build_postgres_task_view_stack(settings=Settings(environment_id="dev"))
+    assert engine.disposed is True
+
+
+def _feishu_settings(identity_file: Path, secret_file: Path) -> Settings:
+    return Settings(
+        environment_id="dev",
+        feishu_listener_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file=str(secret_file),
+        feishu_tenant_key="tenant-test",
+        feishu_bot_open_id="bot-open-id",
+        feishu_identity_file=str(identity_file),
+    )
+
+
+def _write_identity(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tenant_id": "dev-local",
+                "environment_id": "dev",
+                "entries": [
+                    {
+                        "subject_ref": "user-open-id",
+                        "actor": "alice",
+                        "labels": ["operator"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    identity_file = tmp_path / "identities.json"
+    _write_identity(identity_file)
+    fake_transport = RecordingFeishuInboundTransport()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    stack = await build_postgres_feishu_listener_stack(
+        settings=_feishu_settings(identity_file, tmp_path / "missing-secret"),
+        transport=fake_transport,
+    )
+
+    assert isinstance(stack, FeishuListenerStack)
+    assert isinstance(stack.runtime, TaskViewRuntime)
+    assert isinstance(stack.channel_store, PostgresChannelStore)
+    assert {field.name for field in fields(FeishuListenerStack)} == {
+        "listener",
+        "transport",
+        "runtime",
+        "task_store",
+        "channel_store",
+        "identity_directory",
+        "submission_service",
+        "clock",
+        "settings",
+        "readiness",
+        "aclose",
+        "policy_revision",
+    }
+    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert stack.transport is fake_transport
+    assert stack.task_store._engine is engine
+    assert stack.channel_store._engine is engine
+    await stack.aclose()
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_feishu_stack_does_not_create_an_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_engine(_: object) -> object:
+        raise AssertionError("disabled listener must stop before database assembly")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine", fail_engine
+    )
+
+    with pytest.raises(ValueError, match="Feishu listener is disabled"):
+        await build_postgres_feishu_listener_stack(
+            settings=Settings(environment_id="dev")
+        )
+
+
+@pytest.mark.asyncio
+async def test_feishu_stack_disposes_engine_when_identity_loading_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    with pytest.raises(Exception, match="identity configuration invalid"):
+        await build_postgres_feishu_listener_stack(
+            settings=_feishu_settings(
+                tmp_path / "missing-identities.json", tmp_path / "missing-secret"
+            ),
+            transport=RecordingFeishuInboundTransport(),
+        )
     assert engine.disposed is True
 
 

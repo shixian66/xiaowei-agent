@@ -1,7 +1,7 @@
 """生产依赖面与类型检查严格度是同一条边界。
 
 M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn，M6b 引入
-PyMySQL 与对应 typeshed stub。
+PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``。
 两件事必须被机制钉住，而不是靠计划里的一句话：
 
 1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
@@ -17,6 +17,7 @@ PyMySQL 与对应 typeshed stub。
 
 import ast
 import tomllib
+from importlib.metadata import metadata
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -39,6 +40,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "fastapi",
         "uvicorn",
         "pymysql",
+        "lark-oapi",
     }
 )
 
@@ -140,6 +142,82 @@ def test_asyncpg_still_lacks_py_typed() -> None:
     assert not marker.is_file(), (
         "asyncpg 现已自带 py.typed：可重新评估 test_src_never_imports_asyncpg_directly 的禁令"
     )
+
+
+def test_lark_oapi_is_exactly_pinned_and_still_lacks_py_typed() -> None:
+    """M7 的单一 SDK seam 依赖锁版且不得假装上游已提供类型声明。"""
+    project = _pyproject()["project"]
+    assert isinstance(project, dict)
+    declared = project["dependencies"]
+    assert isinstance(declared, list)
+    assert "lark-oapi==1.7.3" in declared
+
+    spec = find_spec("lark_oapi")
+    assert spec is not None and spec.origin is not None
+    assert not (Path(spec.origin).parent / "py.typed").is_file()
+
+
+def test_lark_oapi_wheel_digest_is_locked_to_the_reviewed_artifact() -> None:
+    """锁文件必须引用 PR 4 实测过的 1.7.3 universal wheel。"""
+    lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = lock["package"]
+    assert isinstance(packages, list)
+    matches = [item for item in packages if item.get("name") == "lark-oapi"]
+    assert len(matches) == 1
+    package = matches[0]
+    assert package["version"] == "1.7.3"
+    wheels = package["wheels"]
+    assert isinstance(wheels, list)
+    assert {
+        (item["url"].rsplit("/", 1)[-1], item["hash"])
+        for item in wheels
+    } == {
+        (
+            "lark_oapi-1.7.3-py3-none-any.whl",
+            "sha256:c91f00087b7977dc9059ab492e8fe435e1a873863dca1d4e660d2be5b801e4cd",
+        )
+    }
+
+
+def _class_method_kinds(path: Path, class_name: str) -> dict[str, type[ast.AST]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    ]
+    assert len(classes) == 1
+    return {
+        node.name: type(node)
+        for node in classes[0].body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def test_lark_oapi_reviewed_license_and_async_surface_still_match() -> None:
+    """不用 import SDK（其 ws import 会建事件循环），直接核对锁定 wheel 源码。"""
+    assert metadata("lark-oapi")["License"] == "MIT"
+    spec = find_spec("lark_oapi")
+    assert spec is not None and spec.origin is not None
+    root = Path(spec.origin).parent
+
+    messages = _class_method_kinds(
+        root / "api/im/v1/resource/message.py", "Message"
+    )
+    members = _class_method_kinds(
+        root / "api/im/v1/resource/chat_members.py", "ChatMembers"
+    )
+    websocket = _class_method_kinds(root / "ws/client.py", "Client")
+    dispatcher = _class_method_kinds(
+        root / "event/dispatcher_handler.py", "EventDispatcherHandlerBuilder"
+    )
+
+    assert all(
+        messages[name] is ast.AsyncFunctionDef for name in ("acreate", "apatch", "aget")
+    )
+    assert members["aget"] is ast.AsyncFunctionDef
+    assert websocket["start"] is ast.FunctionDef
+    assert "register_p2_im_message_receive_v1" in dispatcher
 
 
 def test_src_never_imports_asyncpg_directly() -> None:

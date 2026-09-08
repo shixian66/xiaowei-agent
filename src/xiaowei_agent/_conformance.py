@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         CapabilityPlanner,
         CapabilityRenderer,
     )
+    from xiaowei_agent.application.channel_access import FeishuMembershipPort
     from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
     from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
     from xiaowei_agent.capabilities.resolver import (
@@ -34,6 +35,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
     from xiaowei_agent.contracts import TaskStatus
+    from xiaowei_agent.interfaces.feishu_identity import (
+        FeishuIdentityDirectory,
+        StaticFeishuIdentityDirectory,
+    )
+    from xiaowei_agent.interfaces.feishu_sdk import (
+        FeishuInboundTransport,
+        FeishuSdkInboundTransport,
+        FeishuSdkMembershipAdapter,
+    )
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
     from xiaowei_agent.persistence.channel import ChannelStore
@@ -89,6 +99,17 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """PostgreSQL 渠道实现必须保持与内存实现相同的 ``ChannelStore`` 端口。"""
         anchored: ChannelStore = store
         _ = anchored
+
+    def _feishu_port_anchors(
+        identity: "StaticFeishuIdentityDirectory",
+        inbound: "FeishuSdkInboundTransport",
+        membership: "FeishuSdkMembershipAdapter",
+    ) -> None:
+        """三个 SDK/身份实现必须保持应用层与入口层的本地窄协议。"""
+        identity_port: FeishuIdentityDirectory = identity
+        inbound_port: FeishuInboundTransport = inbound
+        membership_port: FeishuMembershipPort = membership
+        _ = (identity_port, inbound_port, membership_port)
 
     def _postgres_port_anchors(
         plans: "PostgresPlanStore", ledger: "PostgresEvidenceLedger"

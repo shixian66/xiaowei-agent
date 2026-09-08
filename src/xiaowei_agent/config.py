@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Annotated, Final, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -59,6 +60,15 @@ def _ip_literal(value: str) -> str:
 
 
 IpLiteral = Annotated[StrictStr, AfterValidator(_ip_literal)]
+
+
+def _absolute_path(value: str) -> str:
+    if not Path(value).is_absolute():
+        raise ValueError("must be an absolute path")
+    return value
+
+
+AbsolutePath = Annotated[StrictStr, AfterValidator(_absolute_path)]
 
 
 class ConfigError(RuntimeError):
@@ -127,6 +137,12 @@ class Settings(BaseModel):
     )
     starrocks_write_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
     starrocks_query_timeout_seconds: int | None = Field(default=None, gt=0, le=25)
+    feishu_listener_enabled: bool = False
+    feishu_app_id: StrictStr | None = None
+    feishu_app_secret_file: AbsolutePath | None = None
+    feishu_tenant_key: StrictStr | None = None
+    feishu_bot_open_id: StrictStr | None = None
+    feishu_identity_file: AbsolutePath | None = None
 
     @model_validator(mode="after")
     def _worker_timings_are_consistent(self) -> "Settings":
@@ -211,6 +227,23 @@ class Settings(BaseModel):
             raise ValueError("StarRocks write timeout must not exceed read timeout")
         if self.starrocks_query_timeout_seconds > self.starrocks_read_timeout_seconds:
             raise ValueError("StarRocks server timeout must not exceed read timeout")
+        return self
+
+    @model_validator(mode="after")
+    def _feishu_listener_profile_is_closed(self) -> "Settings":
+        profile = (
+            self.feishu_app_id,
+            self.feishu_app_secret_file,
+            self.feishu_tenant_key,
+            self.feishu_bot_open_id,
+            self.feishu_identity_file,
+        )
+        if not self.feishu_listener_enabled:
+            if any(value is not None for value in profile):
+                raise ValueError("disabled Feishu listener must not carry live configuration")
+            return self
+        if any(value is None for value in profile):
+            raise ValueError("enabled listener requires the complete Feishu listener profile")
         return self
 
     @property
@@ -305,6 +338,12 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "starrocks_read_timeout_seconds": "XIAOWEI_STARROCKS_READ_TIMEOUT_SECONDS",
     "starrocks_write_timeout_seconds": "XIAOWEI_STARROCKS_WRITE_TIMEOUT_SECONDS",
     "starrocks_query_timeout_seconds": "XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS",
+    "feishu_listener_enabled": "XIAOWEI_FEISHU_LISTENER_ENABLED",
+    "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
+    "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
+    "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
+    "feishu_bot_open_id": "XIAOWEI_FEISHU_BOT_OPEN_ID",
+    "feishu_identity_file": "XIAOWEI_FEISHU_IDENTITY_FILE",
 }
 
 
@@ -325,7 +364,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     kwargs = {
         field: prefixed[name]
         for field, name in _FIELD_TO_ENV.items()
-        if name in prefixed and not (field.startswith("starrocks_") and not prefixed[name])
+        if name in prefixed
+        and not (
+            (field.startswith("starrocks_") or field.startswith("feishu_"))
+            and not prefixed[name]
+        )
     }
     detail: str | None = None
     try:
