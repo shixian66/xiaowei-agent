@@ -943,6 +943,7 @@ PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现�
 
 - Create: `docs/adr/ADR-013-m7-channel-boundary.md`
 - Create: `src/xiaowei_agent/contracts/channel.py`
+- Modify: `src/xiaowei_agent/contracts/enums.py`
 - Modify: `src/xiaowei_agent/contracts/task.py`
 - Modify: `src/xiaowei_agent/contracts/__init__.py`
 - Modify: `src/xiaowei_agent/interfaces/http_models.py`
@@ -955,6 +956,7 @@ PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现�
 
 1. 写失败测试钉死三个权限、principal 严格字段、分页 DTO、投影输入，以及
    `DestinationKind`、`ProjectionState`、`ProjectionErrorCode` 三个枚举闭集；未知字段和值一律拒绝。
+   渠道枚举继续集中定义在 `contracts/enums.py`，不破坏既有枚举单一真源。
 2. 写失败测试证明 `unauthorized`/`forbidden` 加入闭集，但错误体不带 message/输入字段。
 3. 最小实现 contracts 和 error code；不创建身份 adapter。
 4. ADR-013 记录进程隔离、长连接选择、渠道出站不进 ToolGateway、TaskStore/ChannelStore 真源边界、

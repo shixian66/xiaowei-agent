@@ -53,6 +53,19 @@ def test_render_payload_contains_no_sql_and_no_table_names() -> None:
     assert "starrocks_audit_tbl__" not in dumped
 
 
+def test_render_payload_safe_channel_surface_is_closed() -> None:
+    """渠道完整结果也只能投影这五个安全字段。"""
+    from xiaowei_agent.contracts import RenderPayload
+
+    assert set(RenderPayload.model_fields) == {
+        "answer",
+        "sections",
+        "next_steps",
+        "status",
+        "refs",
+    }
+
+
 def test_render_payload_carries_reproducible_parameters() -> None:
     """可复现参数是证据契约的一部分：窗口、目标范围、阈值、行数上限。"""
     payload = _render((_evidence("s1", _ROWS),), TaskStatus.SUCCEEDED)

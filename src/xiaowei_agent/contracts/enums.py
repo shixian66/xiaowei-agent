@@ -50,6 +50,47 @@ class Channel(StrEnum):
     FEISHU = "feishu"
 
 
+class ChannelPermission(StrEnum):
+    """M7 渠道层真正消费的权限闭集。"""
+
+    VIEW_SAFE_TASK = "view_safe_task"
+    SUBMIT_READONLY_TASK = "submit_readonly_task"
+    ADMIN_ALL_SAFE_TASKS = "admin_all_safe_tasks"
+
+
+class IdentitySource(StrEnum):
+    FEISHU = "feishu"
+
+
+class ChannelKind(StrEnum):
+    FEISHU_PRIVATE = "feishu_private"
+    FEISHU_GROUP = "feishu_group"
+    WEB = "web"
+
+
+class DestinationKind(StrEnum):
+    FEISHU_MESSAGE_CARD = "feishu_message_card"
+    FEISHU_PRIVATE_NOTICE = "feishu_private_notice"
+
+
+class ProjectionState(StrEnum):
+    PENDING_INITIAL = "pending_initial"
+    WAITING_TERMINAL = "waiting_terminal"
+    DELIVERING_TERMINAL = "delivering_terminal"
+    COMPLETED = "completed"
+    DEAD_LETTER = "dead_letter"
+
+
+class ProjectionErrorCode(StrEnum):
+    PROVIDER_RATE_LIMITED = "provider_rate_limited"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_UNAUTHORIZED = "provider_unauthorized"
+    PROVIDER_FORBIDDEN = "provider_forbidden"
+    PROVIDER_INVALID_PAYLOAD = "provider_invalid_payload"
+    PROVIDER_INTERNAL = "provider_internal"
+
+
 class IntentSource(StrEnum):
     MODEL = "model"
     USER = "user"

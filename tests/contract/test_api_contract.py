@@ -9,6 +9,7 @@ import pytest
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import ReadinessReport, TaskStatus, TaskView, task_query_path
 from xiaowei_agent.interfaces.api import create_app
+from xiaowei_agent.interfaces.http_models import error_body
 from xiaowei_agent.persistence import (
     IdempotencyConflictError,
     PersistenceUnavailableCategory,
@@ -154,6 +155,15 @@ async def test_framework_404_405_and_validation_are_in_the_closed_protocol() -> 
         response = await _request(app, method, path, json=body)
         assert response.status_code == status
         assert response.json() == {"error": {"code": code}}
+
+
+@pytest.mark.parametrize("code", ["unauthorized", "forbidden"])
+def test_auth_failures_use_the_same_minimal_closed_error_body(code: str) -> None:
+    body = error_body(code)
+
+    assert body == {"error": {"code": code}}
+    assert set(body) == {"error"}
+    assert set(body["error"]) == {"code"}
 
 
 @pytest.mark.asyncio

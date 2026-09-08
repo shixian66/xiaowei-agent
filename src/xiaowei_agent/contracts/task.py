@@ -12,7 +12,13 @@ from urllib.parse import quote
 
 from pydantic import Field, model_validator
 
-from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictInt, StrictStr
+from xiaowei_agent.contracts.base import (
+    AwareDatetime,
+    Contract,
+    Sha256Hex,
+    StrictInt,
+    StrictStr,
+)
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
 from xiaowei_agent.contracts.render import RenderPayload
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
@@ -42,6 +48,25 @@ class TaskLookup(Contract):
     task_id: StrictStr
     tenant_id: StrictStr
     environment_id: StrictStr
+
+
+class ActorTaskPageQuery(Contract):
+    """普通用户按 actor 读取任务页的明确作用域。"""
+
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    actor: StrictStr
+    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    limit: StrictInt = Field(gt=0, le=100)
+
+
+class ScopeTaskPageQuery(Contract):
+    """admin 按 tenant/environment 读取任务页的明确作用域。"""
+
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    after_created_seq: StrictInt | None = Field(default=None, gt=0)
+    limit: StrictInt = Field(gt=0, le=100)
 
 
 def task_query_path(task_id: str) -> str:
@@ -157,6 +182,20 @@ class TaskRecord(Contract):
         if attempt is not None and attempt > self.attempt_number:
             raise ValueError("retry marker cannot refer to a future attempt")
         return self
+
+
+class StoredTaskRead(Contract):
+    """TaskStore 同次读取返回的任务事实与不可变提交。"""
+
+    record: TaskRecord
+    submission: TaskSubmission
+
+
+class StoredTaskPage(Contract):
+    """按 ``created_seq`` 游标分页的存储层读取结果。"""
+
+    items: tuple[StoredTaskRead, ...]
+    next_created_seq: StrictInt | None
 
 
 class LeaseGrant(Contract):

@@ -19,6 +19,8 @@ class ErrorItem(BaseModel):
 
     code: Literal[
         "invalid_request",
+        "unauthorized",
+        "forbidden",
         "not_found",
         "method_not_allowed",
         "idempotency_conflict",
