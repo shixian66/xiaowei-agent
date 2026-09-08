@@ -1,4 +1,4 @@
-"""任务持久化。M2 只有交互形状与单进程实现；PostgreSQL 属 M4。"""
+"""公共持久化错误与既有 TaskStore 出口；渠道契约位于 ``persistence.channel``。"""
 
 from xiaowei_agent.persistence.errors import (
     PersistenceIntegrityCategory,

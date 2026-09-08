@@ -11,7 +11,7 @@ class MigrationSafetyError(RuntimeError):
     """降级会丢失当前里程碑的数据语义。"""
 
     def __init__(self, *, counts: tuple[tuple[str, int], ...]) -> None:
-        super().__init__("M5_DESTRUCTIVE_DOWNGRADE_REJECTED")
+        super().__init__("DESTRUCTIVE_DOWNGRADE_REJECTED")
         self.counts = counts
 
 

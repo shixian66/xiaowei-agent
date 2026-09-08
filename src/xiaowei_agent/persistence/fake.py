@@ -1,4 +1,4 @@
-"""单进程 TaskStore 实现（DEVELOPMENT_PLAN §7 M2 明文要求置于 persistence/）。
+"""单进程 TaskStore 与 ChannelStore 实现。
 
 **真实执行**：幂等作用域、expected-version 检查、返回存储层 winner、lease/fencing
 闭合规则、终态保护、迁移表闭集。
@@ -13,6 +13,7 @@
 
 这样分工是为了让两个实现不可能各自跑偏——判定只有一份，分叉无处发生。**不要在本
 模块里就地重写任何判定**，哪怕只是"顺手内联一个条件"：那正是分叉的起点。
+渠道绑定和投影状态同样只复用 ``persistence/channel.py`` 的纯判定。
 """
 
 import datetime as _dt
@@ -21,12 +22,18 @@ from typing import Final, TypeVar
 
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
+    ActorTaskPageQuery,
     ApprovalRequest,
+    ChannelKind,
     GrantRejection,
     LeaseGrant,
+    ProjectionState,
     RetryDecision,
+    ScopeTaskPageQuery,
     StepAttemptDecision,
     StepCommitRejection,
+    StoredTaskPage,
+    StoredTaskRead,
     TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
@@ -34,6 +41,37 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
     TraceEvent,
     TransitionResult,
+)
+from xiaowei_agent.persistence.channel import (
+    BindTaskCommand,
+    ChannelBinding,
+    ChannelBindingConflictError,
+    ChannelBindingNotFoundError,
+    ClaimedTaskLookup,
+    ClaimProjectionCommand,
+    CompleteProjectionCommand,
+    CreateProjectionSubscriptionCommand,
+    DeadLetterProjectionCommand,
+    GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
+    ProjectionClaimNotFoundError,
+    ProjectionDueQuery,
+    ProjectionSubscription,
+    ProjectionSubscriptionConflictError,
+    ProjectionSubscriptionNotFoundError,
+    ProjectionUpdateResult,
+    RecordInitialProjectionCommand,
+    ScheduleProviderRetryCommand,
+    ScheduleTaskRecheckCommand,
+    authorize_claimed_task_lookup,
+    binding_matches_command,
+    claim_projection,
+    complete_projection,
+    dead_letter_projection,
+    record_initial_projection,
+    schedule_provider_retry,
+    schedule_task_recheck,
+    subscription_matches_command,
 )
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
@@ -82,6 +120,283 @@ _EntryT = TypeVar("_EntryT")
 
 IS_FAKE: Final[bool] = True
 """供 tests/security/test_fake_isolation.py 断言；生产模块不得导入本模块。"""
+
+
+class InMemoryChannelStore:
+    """与 TaskStore 共锁的单进程渠道存储；绑定和订阅可以原子恢复。"""
+
+    def __init__(self, *, clock: Clock, state: InMemoryPersistenceState | None = None) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    def _require_task(self, task_id: str) -> TaskRecord:
+        try:
+            return self._state.tasks[task_id]
+        except KeyError as exc:
+            raise TaskNotFoundError(task_id=task_id) from exc
+
+    def _require_subscription(self, subscription_id: str) -> ProjectionSubscription:
+        try:
+            return self._state.projection_subscriptions[subscription_id]
+        except KeyError as exc:
+            raise ProjectionSubscriptionNotFoundError from exc
+
+    def _create_subscription_locked(
+        self, command: CreateProjectionSubscriptionCommand
+    ) -> ProjectionSubscription:
+        self._require_task(command.task_id)
+        key = (
+            command.task_id,
+            command.destination_kind.value,
+            command.destination_ref,
+        )
+        existing_id = self._state.projection_subscription_ids_by_destination.get(key)
+        if existing_id is not None:
+            existing = self._state.projection_subscriptions[existing_id]
+            if not subscription_matches_command(existing, command):
+                raise ProjectionSubscriptionConflictError
+            return existing
+        subscription = ProjectionSubscription(
+            subscription_id=str(uuid.uuid4()),
+            task_id=command.task_id,
+            destination_kind=command.destination_kind,
+            destination_ref=command.destination_ref,
+            state=command.initial_state,
+            attempt_number=0,
+            next_attempt_at=command.next_attempt_at,
+            provider_failure_count=0,
+        )
+        self._state.projection_subscriptions[subscription.subscription_id] = subscription
+        self._state.projection_subscription_ids_by_destination[key] = (
+            subscription.subscription_id
+        )
+        return subscription
+
+    async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:
+        async with self._lock:
+            task = self._require_task(command.task_id)
+            if (
+                task.tenant_id != command.tenant_id
+                or task.environment_id != command.environment_id
+            ):
+                raise TaskNotFoundError(task_id=command.task_id)
+            source_key = (
+                command.tenant_id,
+                command.environment_id,
+                command.channel.value,
+                command.source_event_ref,
+            )
+            source_id = self._state.channel_binding_ids_by_source.get(source_key)
+            task_binding_id = self._state.channel_binding_ids_by_task.get(command.task_id)
+            existing_id = source_id if source_id is not None else task_binding_id
+            if existing_id is not None:
+                existing = self._state.channel_bindings[existing_id]
+                if (
+                    source_id != task_binding_id
+                    or not binding_matches_command(existing, command)
+                ):
+                    raise ChannelBindingConflictError
+                if command.projection is not None:
+                    self._create_subscription_locked(command.projection)
+                return existing
+
+            binding = ChannelBinding(
+                binding_id=str(uuid.uuid4()),
+                task_id=command.task_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                channel=command.channel,
+                initiator_subject_ref=command.initiator_subject_ref,
+                conversation_ref=command.conversation_ref,
+                source_event_ref=command.source_event_ref,
+                created_at=command.created_at,
+            )
+            if command.projection is not None:
+                self._create_subscription_locked(command.projection)
+            self._state.channel_bindings[binding.binding_id] = binding
+            self._state.channel_binding_ids_by_source[source_key] = binding.binding_id
+            self._state.channel_binding_ids_by_task[command.task_id] = binding.binding_id
+            return binding
+
+    async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding:
+        async with self._lock:
+            binding_id = self._state.channel_binding_ids_by_task.get(lookup.task_id)
+            if binding_id is None:
+                raise ChannelBindingNotFoundError
+            binding = self._state.channel_bindings[binding_id]
+            if (
+                binding.tenant_id != lookup.tenant_id
+                or binding.environment_id != lookup.environment_id
+                or binding.channel is not ChannelKind.FEISHU_GROUP
+            ):
+                raise ChannelBindingNotFoundError
+            return binding
+
+    async def list_group_bound_task_ids(
+        self, *, query: GroupBoundTaskIdsQuery
+    ) -> frozenset[str]:
+        async with self._lock:
+            task_ids: set[str] = set()
+            for task_id in query.task_ids:
+                binding_id = self._state.channel_binding_ids_by_task.get(task_id)
+                if binding_id is None:
+                    continue
+                binding = self._state.channel_bindings[binding_id]
+                if (
+                    binding.tenant_id == query.tenant_id
+                    and binding.environment_id == query.environment_id
+                    and binding.channel is ChannelKind.FEISHU_GROUP
+                ):
+                    task_ids.add(task_id)
+            return frozenset(task_ids)
+
+    async def create_projection_subscription(
+        self, *, command: CreateProjectionSubscriptionCommand
+    ) -> ProjectionSubscription:
+        async with self._lock:
+            return self._create_subscription_locked(command)
+
+    async def list_due_projection_subscriptions(
+        self, *, query: ProjectionDueQuery
+    ) -> tuple[ProjectionSubscription, ...]:
+        now = self._clock()
+        async with self._lock:
+            due = []
+            for subscription in self._state.projection_subscriptions.values():
+                binding_id = self._state.channel_binding_ids_by_task.get(
+                    subscription.task_id
+                )
+                binding = (
+                    None
+                    if binding_id is None
+                    else self._state.channel_bindings[binding_id]
+                )
+                if (
+                    binding is None
+                    or binding.tenant_id != query.tenant_id
+                    or binding.environment_id != query.environment_id
+                    or subscription.state
+                    in {ProjectionState.COMPLETED, ProjectionState.DEAD_LETTER}
+                    or subscription.next_attempt_at > now
+                    or (
+                        subscription.claim_expires_at is not None
+                        and subscription.claim_expires_at > now
+                    )
+                ):
+                    continue
+                due.append(subscription)
+            return tuple(
+                sorted(
+                    due,
+                    key=lambda item: (item.next_attempt_at, item.subscription_id),
+                )[: query.limit]
+            )
+
+    def _save(self, result: ProjectionUpdateResult) -> ProjectionUpdateResult:
+        if result.applied:
+            self._state.projection_subscriptions[
+                result.winner.subscription_id
+            ] = result.winner
+        return result
+
+    async def claim_projection_subscription(
+        self, *, command: ClaimProjectionCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            current = self._require_subscription(command.subscription_id)
+            result = claim_projection(
+                current,
+                command,
+                now=self._clock(),
+                fencing_token=self._state.next_projection_fencing_token,
+            )
+            if result.applied:
+                self._state.next_projection_fencing_token += 1
+            return self._save(result)
+
+    async def resolve_claimed_task_lookup(
+        self, *, lookup: ClaimedTaskLookup
+    ) -> TaskLookup:
+        async with self._lock:
+            subscription = self._state.projection_subscriptions.get(
+                lookup.subscription_id
+            )
+            binding = None
+            if subscription is not None:
+                binding_id = self._state.channel_binding_ids_by_task.get(
+                    subscription.task_id
+                )
+                if binding_id is not None:
+                    binding = self._state.channel_bindings[binding_id]
+            if subscription is None:
+                raise ProjectionClaimNotFoundError
+            return authorize_claimed_task_lookup(
+                subscription,
+                binding,
+                lookup,
+                now=self._clock(),
+            )
+
+    async def record_initial_projection(
+        self, *, command: RecordInitialProjectionCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                record_initial_projection(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
+            )
+
+    async def schedule_task_recheck(
+        self, *, command: ScheduleTaskRecheckCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                schedule_task_recheck(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
+            )
+
+    async def schedule_provider_retry(
+        self, *, command: ScheduleProviderRetryCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                schedule_provider_retry(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
+            )
+
+    async def complete_projection(
+        self, *, command: CompleteProjectionCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                complete_projection(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
+            )
+
+    async def dead_letter_projection(
+        self, *, command: DeadLetterProjectionCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                dead_letter_projection(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
+            )
 
 
 class InMemoryTaskStore:
@@ -157,6 +472,84 @@ class InMemoryTaskStore:
         ):
             raise TaskNotFoundError(task_id=lookup.task_id)
         return current
+
+    def _stored_read(self, record: TaskRecord) -> StoredTaskRead:
+        submission = self._state.submissions.get(record.task_id)
+        stored_digest = self._state.submission_digests.get(record.task_id)
+        if (
+            submission is None
+            or stored_digest is None
+            or not submission_matches_record(
+                record, submission, stored_digest=stored_digest
+            )
+        ):
+            raise TaskNotFoundError(task_id=record.task_id)
+        return StoredTaskRead(record=record, submission=submission)
+
+    async def get_submission(self, *, lookup: TaskLookup) -> TaskSubmission:
+        async with self._lock:
+            current = self._require(lookup.task_id)
+            if (
+                current.tenant_id != lookup.tenant_id
+                or current.environment_id != lookup.environment_id
+            ):
+                raise TaskNotFoundError(task_id=lookup.task_id)
+            return self._stored_read(current).submission
+
+    def _page(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        actor: str | None,
+        before_created_seq: int | None,
+        limit: int,
+    ) -> StoredTaskPage:
+        candidates = sorted(
+            (
+                record
+                for record in self._records.values()
+                if record.tenant_id == tenant_id
+                and record.environment_id == environment_id
+                and (actor is None or record.actor == actor)
+                and (
+                    before_created_seq is None
+                    or record.created_seq < before_created_seq
+                )
+            ),
+            key=lambda record: (record.created_seq, record.task_id),
+            reverse=True,
+        )
+        selected = candidates[: limit + 1]
+        items = tuple(self._stored_read(record) for record in selected[:limit])
+        next_created_seq = (
+            items[-1].record.created_seq if len(selected) > limit else None
+        )
+        return StoredTaskPage(items=items, next_created_seq=next_created_seq)
+
+    async def list_tasks_for_actor(
+        self, *, query: ActorTaskPageQuery
+    ) -> StoredTaskPage:
+        async with self._lock:
+            return self._page(
+                tenant_id=query.tenant_id,
+                environment_id=query.environment_id,
+                actor=query.actor,
+                before_created_seq=query.before_created_seq,
+                limit=query.limit,
+            )
+
+    async def list_tasks_for_scope(
+        self, *, query: ScopeTaskPageQuery
+    ) -> StoredTaskPage:
+        async with self._lock:
+            return self._page(
+                tenant_id=query.tenant_id,
+                environment_id=query.environment_id,
+                actor=None,
+                before_created_seq=query.before_created_seq,
+                limit=query.limit,
+            )
 
     async def transition(
         self, *, command: TransitionCommand

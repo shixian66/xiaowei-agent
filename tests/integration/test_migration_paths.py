@@ -208,7 +208,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0005_step_journal"
+    assert revision == "0006_channels"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -276,7 +276,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         step_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_step_executions")
         )
-    assert revision == "0005_step_journal"
+    assert revision == "0006_channels"
     assert step_count == 1
 
     async with clean_database.begin() as connection:

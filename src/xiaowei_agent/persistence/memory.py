@@ -1,7 +1,7 @@
 """单进程持久化适配器共享的状态容器。"""
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
@@ -11,9 +11,12 @@ from xiaowei_agent.contracts import (
     TraceEvent,
 )
 
+if TYPE_CHECKING:
+    from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
+
 
 class InMemoryPersistenceState:
-    """让 TaskStore、PlanStore 与 EvidenceLedger 共享同一锁和事实命名空间。"""
+    """让单进程持久化端口共享同一锁和事实命名空间。"""
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
@@ -26,5 +29,13 @@ class InMemoryPersistenceState:
         self.approvals: dict[str, list[ApprovalRequest]] = {}
         self.audit_events: dict[str, list[TraceEvent]] = {}
         self.step_executions: dict[tuple[str, str], Any] = {}
+        self.channel_bindings: dict[str, ChannelBinding] = {}
+        self.channel_binding_ids_by_source: dict[tuple[str, str, str, str], str] = {}
+        self.channel_binding_ids_by_task: dict[str, str] = {}
+        self.projection_subscriptions: dict[str, ProjectionSubscription] = {}
+        self.projection_subscription_ids_by_destination: dict[
+            tuple[str, str, str], str
+        ] = {}
         self.next_fencing_token = 1
+        self.next_projection_fencing_token = 1
         self.next_created_seq = 1

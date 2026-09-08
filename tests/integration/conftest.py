@@ -37,6 +37,7 @@ from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
+    PROJECTION_FENCING_SEQUENCE_NAME,
 )
 
 DSN_ENV_VAR = "PYTEST_POSTGRES_DSN"
@@ -155,6 +156,11 @@ async def clean_database(migrated_engine: AsyncEngine) -> AsyncIterator[AsyncEng
         )
         await connection.execute(
             sa.text(f"ALTER SEQUENCE {CREATED_SEQUENCE_NAME} RESTART WITH 1")
+        )
+        await connection.execute(
+            sa.text(
+                f"ALTER SEQUENCE {PROJECTION_FENCING_SEQUENCE_NAME} RESTART WITH 1"
+            )
         )
     yield migrated_engine
 

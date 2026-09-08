@@ -45,7 +45,13 @@ Web app 不注册内部 `/v1/tasks/*`，内部 API 不注册 `/app` 或 OAuth �
 TaskStore 继续是 task ID、作用域、actor、状态、版本、提交和终态投影引用的唯一真源。
 ChannelStore 只保存来源绑定与投影订阅，包括渠道引用、claim、fencing、退避和投递状态；它不保存
 task owner、task status、task version、request text 或 `RenderPayload` 副本。渠道恢复必须按
-task ID 回读 TaskStore winner。
+task ID 回读 TaskStore winner。投影 worker 不能用裸 task ID 绕过作用域读取；只有当前有效的
+projection owner/fencing claim 可以经 ChannelStore 从既有绑定解析 scoped `TaskLookup`，错 token、
+过期或无绑定都 fail-closed。
+
+投影 worker 的 due 查询必须显式携带受信配置中的 tenant/environment，并经 task 唯一绑定过滤；
+未绑定订阅不能进入待投递集合。普通用户列表最多用一个 100 项的 scoped batch 查询排除群绑定，
+不能逐任务查询。两条路径都以 ChannelBinding 的 scope 为准，ProjectionSubscription 不复制作用域。
 
 浏览器 session 只持久化随机 cookie 的 digest、飞书 subject 引用和时效事实；tenant、environment、
 actor 与权限每次由当前身份目录重新解析，不把旧权限快照当作授权依据。
@@ -66,6 +72,9 @@ Webhook 被拒绝，因为它会额外引入公网回调、签名验证、重放
 ToolGateway。它们仍必须使用固定超时、有限重试、tenant/目标限流、结构化闭集错误、脱敏日志与
 可审计的 task/trace/subscription 关联。
 
+群成员端口异常须产生不含供应商正文、task/group/subject 不透明引用的结构化信号，同时对用户继续
+统一 fail-closed 为 not-found；日志链自身失败不能改变授权结果。正常“不是成员”不记为供应商故障。
+
 渠道调用失败只能改变渠道投影或 session 事实，不能反向改变 capability、计划、准入、TaskStore
 状态或业务结果。M0–M7 对被管运维目标的 E1 禁令保持不变。
 
@@ -79,7 +88,7 @@ secret reference、发起任何飞书网络请求、部署或 canary 仍需 M7 �
 
 - Web、飞书、内部 API 与 CLI 可以共享同一安全任务投影，不复制业务判断。
 - 渠道进程即使被攻破，也不应因装配关系直接取得运维目标执行对象。
-- ChannelStore 不能单独回答任务状态或 owner；每次投影和授权读取会增加一次 TaskStore 回读。
+- ChannelStore 不能单独回答任务状态或 owner；任务详情和投影必须回读 TaskStore winner。
 - 群详情实时成员校验选择权限新鲜度而不是可用性；飞书失败时统一 fail-closed。
 - 飞书外部投递只能提供带 fencing 的 at-least-once 语义，不能承诺 exactly-once。
 - 静态身份映射的权限撤销需要受控重启；热更新留给未来配置治理里程碑。

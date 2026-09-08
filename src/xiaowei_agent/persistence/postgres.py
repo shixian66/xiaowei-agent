@@ -1,8 +1,8 @@
-"""``TaskStore`` 的 PostgreSQL 实现。
+"""``TaskStore`` 与 ``ChannelStore`` 的 PostgreSQL 实现。
 
 **判定不在这里**。拒绝顺序、fencing 闭合规则、租约与续租条件、迁移后的记录形状，
 全部来自 ``persistence/decisions.py`` 的纯函数，与 ``InMemoryTaskStore`` 逐字共用。
-本模块只负责三件事：把行读成 ``TaskRecord``、在正确的隔离下调用判定、把结果写回去。
+本模块只负责三件事：把行读成契约、在正确的隔离下调用判定、把结果写回去。
 
 **每个写方法的形状是固定的**：
 
@@ -37,18 +37,24 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
+    ActorTaskPageQuery,
     ApprovalRequest,
     AttemptIntent,
+    ChannelKind,
     EvidenceEnvelope,
     ExecutionPlan,
     GrantRejection,
     LeaseGrant,
+    ProjectionState,
     RequestContext,
     RequestEnvelope,
     ResolvedTarget,
     RetryDecision,
+    ScopeTaskPageQuery,
     StepAttemptDecision,
     StepCommitRejection,
+    StoredTaskPage,
+    StoredTaskRead,
     TaskAttemptRejection,
     TaskLookup,
     TaskRecord,
@@ -56,6 +62,38 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
     TraceEvent,
     TransitionResult,
+)
+from xiaowei_agent.persistence.channel import (
+    BindTaskCommand,
+    ChannelBinding,
+    ChannelBindingConflictError,
+    ChannelBindingNotFoundError,
+    ClaimedTaskLookup,
+    ClaimProjectionCommand,
+    CompleteProjectionCommand,
+    CreateProjectionSubscriptionCommand,
+    DeadLetterProjectionCommand,
+    GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
+    ProjectionClaimMutation,
+    ProjectionClaimNotFoundError,
+    ProjectionDueQuery,
+    ProjectionSubscription,
+    ProjectionSubscriptionConflictError,
+    ProjectionSubscriptionNotFoundError,
+    ProjectionUpdateResult,
+    RecordInitialProjectionCommand,
+    ScheduleProviderRetryCommand,
+    ScheduleTaskRecheckCommand,
+    authorize_claimed_task_lookup,
+    binding_matches_command,
+    claim_projection,
+    complete_projection,
+    dead_letter_projection,
+    record_initial_projection,
+    schedule_provider_retry,
+    schedule_task_recheck,
+    subscription_matches_command,
 )
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
@@ -87,16 +125,23 @@ from xiaowei_agent.persistence.plans import (
     StoredPlan,
 )
 from xiaowei_agent.persistence.rows import (
+    channel_binding_to_row,
     dump_contract,
     load_contract,
+    projection_subscription_to_row,
     record_to_row,
+    row_to_channel_binding,
+    row_to_projection_subscription,
     row_to_record,
     row_to_step_execution,
     step_execution_to_row,
 )
 from xiaowei_agent.persistence.schema import (
+    CHANNEL_BINDINGS,
     CREATED_SEQUENCE,
     FENCING_SEQUENCE,
+    PROJECTION_FENCING_SEQUENCE,
+    PROJECTION_SUBSCRIPTIONS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
@@ -385,6 +430,375 @@ def _as_row(mapping: Mapping[Any, Any]) -> dict[str, Any]:
     return {name: mapping[name] for name in _TASK_COLUMNS}
 
 
+class PostgresChannelStore:
+    """ChannelStore 的 PostgreSQL 实现；所有竞争更新均锁定订阅行。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    async def _require_task_scope(
+        self,
+        connection: AsyncConnection,
+        *,
+        task_id: str,
+        tenant_id: str | None = None,
+        environment_id: str | None = None,
+    ) -> None:
+        conditions = [TASKS.c.task_id == task_id]
+        if tenant_id is not None:
+            conditions.append(TASKS.c.tenant_id == tenant_id)
+        if environment_id is not None:
+            conditions.append(TASKS.c.environment_id == environment_id)
+        found = await connection.scalar(sa.select(TASKS.c.task_id).where(*conditions))
+        if found is None:
+            raise TaskNotFoundError(task_id=task_id)
+
+    async def _create_subscription(
+        self,
+        connection: AsyncConnection,
+        command: CreateProjectionSubscriptionCommand,
+    ) -> ProjectionSubscription:
+        await self._require_task_scope(connection, task_id=command.task_id)
+        candidate = ProjectionSubscription(
+            subscription_id=str(uuid.uuid4()),
+            task_id=command.task_id,
+            destination_kind=command.destination_kind,
+            destination_ref=command.destination_ref,
+            state=command.initial_state,
+            attempt_number=0,
+            next_attempt_at=command.next_attempt_at,
+            provider_failure_count=0,
+        )
+        insert = (
+            sa.dialects.postgresql.insert(PROJECTION_SUBSCRIPTIONS)
+            .values(**projection_subscription_to_row(candidate))
+            .on_conflict_do_nothing()
+            .returning(PROJECTION_SUBSCRIPTIONS)
+        )
+        inserted = (await connection.execute(insert)).mappings().first()
+        if inserted is not None:
+            return row_to_projection_subscription(inserted)
+        existing = (
+            (
+                await connection.execute(
+                    sa.select(PROJECTION_SUBSCRIPTIONS)
+                    .where(
+                        PROJECTION_SUBSCRIPTIONS.c.task_id == command.task_id,
+                        PROJECTION_SUBSCRIPTIONS.c.destination_kind
+                        == command.destination_kind.value,
+                        PROJECTION_SUBSCRIPTIONS.c.destination_ref
+                        == command.destination_ref,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if existing is None:
+            raise ProjectionSubscriptionConflictError
+        winner = row_to_projection_subscription(existing)
+        if not subscription_matches_command(winner, command):
+            raise ProjectionSubscriptionConflictError
+        return winner
+
+    @_persistence_boundary(write=True)
+    async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:
+        async with _write_transaction(self._engine) as connection:
+            await self._require_task_scope(
+                connection,
+                task_id=command.task_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+            )
+            candidate = ChannelBinding(
+                binding_id=str(uuid.uuid4()),
+                task_id=command.task_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                channel=command.channel,
+                initiator_subject_ref=command.initiator_subject_ref,
+                conversation_ref=command.conversation_ref,
+                source_event_ref=command.source_event_ref,
+                created_at=command.created_at,
+            )
+            insert = (
+                sa.dialects.postgresql.insert(CHANNEL_BINDINGS)
+                .values(**channel_binding_to_row(candidate))
+                .on_conflict_do_nothing()
+                .returning(CHANNEL_BINDINGS)
+            )
+            inserted = (await connection.execute(insert)).mappings().first()
+            if inserted is None:
+                rows = (
+                    (
+                        await connection.execute(
+                            sa.select(CHANNEL_BINDINGS)
+                            .where(
+                                sa.or_(
+                                    CHANNEL_BINDINGS.c.task_id == command.task_id,
+                                    sa.and_(
+                                        CHANNEL_BINDINGS.c.tenant_id
+                                        == command.tenant_id,
+                                        CHANNEL_BINDINGS.c.environment_id
+                                        == command.environment_id,
+                                        CHANNEL_BINDINGS.c.channel
+                                        == command.channel.value,
+                                        CHANNEL_BINDINGS.c.source_event_ref
+                                        == command.source_event_ref,
+                                    ),
+                                )
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if len(rows) != 1:
+                    raise ChannelBindingConflictError
+                binding = row_to_channel_binding(rows[0])
+                if not binding_matches_command(binding, command):
+                    raise ChannelBindingConflictError
+            else:
+                binding = row_to_channel_binding(inserted)
+            if command.projection is not None:
+                await self._create_subscription(connection, command.projection)
+            return binding
+
+    @_persistence_boundary(write=False)
+    async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding:
+        statement = sa.select(CHANNEL_BINDINGS).where(
+            CHANNEL_BINDINGS.c.task_id == lookup.task_id,
+            CHANNEL_BINDINGS.c.tenant_id == lookup.tenant_id,
+            CHANNEL_BINDINGS.c.environment_id == lookup.environment_id,
+            CHANNEL_BINDINGS.c.channel == ChannelKind.FEISHU_GROUP.value,
+        )
+        async with self._engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().first()
+        if row is None:
+            raise ChannelBindingNotFoundError
+        return row_to_channel_binding(row)
+
+    @_persistence_boundary(write=False)
+    async def list_group_bound_task_ids(
+        self, *, query: GroupBoundTaskIdsQuery
+    ) -> frozenset[str]:
+        statement = sa.select(CHANNEL_BINDINGS.c.task_id).where(
+            CHANNEL_BINDINGS.c.tenant_id == query.tenant_id,
+            CHANNEL_BINDINGS.c.environment_id == query.environment_id,
+            CHANNEL_BINDINGS.c.channel == ChannelKind.FEISHU_GROUP.value,
+            CHANNEL_BINDINGS.c.task_id.in_(query.task_ids),
+        )
+        async with self._engine.connect() as connection:
+            task_ids = (await connection.execute(statement)).scalars().all()
+        return frozenset(task_ids)
+
+    @_persistence_boundary(write=True)
+    async def create_projection_subscription(
+        self, *, command: CreateProjectionSubscriptionCommand
+    ) -> ProjectionSubscription:
+        async with _write_transaction(self._engine) as connection:
+            return await self._create_subscription(connection, command)
+
+    @_persistence_boundary(write=False)
+    async def list_due_projection_subscriptions(
+        self, *, query: ProjectionDueQuery
+    ) -> tuple[ProjectionSubscription, ...]:
+        now = self._clock()
+        statement = (
+            sa.select(PROJECTION_SUBSCRIPTIONS)
+            .select_from(
+                PROJECTION_SUBSCRIPTIONS.join(
+                    CHANNEL_BINDINGS,
+                    CHANNEL_BINDINGS.c.task_id == PROJECTION_SUBSCRIPTIONS.c.task_id,
+                )
+            )
+            .where(
+                CHANNEL_BINDINGS.c.tenant_id == query.tenant_id,
+                CHANNEL_BINDINGS.c.environment_id == query.environment_id,
+                PROJECTION_SUBSCRIPTIONS.c.state.not_in(
+                    [ProjectionState.COMPLETED.value, ProjectionState.DEAD_LETTER.value]
+                ),
+                PROJECTION_SUBSCRIPTIONS.c.next_attempt_at <= now,
+                sa.or_(
+                    PROJECTION_SUBSCRIPTIONS.c.claim_expires_at.is_(None),
+                    PROJECTION_SUBSCRIPTIONS.c.claim_expires_at <= now,
+                ),
+            )
+            .order_by(
+                PROJECTION_SUBSCRIPTIONS.c.next_attempt_at,
+                PROJECTION_SUBSCRIPTIONS.c.subscription_id,
+            )
+            .limit(query.limit)
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        return tuple(row_to_projection_subscription(row) for row in rows)
+
+    async def _require_subscription(
+        self, connection: AsyncConnection, subscription_id: str
+    ) -> ProjectionSubscription:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(PROJECTION_SUBSCRIPTIONS)
+                    .where(
+                        PROJECTION_SUBSCRIPTIONS.c.subscription_id == subscription_id
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ProjectionSubscriptionNotFoundError
+        return row_to_projection_subscription(row)
+
+    async def _persist_projection_result(
+        self,
+        connection: AsyncConnection,
+        result: ProjectionUpdateResult,
+    ) -> ProjectionUpdateResult:
+        if not result.applied:
+            return result
+        row = (
+            (
+                await connection.execute(
+                    sa.update(PROJECTION_SUBSCRIPTIONS)
+                    .where(
+                        PROJECTION_SUBSCRIPTIONS.c.subscription_id
+                        == result.winner.subscription_id
+                    )
+                    .values(**projection_subscription_to_row(result.winner))
+                    .returning(PROJECTION_SUBSCRIPTIONS)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return ProjectionUpdateResult(
+            applied=True, winner=row_to_projection_subscription(row)
+        )
+
+    @_persistence_boundary(write=True)
+    async def claim_projection_subscription(
+        self, *, command: ClaimProjectionCommand
+    ) -> ProjectionUpdateResult:
+        async with _write_transaction(self._engine) as connection:
+            current = await self._require_subscription(
+                connection, command.subscription_id
+            )
+            preliminary = claim_projection(
+                current, command, now=self._clock(), fencing_token=1
+            )
+            if not preliminary.applied:
+                return preliminary
+            token = (
+                await connection.execute(
+                    sa.select(PROJECTION_FENCING_SEQUENCE.next_value())
+                )
+            ).scalar_one()
+            result = claim_projection(
+                current, command, now=self._clock(), fencing_token=token
+            )
+            return await self._persist_projection_result(connection, result)
+
+    @_persistence_boundary(write=False)
+    async def resolve_claimed_task_lookup(
+        self, *, lookup: ClaimedTaskLookup
+    ) -> TaskLookup:
+        async with self._engine.connect() as connection:
+            subscription_row = (
+                (
+                    await connection.execute(
+                        sa.select(PROJECTION_SUBSCRIPTIONS).where(
+                            PROJECTION_SUBSCRIPTIONS.c.subscription_id
+                            == lookup.subscription_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if subscription_row is None:
+                raise ProjectionClaimNotFoundError
+            subscription = row_to_projection_subscription(subscription_row)
+            binding_row = (
+                (
+                    await connection.execute(
+                        sa.select(CHANNEL_BINDINGS).where(
+                            CHANNEL_BINDINGS.c.task_id == subscription.task_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        binding = None if binding_row is None else row_to_channel_binding(binding_row)
+        return authorize_claimed_task_lookup(
+            subscription,
+            binding,
+            lookup,
+            now=self._clock(),
+        )
+
+    async def _mutate_projection(
+        self,
+        *,
+        command: ProjectionClaimMutation,
+        decision: Callable[..., ProjectionUpdateResult],
+    ) -> ProjectionUpdateResult:
+        async with _write_transaction(self._engine) as connection:
+            current = await self._require_subscription(
+                connection, command.subscription_id
+            )
+            result = decision(current, command, now=self._clock())
+            return await self._persist_projection_result(connection, result)
+
+    @_persistence_boundary(write=True)
+    async def record_initial_projection(
+        self, *, command: RecordInitialProjectionCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=record_initial_projection
+        )
+
+    @_persistence_boundary(write=True)
+    async def schedule_task_recheck(
+        self, *, command: ScheduleTaskRecheckCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=schedule_task_recheck
+        )
+
+    @_persistence_boundary(write=True)
+    async def schedule_provider_retry(
+        self, *, command: ScheduleProviderRetryCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=schedule_provider_retry
+        )
+
+    @_persistence_boundary(write=True)
+    async def complete_projection(
+        self, *, command: CompleteProjectionCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=complete_projection
+        )
+
+    @_persistence_boundary(write=True)
+    async def dead_letter_projection(
+        self, *, command: DeadLetterProjectionCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=dead_letter_projection
+        )
+
+
 class PostgresTaskStore:
     def __init__(
         self, *, engine: AsyncEngine, clock: Clock, task_failure_limit: int = 3
@@ -428,6 +842,122 @@ class PostgresTaskStore:
                 raise TaskNotFoundError(task_id=lookup.task_id)
             row = _as_row(found)
         return row_to_record(row)
+
+    def _stored_read_from_joined_row(self, row: Mapping[str, Any]) -> StoredTaskRead:
+        record = row_to_record(_as_row(row))
+        try:
+            submission = TaskSubmission(
+                envelope=load_contract(RequestEnvelope, row["submission_envelope"]),
+                context=load_contract(RequestContext, row["submission_context"]),
+                as_of=row["submission_as_of"],
+            )
+        except ValueError as exc:
+            raise TaskNotFoundError(task_id=record.task_id) from exc
+        if not submission_matches_record(
+            record,
+            submission,
+            stored_digest=row["submission_digest"],
+        ):
+            raise TaskNotFoundError(task_id=record.task_id)
+        return StoredTaskRead(record=record, submission=submission)
+
+    def _task_page_statement(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        actor: str | None,
+        before_created_seq: int | None,
+        limit: int,
+    ) -> sa.sql.Select[tuple[Any, ...]]:
+        conditions = [
+            TASKS.c.tenant_id == tenant_id,
+            TASKS.c.environment_id == environment_id,
+        ]
+        if actor is not None:
+            conditions.append(TASKS.c.actor == actor)
+        if before_created_seq is not None:
+            conditions.append(TASKS.c.created_seq < before_created_seq)
+        return (
+            sa.select(
+                TASKS,
+                TASK_SUBMISSIONS.c.envelope.label("submission_envelope"),
+                TASK_SUBMISSIONS.c.context.label("submission_context"),
+                TASK_SUBMISSIONS.c.as_of.label("submission_as_of"),
+                TASK_SUBMISSIONS.c.submission_digest.label("submission_digest"),
+            )
+            .join(TASK_SUBMISSIONS, TASK_SUBMISSIONS.c.task_id == TASKS.c.task_id)
+            .where(*conditions)
+            .order_by(TASKS.c.created_seq.desc(), TASKS.c.task_id.desc())
+            .limit(limit + 1)
+        )
+
+    async def _list_task_page(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        actor: str | None,
+        before_created_seq: int | None,
+        limit: int,
+    ) -> StoredTaskPage:
+        statement = self._task_page_statement(
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            actor=actor,
+            before_created_seq=before_created_seq,
+            limit=limit,
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        selected = rows[:limit]
+        items = tuple(self._stored_read_from_joined_row(row) for row in selected)
+        next_created_seq = (
+            items[-1].record.created_seq if len(rows) > limit else None
+        )
+        return StoredTaskPage(items=items, next_created_seq=next_created_seq)
+
+    @_persistence_boundary(write=False)
+    async def get_submission(self, *, lookup: TaskLookup) -> TaskSubmission:
+        statement = (
+            self._task_page_statement(
+                tenant_id=lookup.tenant_id,
+                environment_id=lookup.environment_id,
+                actor=None,
+                before_created_seq=None,
+                limit=1,
+            )
+            .where(TASKS.c.task_id == lookup.task_id)
+        )
+        async with self._engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().first()
+        if row is None:
+            raise TaskNotFoundError(task_id=lookup.task_id)
+        return self._stored_read_from_joined_row(row).submission
+
+    @_persistence_boundary(write=False)
+    async def list_tasks_for_actor(
+        self, *, query: ActorTaskPageQuery
+    ) -> StoredTaskPage:
+        return await self._list_task_page(
+            tenant_id=query.tenant_id,
+            environment_id=query.environment_id,
+            actor=query.actor,
+            before_created_seq=query.before_created_seq,
+            limit=query.limit,
+        )
+
+    @_persistence_boundary(write=False)
+    async def list_tasks_for_scope(
+        self, *, query: ScopeTaskPageQuery
+    ) -> StoredTaskPage:
+        return await self._list_task_page(
+            tenant_id=query.tenant_id,
+            environment_id=query.environment_id,
+            actor=None,
+            before_created_seq=query.before_created_seq,
+            limit=query.limit,
+        )
 
     @_persistence_boundary(write=False)
     async def list_stale_leases(

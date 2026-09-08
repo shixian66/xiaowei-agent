@@ -24,7 +24,11 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from xiaowei_agent.contracts import (
+    ChannelKind,
     Contract,
+    DestinationKind,
+    ProjectionErrorCode,
+    ProjectionState,
     StepOutcomeKind,
     StepResultStatus,
     TaskRecord,
@@ -32,6 +36,7 @@ from xiaowei_agent.contracts import (
 )
 
 if TYPE_CHECKING:
+    from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.store import StepExecutionRecord
 
 _C = TypeVar("_C", bound=Contract)
@@ -114,6 +119,89 @@ def row_to_record(row: Mapping[str, Any]) -> TaskRecord:
         lease_owner=row["lease_owner"],
         lease_expires_at=row["lease_expires_at"],
         fencing_token=row["fencing_token"],
+    )
+
+
+def channel_binding_to_row(binding: "ChannelBinding") -> dict[str, Any]:
+    """渠道绑定契约到列；只展开来源授权所需字段。"""
+    return {
+        "binding_id": binding.binding_id,
+        "task_id": binding.task_id,
+        "tenant_id": binding.tenant_id,
+        "environment_id": binding.environment_id,
+        "channel": binding.channel.value,
+        "initiator_subject_ref": binding.initiator_subject_ref,
+        "conversation_ref": binding.conversation_ref,
+        "source_event_ref": binding.source_event_ref,
+        "created_at": binding.created_at,
+    }
+
+
+def row_to_channel_binding(row: Mapping[Any, Any]) -> "ChannelBinding":
+    """数据库列到渠道绑定契约。"""
+    from xiaowei_agent.persistence.channel import ChannelBinding
+
+    return ChannelBinding(
+        binding_id=row["binding_id"],
+        task_id=row["task_id"],
+        tenant_id=row["tenant_id"],
+        environment_id=row["environment_id"],
+        channel=ChannelKind(row["channel"]),
+        initiator_subject_ref=row["initiator_subject_ref"],
+        conversation_ref=row["conversation_ref"],
+        source_event_ref=row["source_event_ref"],
+        created_at=row["created_at"],
+    )
+
+
+def projection_subscription_to_row(
+    subscription: "ProjectionSubscription",
+) -> dict[str, Any]:
+    """投影订阅契约到列；可空 claim 与投影字段一律显式保留。"""
+    return {
+        "subscription_id": subscription.subscription_id,
+        "task_id": subscription.task_id,
+        "destination_kind": subscription.destination_kind.value,
+        "destination_ref": subscription.destination_ref,
+        "source_message_ref": subscription.source_message_ref,
+        "state": subscription.state.value,
+        "last_projected_task_version": subscription.last_projected_task_version,
+        "attempt_number": subscription.attempt_number,
+        "claim_owner": subscription.claim_owner,
+        "claim_expires_at": subscription.claim_expires_at,
+        "fencing_token": subscription.fencing_token,
+        "next_attempt_at": subscription.next_attempt_at,
+        "provider_failure_count": subscription.provider_failure_count,
+        "last_error_code": None
+        if subscription.last_error_code is None
+        else subscription.last_error_code.value,
+        "payload_digest": subscription.payload_digest,
+    }
+
+
+def row_to_projection_subscription(row: Mapping[Any, Any]) -> "ProjectionSubscription":
+    """数据库列到自校验的投影订阅契约。"""
+    from xiaowei_agent.persistence.channel import ProjectionSubscription
+
+    error_code = row["last_error_code"]
+    return ProjectionSubscription(
+        subscription_id=row["subscription_id"],
+        task_id=row["task_id"],
+        destination_kind=DestinationKind(row["destination_kind"]),
+        destination_ref=row["destination_ref"],
+        source_message_ref=row["source_message_ref"],
+        state=ProjectionState(row["state"]),
+        last_projected_task_version=row["last_projected_task_version"],
+        attempt_number=row["attempt_number"],
+        claim_owner=row["claim_owner"],
+        claim_expires_at=row["claim_expires_at"],
+        fencing_token=row["fencing_token"],
+        next_attempt_at=row["next_attempt_at"],
+        provider_failure_count=row["provider_failure_count"],
+        last_error_code=None
+        if error_code is None
+        else ProjectionErrorCode(error_code),
+        payload_digest=row["payload_digest"],
     )
 
 
