@@ -1,4 +1,4 @@
-# M7 Web 与飞书薄渠道实施计划（V0.5）
+# M7 Web 与飞书薄渠道实施计划（V0.6）
 
 > **For agentic workers:** implementation must use
 > `superpowers:executing-plans` task by task. Do not dispatch subagents unless the
@@ -25,9 +25,9 @@ HTML/CSS/ES Modules、`lark-oapi==1.7.3`、pytest、Ruff、mypy。
 
 ### 0.1 本次事实快照
 
-- 计划修订日：2026-09-07。
+- 计划修订日：2026-09-08。
 - 当前文档分支：`claude/m7-plan-v0.4-gates`。
-- 文档分支基线 `HEAD`：`aa2af2edcd4c30c611e0ed51d10263b26acef598`。
+- 文档分支 fork point：`aa2af2edcd4c30c611e0ed51d10263b26acef598`。
 - 当前 `origin/main`：`aa2af2edcd4c30c611e0ed51d10263b26acef598`；文档分支从该 SHA 创建。
 - M6b 实现 squash merge：`a5b60baa25eda7ec964b2b48f13f051bf926e3c4`。
 - M6b 当前最强证据是离线测试；没有真实测试环境验证、部署、canary 或用户验收。
@@ -52,25 +52,27 @@ HTML/CSS/ES Modules、`lark-oapi==1.7.3`、pytest、Ruff、mypy。
 
 ### 0.2 计划审核不等于实现授权
 
-本文 **V0.5 已通过技术复核，尚待作为纯文档基线合入 `main`**。V0.3 已通过 Claude 技术审核；
-项目负责人于 2026-09-07 明确批准把入口门拆为「PR 1–3 离线实现门」和「PR 4–8 真实渠道门」。
-V0.5 只追加已确认的产品范围收口，不改变 V0.4 的阶段门。上述批准只授权文档修订，
+本文 **V0.6 是已获项目负责人批准、尚待技术复核与合入的门槛修订**。V0.5 已通过技术复核；
+项目负责人于 2026-09-08 进一步明确：M6a/M6b 的代码完成状态不应成为 M7 离线开发的技术阻塞，
+因此 PR 1–8 均可在离线门内实现；真实应用、凭据、网络连接、部署与 canary 继续使用独立硬门。
+上述批准只授权文档修订，
 不等于已经发出“开始 M7 离线实现”，也不授权安装新依赖、修改源码、注册飞书应用、连接真实
 飞书或连接真实运维目标。
 
 ### 0.3 分阶段且不可降低的实现入口门
 
-#### 0.3.1 PR 1–3 离线实现门
+#### 0.3.1 PR 1–8 离线实现门
 
-PR 1–3 只交付契约/ADR、无执行权的 `TaskViewRuntime` 重构，以及 TaskStore/ChannelStore/访问服务；
-不安装飞书 SDK，不实现或启动渠道进程，不注册应用，不调用飞书或任何真实运维目标。开始这三项
-源码工作前，以下条件必须同时成立：
+PR 1–8 均可在 fake/recording 与本地隔离基础设施上离线实现和评审，包括锁定飞书 SDK、实现默认
+关闭的 listener/worker/Web 进程、OAuth/Membership typed port、卡片投影、Web UI 与 Compose smoke。
+离线实现不得注册真实应用、读取真实 secret、连接飞书或任何真实运维目标，也不得部署、canary
+或声称渠道可用。开始源码工作前，以下条件必须同时成立：
 
 - [x] 渠道优先级已确认：飞书第一，Web 第二。
 - [x] V0.3 已通过 Claude 技术审核。
-- [x] 项目负责人已明确批准 B：只开放 PR 1–3 离线实现，PR 4–8 保持硬门。
 - [x] V0.5（包含 V0.4 阶段门与本轮产品范围收口）已通过技术复核。
-- [ ] V0.5 已作为纯文档基线合入 `main`。
+- [x] 项目负责人已明确批准 V0.6：PR 1–8 均可离线实现，真实渠道激活仍保持硬门。
+- [ ] V0.6 已通过技术复核并作为纯文档基线合入 `main`。
 - [ ] 项目负责人在上述文档基线合入后明确说“开始 M7 离线实现”。
 - [ ] 届时重新按顺序完整读取最新 `AGENTS.md`、`ARCHITECTURE.md`、
   `AGENT_HANDOFF.md`、`README.md`、`DEVELOPMENT_PLAN.md`。
@@ -79,22 +81,26 @@ PR 1–3 只交付契约/ADR、无执行权的 `TaskViewRuntime` 重构，以及
 - [ ] 从当时最新 `main` 创建 `claude/<topic>` 分支，不直接在 `main` 开发。
 
 该离线门是项目负责人对 `DEVELOPMENT_PLAN.md` 里程碑串行规则批准的窄例外，不改变 M6b 的
-`tests` 证据等级，不把 PR 1–3 表述为渠道可用，也不授权 PR 4–8。PR 1–3 任一项准备不足时，
-仍只能继续评审，不能执行对应任务。
+`tests` 证据等级，不把 PR 1–8 表述为渠道可用，也不授权真实渠道激活。任一项准备不足时，
+仍只能继续评审，不能开始源码工作。
 
-#### 0.3.2 PR 4–8 真实渠道门
+#### 0.3.2 真实渠道激活、部署与 canary 门
 
-开始 PR 4 或任何后续 M7 源码工作前，除已满足 0.3.1 外，还必须同时成立：
+注册真实飞书应用、读取 secret reference、发起任何飞书网络请求、部署渠道进程或执行真实渠道
+canary 前，除已满足 0.3.1 外，还必须同时成立：
 
-- [ ] 至少一条真实只读 M6 能力完成 canary，并有部署 SHA、真实 trace 和用户验收记录。
+- [ ] 被验证的 M7 代码已有精确受审 SHA，离线四门、Compose smoke 与安全 eval 全绿。
 - [ ] 飞书测试企业自建应用、身份映射、所需权限、secret reference、数据范围、保留策略、调用窗口
   和回滚方式均已由项目负责人单独批准。
-- [ ] `lark-oapi` 版本、wheel digest、类型声明和实际 async API 在 PR 4 开工时重新核验；与本文
-  不一致则停工修订计划，不靠兼容猜测继续。
-- [ ] 项目负责人在真实渠道门满足后明确说“开始 M7 PR 4–8 实现”。
+- [ ] `lark-oapi` 版本、wheel digest、类型声明和实际 async API 已在 PR 4 离线实现时核验；与本文
+  不一致时已先修订计划，没有靠兼容猜测继续。
+- [ ] canary 若展示真实运维结果，对应 capability 必须先取得其自身要求的真实运行证据；若只使用
+  fake/recording，则必须显式标注，且不能提升 M6b 或该 capability 的证据等级。
+- [ ] 项目负责人在上述条件满足后明确说“开始 M7 真实渠道验证”。
 
-现有 API/CLI 足以承载 M6 真实只读 canary，因此真实渠道门不存在循环依赖。它未齐时只能完成
-并评审 PR 1–3；不得安装飞书 SDK、创建 PR 4 分支、启动飞书/Web 渠道进程或连接任何真实服务。
+M6a/M6b 的代码完成与 M7 离线开发相互独立；M6b 延期的真实测试环境验证不阻塞 PR 1–8，
+也不会因 M7 离线测试或真实渠道 fake/recording canary 自动完成。真实渠道门未齐时可以完成并
+评审 PR 1–8，但所有渠道进程必须默认关闭，且不得注册应用、读取真实凭据、连接或部署真实服务。
 
 ---
 
@@ -108,7 +114,7 @@ PR 1–3 只交付契约/ADR、无执行权的 `TaskViewRuntime` 重构，以及
 | 新 `interfaces/*.py` 会触发穷尽白名单 | 采纳 | 每个新增入口文件必须在同一提交更新 `test_module_layering.py` |
 | HTTP 错误闭集缺 401/403 | 采纳 | 增加 `unauthorized`、`forbidden`，并测试不泄露资源存在性 |
 | 单次 delivery 无法表达等待终态与供应商失败 | 采纳 | 改成有 fencing 的持久化 ProjectionSubscription 状态机 |
-| M6 canary 门可以降级 | 不采纳 | 保留为 PR 4–8 的真实渠道硬门；V0.4 只为 PR 1–3 增加离线窄例外 |
+| M6 canary 门可以降级 | V0.4 未采纳；V0.6 重新界定 | 取消 M6 canary 作为 M7 的全局前置；仅当渠道 canary 展示真实运维结果时，要求对应 capability 先取得自身真实运行证据，见 §0.3.2/§1.5 |
 | 六个角色写进核心契约过早 | 采纳方向 | 核心只认识三个权限；运维/DBA/值班等标签只在身份映射配置出现 |
 | ChannelStore 保存 owner/status/version/request_text 会成为第二事实源 | 采纳 | 任务字段、提交和列表全部从 TaskStore 读取；ChannelStore 仅保存绑定/订阅 |
 | 群任务列表需要批量查群成员关系 | 收敛范围 | M7 不做“所有群任务”聚合列表；群卡片链接按单任务实时校验成员关系 |
@@ -150,6 +156,9 @@ V0.3 技术审核通过后，审核人指出原 §0.3 会因 M6b 真实验证延
 - PR 4–8 仍由 M6 真实只读 canary、真实飞书应用授权和新鲜 SDK 事实共同阻塞。
 - 该拆分不改变 ADR-007，不提升 M6b 证据等级，不授权真实网络调用，也不降低 M7 最终退出标准。
 
+以上是 V0.4 的历史决定；V0.6 以 §1.5 取代其“PR 4–8 不得离线实现”的部分，但不把离线开发
+解释为真实渠道激活许可。
+
 ### 1.4 V0.5 产品范围收口
 
 项目负责人于 2026-09-08 确认：未来产品应包含数据库、Prometheus、模型 API、飞书等
@@ -161,6 +170,17 @@ Admin 配置治理，以及后续审批和确定性运维能力；但这些目�
 - 未来的 Admin 配置中心、真实模型 API、审批/重跑和 Jenkins、Dinky 等能力，
   必须分别经过后续里程碑、ADR、权限、secret、审计、测试与回滚设计后才可实现。
 - 本轮交互示例中的连接、任务和状态只用于产品评审，不是已配置、已连接或已验证证据。
+
+### 1.5 V0.6 离线开发与真实渠道激活解耦
+
+项目负责人于 2026-09-08 明确批准修正 V0.4 的阶段门：M6a/M6b 的代码完成状态不再被误写成
+M7 离线实现的技术依赖。V0.4 “只开放 PR 1–3”的结论由本节取代：
+
+- PR 1–8 均可在 V0.6 合入并再次获得明确开工口令后离线实现；PR 顺序和逐 PR 审查不变。
+- PR 4 可以核验并锁定 SDK，PR 4–8 可以实现默认关闭的渠道进程、Web UI 和本地 Compose；全部
+  使用 fake/recording/typed port，不注册应用、不读取真实 secret、不发起真实网络调用。
+- 真实应用注册、凭据、网络连接、部署、canary 与用户验收仍由 §0.3.2 单独阻塞。
+- M6b 的真实测试环境验证继续独立延期；M7 的任何离线或 fake 渠道证据都不能提升其状态。
 
 ---
 
@@ -911,8 +931,9 @@ detail_ready(running) → detail_polling → detail_ready(running) | detail_read
 每个 PR 从最新 `main` 单独创建 `claude/<topic>` 分支，由 Claude 实现；Codex 按精确 SHA 审查；
 项目负责人决定是否合并。后一个 PR 必须基于前一个已审通过的主线，不自行堆叠未审核分支。
 
-PR 1–3 受 §0.3.1 离线实现门约束；PR 4–8 受 §0.3.2 真实渠道门约束。PR 1–3 合入不自动
-解锁 PR 4，也不能被描述成飞书/Web 渠道已经实现、部署或可用。
+PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现、审查和合入；§0.3.2 只约束真实
+应用注册、凭据读取、网络连接、部署和 canary。任何离线 PR 合入都不能被描述成飞书/Web 渠道
+已经部署、真实可用或通过用户验收。
 
 ### PR 1：ADR、权限与读取契约
 
@@ -1076,8 +1097,9 @@ mypy src
 
 ### PR 4：飞书 SDK seam、身份和长连接 listener
 
-**开工硬门：** §0.3.2 必须全部满足；未满足时不得创建本 PR 的实现分支、安装/更新
-`lark-oapi`、注册应用、启动 listener 或调用飞书 API。
+**离线开工门：** 满足 §0.3.1 后可以创建本 PR 分支，核验并锁定 `lark-oapi`，使用 fake SDK seam
+实现默认关闭的 listener。§0.3.2 未满足时不得注册应用、读取真实 secret、连接飞书或启动真实
+listener；依赖安装和离线 contract 测试不构成真实渠道授权。
 
 **建议分支：** `claude/m7-feishu-listener`
 
@@ -1340,8 +1362,9 @@ docker compose -f docker-compose.yml -f docker-compose.smoke.yml up \
 
 ## 9. 真实飞书 canary 计划
 
-真实飞书 app 注册只有在项目负责人单独授权后才可准备；PR 1–3 离线实现不要求真实凭据。
-§0.3.2 真实渠道门未满足前，不得开始 PR 4–8、注册应用或连接飞书。
+PR 1–8 离线实现和评审完成后，才进入本节。真实飞书 app 注册只有在项目负责人单独授权后才可
+准备；离线实现不要求也不得读取真实凭据。§0.3.2 未满足前，不得注册应用、连接飞书、部署渠道
+进程或执行 canary。
 
 ### 9.1 前置核对
 
@@ -1381,8 +1404,9 @@ docker compose -f docker-compose.yml -f docker-compose.smoke.yml up \
 
 ### 10.1 必须全部满足
 
-- [ ] PR 1–3 的离线入口门证据齐全，且实现从当时最新 `main` 合规启动。
-- [ ] PR 4–8 的真实渠道门证据齐全；离线阶段没有提前创建实现分支、安装飞书 SDK 或调用真实服务。
+- [ ] PR 1–8 的离线入口门证据齐全，且各 PR 从当时最新主线按顺序合规启动。
+- [ ] 真实渠道激活、部署与 canary 门证据齐全；离线阶段没有注册应用、读取真实 secret 或调用
+  真实服务。安装锁定的飞书 SDK 和运行 fake contract 不构成真实激活。
 - [ ] 飞书长连接入站与 Web 独立 app 均为薄入口，没有业务路由和安全链副本。
 - [ ] Web ingress 与内部 `/v1/tasks/*` 进程/端口隔离，并有负向测试和现场证据。
 - [ ] internal-api、feishu-listener、channel-worker、web-app 只装配四依赖 TaskViewRuntime；只有
@@ -1436,8 +1460,8 @@ docker compose -f docker-compose.yml -f docker-compose.smoke.yml up \
 8. Web OAuth/session/CSRF/CSP/route 闭集是否完整，权限撤销需重启是否写清楚？
 9. “完整结果”是否始终仅指完整安全 RenderPayload，没有数据库行或 Evidence facts 旁路？
 10. 八个 PR 是否各自可独立 TDD、审查和回滚，文件归属是否与模块分层一致？
-11. 入口门是否只对 PR 1–3 开放离线窄例外，而 M6 真实只读 canary 与真实飞书授权仍完整阻塞
-    PR 4–8，没有被计划文字暗中降级？
+11. 入口门是否允许 PR 1–8 离线实现，同时仍完整阻塞真实应用注册、凭据、网络连接、部署、
+    canary 与用户验收？是否明确 M7 证据不能提升 M6b 状态？
 12. 退出标准是否区分源码、测试、Compose、部署、canary 与用户验收？
 13. 所有配置项是否同步进入 `_FIELD_TO_ENV` 与 `.env.example`，且示例没有 secret 形状？
 14. `local_stack.py` 的窄 builder、TaskViewRuntime 依赖闭集和进程调用闭集是否从结构上排除了
@@ -1459,5 +1483,6 @@ docker compose -f docker-compose.yml -f docker-compose.smoke.yml up \
   RenderPayload 的缺陷。
 - 未来的 Admin 配置治理、真实模型 API、审批/重跑和后续运维能力尚无独立里程碑、ADR、源码或
   运行证据；这些未来目标不能被解释为 M7 交付物。
-- 当前 M6 尚无满足真实渠道门的 canary 证据，因此即使 V0.5 审核并合入，最多也只能在负责人
-  再次明确开工后实施 PR 1–3；PR 4–8 仍保持阻塞。
+- M6b 真实测试环境验证仍延期，但它不阻塞 M7 PR 1–8 的离线实现。若真实渠道 canary 只使用
+  fake/recording，它只能证明渠道链路；若要展示真实运维结果，对应 capability 仍必须先取得自身
+  要求的真实运行证据，二者不能互相冒充。
