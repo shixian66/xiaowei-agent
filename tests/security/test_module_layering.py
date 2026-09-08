@@ -177,6 +177,37 @@ def _internal_imports(path: Path) -> set[str]:
     return found
 
 
+def _dynamic_import_call_lines(path: Path) -> set[int]:
+    """找出 ``importlib.import_module`` 入口和内建动态导入调用。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.lineno
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name == "importlib" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "importlib"
+            and any(alias.name == "import_module" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.Call)
+            and (
+                (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "__import__"
+                )
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "__import__"
+                )
+            )
+        )
+    }
+
+
 def _string_literals(path: Path) -> set[str]:
     return {
         node.value
@@ -296,6 +327,15 @@ def test_contracts_never_depend_on_implementations() -> None:
     }
     for path in (_SRC / "contracts").rglob("*.py"):
         assert not (_internal_imports(path) & banned), path
+
+
+def test_contracts_do_not_hide_dependencies_behind_dynamic_imports() -> None:
+    offenders = {
+        path.relative_to(_SRC).as_posix(): sorted(lines)
+        for path in (_SRC / "contracts").rglob("*.py")
+        if (lines := _dynamic_import_call_lines(path))
+    }
+    assert not offenders, f"contracts 不得动态加载依赖: {offenders}"
 
 
 def test_redaction_is_a_leaf() -> None:

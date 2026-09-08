@@ -964,12 +964,15 @@ PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现�
 - Modify: `tests/unit/test_render_payload.py`
 - Modify: `tests/contract/test_api_contract.py`
 - Create: `tests/security/test_channel_contract_boundaries.py`
+- Modify: `tests/security/test_module_layering.py`
 
 **Steps:**
 
 1. 写失败测试钉死三个权限、principal 严格字段、分页 DTO、投影输入，以及
    `DestinationKind`、`ProjectionState`、`ProjectionErrorCode` 三个枚举闭集；未知字段和值一律拒绝。
-   渠道枚举继续集中定义在 `contracts/enums.py`，不破坏既有枚举单一真源。
+   渠道枚举继续集中定义在 `contracts/enums.py`，不破坏既有枚举单一真源；契约包分层继续由中央
+   allowlist 承重，并补齐其对 `importlib.import_module` / `__import__` 动态加载的盲区，不另写更弱的
+   渠道专用 denylist。
 2. 写失败测试证明 `unauthorized`/`forbidden` 作为后续 Web app 预留错误码加入闭集，且共享错误体
    不带 message/输入字段；不把直接调用 `error_body()` 描述成现有 internal-api 已具备鉴权行为。
 3. 最小实现 contracts 和 error code；不创建身份 adapter。
