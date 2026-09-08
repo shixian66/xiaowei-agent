@@ -1,8 +1,8 @@
 """PostgreSQL 表结构：SQLAlchemy Core 的 ``Table`` 定义。
 
-**只有 ``tasks`` 把契约字段展开成列**，因为 CAS、租约判定和幂等唯一性都要在 SQL 里
-作用于单个字段。其余四张表以 JSONB 存 DTO，只提取查询与唯一性所需的列——展开一个
-不需要被 SQL 检索的字段，等于把契约形状复制到第二处，两份迟早漂移。
+``tasks``、步骤 journal 与渠道表为并发判定、索引和 fencing 展开必要字段；其余
+append-only 契约载荷主要以 JSONB 保存。任何展开字段都必须由 schema/迁移对齐测试守住，
+避免契约形状在第二处静默漂移。
 
 **用 Core 不用 ORM**：ORM 的 identity map 与 flush 时机会让"必须采纳存储层 winner"
 这条不变量更难断言，而并发语义正是 M4 的全部承重点。
@@ -37,6 +37,13 @@ CREATED_SEQUENCE_NAME: Final = "task_created_seq"
 """任务创建顺序的数据库分配源；只承诺稳定的近似公平，不承诺 commit FIFO。"""
 
 CREATED_SEQUENCE: Final = sa.Sequence(CREATED_SEQUENCE_NAME, start=1)
+
+PROJECTION_FENCING_SEQUENCE_NAME: Final = "projection_fencing_token_seq"
+"""渠道投影 claim 的独立单调 fencing 来源。"""
+
+PROJECTION_FENCING_SEQUENCE: Final = sa.Sequence(
+    PROJECTION_FENCING_SEQUENCE_NAME, start=1
+)
 
 TASKS: Final = sa.Table(
     "tasks",
@@ -216,6 +223,141 @@ TASK_AUDIT_EVENTS: Final = sa.Table(
 因此审计表不会成为新的脱敏缺口——不需要在持久化层再写一份脱敏。
 """
 
+CHANNEL_BINDINGS: Final = sa.Table(
+    "channel_bindings",
+    METADATA,
+    sa.Column("binding_id", sa.Text, primary_key=True),
+    sa.Column("task_id", sa.Text, nullable=False),
+    sa.Column("tenant_id", sa.Text, nullable=False),
+    sa.Column("environment_id", sa.Text, nullable=False),
+    sa.Column("channel", sa.Text, nullable=False),
+    sa.Column("initiator_subject_ref", sa.Text, nullable=False),
+    sa.Column("conversation_ref", sa.Text, nullable=True),
+    sa.Column("source_event_ref", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["task_id"],
+        ["tasks.task_id"],
+        name="fk_channel_bindings_task",
+        ondelete="CASCADE",
+    ),
+    sa.UniqueConstraint("task_id", name="uq_channel_bindings_task"),
+    sa.UniqueConstraint(
+        "tenant_id",
+        "environment_id",
+        "channel",
+        "source_event_ref",
+        name="uq_channel_bindings_source",
+    ),
+    sa.CheckConstraint(
+        "channel IN ('feishu_private', 'feishu_group', 'web')",
+        name="ck_channel_bindings_channel",
+    ),
+    sa.CheckConstraint(
+        "channel != 'feishu_group' OR conversation_ref IS NOT NULL",
+        name="ck_channel_bindings_group_conversation",
+    ),
+)
+"""渠道来源绑定；只保存授权所需引用，不复制任务状态或请求正文。"""
+
+PROJECTION_SUBSCRIPTIONS: Final = sa.Table(
+    "projection_subscriptions",
+    METADATA,
+    sa.Column("subscription_id", sa.Text, primary_key=True),
+    sa.Column("task_id", sa.Text, nullable=False),
+    sa.Column("destination_kind", sa.Text, nullable=False),
+    sa.Column("destination_ref", sa.Text, nullable=False),
+    sa.Column("source_message_ref", sa.Text, nullable=True),
+    sa.Column("state", sa.Text, nullable=False),
+    sa.Column("last_projected_task_version", sa.BigInteger, nullable=True),
+    sa.Column("attempt_number", sa.BigInteger, nullable=False),
+    sa.Column("claim_owner", sa.Text, nullable=True),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("fencing_token", sa.BigInteger, nullable=True),
+    sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("provider_failure_count", sa.BigInteger, nullable=False),
+    sa.Column("last_error_code", sa.Text, nullable=True),
+    sa.Column("payload_digest", sa.CHAR(64), nullable=True),
+    sa.ForeignKeyConstraint(
+        ["task_id"],
+        ["tasks.task_id"],
+        name="fk_projection_subscriptions_task",
+        ondelete="CASCADE",
+    ),
+    sa.UniqueConstraint(
+        "task_id",
+        "destination_kind",
+        "destination_ref",
+        name="uq_projection_subscriptions_destination",
+    ),
+    sa.CheckConstraint(
+        "destination_kind IN ('feishu_message_card', 'feishu_private_notice')",
+        name="ck_projection_subscriptions_destination_kind",
+    ),
+    sa.CheckConstraint(
+        "state IN ('pending_initial', 'waiting_terminal', 'delivering_terminal',"
+        " 'completed', 'dead_letter')",
+        name="ck_projection_subscriptions_state",
+    ),
+    sa.CheckConstraint(
+        "attempt_number >= 0",
+        name="ck_projection_subscriptions_attempt_non_negative",
+    ),
+    sa.CheckConstraint(
+        "provider_failure_count >= 0",
+        name="ck_projection_subscriptions_failure_non_negative",
+    ),
+    sa.CheckConstraint(
+        "fencing_token IS NULL OR fencing_token > 0",
+        name="ck_projection_subscriptions_fencing_positive",
+    ),
+    sa.CheckConstraint(
+        "last_projected_task_version IS NULL OR last_projected_task_version >= 0",
+        name="ck_projection_subscriptions_version_non_negative",
+    ),
+    sa.CheckConstraint(
+        "(claim_owner IS NULL AND claim_expires_at IS NULL AND fencing_token IS NULL)"
+        " OR (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL"
+        " AND fencing_token IS NOT NULL)",
+        name="ck_projection_subscriptions_claim_consistent",
+    ),
+    sa.CheckConstraint(
+        "state NOT IN ('completed', 'dead_letter') OR"
+        " (claim_owner IS NULL AND claim_expires_at IS NULL AND fencing_token IS NULL)",
+        name="ck_projection_subscriptions_terminal_unclaimed",
+    ),
+    sa.CheckConstraint(
+        "(last_projected_task_version IS NULL AND payload_digest IS NULL) OR"
+        " (last_projected_task_version IS NOT NULL AND payload_digest IS NOT NULL)",
+        name="ck_projection_subscriptions_projection_consistent",
+    ),
+    sa.CheckConstraint(
+        "(provider_failure_count = 0 AND last_error_code IS NULL) OR"
+        " (provider_failure_count > 0 AND last_error_code IS NOT NULL)",
+        name="ck_projection_subscriptions_failure_consistent",
+    ),
+    sa.CheckConstraint(
+        "last_error_code IS NULL OR last_error_code IN"
+        " ('provider_rate_limited', 'provider_timeout', 'provider_unavailable',"
+        " 'provider_unauthorized', 'provider_forbidden', 'provider_invalid_payload',"
+        " 'provider_internal')",
+        name="ck_projection_subscriptions_error_code",
+    ),
+    sa.CheckConstraint(
+        "state != 'completed' OR"
+        " (source_message_ref IS NOT NULL AND last_projected_task_version IS NOT NULL"
+        " AND payload_digest IS NOT NULL)",
+        name="ck_projection_subscriptions_completed_payload",
+    ),
+)
+sa.Index(
+    "ix_projection_subscriptions_due",
+    PROJECTION_SUBSCRIPTIONS.c.state,
+    PROJECTION_SUBSCRIPTIONS.c.next_attempt_at,
+    PROJECTION_SUBSCRIPTIONS.c.subscription_id,
+)
+"""渠道投影投递状态；任务当前真相必须回读 ``tasks``。"""
+
 ALL_TABLES: Final = (
     TASKS,
     TASK_SUBMISSIONS,
@@ -224,4 +366,6 @@ ALL_TABLES: Final = (
     TASK_EVIDENCE,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
+    CHANNEL_BINDINGS,
+    PROJECTION_SUBSCRIPTIONS,
 )

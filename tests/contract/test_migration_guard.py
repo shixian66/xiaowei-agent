@@ -52,7 +52,7 @@ def test_guard_rejects_data_when_the_attribute_is_missing(
             _Connection(2),
             guarded=((sa.table("task_submissions"), "task_submissions"),),
         )
-    assert str(caught.value) == "M5_DESTRUCTIVE_DOWNGRADE_REJECTED"
+    assert str(caught.value) == "DESTRUCTIVE_DOWNGRADE_REJECTED"
     assert caught.value.counts == (("task_submissions", 2),)
 
 

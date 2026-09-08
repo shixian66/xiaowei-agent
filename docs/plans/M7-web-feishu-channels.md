@@ -520,6 +520,9 @@ async def list_tasks_for_scope(self, *, query: ScopeTaskPageQuery) -> StoredTask
   projection claim 时调用，用于生成脱敏预览；外部 handler 不能直接调用。
 - 任务详情由共享 `TaskViewRuntime.query_task(TaskLookup)` 产生 `TaskView`；完整
   `XiaoweiRuntime.query_task()` 也委托它，保证投影唯一。
+- 详情服务用 `TaskRecord(before) → TaskViewRuntime.query_task() → TaskRecord(after)` 形成版本/状态一致
+  快照，最多重试 3 次；任务持续变化时返回闭集的 snapshot-unavailable 故障，不能把不同版本的
+  `TaskView` 与 `task_version` 拼在一起。
 - 普通用户列表只调 `list_tasks_for_actor`；admin 列表只在确认
   `ADMIN_ALL_SAFE_TASKS` 后调 `list_tasks_for_scope`。
 
@@ -607,14 +610,26 @@ class ChannelBinding(Contract):
 ```
 
 `source_event_ref` 保存服务端不可逆摘要或供应商稳定事件引用，不能保存整段事件正文。
-ChannelStore 只提供：
+ChannelStore 的绑定读取面只提供：
 
 ```python
+class ClaimedTaskLookup(Contract):
+    subscription_id: StrictStr
+    claim_owner: StrictStr
+    fencing_token: StrictInt = Field(gt=0)
+
+
 async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding: ...
 async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding: ...
+async def resolve_claimed_task_lookup(
+    self, *, lookup: ClaimedTaskLookup
+) -> TaskLookup: ...
 ```
 
 同一 `(tenant, environment, channel, source_event_ref)` 幂等绑定同一 task；语义冲突 fail-closed。
+投影 worker 不能只拿裸 `task_id` 绕过 TaskStore 的 scope 读取：它必须提交当前
+`subscription_id + claim_owner + fencing_token`，ChannelStore 仅在 claim 仍有效且任务存在渠道绑定时
+从绑定解析 `TaskLookup`；无绑定、错 owner/token 或过期统一按 claim 不存在处理。
 
 ### 4.5 服务端幂等键
 
@@ -710,6 +725,10 @@ class ProjectionSubscription(Contract):
 
 `destination_ref`、`source_message_ref` 是不透明引用；日志不可输出原值。存储命令包括：
 
+`COMPLETED` 必须同时持有 `source_message_ref`、`last_projected_task_version` 与 `payload_digest`；
+绑定终态却没有供应商消息引用，会使后续审计无法证明实际更新了哪条消息，因此契约与数据库约束
+都必须拒绝。
+
 - `create_projection_subscription`
 - `list_due_projection_subscriptions`
 - `claim_projection_subscription`
@@ -727,7 +746,8 @@ class ProjectionSubscription(Contract):
 worker 每次执行：
 
 1. claim 一条到期订阅，得到单调递增 fencing token。
-2. 用 task ID 回读 TaskStore winner；不相信订阅里的旧版本。
+2. 用 live claim 经 ChannelStore 解析绑定中的 `TaskLookup`，再按该 scope 回读 TaskStore winner；
+   不相信订阅里的裸 task ID 或旧版本。
 3. 若任务未终态，调用 `schedule_task_recheck` 并保持 `WAITING_TERMINAL`，短延时后重新检查；
    不写 `last_error_code`，也不增加供应商失败计数。
 4. 若任务终态，通过 Runtime 读取 `TaskView`，再读取已授权 submission 生成安全请求预览。
@@ -1076,12 +1096,14 @@ git commit -m "refactor(m7): isolate task view runtime from execution"
 **Files:**
 
 - Modify: `src/xiaowei_agent/_conformance.py`
+- Modify: `src/xiaowei_agent/persistence/__init__.py`
 - Modify: `src/xiaowei_agent/persistence/store.py`
 - Modify: `src/xiaowei_agent/persistence/fake.py`
 - Modify: `src/xiaowei_agent/persistence/memory.py`
 - Modify: `src/xiaowei_agent/persistence/postgres.py`
 - Modify: `src/xiaowei_agent/persistence/schema.py`
 - Modify: `src/xiaowei_agent/persistence/rows.py`
+- Modify: `src/xiaowei_agent/persistence/migrations/guards.py`
 - Create: `src/xiaowei_agent/persistence/channel.py`
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0006_channels.py`
 - Create: `src/xiaowei_agent/application/channel_access.py`
@@ -1093,21 +1115,34 @@ git commit -m "refactor(m7): isolate task view runtime from execution"
 - Create: `tests/contract/test_channel_access.py`
 - Create: `tests/contract/test_channel_submission.py`
 - Create: `tests/contract/test_channel_migration.py`
+- Modify: `tests/contract/test_migration_guard.py`
+- Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/contract/test_suite_bindings.py`
+- Modify: `tests/integration/conftest.py`
 - Create: `tests/integration/test_channel_store_postgres.py`
+- Create: `tests/integration/test_task_read_store_postgres.py`
+- Modify: `tests/integration/test_migration_paths.py`
 - Create: `tests/security/test_channel_access_control.py`
 - Create: `tests/security/test_task_submission_read_boundary.py`
+- Modify: `tests/security/test_task_view_runtime_authority.py`
+- Modify: `tests/unit/test_readiness.py`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `README.md`
+- Modify: `docs/adr/ADR-013-m7-channel-boundary.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 
 1. 先在 shared suites 写失败用例：actor/admin 分页、scope 隔离、稳定倒序游标、submission 作用域读取。
-2. 写 ChannelStore 失败用例：绑定幂等/冲突、订阅 claim/fencing、终态保护、task 等待不计 provider failure。
+2. 写 ChannelStore 失败用例：绑定幂等/冲突、订阅 claim/fencing、终态保护、task 等待不计 provider
+   failure，以及只有 live owner/token claim 能从绑定解析 scoped `TaskLookup`。
 3. 创建 rev_0006；先跑 upgrade/downgrade/schema 对齐失败测试，再实现 fake/PostgreSQL 同语义。
 4. 在 `test_channel_access.py` 写 TaskAccessService 失败用例：owner/admin/current-group-member 允许，
-   其余统一 not_found；成员端口异常也 fail-closed。
+   其余统一 not_found；成员端口异常也 fail-closed；详情版本持续变化时有界重试后拒绝不一致快照。
 5. 在 `test_channel_submission.py` 写 ChannelSubmissionService 失败用例：权限、服务端幂等 digest、
    `TaskViewRuntime` 重放、绑定恢复和 admin Web 任务不建通知订阅。
-6. 最小实现，不在 ChannelStore 复制 task owner/status/version/request text；在 `_conformance.py`
-   同时锚定内存/PostgreSQL ChannelStore 实现。
+6. 最小实现，不在 ChannelStore 复制 task owner/status/version/request text；投影 scope 只从现有绑定在
+   live claim 下解析；在 `_conformance.py` 同时锚定内存/PostgreSQL ChannelStore 实现。
 7. 新增 AST 调用点闭集：本 PR 暂时只允许 `application/channel_access.py` 调用
    `TaskStore.get_submission()`；PR 5 创建 projection 服务时把第二个允许点精确加入，最终闭集只能是
    `channel_access.py`、`channel_projection.py`。
@@ -1117,7 +1152,8 @@ git commit -m "refactor(m7): isolate task view runtime from execution"
 python -m pytest tests/contract/test_task_read_store.py tests/contract/test_channel_store.py \
   tests/contract/test_channel_access.py tests/contract/test_channel_submission.py \
   tests/contract/test_channel_migration.py -q
-python -m pytest tests/integration/test_channel_store_postgres.py -q
+python -m pytest tests/integration/test_channel_store_postgres.py \
+  tests/integration/test_task_read_store_postgres.py -q
 python -m pytest -m security -q
 ruff check .
 mypy src

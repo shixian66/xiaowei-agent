@@ -15,6 +15,7 @@ import pytest
 
 from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.store import TaskStore
 from xiaowei_agent.runners.binding import ExecutionBindingProvider, StepEvidenceBuilder
 from xiaowei_agent.runners.runner import WorkflowRunner
@@ -32,6 +33,7 @@ _ANCHORED = {
     "ToolGateway",
     "ToolAdapter",
     "TaskStore",
+    "ChannelStore",
     "WorkflowRunner",
     "TraceSink",
 }
@@ -140,12 +142,33 @@ def test_every_task_store_implementation_keeps_the_protocol_keyword_arguments(
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(TaskStore)
-    # 14：M5 Task 4 再增加 begin-step / commit-step / load-step，方法集到此闭合。
+    # 17：M7 PR 3 增加三条纯读方法；这个数字是方法集变更哨兵。
     # 这个数字是刻意写死的哨兵：下一次扩约必须让评审者明确看到。
-    assert len(methods) == 14, f"TaskStore 的方法集变了：{methods}"
+    assert len(methods) == 17, f"TaskStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(TaskStore, method)
+        ), f"{class_name}.{method}"
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.fake:InMemoryChannelStore",
+        "xiaowei_agent.persistence.postgres:PostgresChannelStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_every_channel_store_implementation_keeps_the_protocol_keyword_arguments(
+    implementation_path: str,
+) -> None:
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(ChannelStore)
+    assert len(methods) == 11, f"ChannelStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(ChannelStore, method)
         ), f"{class_name}.{method}"
 
 

@@ -45,7 +45,9 @@ Web app 不注册内部 `/v1/tasks/*`，内部 API 不注册 `/app` 或 OAuth �
 TaskStore 继续是 task ID、作用域、actor、状态、版本、提交和终态投影引用的唯一真源。
 ChannelStore 只保存来源绑定与投影订阅，包括渠道引用、claim、fencing、退避和投递状态；它不保存
 task owner、task status、task version、request text 或 `RenderPayload` 副本。渠道恢复必须按
-task ID 回读 TaskStore winner。
+task ID 回读 TaskStore winner。投影 worker 不能用裸 task ID 绕过作用域读取；只有当前有效的
+projection owner/fencing claim 可以经 ChannelStore 从既有绑定解析 scoped `TaskLookup`，错 token、
+过期或无绑定都 fail-closed。
 
 浏览器 session 只持久化随机 cookie 的 digest、飞书 subject 引用和时效事实；tenant、environment、
 actor 与权限每次由当前身份目录重新解析，不把旧权限快照当作授权依据。

@@ -1,0 +1,418 @@
+"""M7 任务访问服务：统一 not_found、群成员实时校验与安全投影。"""
+
+from typing import Any
+
+import pytest
+from tests.conftest import make_envelope, make_submission
+
+from xiaowei_agent.application.channel_access import (
+    TaskAccessNotFoundError,
+    TaskAccessQuery,
+    TaskAccessService,
+    TaskAccessSnapshotUnavailableError,
+    TaskListQuery,
+)
+from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.contracts import (
+    AuthenticatedPrincipal,
+    ChannelKind,
+    ChannelPermission,
+    IdentitySource,
+    TaskStatus,
+)
+from xiaowei_agent.persistence.channel import BindTaskCommand
+from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
+from xiaowei_agent.persistence.fake import InMemoryChannelStore
+from xiaowei_agent.persistence.plans import InMemoryPlanStore
+from xiaowei_agent.persistence.store import TransitionCommand
+
+
+class MembershipStub:
+    def __init__(self, *, result: bool = False, error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def is_current_group_member(
+        self, *, tenant_id: str, conversation_ref: str, subject_ref: str
+    ) -> bool:
+        self.calls.append((tenant_id, conversation_ref, subject_ref))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def _principal(
+    *,
+    actor: str = "alice",
+    subject_ref: str = "subject-alice",
+    tenant_id: str = "dev-local",
+    environment_id: str = "dev",
+    permissions: frozenset[ChannelPermission] | None = None,
+) -> AuthenticatedPrincipal:
+    return AuthenticatedPrincipal(
+        tenant_id=tenant_id,
+        environment_id=environment_id,
+        actor=actor,
+        source=IdentitySource.FEISHU,
+        subject_ref=subject_ref,
+        permissions=permissions
+        if permissions is not None
+        else frozenset({ChannelPermission.VIEW_SAFE_TASK}),
+    )
+
+
+def _service(store: Any, channel_store: Any, memory_state: Any, membership: Any):
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        bindings=object(),
+    )
+    return TaskAccessService(
+        runtime=runtime,
+        task_store=store,
+        channel_store=channel_store,
+        membership=membership,
+    )
+
+
+async def _create_task(store: Any, context: Any, *, suffix: str, actor: str = "alice"):
+    scoped = context.model_copy(update={"actor": actor})
+    return await store.create_task(
+        submission=make_submission(
+            scoped,
+            envelope=make_envelope(
+                request_id=f"request-{suffix}",
+                actor=actor,
+                idempotency_key=f"access-{suffix}",
+                text=f"inspect {suffix}",
+            ),
+        )
+    )
+
+
+@pytest.fixture
+def channel_store(clock, memory_state):
+    return InMemoryChannelStore(clock=clock, state=memory_state)
+
+
+async def test_owner_and_admin_can_read_without_a_membership_call(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(store, context, suffix="owner-admin")
+    membership = MembershipStub(error=RuntimeError("must not be called"))
+    service = _service(store, channel_store, memory_state, membership)
+
+    owner = await service.get_task(
+        query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+    )
+    admin = await service.get_task(
+        query=TaskAccessQuery(
+            principal=_principal(
+                actor="root",
+                subject_ref="subject-root",
+                permissions=frozenset(
+                    {
+                        ChannelPermission.VIEW_SAFE_TASK,
+                        ChannelPermission.ADMIN_ALL_SAFE_TASKS,
+                    }
+                ),
+            ),
+            task_id=task.task_id,
+        )
+    )
+
+    assert owner.task_view.task_id == task.task_id
+    assert admin.task_view == owner.task_view
+    assert membership.calls == []
+
+
+async def test_current_group_member_can_read_and_is_checked_on_every_request(
+    store, channel_store, memory_state, context, clock
+) -> None:
+    task = await _create_task(store, context, suffix="group-member")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref="event-group-member",
+            created_at=clock(),
+        )
+    )
+    membership = MembershipStub(result=True)
+    service = _service(store, channel_store, memory_state, membership)
+    query = TaskAccessQuery(
+        principal=_principal(actor="bob", subject_ref="subject-bob"),
+        task_id=task.task_id,
+    )
+
+    await service.get_task(query=query)
+    await service.get_task(query=query)
+
+    assert membership.calls == [
+        ("dev-local", "chat-1", "subject-bob"),
+        ("dev-local", "chat-1", "subject-bob"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "membership",
+    [MembershipStub(result=False), MembershipStub(error=TimeoutError())],
+)
+async def test_non_member_and_membership_failure_share_the_same_not_found(
+    store, channel_store, memory_state, context, clock, membership
+) -> None:
+    task = await _create_task(store, context, suffix=f"denied-{id(membership)}")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref=f"event-{task.task_id}",
+            created_at=clock(),
+        )
+    )
+    service = _service(store, channel_store, memory_state, membership)
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found") as denied:
+        await service.get_task(
+            query=TaskAccessQuery(
+                principal=_principal(actor="mallory", subject_ref="subject-mallory"),
+                task_id=task.task_id,
+            )
+        )
+    assert task.task_id not in str(denied.value)
+
+
+async def test_cross_scope_missing_permission_and_private_non_owner_are_indistinguishable(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(store, context, suffix="hidden")
+    service = _service(store, channel_store, memory_state, MembershipStub(result=True))
+    principals = (
+        _principal(tenant_id="other-tenant"),
+        _principal(actor="mallory", subject_ref="subject-mallory"),
+        _principal(permissions=frozenset()),
+    )
+
+    messages = []
+    for principal in principals:
+        with pytest.raises(TaskAccessNotFoundError) as hidden:
+            await service.get_task(
+                query=TaskAccessQuery(principal=principal, task_id=task.task_id)
+            )
+        messages.append(str(hidden.value))
+    assert messages == ["task not found"] * len(principals)
+
+
+async def test_task_list_requires_view_permission(
+    store, channel_store, memory_state
+) -> None:
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.list_tasks(
+            query=TaskListQuery(
+                principal=_principal(permissions=frozenset()),
+                limit=10,
+            )
+        )
+
+
+async def test_accessible_task_redacts_request_text_before_returning_it(
+    store, channel_store, memory_state, context
+) -> None:
+    raw = "inspect password=" + "hunter" + "2-plain"
+    task = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(idempotency_key="access-redaction", text=raw),
+        )
+    )
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    result = await service.get_task(
+        query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+    )
+
+    assert result.request_preview == "inspect password=***"
+    assert raw not in result.model_dump_json()
+
+
+async def test_detail_retries_when_status_changes_during_runtime_projection(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(store, context, suffix="snapshot-race")
+    real_runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        bindings=object(),
+    )
+
+    class AdvanceOnceRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def query_task(self, *, lookup):
+            view = await real_runtime.query_task(lookup=lookup)
+            self.calls += 1
+            if self.calls == 1:
+                current = await store.get(lookup=lookup)
+                await store.transition(
+                    command=TransitionCommand(
+                        task_id=task.task_id,
+                        expected_version=current.version,
+                        to_status=TaskStatus.PLANNING,
+                    )
+                )
+            return view
+
+    runtime = AdvanceOnceRuntime()
+    service = TaskAccessService(
+        runtime=runtime,
+        task_store=store,
+        channel_store=channel_store,
+        membership=MembershipStub(),
+    )
+
+    detail = await service.get_task(
+        query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+    )
+
+    assert runtime.calls == 2
+    assert detail.task_view.status is TaskStatus.PLANNING
+    assert detail.task_version == 1
+
+
+async def test_detail_fails_closed_when_no_consistent_snapshot_can_be_formed(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(store, context, suffix="snapshot-unavailable")
+    real_runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        bindings=object(),
+    )
+
+    class ContinuouslyChangingReads:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        async def get(self, *, lookup):
+            self.reads += 1
+            record = await store.get(lookup=lookup)
+            return record.model_copy(update={"version": record.version + self.reads})
+
+        async def get_submission(self, *, lookup):
+            return await store.get_submission(lookup=lookup)
+
+    changing = ContinuouslyChangingReads()
+    service = TaskAccessService(
+        runtime=real_runtime,
+        task_store=changing,
+        channel_store=channel_store,
+        membership=MembershipStub(),
+    )
+
+    with pytest.raises(
+        TaskAccessSnapshotUnavailableError, match="task snapshot unavailable"
+    ):
+        await service.get_task(
+            query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+        )
+
+    assert changing.reads == 7  # 一次授权读取 + 三轮 before/after。
+
+
+async def test_user_list_excludes_group_tasks_while_admin_list_keeps_the_scope(
+    store, channel_store, memory_state, context, clock
+) -> None:
+    private = await _create_task(store, context, suffix="private")
+    group = await _create_task(store, context, suffix="group")
+    other_actor = await _create_task(store, context, suffix="other-actor", actor="bob")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=group.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref="event-list-group",
+            created_at=clock(),
+        )
+    )
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    mine = await service.list_tasks(
+        query=TaskListQuery(principal=_principal(), limit=100)
+    )
+    admin = await service.list_tasks(
+        query=TaskListQuery(
+            principal=_principal(
+                actor="root",
+                subject_ref="subject-root",
+                permissions=frozenset(
+                    {
+                        ChannelPermission.VIEW_SAFE_TASK,
+                        ChannelPermission.ADMIN_ALL_SAFE_TASKS,
+                    }
+                ),
+            ),
+            limit=100,
+        )
+    )
+
+    assert [item.task_id for item in mine.items] == [private.task_id]
+    assert {item.task_id for item in admin.items} == {
+        private.task_id,
+        group.task_id,
+        other_actor.task_id,
+    }
+
+
+async def test_group_only_scan_page_keeps_a_cursor_to_older_private_tasks(
+    store, channel_store, memory_state, context, clock
+) -> None:
+    private = await _create_task(store, context, suffix="old-private")
+    for index in range(100):
+        group = await _create_task(store, context, suffix=f"new-group-{index}")
+        await channel_store.bind_task(
+            command=BindTaskCommand(
+                task_id=group.task_id,
+                tenant_id="dev-local",
+                environment_id="dev",
+                channel=ChannelKind.FEISHU_GROUP,
+                initiator_subject_ref="subject-alice",
+                conversation_ref="chat-1",
+                source_event_ref=f"event-group-page-{index}",
+                created_at=clock(),
+            )
+        )
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    group_only_page = await service.list_tasks(
+        query=TaskListQuery(principal=_principal(), limit=1)
+    )
+    assert group_only_page.items == ()
+    assert group_only_page.next_created_seq is not None
+
+    next_page = await service.list_tasks(
+        query=TaskListQuery(
+            principal=_principal(),
+            before_created_seq=group_only_page.next_created_seq,
+            limit=1,
+        )
+    )
+    assert [item.task_id for item in next_page.items] == [private.task_id]
+    assert next_page.next_created_seq is None

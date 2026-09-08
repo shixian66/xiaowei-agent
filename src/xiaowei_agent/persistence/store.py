@@ -23,6 +23,7 @@ from typing import Protocol, Self, TypeAlias
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts import (
+    ActorTaskPageQuery,
     ApprovalRequest,
     AttemptIntent,
     AwareDatetime,
@@ -34,12 +35,14 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     RetryDecision,
     RetryReason,
+    ScopeTaskPageQuery,
     Sha256Hex,
     StageOutcome,
     StepAttemptDecision,
     StepCommitRejection,
     StepOutcomeKind,
     StepResultStatus,
+    StoredTaskPage,
     StrictInt,
     StrictStr,
     TaskAttemptRejection,
@@ -515,6 +518,19 @@ class TaskStore(Protocol):
 
     async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         """:raises TaskNotFoundError: 任务不存在或不属于指定作用域。"""
+
+    async def get_submission(self, *, lookup: TaskLookup) -> TaskSubmission:
+        """读取作用域内的不可变提交事实；不存在、错 scope 或损坏都按未找到处理。"""
+
+    async def list_tasks_for_actor(
+        self, *, query: ActorTaskPageQuery
+    ) -> StoredTaskPage:
+        """按 ``created_seq`` 倒序读取一个 actor 的任务与提交事实。"""
+
+    async def list_tasks_for_scope(
+        self, *, query: ScopeTaskPageQuery
+    ) -> StoredTaskPage:
+        """按 ``created_seq`` 倒序读取 tenant/environment 内所有任务与提交事实。"""
 
     async def transition(
         self, *, command: TransitionCommand

@@ -12,7 +12,7 @@
 ``test_module_layering.py::test_every_existing_package_is_registered`` 相同：覆盖
 完整性必须由机制保证，否则漏登记与"检查通过"无法区分。
 
-三个套件（TaskStore / PlanStore / EvidenceLedger）共用这一套检查。**登记表是按套件
+四个套件（TaskStore / ChannelStore / PlanStore / EvidenceLedger）共用这一套检查。**登记表是按套件
 分层的**，因为"每一组必须被同一批实现绑定"只在**同一个套件内部**成立：TaskStore 有
 memory 与 postgres 两种，将来若某个套件只有一种实现，跨套件比较会误报。
 """
@@ -22,6 +22,7 @@ import importlib
 from pathlib import Path
 from types import ModuleType
 
+from tests.suites import channel_store as channel_suite
 from tests.suites import evidence_ledger as evidence_suite
 from tests.suites import plan_store as plan_suite
 from tests.suites import task_store as task_suite
@@ -29,6 +30,7 @@ from tests.suites import task_store as task_suite
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 
 _SUITES: dict[str, ModuleType] = {
+    "channel_store": channel_suite,
     "task_store": task_suite,
     "plan_store": plan_suite,
     "evidence_ledger": evidence_suite,
@@ -41,6 +43,16 @@ _SUITES: dict[str, ModuleType] = {
 # ``test_binding_exposes_exactly_its_group`` 不再是平凡真，两条都在 T5 复查过确实
 # 会因缺绑定而转红。
 _BINDINGS: dict[str, tuple[str, str, str]] = {
+    "tests.contract.test_channel_store": (
+        "channel_store",
+        "channel_store",
+        "memory",
+    ),
+    "tests.integration.test_channel_store_postgres": (
+        "channel_store",
+        "channel_store",
+        "postgres",
+    ),
     "tests.contract.test_task_store_contract": ("task_store", "contract", "memory"),
     "tests.security.test_lease_fencing": ("task_store", "lease_fencing", "memory"),
     "tests.security.test_terminal_protection": (
@@ -81,6 +93,12 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
     "tests.integration.test_step_execution_postgres": (
         "task_store",
         "step_execution",
+        "postgres",
+    ),
+    "tests.contract.test_task_read_store": ("task_store", "read", "memory"),
+    "tests.integration.test_task_read_store_postgres": (
+        "task_store",
+        "read",
         "postgres",
     ),
     "tests.contract.test_plan_store": ("plan_store", "plan_store", "memory"),

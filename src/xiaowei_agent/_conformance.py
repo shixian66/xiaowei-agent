@@ -36,10 +36,12 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.contracts import TaskStatus
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
+    from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
-    from xiaowei_agent.persistence.fake import InMemoryTaskStore
+    from xiaowei_agent.persistence.fake import InMemoryChannelStore, InMemoryTaskStore
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
+        PostgresChannelStore,
         PostgresEvidenceLedger,
         PostgresPlanStore,
         PostgresTaskStore,
@@ -63,6 +65,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         adapter: ToolAdapter = RecordingToolAdapter(responses=responses)
         gateway: ToolGateway = DeterministicToolGateway(adapters={"starrocks": adapter})
         store: TaskStore = InMemoryTaskStore(clock=clock)
+        channels: ChannelStore = InMemoryChannelStore(clock=clock)
         runner: WorkflowRunner = ScriptedRunner(
             store, outcome_status=TaskStatus.SUCCEEDED
         )
@@ -71,7 +74,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         sink: TraceSink = StructuredLogTraceSink()
         plans: PlanStore = InMemoryPlanStore()
         ledger: EvidenceLedger = InMemoryEvidenceLedger()
-        _ = (gateway, runner, registry, resolver, sink, plans, ledger)
+        _ = (gateway, runner, registry, resolver, sink, plans, ledger, channels)
 
     def _postgres_store_anchor(store: "PostgresTaskStore") -> None:
         """PostgreSQL 实现必须**就是**一个 ``TaskStore``。
@@ -80,6 +83,11 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         因为构造它需要一个 ``AsyncEngine``，而结构兼容性只需要一次赋值。
         """
         anchored: TaskStore = store
+        _ = anchored
+
+    def _postgres_channel_store_anchor(store: "PostgresChannelStore") -> None:
+        """PostgreSQL 渠道实现必须保持与内存实现相同的 ``ChannelStore`` 端口。"""
+        anchored: ChannelStore = store
         _ = anchored
 
     def _postgres_port_anchors(

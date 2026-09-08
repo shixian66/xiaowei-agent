@@ -38,12 +38,14 @@ from tests.fakes.sinks import make_event
 
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
+    ActorTaskPageQuery,
     ApprovalRequest,
     ApprovalState,
     AttemptIntent,
     EvidenceEnvelope,
     ExternalSource,
     PipelineStage,
+    ScopeTaskPageQuery,
     StepAttemptDecision,
     StepCommitRejection,
     StepOutcomeKind,
@@ -243,6 +245,160 @@ async def test_get_rejects_the_wrong_environment_without_leaking_existence(
 async def test_bare_task_id_is_not_a_supported_read_shape(store, task) -> None:
     with pytest.raises(TypeError):
         await store.get(task.task_id)
+
+
+# --- M7 作用域读取与稳定游标 -------------------------------------------------
+
+
+async def _create_read_task(
+    store: Any,
+    context: Any,
+    *,
+    suffix: str,
+    actor: str = "alice",
+    tenant_id: str = "dev-local",
+    environment_id: str = "dev",
+) -> tuple[Any, Any]:
+    scoped_context = context.model_copy(
+        update={
+            "tenant_id": tenant_id,
+            "environment_id": environment_id,
+            "actor": actor,
+        }
+    )
+    submission = make_submission(
+        scoped_context,
+        envelope=make_envelope(
+            request_id=f"request-{suffix}",
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            actor=actor,
+            idempotency_key=f"read-{suffix}",
+            text=f"request text {suffix}",
+        ),
+        as_of=_APPROVAL_AT + _dt.timedelta(seconds=len(suffix)),
+    )
+    return await store.create_task(submission=submission), submission
+
+
+async def test_get_submission_is_scoped_and_returns_the_original_fact(
+    store, context
+) -> None:
+    record, submission = await _create_read_task(store, context, suffix="submission")
+
+    assert await store.get_submission(lookup=lookup_for(record)) == submission
+
+    for field, value in (
+        ("tenant_id", "other-tenant"),
+        ("environment_id", "prod"),
+    ):
+        wrong_scope = lookup_for(record).model_copy(update={field: value})
+        with pytest.raises(TaskNotFoundError):
+            await store.get_submission(lookup=wrong_scope)
+
+
+async def test_actor_page_filters_before_limit_and_is_strictly_descending(
+    store, context
+) -> None:
+    oldest, _ = await _create_read_task(store, context, suffix="alice-old")
+    await _create_read_task(store, context, suffix="bob-newer", actor="bob")
+    middle, _ = await _create_read_task(store, context, suffix="alice-middle")
+    newest, _ = await _create_read_task(store, context, suffix="alice-new")
+
+    page = await store.list_tasks_for_actor(
+        query=ActorTaskPageQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            actor="alice",
+            limit=2,
+        )
+    )
+
+    assert [item.record.task_id for item in page.items] == [
+        newest.task_id,
+        middle.task_id,
+    ]
+    assert [item.submission.context.actor for item in page.items] == ["alice", "alice"]
+    assert page.next_created_seq == middle.created_seq
+
+    next_page = await store.list_tasks_for_actor(
+        query=ActorTaskPageQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            actor="alice",
+            before_created_seq=page.next_created_seq,
+            limit=2,
+        )
+    )
+    assert [item.record.task_id for item in next_page.items] == [oldest.task_id]
+    assert next_page.next_created_seq is None
+
+
+async def test_scope_page_includes_all_actors_but_never_crosses_scope(
+    store, context
+) -> None:
+    alice, _ = await _create_read_task(store, context, suffix="scope-alice")
+    bob, _ = await _create_read_task(store, context, suffix="scope-bob", actor="bob")
+    await _create_read_task(
+        store,
+        context,
+        suffix="other-tenant",
+        tenant_id="other-tenant",
+    )
+    await _create_read_task(
+        store,
+        context,
+        suffix="other-environment",
+        environment_id="prod",
+    )
+
+    page = await store.list_tasks_for_scope(
+        query=ScopeTaskPageQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            limit=100,
+        )
+    )
+
+    assert [item.record.task_id for item in page.items] == [bob.task_id, alice.task_id]
+    assert {item.record.actor for item in page.items} == {"alice", "bob"}
+    assert page.next_created_seq is None
+
+
+async def test_page_cursor_is_exclusive_and_only_present_when_more_rows_exist(
+    store, context
+) -> None:
+    records = [
+        (await _create_read_task(store, context, suffix=f"cursor-{index}"))[0]
+        for index in range(4)
+    ]
+    first = await store.list_tasks_for_scope(
+        query=ScopeTaskPageQuery(
+            tenant_id="dev-local", environment_id="dev", limit=2
+        )
+    )
+    second = await store.list_tasks_for_scope(
+        query=ScopeTaskPageQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            before_created_seq=first.next_created_seq,
+            limit=2,
+        )
+    )
+
+    assert [item.record.task_id for item in first.items] == [
+        records[3].task_id,
+        records[2].task_id,
+    ]
+    assert [item.record.task_id for item in second.items] == [
+        records[1].task_id,
+        records[0].task_id,
+    ]
+    assert first.next_created_seq == records[2].created_seq
+    assert second.next_created_seq is None
+    assert {item.record.task_id for item in first.items}.isdisjoint(
+        item.record.task_id for item in second.items
+    )
 
 
 # --- CAS 与迁移合法性 ---------------------------------------------------------
@@ -1603,6 +1759,13 @@ CONTRACT_CASES = (
     test_audit_events_do_not_require_the_task_to_exist,
 )
 
+READ_CASES = (
+    test_get_submission_is_scoped_and_returns_the_original_fact,
+    test_actor_page_filters_before_limit_and_is_strictly_descending,
+    test_scope_page_includes_all_actors_but_never_crosses_scope,
+    test_page_cursor_is_exclusive_and_only_present_when_more_rows_exist,
+)
+
 LEASE_FENCING_CASES = (
     test_second_holder_is_refused_while_lease_is_live,
     test_expired_lease_can_be_taken_over_with_a_higher_token,
@@ -1671,6 +1834,7 @@ STEP_EXECUTION_CASES = (
 
 ALL_GROUPS = {
     "contract": CONTRACT_CASES,
+    "read": READ_CASES,
     "lease_fencing": LEASE_FENCING_CASES,
     "terminal_protection": TERMINAL_PROTECTION_CASES,
     "dispatch_attempt": DISPATCH_ATTEMPT_CASES,
