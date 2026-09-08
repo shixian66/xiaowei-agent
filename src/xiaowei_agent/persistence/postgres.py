@@ -74,6 +74,7 @@ from xiaowei_agent.persistence.channel import (
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
     GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
     ProjectionClaimMutation,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
@@ -580,6 +581,20 @@ class PostgresChannelStore:
             raise ChannelBindingNotFoundError
         return row_to_channel_binding(row)
 
+    @_persistence_boundary(write=False)
+    async def list_group_bound_task_ids(
+        self, *, query: GroupBoundTaskIdsQuery
+    ) -> frozenset[str]:
+        statement = sa.select(CHANNEL_BINDINGS.c.task_id).where(
+            CHANNEL_BINDINGS.c.tenant_id == query.tenant_id,
+            CHANNEL_BINDINGS.c.environment_id == query.environment_id,
+            CHANNEL_BINDINGS.c.channel == ChannelKind.FEISHU_GROUP.value,
+            CHANNEL_BINDINGS.c.task_id.in_(query.task_ids),
+        )
+        async with self._engine.connect() as connection:
+            task_ids = (await connection.execute(statement)).scalars().all()
+        return frozenset(task_ids)
+
     @_persistence_boundary(write=True)
     async def create_projection_subscription(
         self, *, command: CreateProjectionSubscriptionCommand
@@ -594,7 +609,15 @@ class PostgresChannelStore:
         now = self._clock()
         statement = (
             sa.select(PROJECTION_SUBSCRIPTIONS)
+            .select_from(
+                PROJECTION_SUBSCRIPTIONS.join(
+                    CHANNEL_BINDINGS,
+                    CHANNEL_BINDINGS.c.task_id == PROJECTION_SUBSCRIPTIONS.c.task_id,
+                )
+            )
             .where(
+                CHANNEL_BINDINGS.c.tenant_id == query.tenant_id,
+                CHANNEL_BINDINGS.c.environment_id == query.environment_id,
                 PROJECTION_SUBSCRIPTIONS.c.state.not_in(
                     [ProjectionState.COMPLETED.value, ProjectionState.DEAD_LETTER.value]
                 ),

@@ -70,12 +70,24 @@ class TaskViewRuntime:
     async def submit_task(self, *, submission: TaskSubmission) -> TaskView:
         """只持久化提交事实并返回任务投影，不解释或执行。"""
         record = await self._tasks.create_task(submission=submission)
-        return await self._task_view(record=record)
+        return await self.project_task(record=record)
 
     async def query_task(self, *, lookup: TaskLookup) -> TaskView:
         """按受信 scope 纯读任务；不发 trace、不改变任务事实。"""
         record = await self._tasks.get(lookup=lookup)
-        return await self._task_view(record=record)
+        return await self.project_task(record=record)
+
+    async def project_task(self, *, record: TaskRecord) -> TaskView:
+        """从已由调用方安全读取的任务 winner 生成同一任务投影。"""
+        payload: RenderPayload | None = None
+        if record.status in TERMINAL_STATUSES:
+            payload = await self.project_recorded(record=record)
+        return TaskView(
+            task_id=record.task_id,
+            status=record.status,
+            render=payload,
+            query_path=task_query_path(record.task_id),
+        )
 
     async def project_recorded(self, *, record: TaskRecord) -> RenderPayload:
         """从持久化计划与证据重建终态投影。"""
@@ -94,18 +106,6 @@ class TaskViewRuntime:
             verdict=verdict,
             binding=binding,
         )
-
-    async def _task_view(self, *, record: TaskRecord) -> TaskView:
-        payload: RenderPayload | None = None
-        if record.status in TERMINAL_STATUSES:
-            payload = await self.project_recorded(record=record)
-        return TaskView(
-            task_id=record.task_id,
-            status=record.status,
-            render=payload,
-            query_path=task_query_path(record.task_id),
-        )
-
 
 def project_terminal(
     *,

@@ -456,6 +456,7 @@ class TaskViewRuntime:
 
     async def submit_task(self, *, submission: TaskSubmission) -> TaskView: ...
     async def query_task(self, *, lookup: TaskLookup) -> TaskView: ...
+    async def project_task(self, *, record: TaskRecord) -> TaskView: ...
     async def project_recorded(self, *, record: TaskRecord) -> RenderPayload: ...
 ```
 
@@ -518,13 +519,17 @@ async def list_tasks_for_scope(self, *, query: ScopeTaskPageQuery) -> StoredTask
   TaskRecord、idempotency digest、lease 或原始 submission。
 - `get_submission` 只能在 TaskAccessService 完成用户授权后，或 channel worker 持有同 scope 的有效
   projection claim 时调用，用于生成脱敏预览；外部 handler 不能直接调用。
-- 任务详情由共享 `TaskViewRuntime.query_task(TaskLookup)` 产生 `TaskView`；完整
-  `XiaoweiRuntime.query_task()` 也委托它，保证投影唯一。
-- 详情服务用 `TaskRecord(before) → TaskViewRuntime.query_task() → TaskRecord(after)` 形成版本/状态一致
-  快照，最多重试 3 次；任务持续变化时返回闭集的 snapshot-unavailable 故障，不能把不同版本的
-  `TaskView` 与 `task_version` 拼在一起。
+- 任务详情先取得已授权的 `TaskRecord`，再由共享 `TaskViewRuntime.project_task(record)` 产生
+  `TaskView`；`TaskViewRuntime.query_task()` 与完整 `XiaoweiRuntime.query_task()` 也委托同一投影，
+  保证业务投影唯一且不重复读取已授权的 winner。
+- 详情服务用 `TaskRecord(authorized) → TaskViewRuntime.project_task() → TaskRecord(after)` 形成版本/状态
+  一致快照；重试时把 `after` 作为下一轮输入，最多投影 3 次。稳定路径只读两次 TaskRecord；任务持续
+  变化时返回闭集的 snapshot-unavailable 故障，不能把不同版本的 `TaskView` 与 `task_version` 拼接。
 - 普通用户列表只调 `list_tasks_for_actor`；admin 列表只在确认
   `ADMIN_ALL_SAFE_TASKS` 后调 `list_tasks_for_scope`。
+- 普通用户列表最多取 100 条 actor 任务，并以一次带 tenant/environment 的
+  `list_group_bound_task_ids()` 批量排除群绑定；不得逐任务查询 ChannelStore。群任务密集时允许空页
+  携带继续游标，调用方不能把空页误判为已到底。
 
 访问与提交服务分别落在两个单一职责模块：`TaskAccessService` 与成员校验端口位于
 `application/channel_access.py`；`ChannelSubmissionService` 位于
@@ -558,6 +563,8 @@ ELSE not_found
 - 未登录返回 401/`unauthorized`。
 - 已登录但缺提交权限返回 403/`forbidden`。
 - 单任务不存在、跨 scope、无查看权、成员查询失败统一返回 404/`not_found`，避免存在性泄露。
+- 成员端口异常另发一条不含异常正文、task/group/subject 不透明引用的结构化 warning；诊断日志自身
+  失败也不得把统一 404 改成另一种可区分结果。正常的“当前不是成员”不发 provider-failure 信号。
 - `forbidden` 不用于任务详情，以免区分“存在但没权限”。
 
 `unauthorized`、`forbidden` 在 PR 1 只进入共享错误体词汇表；现有 `internal-api` 是受信入口，
@@ -619,8 +626,17 @@ class ClaimedTaskLookup(Contract):
     fencing_token: StrictInt = Field(gt=0)
 
 
+class GroupBoundTaskIdsQuery(Contract):
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    task_ids: tuple[StrictStr, ...] = Field(min_length=1, max_length=100)
+
+
 async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding: ...
 async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding: ...
+async def list_group_bound_task_ids(
+    self, *, query: GroupBoundTaskIdsQuery
+) -> frozenset[str]: ...
 async def resolve_claimed_task_lookup(
     self, *, lookup: ClaimedTaskLookup
 ) -> TaskLookup: ...
@@ -649,6 +665,10 @@ channel:v1:sha256(canonical_json({
 请求正文继续由现有 `TaskStore.create_task()` 的 request digest 检查。同一作用域和客户端键但正文
 不同必须返回 `idempotency_conflict`，不能静默复用旧任务。安全测试覆盖跨 actor、跨 tenant、
 跨 environment、跨 channel 不碰撞，也覆盖伪造 Header/Cookie/事件字段不能替换作用域。
+
+服务端一次规范化并派生摘要：Runtime key 是 `channel:v1:<digest>`，ChannelBinding 的
+`source_event_ref` 保存同一个 64 位摘要。两者不得靠 `removeprefix` 或其他字符串解析互相反推；
+`actor` 必须进入摘要，使不同主体复用同一供应商事件/客户端引用时不会在来源唯一约束上误碰撞。
 
 提交恢复顺序固定为：先授权并构造服务端信封，再用 scoped key 调 Runtime 幂等创建任务，随后在
 ChannelStore 的一个事务中写 binding 与 subscription。若后一步失败，返回可重试的渠道错误；重试时
@@ -730,7 +750,7 @@ class ProjectionSubscription(Contract):
 都必须拒绝。
 
 - `create_projection_subscription`
-- `list_due_projection_subscriptions`
+- `list_due_projection_subscriptions`（查询必须显式携带 tenant/environment）
 - `claim_projection_subscription`
 - `record_initial_projection`
 - `schedule_task_recheck`
@@ -741,11 +761,16 @@ class ProjectionSubscription(Contract):
 所有更新都带 `subscription_id + claim_owner + fencing_token + expected_state`。存储层返回 winner，
 陈旧 claim 只能成为 loser，不能覆盖新状态。
 
+到期订阅发现以 `channel_bindings` 的 tenant/environment 为授权 scope，并只返回已有绑定的订阅；
+未绑定订阅 fail-closed，不会被任何 worker 发现。`projection_subscriptions` 不复制 scope 字段，
+PostgreSQL 通过 task 唯一绑定 JOIN 过滤，内存实现保持同语义，所以 rev_0006 不需要新增重复列。
+
 ### 5.4 发送前后的顺序
 
-worker 每次执行：
+worker 实例先从受信配置取得唯一 tenant/environment，并用该 scope 查询到期订阅；不得全表扫描，
+也不得从事件或订阅目的地推导 scope。每次执行：
 
-1. claim 一条到期订阅，得到单调递增 fencing token。
+1. 只从上述 scoped due 集合中 claim 一条到期订阅，得到单调递增 fencing token。
 2. 用 live claim 经 ChannelStore 解析绑定中的 `TaskLookup`，再按该 scope 回读 TaskStore winner；
    不相信订阅里的裸 task ID 或旧版本。
 3. 若任务未终态，调用 `schedule_task_recheck` 并保持 `WAITING_TERMINAL`，短延时后重新检查；
@@ -1135,12 +1160,16 @@ git commit -m "refactor(m7): isolate task view runtime from execution"
 
 1. 先在 shared suites 写失败用例：actor/admin 分页、scope 隔离、稳定倒序游标、submission 作用域读取。
 2. 写 ChannelStore 失败用例：绑定幂等/冲突、订阅 claim/fencing、终态保护、task 等待不计 provider
-   failure，以及只有 live owner/token claim 能从绑定解析 scoped `TaskLookup`。
+   failure；due 扫描分别隔离 tenant/environment 且排除无绑定订阅；群绑定批量查询一次最多 100 个
+   task ID；只有 live owner/token claim 能从绑定解析 scoped `TaskLookup`。
 3. 创建 rev_0006；先跑 upgrade/downgrade/schema 对齐失败测试，再实现 fake/PostgreSQL 同语义。
 4. 在 `test_channel_access.py` 写 TaskAccessService 失败用例：owner/admin/current-group-member 允许，
-   其余统一 not_found；成员端口异常也 fail-closed；详情版本持续变化时有界重试后拒绝不一致快照。
+   其余统一 not_found；成员端口异常发安全结构化信号并 fail-closed，日志失败仍保持相同 404；详情
+   复用已授权 record，稳定路径只读两次，版本持续变化时有界重试后拒绝不一致快照；普通用户列表
+   用一次 scoped batch 排除群任务，禁止 N+1 单条绑定查询。
 5. 在 `test_channel_submission.py` 写 ChannelSubmissionService 失败用例：权限、服务端幂等 digest、
-   `TaskViewRuntime` 重放、绑定恢复和 admin Web 任务不建通知订阅。
+   Runtime key/source event digest 同源派生、跨 actor 隔离、`TaskViewRuntime` 重放、绑定恢复和
+   admin Web 任务不建通知订阅。
 6. 最小实现，不在 ChannelStore 复制 task owner/status/version/request text；投影 scope 只从现有绑定在
    live claim 下解析；在 `_conformance.py` 同时锚定内存/PostgreSQL ChannelStore 实现。
 7. 新增 AST 调用点闭集：本 PR 暂时只允许 `application/channel_access.py` 调用
@@ -1248,8 +1277,9 @@ python -m pip_audit
 **Steps:**
 
 1. 写 card snapshot/结构失败测试：受理、各终态、截断、“还有更多证据”、详情 URL、无 raw rows。
-2. 写 worker 状态机失败测试：等待任务与 provider failure 分开、版本变化重投影、陈旧 fencing 失败、
-   同一 subscription 串行、terminal subscription 不重开；不写无法兑现的 destination 全局串行断言。
+2. 写 worker 状态机失败测试：worker 只按受信配置的 tenant/environment 查询 due，等待任务与
+   provider failure 分开、版本变化重投影、陈旧 fencing 失败、同一 subscription 串行、terminal
+   subscription 不重开；不写无法兑现的 destination 全局串行断言。
 3. 写 provider 失败矩阵和 5s/15s/3 次/退避/Retry-After 上限测试，使用 fake clock/sleep/client。
 4. 写 TDD 反证：临时移除发送前 version re-read 或 fencing 条件时，对应用例必须变红。
 5. 每个新增投递设置（含安全 Web 详情 base URL）同时登记 `_FIELD_TO_ENV` 与

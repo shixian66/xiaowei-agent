@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent`；当前 M7 PR 3 隔离 worktree 为 `/private/tmp/xiaowei-m7-channel-access`；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-08（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6、PR 1 与 PR 2 已合入 `main`，PR 3 正在隔离分支离线实现；真实应用、凭据、网络、部署与 canary 继续使用独立硬门** |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6、PR 1 与 PR 2 已合入 `main`，PR 3 已完成首轮精确审查后的根因修复并等待复审；真实应用、凭据、网络、部署与 canary 继续使用独立硬门** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.2；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，不授权真实渠道激活 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -231,11 +231,17 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   `1ec2b5c5edc7fb100e69649bb1463de19d768736` 合入；run
   [`34199379815`](https://github.com/shixian66/xiaowei-agent/actions/runs/34199379815) 的 tests、
   integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项全绿。
-- **M7 PR 3 当前隔离分支完成离线实现与本机四门**：TaskStore 作用域读取、ChannelStore
-  绑定/订阅/claim/fencing、TaskAccessService 和 ChannelSubmissionService 已落地；本机全量为
-  2447 passed / 176 skipped / 5 warnings，安全门为 1103 passed / 79 skipped / 1441 deselected /
+- **M7 PR 3 当前隔离分支完成首轮审查根因修复与本机四门**：受审 head `46cc0dd` 暴露的 worker
+  due 全局扫描、普通列表 N+1、详情重复读取、成员异常静默和来源摘要字符串解析均已沿调用链修复。
+  due 与群绑定批量查询都显式按 tenant/environment 隔离；详情稳定路径为两次 TaskRecord 读取加一次
+  submission 读取；成员适配异常只发安全结构化信号；Runtime key/source ref 一次派生。本机全量为
+  2458 passed / 178 skipped / 5 warnings，安全门为 1104 passed / 79 skipped / 1453 deselected /
   5 warnings，Ruff 与 mypy（140 个源文件）通过。本机没有 Docker 或 `PYTEST_POSTGRES_DSN`，新增
   PostgreSQL 共享套件和并发/迁移用例目前属于受控 skip，不能声称已有本机 PostgreSQL 运行证据。
+- **M7 PR 3 修复有真实红灯与隔离变异反证**：修复前 scope DTO 拒绝 tenant/environment、10 项普通
+  列表的批量调用计数为 0、详情 TaskRecord 读取为 4、成员异常无安全信号、同源引用派生函数不存在；
+  对应测试先红后绿。另在隔离源码副本删除 due 的 environment 谓词后，跨环境订阅反例准确转红，
+  且解释器确认加载的是变异副本；变体随后删除，未进入候选工作树。
 - **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
   collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
   `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export
@@ -278,8 +284,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **M7 只有 PR 1–2 的 `main` 源码/测试证据和 PR 3 工作树的离线测试证据**：PR 3 尚未审查或合入，
-  PR 4–8 尚未实现。M7 仍无真实飞书/Web 进程、Compose、部署、canary 或用户验收证据。未来的
+- **M7 只有 PR 1–2 的 `main` 源码/测试证据和 PR 3 工作树的离线测试证据**：PR 3 原 head 已精确
+  审查，修复候选尚未复审或合入；PR 4–8 尚未实现。M7 仍无真实飞书/Web 进程、Compose、部署、
+  canary 或用户验收证据。未来的
   Admin 配置治理和真实模型 API 也尚无源码或运行证据；真实应用、凭据、网络连接、部署与 canary
   仍被独立硬门阻塞。
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
@@ -298,10 +305,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 残余风险
 
-- **M7 PR 3 的普通用户列表为避免建立“所在群任务”聚合权限，最多按 actor 扫描 100 条并逐条排除
-  群绑定**：群任务密集时一页可以为空但携带继续游标，Web 客户端必须按游标继续而不能把空页误判为
-  已到底；该方案也会产生每页最多 100 次 ChannelStore 查询，M7 先以范围正确性优先，性能优化需有
-  实测负载后再立项。
+- **M7 PR 3 的普通用户列表为避免建立“所在群任务”聚合权限，最多按 actor 扫描 100 条，再以一次
+  scoped ChannelStore batch 排除群绑定**：群任务密集时一页可以为空但携带继续游标，Web 客户端
+  必须按游标继续而不能把空页误判为已到底；N+1 已消除，但这条查询尚无真实负载基准。
 - **projection claim 只在解析 scoped `TaskLookup` 的读取时刻证明仍有效**：随后执行期间 claim 仍可能
   过期或被接管，因此渠道 worker 最终写入必须继续使用 owner/fencing/expected-state 提交；本 PR 的
   同 owner 新 token 变异反证证明旧 token 不能提交，但尚无长期运行或进程崩溃压测。

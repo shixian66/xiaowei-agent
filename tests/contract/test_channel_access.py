@@ -1,10 +1,12 @@
 """M7 任务访问服务：统一 not_found、群成员实时校验与安全投影。"""
 
+import logging
 from typing import Any
 
 import pytest
 from tests.conftest import make_envelope, make_submission
 
+from xiaowei_agent.application import channel_access as channel_access_module
 from xiaowei_agent.application.channel_access import (
     TaskAccessNotFoundError,
     TaskAccessQuery,
@@ -18,6 +20,7 @@ from xiaowei_agent.contracts import (
     ChannelKind,
     ChannelPermission,
     IdentitySource,
+    TaskLookup,
     TaskStatus,
 )
 from xiaowei_agent.persistence.channel import BindTaskCommand
@@ -192,6 +195,139 @@ async def test_non_member_and_membership_failure_share_the_same_not_found(
     assert task.task_id not in str(denied.value)
 
 
+async def test_membership_failure_emits_only_a_safe_structured_signal(
+    store, channel_store, memory_state, context, clock, caplog
+) -> None:
+    task = await _create_task(store, context, suffix="membership-observability")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-sensitive-ref",
+            source_event_ref="event-membership-observability",
+            created_at=clock(),
+        )
+    )
+    raw_error = "provider token=" + "hunter" + "2-plain"
+    service = _service(
+        store,
+        channel_store,
+        memory_state,
+        MembershipStub(error=RuntimeError(raw_error)),
+    )
+
+    with caplog.at_level(
+        logging.WARNING, logger="xiaowei_agent.application.channel_access"
+    ):
+        with pytest.raises(TaskAccessNotFoundError):
+            await service.get_task(
+                query=TaskAccessQuery(
+                    principal=_principal(
+                        actor="bob", subject_ref="subject-sensitive-ref"
+                    ),
+                    task_id=task.task_id,
+                )
+            )
+
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "feishu membership check failed"
+    ]
+    assert len(records) == 1
+    assert records[0].tenant_id == "dev-local"
+    assert records[0].environment_id == "dev"
+    assert records[0].failure_kind == "membership_adapter_error"
+    serialized = "\n".join(
+        f"{record.getMessage()} {record.__dict__}" for record in records
+    )
+    for forbidden in (
+        raw_error,
+        task.task_id,
+        "chat-sensitive-ref",
+        "subject-sensitive-ref",
+    ):
+        assert forbidden not in serialized
+
+
+async def test_non_member_does_not_emit_a_provider_failure_signal(
+    store, channel_store, memory_state, context, clock, caplog
+) -> None:
+    task = await _create_task(store, context, suffix="membership-denied-signal")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref="event-membership-denied-signal",
+            created_at=clock(),
+        )
+    )
+    service = _service(
+        store, channel_store, memory_state, MembershipStub(result=False)
+    )
+
+    with caplog.at_level(
+        logging.WARNING, logger="xiaowei_agent.application.channel_access"
+    ):
+        with pytest.raises(TaskAccessNotFoundError):
+            await service.get_task(
+                query=TaskAccessQuery(
+                    principal=_principal(actor="bob", subject_ref="subject-bob"),
+                    task_id=task.task_id,
+                )
+            )
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "feishu membership check failed"
+    ]
+
+
+async def test_membership_diagnostic_failure_preserves_hidden_not_found(
+    store, channel_store, memory_state, context, clock, monkeypatch
+) -> None:
+    task = await _create_task(store, context, suffix="membership-log-failure")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref="event-membership-log-failure",
+            created_at=clock(),
+        )
+    )
+
+    def fail_logging(*args, **kwargs):
+        raise RuntimeError("logging unavailable")
+
+    monkeypatch.setattr(channel_access_module._LOGGER, "warning", fail_logging)
+    service = _service(
+        store,
+        channel_store,
+        memory_state,
+        MembershipStub(error=TimeoutError("membership unavailable")),
+    )
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.get_task(
+            query=TaskAccessQuery(
+                principal=_principal(actor="bob", subject_ref="subject-bob"),
+                task_id=task.task_id,
+            )
+        )
+
+
 async def test_cross_scope_missing_permission_and_private_non_owner_are_indistinguishable(
     store, channel_store, memory_state, context
 ) -> None:
@@ -247,6 +383,47 @@ async def test_accessible_task_redacts_request_text_before_returning_it(
     assert raw not in result.model_dump_json()
 
 
+async def test_detail_reuses_the_authorized_record_for_projection(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(store, context, suffix="read-count")
+
+    class CountingTaskReads:
+        def __init__(self) -> None:
+            self.record_reads = 0
+            self.submission_reads = 0
+
+        async def get(self, *, lookup):
+            self.record_reads += 1
+            return await store.get(lookup=lookup)
+
+        async def get_submission(self, *, lookup):
+            self.submission_reads += 1
+            return await store.get_submission(lookup=lookup)
+
+    counting = CountingTaskReads()
+    runtime = TaskViewRuntime(
+        task_store=counting,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        bindings=object(),
+    )
+    service = TaskAccessService(
+        runtime=runtime,
+        task_store=counting,
+        channel_store=channel_store,
+        membership=MembershipStub(),
+    )
+
+    detail = await service.get_task(
+        query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+    )
+
+    assert detail.task_view.task_id == task.task_id
+    assert counting.record_reads == 2
+    assert counting.submission_reads == 1
+
+
 async def test_detail_retries_when_status_changes_during_runtime_projection(
     store, channel_store, memory_state, context
 ) -> None:
@@ -262,11 +439,17 @@ async def test_detail_retries_when_status_changes_during_runtime_projection(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def query_task(self, *, lookup):
-            view = await real_runtime.query_task(lookup=lookup)
+        async def project_task(self, *, record):
+            view = await real_runtime.project_task(record=record)
             self.calls += 1
             if self.calls == 1:
-                current = await store.get(lookup=lookup)
+                current = await store.get(
+                    lookup=TaskLookup(
+                        task_id=record.task_id,
+                        tenant_id=record.tenant_id,
+                        environment_id=record.environment_id,
+                    )
+                )
                 await store.transition(
                     command=TransitionCommand(
                         task_id=task.task_id,
@@ -331,7 +514,7 @@ async def test_detail_fails_closed_when_no_consistent_snapshot_can_be_formed(
             query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
         )
 
-    assert changing.reads == 7  # 一次授权读取 + 三轮 before/after。
+    assert changing.reads == 4  # 一次授权读取 + 每轮一次 winner 复核。
 
 
 async def test_user_list_excludes_group_tasks_while_admin_list_keeps_the_scope(
@@ -379,6 +562,37 @@ async def test_user_list_excludes_group_tasks_while_admin_list_keeps_the_scope(
         group.task_id,
         other_actor.task_id,
     }
+
+
+async def test_user_list_uses_one_scoped_group_binding_batch(
+    store, memory_state, context, clock
+) -> None:
+    class CountingChannelStore(InMemoryChannelStore):
+        def __init__(self) -> None:
+            super().__init__(clock=clock, state=memory_state)
+            self.single_group_reads = 0
+            self.batch_group_reads = 0
+
+        async def get_group_binding(self, *, lookup):
+            self.single_group_reads += 1
+            return await super().get_group_binding(lookup=lookup)
+
+        async def list_group_bound_task_ids(self, *, query):
+            self.batch_group_reads += 1
+            return await super().list_group_bound_task_ids(query=query)
+
+    channel_store = CountingChannelStore()
+    for index in range(10):
+        await _create_task(store, context, suffix=f"batch-list-{index}")
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    page = await service.list_tasks(
+        query=TaskListQuery(principal=_principal(), limit=10)
+    )
+
+    assert len(page.items) == 10
+    assert channel_store.batch_group_reads == 1
+    assert channel_store.single_group_reads == 0
 
 
 async def test_group_only_scan_page_keeps_a_cursor_to_older_private_tasks(

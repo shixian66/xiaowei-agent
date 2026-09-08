@@ -1,5 +1,6 @@
 """Web/飞书共用的任务读取授权与安全摘要投影。"""
 
+import logging
 from typing import Protocol
 
 from pydantic import Field
@@ -17,6 +18,7 @@ from xiaowei_agent.contracts import (
     StrictInt,
     StrictStr,
     TaskLookup,
+    TaskRecord,
     TaskStatus,
     TaskView,
 )
@@ -24,12 +26,14 @@ from xiaowei_agent.persistence.channel import (
     ChannelBindingNotFoundError,
     ChannelStore,
     GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
 )
 from xiaowei_agent.persistence.store import TaskNotFoundError, TaskStore
 from xiaowei_agent.redaction import scrub_text
 
 _SUMMARY_PREVIEW_LIMIT = 240
 _DETAIL_PREVIEW_LIMIT = 8192
+_LOGGER = logging.getLogger(__name__)
 
 
 class TaskAccessNotFoundError(LookupError):
@@ -91,6 +95,22 @@ def _preview(text: str, *, limit: int) -> str:
     return scrub_text(text)[:limit]
 
 
+def _log_membership_check_failure(principal: AuthenticatedPrincipal) -> None:
+    """只记录可归因的安全维度，不记录供应商正文或不透明身份引用。"""
+    try:
+        _LOGGER.warning(
+            "feishu membership check failed",
+            extra={
+                "tenant_id": principal.tenant_id,
+                "environment_id": principal.environment_id,
+                "failure_kind": "membership_adapter_error",
+            },
+        )
+    except Exception:
+        # 诊断面故障不能把 fail-closed 的 404 变成另一种可区分结果。
+        return
+
+
 class TaskAccessService:
     """只做任务读取 ACL 与安全字段投影，不拥有执行或渲染规则。"""
 
@@ -115,20 +135,20 @@ class TaskAccessService:
             environment_id=principal.environment_id,
         )
 
-    async def _is_authorized(self, query: TaskAccessQuery) -> bool:
+    async def _authorized_record(self, query: TaskAccessQuery) -> TaskRecord | None:
         principal = query.principal
         if ChannelPermission.VIEW_SAFE_TASK not in principal.permissions:
-            return False
+            return None
         lookup = self._lookup(principal, query.task_id)
         try:
             record = await self._tasks.get(lookup=lookup)
         except TaskNotFoundError:
-            return False
+            return None
         if (
             ChannelPermission.ADMIN_ALL_SAFE_TASKS in principal.permissions
             or record.actor == principal.actor
         ):
-            return True
+            return record
         try:
             binding = await self._channels.get_group_binding(
                 lookup=GroupBindingLookup(
@@ -138,35 +158,37 @@ class TaskAccessService:
                 )
             )
         except ChannelBindingNotFoundError:
-            return False
+            return None
         if binding.conversation_ref is None:
-            return False
+            return None
         try:
-            return await self._membership.is_current_group_member(
+            is_member = await self._membership.is_current_group_member(
                 tenant_id=principal.tenant_id,
                 conversation_ref=binding.conversation_ref,
                 subject_ref=principal.subject_ref,
             )
         except Exception:
-            return False
+            _log_membership_check_failure(principal)
+            return None
+        return record if is_member else None
 
     async def get_task(self, *, query: TaskAccessQuery) -> AccessibleTask:
         """返回同一 Runtime 的安全任务详情；所有拒绝统一为未找到。"""
-        if not await self._is_authorized(query):
+        record = await self._authorized_record(query)
+        if record is None:
             raise TaskAccessNotFoundError
         lookup = self._lookup(query.principal, query.task_id)
         try:
             task_view: TaskView | None = None
-            record = None
             for _ in range(3):
-                before = await self._tasks.get(lookup=lookup)
-                candidate = await self._runtime.query_task(lookup=lookup)
+                candidate = await self._runtime.project_task(record=record)
                 after = await self._tasks.get(lookup=lookup)
-                if before.version == after.version and candidate.status is after.status:
+                if record.version == after.version and candidate.status is after.status:
                     task_view = candidate
                     record = after
                     break
-            if task_view is None or record is None:
+                record = after
+            if task_view is None:
                 raise TaskAccessSnapshotUnavailableError
             submission = await self._tasks.get_submission(lookup=lookup)
         except TaskNotFoundError:
@@ -179,21 +201,6 @@ class TaskAccessService:
             submitted_at=submission.as_of,
             task_version=record.version,
         )
-
-    async def _is_group_task(
-        self, *, principal: AuthenticatedPrincipal, task_id: str
-    ) -> bool:
-        try:
-            await self._channels.get_group_binding(
-                lookup=GroupBindingLookup(
-                    task_id=task_id,
-                    tenant_id=principal.tenant_id,
-                    environment_id=principal.environment_id,
-                )
-            )
-        except ChannelBindingNotFoundError:
-            return False
-        return True
 
     @staticmethod
     def _summary(item: StoredTaskRead) -> TaskSummary:
@@ -234,14 +241,23 @@ class TaskAccessService:
                 limit=100,
             )
         )
+        group_task_ids = (
+            await self._channels.list_group_bound_task_ids(
+                query=GroupBoundTaskIdsQuery(
+                    tenant_id=principal.tenant_id,
+                    environment_id=principal.environment_id,
+                    task_ids=tuple(item.record.task_id for item in stored.items),
+                )
+            )
+            if stored.items
+            else frozenset()
+        )
         summaries: list[TaskSummary] = []
         processed_created_seq: int | None = None
         has_more = stored.next_created_seq is not None
         for index, item in enumerate(stored.items):
             processed_created_seq = item.record.created_seq
-            if not await self._is_group_task(
-                principal=principal, task_id=item.record.task_id
-            ):
+            if item.record.task_id not in group_task_ids:
                 summaries.append(self._summary(item))
             if len(summaries) == query.limit:
                 has_more = has_more or index < len(stored.items) - 1

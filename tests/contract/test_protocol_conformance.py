@@ -165,7 +165,7 @@ def test_every_channel_store_implementation_keeps_the_protocol_keyword_arguments
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(ChannelStore)
-    assert len(methods) == 11, f"ChannelStore 的方法集变了：{methods}"
+    assert len(methods) == 12, f"ChannelStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ChannelStore, method)

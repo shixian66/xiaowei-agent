@@ -15,6 +15,8 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.channel import (
     ChannelBinding,
     CreateProjectionSubscriptionCommand,
+    GroupBoundTaskIdsQuery,
+    ProjectionDueQuery,
     ProjectionSubscription,
 )
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
@@ -35,6 +37,32 @@ bind(globals(), CHANNEL_STORE_CASES)
 
 
 _NOW = dt.datetime(2026, 9, 8, 12, 0, tzinfo=dt.UTC)
+
+
+def test_worker_queries_require_explicit_scope_and_bounded_batches() -> None:
+    assert set(ProjectionDueQuery.model_fields) == {
+        "tenant_id",
+        "environment_id",
+        "limit",
+    }
+    assert set(GroupBoundTaskIdsQuery.model_fields) == {
+        "tenant_id",
+        "environment_id",
+        "task_ids",
+    }
+
+    with pytest.raises(ValidationError):
+        ProjectionDueQuery(limit=100)
+    with pytest.raises(ValidationError):
+        GroupBoundTaskIdsQuery(
+            tenant_id="tenant-a", environment_id="dev", task_ids=()
+        )
+    with pytest.raises(ValidationError):
+        GroupBoundTaskIdsQuery(
+            tenant_id="tenant-a",
+            environment_id="dev",
+            task_ids=tuple(f"task-{index}" for index in range(101)),
+        )
 
 
 def test_channel_binding_row_mapping_round_trips_without_extra_fields() -> None:

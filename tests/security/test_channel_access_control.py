@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.suites import channel_store as channel_store_suite
 
 from xiaowei_agent.application.channel_access import (
     AccessibleTask,
@@ -18,10 +19,24 @@ from xiaowei_agent.persistence.channel import (
     ClaimedTaskLookup,
     ProjectionClaimNotFoundError,
 )
+from xiaowei_agent.persistence.fake import InMemoryChannelStore
 
 pytestmark = pytest.mark.security
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
+
+
+@pytest.fixture
+def channel_store(clock, memory_state):
+    return InMemoryChannelStore(clock=clock, state=memory_state)
+
+
+async def test_projection_due_discovery_is_bound_to_the_worker_scope(
+    channel_store, store, context, clock
+) -> None:
+    await channel_store_suite.test_due_scan_returns_only_the_requested_tenant_and_environment(
+        channel_store, store, context, clock
+    )
 
 
 def test_safe_access_models_cannot_return_submission_or_internal_task_facts() -> None:

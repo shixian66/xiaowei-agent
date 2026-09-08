@@ -53,6 +53,7 @@ from xiaowei_agent.persistence.channel import (
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
     GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
     ProjectionSubscription,
@@ -232,6 +233,24 @@ class InMemoryChannelStore:
                 raise ChannelBindingNotFoundError
             return binding
 
+    async def list_group_bound_task_ids(
+        self, *, query: GroupBoundTaskIdsQuery
+    ) -> frozenset[str]:
+        async with self._lock:
+            task_ids: set[str] = set()
+            for task_id in query.task_ids:
+                binding_id = self._state.channel_binding_ids_by_task.get(task_id)
+                if binding_id is None:
+                    continue
+                binding = self._state.channel_bindings[binding_id]
+                if (
+                    binding.tenant_id == query.tenant_id
+                    and binding.environment_id == query.environment_id
+                    and binding.channel is ChannelKind.FEISHU_GROUP
+                ):
+                    task_ids.add(task_id)
+            return frozenset(task_ids)
+
     async def create_projection_subscription(
         self, *, command: CreateProjectionSubscriptionCommand
     ) -> ProjectionSubscription:
@@ -243,17 +262,30 @@ class InMemoryChannelStore:
     ) -> tuple[ProjectionSubscription, ...]:
         now = self._clock()
         async with self._lock:
-            due = (
-                subscription
-                for subscription in self._state.projection_subscriptions.values()
-                if subscription.state
-                not in {ProjectionState.COMPLETED, ProjectionState.DEAD_LETTER}
-                and subscription.next_attempt_at <= now
-                and (
-                    subscription.claim_expires_at is None
-                    or subscription.claim_expires_at <= now
+            due = []
+            for subscription in self._state.projection_subscriptions.values():
+                binding_id = self._state.channel_binding_ids_by_task.get(
+                    subscription.task_id
                 )
-            )
+                binding = (
+                    None
+                    if binding_id is None
+                    else self._state.channel_bindings[binding_id]
+                )
+                if (
+                    binding is None
+                    or binding.tenant_id != query.tenant_id
+                    or binding.environment_id != query.environment_id
+                    or subscription.state
+                    in {ProjectionState.COMPLETED, ProjectionState.DEAD_LETTER}
+                    or subscription.next_attempt_at > now
+                    or (
+                        subscription.claim_expires_at is not None
+                        and subscription.claim_expires_at > now
+                    )
+                ):
+                    continue
+                due.append(subscription)
             return tuple(
                 sorted(
                     due,

@@ -23,6 +23,7 @@ from xiaowei_agent.persistence.channel import (
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
     GroupBindingLookup,
+    GroupBoundTaskIdsQuery,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
     ProjectionSubscriptionConflictError,
@@ -46,6 +47,9 @@ async def _task(store: Any, context: Any, suffix: str) -> Any:
                 request_id=f"request-{suffix}",
                 idempotency_key=f"channel-{suffix}",
                 text=f"channel request {suffix}",
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                actor=context.actor,
             ),
         )
     )
@@ -74,11 +78,13 @@ def _binding(
     source_event_ref: str = "event-digest-1",
     channel: ChannelKind = ChannelKind.FEISHU_GROUP,
     projection: CreateProjectionSubscriptionCommand | None = None,
+    tenant_id: str = "dev-local",
+    environment_id: str = "dev",
 ) -> BindTaskCommand:
     return BindTaskCommand(
         task_id=task_id,
-        tenant_id="dev-local",
-        environment_id="dev",
+        tenant_id=tenant_id,
+        environment_id=environment_id,
         channel=channel,
         initiator_subject_ref="subject-alice",
         conversation_ref="chat-1" if channel is ChannelKind.FEISHU_GROUP else None,
@@ -101,7 +107,9 @@ async def test_binding_is_idempotent_and_atomically_recovers_its_subscription(
     first = await channel_store.bind_task(command=command)
     second = await channel_store.bind_task(command=command)
     due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(limit=100)
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
     )
 
     assert second == first
@@ -212,6 +220,72 @@ async def test_group_binding_lookup_is_scope_hidden_and_excludes_private_binding
             await channel_store.get_group_binding(lookup=lookup)
 
 
+async def test_group_bound_task_ids_are_batched_and_scope_hidden(
+    channel_store: Any, store: Any, context: Any, clock: Any
+) -> None:
+    group_task = await _task(store, context, "group-batch")
+    private_task = await _task(store, context, "private-batch")
+    other_tenant_context = context.model_copy(
+        update={"tenant_id": "other-tenant"}
+    )
+    other_environment_context = context.model_copy(
+        update={"environment_id": "prod"}
+    )
+    other_tenant_task = await _task(
+        store, other_tenant_context, "other-tenant-group-batch"
+    )
+    other_environment_task = await _task(
+        store, other_environment_context, "other-environment-group-batch"
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            group_task.task_id,
+            clock(),
+            source_event_ref="event-group-batch",
+        )
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            private_task.task_id,
+            clock(),
+            source_event_ref="event-private-batch",
+            channel=ChannelKind.FEISHU_PRIVATE,
+        )
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            other_tenant_task.task_id,
+            clock(),
+            source_event_ref="event-other-tenant-group-batch",
+            tenant_id="other-tenant",
+        )
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            other_environment_task.task_id,
+            clock(),
+            source_event_ref="event-other-environment-group-batch",
+            environment_id="prod",
+        )
+    )
+
+    task_ids = await channel_store.list_group_bound_task_ids(
+        query=GroupBoundTaskIdsQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            task_ids=(
+                group_task.task_id,
+                private_task.task_id,
+                other_tenant_task.task_id,
+                other_environment_task.task_id,
+                "missing-task",
+            ),
+        )
+    )
+
+    assert task_ids == frozenset({group_task.task_id})
+
+
 async def test_projection_creation_is_idempotent_but_semantic_conflicts_fail_closed(
     channel_store: Any, store: Any, context: Any, clock: Any
 ) -> None:
@@ -256,6 +330,18 @@ async def test_due_scan_is_stable_and_ignores_future_or_live_claims(
             update={"next_attempt_at": clock() + dt.timedelta(seconds=60)}
         )
     )
+    for task, source_event_ref in (
+        (first_task, "event-due-first"),
+        (second_task, "event-due-second"),
+        (future_task, "event-due-future"),
+    ):
+        await channel_store.bind_task(
+            command=_binding(
+                task.task_id,
+                clock(),
+                source_event_ref=source_event_ref,
+            )
+        )
     claimed = await channel_store.claim_projection_subscription(
         command=ClaimProjectionCommand(
             subscription_id=first.subscription_id,
@@ -267,9 +353,81 @@ async def test_due_scan_is_stable_and_ignores_future_or_live_claims(
     assert claimed.applied
 
     due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(limit=100)
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
     )
     assert due == (second,)
+
+
+async def test_due_scan_returns_only_the_requested_tenant_and_environment(
+    channel_store: Any, store: Any, context: Any, clock: Any
+) -> None:
+    local_task = await _task(store, context, "due-local-scope")
+    other_tenant_context = context.model_copy(
+        update={"tenant_id": "other-tenant"}
+    )
+    other_environment_context = context.model_copy(
+        update={"environment_id": "prod"}
+    )
+    other_tenant_task = await _task(
+        store, other_tenant_context, "due-other-tenant-scope"
+    )
+    other_environment_task = await _task(
+        store, other_environment_context, "due-other-environment-scope"
+    )
+    unbound_task = await _task(store, context, "due-unbound-scope")
+    await channel_store.bind_task(
+        command=_binding(
+            local_task.task_id,
+            clock(),
+            source_event_ref="event-due-local-scope",
+            projection=_subscription(local_task.task_id, clock()),
+        )
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            other_tenant_task.task_id,
+            clock(),
+            source_event_ref="event-due-other-tenant-scope",
+            projection=_subscription(
+                other_tenant_task.task_id,
+                clock(),
+                destination_ref="chat-other-tenant",
+            ),
+            tenant_id="other-tenant",
+        )
+    )
+    await channel_store.bind_task(
+        command=_binding(
+            other_environment_task.task_id,
+            clock(),
+            source_event_ref="event-due-other-environment-scope",
+            projection=_subscription(
+                other_environment_task.task_id,
+                clock(),
+                destination_ref="chat-other-environment",
+            ),
+            environment_id="prod",
+        )
+    )
+    await channel_store.create_projection_subscription(
+        command=_subscription(
+            unbound_task.task_id,
+            clock(),
+            destination_ref="chat-unbound",
+        )
+    )
+
+    due = await channel_store.list_due_projection_subscriptions(
+        query=ProjectionDueQuery(
+            tenant_id="dev-local",
+            environment_id="dev",
+            limit=100,
+        )
+    )
+
+    assert [item.task_id for item in due] == [local_task.task_id]
 
 
 async def test_expired_claim_gets_a_higher_fence_and_stale_worker_cannot_commit(
@@ -333,7 +491,9 @@ async def test_only_a_live_projection_claim_can_resolve_its_task_scope(
         )
     )
     due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(limit=100)
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
     )
     claimed = await channel_store.claim_projection_subscription(
         command=ClaimProjectionCommand(
@@ -587,9 +747,11 @@ CHANNEL_STORE_CASES = (
     test_binding_cannot_override_the_task_store_scope,
     test_binding_rolls_back_when_its_nested_subscription_conflicts,
     test_group_binding_lookup_is_scope_hidden_and_excludes_private_bindings,
+    test_group_bound_task_ids_are_batched_and_scope_hidden,
     test_projection_creation_is_idempotent_but_semantic_conflicts_fail_closed,
     test_projection_subscription_cannot_reference_an_unknown_task,
     test_due_scan_is_stable_and_ignores_future_or_live_claims,
+    test_due_scan_returns_only_the_requested_tenant_and_environment,
     test_expired_claim_gets_a_higher_fence_and_stale_worker_cannot_commit,
     test_only_a_live_projection_claim_can_resolve_its_task_scope,
     test_claim_without_a_channel_binding_cannot_resolve_task_scope,

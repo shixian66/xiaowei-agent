@@ -166,7 +166,15 @@ class GroupBindingLookup(Contract):
     environment_id: StrictStr
 
 
+class GroupBoundTaskIdsQuery(Contract):
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    task_ids: tuple[StrictStr, ...] = Field(min_length=1, max_length=100)
+
+
 class ProjectionDueQuery(Contract):
+    tenant_id: StrictStr
+    environment_id: StrictStr
     limit: StrictInt = Field(gt=0, le=100)
 
 
@@ -479,6 +487,11 @@ class ChannelStore(Protocol):
     async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding:
         """按 task 与 scope 读取群绑定；其余情形统一未找到。"""
 
+    async def list_group_bound_task_ids(
+        self, *, query: GroupBoundTaskIdsQuery
+    ) -> frozenset[str]:
+        """批量返回指定 scope 中存在飞书群绑定的任务 ID。"""
+
     async def create_projection_subscription(
         self, *, command: CreateProjectionSubscriptionCommand
     ) -> ProjectionSubscription:
@@ -487,7 +500,7 @@ class ChannelStore(Protocol):
     async def list_due_projection_subscriptions(
         self, *, query: ProjectionDueQuery
     ) -> tuple[ProjectionSubscription, ...]:
-        """稳定列出到期且未被 live claim 持有的订阅，不改变状态。"""
+        """稳定列出指定 scope 内到期且无 live claim 的订阅，不改变状态。"""
 
     async def claim_projection_subscription(
         self, *, command: ClaimProjectionCommand
@@ -533,6 +546,7 @@ __all__ = [
     "CreateProjectionSubscriptionCommand",
     "DeadLetterProjectionCommand",
     "GroupBindingLookup",
+    "GroupBoundTaskIdsQuery",
     "ProjectionClaimNotFoundError",
     "ProjectionDueQuery",
     "ProjectionSubscription",

@@ -1,6 +1,6 @@
 """Web/飞书共用的提交权限、服务端幂等与渠道绑定编排。"""
 
-from typing import Self
+from typing import NamedTuple, Self
 
 from pydantic import Field, model_validator
 
@@ -62,6 +62,13 @@ class SubmittedTask(Contract):
     binding: ChannelBinding
 
 
+class ChannelSubmissionReferences(NamedTuple):
+    """同一作用域摘要派生出的 Runtime key 与渠道来源引用。"""
+
+    idempotency_key: str
+    source_event_ref: str
+
+
 def _idempotency_payload(command: ChannelSubmitCommand) -> dict[str, str]:
     principal = command.principal
     return {
@@ -73,10 +80,20 @@ def _idempotency_payload(command: ChannelSubmitCommand) -> dict[str, str]:
     }
 
 
+def derive_channel_submission_references(
+    command: ChannelSubmitCommand,
+) -> ChannelSubmissionReferences:
+    """一次派生两个引用；actor 入摘要可避免跨主体误撞来源唯一约束。"""
+    digest = content_digest(canonical_json(_idempotency_payload(command)).decode("utf-8"))
+    return ChannelSubmissionReferences(
+        idempotency_key=f"channel:v1:{digest}",
+        source_event_ref=digest,
+    )
+
+
 def channel_idempotency_key(command: ChannelSubmitCommand) -> str:
     """按全部授权作用域维度生成 Runtime 的服务端幂等键。"""
-    digest = content_digest(canonical_json(_idempotency_payload(command)).decode("utf-8"))
-    return f"channel:v1:{digest}"
+    return derive_channel_submission_references(command).idempotency_key
 
 
 def _projection_command(
@@ -117,7 +134,7 @@ class ChannelSubmissionService:
         principal = command.principal
         if ChannelPermission.SUBMIT_READONLY_TASK not in principal.permissions:
             raise ChannelSubmissionForbiddenError
-        idempotency_key = channel_idempotency_key(command)
+        references = derive_channel_submission_references(command)
         task_view = await self._runtime.submit_task(
             submission=TaskSubmission(
                 envelope=RequestEnvelope(
@@ -128,7 +145,7 @@ class ChannelSubmissionService:
                     if command.channel is ChannelKind.WEB
                     else Channel.FEISHU,
                     text=command.text,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=references.idempotency_key,
                     environment_id=principal.environment_id,
                 ),
                 context=RequestContext(
@@ -149,7 +166,7 @@ class ChannelSubmissionService:
                 channel=command.channel,
                 initiator_subject_ref=principal.subject_ref,
                 conversation_ref=command.conversation_ref,
-                source_event_ref=idempotency_key.removeprefix("channel:v1:"),
+                source_event_ref=references.source_event_ref,
                 created_at=command.submitted_at,
                 projection=_projection_command(command, task_id=task_view.task_id),
             )
@@ -159,8 +176,10 @@ class ChannelSubmissionService:
 
 __all__ = [
     "ChannelSubmissionForbiddenError",
+    "ChannelSubmissionReferences",
     "ChannelSubmissionService",
     "ChannelSubmitCommand",
     "SubmittedTask",
     "channel_idempotency_key",
+    "derive_channel_submission_references",
 ]

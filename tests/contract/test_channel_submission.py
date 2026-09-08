@@ -9,6 +9,7 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionService,
     ChannelSubmitCommand,
     channel_idempotency_key,
+    derive_channel_submission_references,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.contracts import (
@@ -116,7 +117,9 @@ async def test_same_client_key_replays_one_runtime_task_and_one_binding(
     first = await service.submit(command=command)
     second = await service.submit(command=command.model_copy(update={"request_id": "retry-2"}))
     due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(limit=100)
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
     )
 
     assert second == first
@@ -173,7 +176,9 @@ async def test_web_user_gets_terminal_notice_but_admin_gets_no_subscription(
         )
     )
     due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(limit=100)
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
     )
 
     assert [item.task_id for item in due] == [ordinary.task_view.task_id]
@@ -194,6 +199,47 @@ def test_server_idempotency_key_is_scoped_by_every_authority_dimension(clock) ->
     keys = {channel_idempotency_key(base), *(channel_idempotency_key(item) for item in variants)}
     assert len(keys) == len(variants) + 1
     assert all(key.startswith("channel:v1:") and len(key) == 75 for key in keys)
+
+
+def test_runtime_key_and_source_event_digest_are_derived_together(clock) -> None:
+    base = _command(clock, client_key="same-provider-event")
+    retry = base.model_copy(
+        update={
+            "request_id": "retry-request",
+            "trace_id": "2" * 32,
+            "text": "different body is checked by TaskStore",
+        }
+    )
+    other_actor = base.model_copy(update={"principal": _principal(actor="bob")})
+
+    first = derive_channel_submission_references(base)
+    replay = derive_channel_submission_references(retry)
+    other = derive_channel_submission_references(other_actor)
+
+    assert replay == first
+    assert other != first
+    assert first.idempotency_key == f"channel:v1:{first.source_event_ref}"
+    assert len(first.source_event_ref) == 64
+    assert set(first.source_event_ref) <= set("0123456789abcdef")
+    assert base.client_submission_ref not in first.source_event_ref
+
+
+async def test_same_provider_reference_is_isolated_between_actors(service, clock) -> None:
+    first = await service.submit(
+        command=_command(clock, client_key="shared-provider-reference")
+    )
+    second = await service.submit(
+        command=_command(
+            clock,
+            principal=_principal(actor="bob"),
+            client_key="shared-provider-reference",
+        )
+    )
+
+    assert first.task_view.task_id != second.task_view.task_id
+    assert first.binding.source_event_ref != second.binding.source_event_ref
+    assert len(first.binding.source_event_ref) == 64
+    assert len(second.binding.source_event_ref) == 64
 
 
 async def test_binding_failure_leaves_one_recoverable_runtime_task(
