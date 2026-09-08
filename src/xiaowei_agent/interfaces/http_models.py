@@ -15,10 +15,17 @@ class SubmitTaskRequest(BaseModel):
 
 
 class ErrorItem(BaseModel):
+    """共享 HTTP 错误码；401/403 由后续独立 Web app 产出。
+
+    当前受信的 internal-api 不实现终端用户鉴权，也不因词汇表预留而增加不可达分支。
+    """
+
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     code: Literal[
         "invalid_request",
+        "unauthorized",
+        "forbidden",
         "not_found",
         "method_not_allowed",
         "idempotency_conflict",

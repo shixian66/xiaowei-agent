@@ -9,7 +9,12 @@ import datetime as dt
 import pytest
 
 from xiaowei_agent.capabilities.specs import CAPABILITY_ID, CAPABILITY_VERSION
-from xiaowei_agent.contracts import EvidenceEnvelope, ExternalSource, TaskStatus
+from xiaowei_agent.contracts import (
+    EvidenceEnvelope,
+    ExternalSource,
+    RenderPayload,
+    TaskStatus,
+)
 from xiaowei_agent.reflection.answerability import assess
 from xiaowei_agent.rendering.generic import render_preplan_rejection
 from xiaowei_agent.rendering.pending import render_pending
@@ -51,6 +56,17 @@ def test_render_payload_contains_no_sql_and_no_table_names() -> None:
     assert "SELECT" not in dumped
     assert "starrocks_audit_db__" not in dumped
     assert "starrocks_audit_tbl__" not in dumped
+
+
+def test_render_payload_safe_channel_surface_is_closed() -> None:
+    """渠道完整结果也只能投影这五个安全字段。"""
+    assert set(RenderPayload.model_fields) == {
+        "answer",
+        "sections",
+        "next_steps",
+        "status",
+        "refs",
+    }
 
 
 def test_render_payload_carries_reproducible_parameters() -> None:
