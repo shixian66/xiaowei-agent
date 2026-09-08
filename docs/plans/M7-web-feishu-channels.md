@@ -112,7 +112,7 @@ M6a/M6b 的代码完成与 M7 离线开发相互独立；M6b 延期的真实测�
 | --- | --- | --- |
 | Web 与内部 `/v1` 共用一个 ASGI app 会扩大攻击面 | 采纳 | 拆成独立进程、端口和路由闭集；公网 Web app 不注册内部 `/v1/tasks/*` |
 | 新 `interfaces/*.py` 会触发穷尽白名单 | 采纳 | 每个新增入口文件必须在同一提交更新 `test_module_layering.py` |
-| HTTP 错误闭集缺 401/403 | 采纳 | 增加 `unauthorized`、`forbidden`，并测试不泄露资源存在性 |
+| HTTP 错误闭集缺 401/403 | 采纳 | PR 1 预留 `unauthorized`、`forbidden` 最小错误体；PR 6/7 必须用真实 Web app 路由测试 401/403 与存在性保护 |
 | 单次 delivery 无法表达等待终态与供应商失败 | 采纳 | 改成有 fencing 的持久化 ProjectionSubscription 状态机 |
 | M6 canary 门可以降级 | V0.4 未采纳；V0.6 重新界定 | 取消 M6 canary 作为 M7 的全局前置；仅当渠道 canary 展示真实运维结果时，要求对应 capability 先取得自身真实运行证据，见 §0.3.2/§1.5 |
 | 六个角色写进核心契约过早 | 采纳方向 | 核心只认识三个权限；运维/DBA/值班等标签只在身份映射配置出现 |
@@ -495,8 +495,13 @@ class StoredTaskRead(Contract):
 
 class StoredTaskPage(Contract):
     items: tuple[StoredTaskRead, ...]
-    next_created_seq: StrictInt | None
+    next_created_seq: StrictInt | None = Field(default=None, gt=0)
 ```
+
+空页的 `next_created_seq` 必须为 `None`；非空页若存在下一页游标，它必须等于本页最后一条
+`items[-1].record.created_seq`。非空页允许 `None` 表示没有下一页。这样服务端产出的游标才能
+原样成为下一次查询的排他游标，且不会静默跳过或重复任务。`items` 的 `created_seq` 必须严格
+降序；数据库已对该列施加唯一约束，因此契约不接受同值决胜这种数据库无法产出的页面。
 
 `TaskStore` 增加三条纯读方法：
 
@@ -550,6 +555,11 @@ ELSE not_found
 - 已登录但缺提交权限返回 403/`forbidden`。
 - 单任务不存在、跨 scope、无查看权、成员查询失败统一返回 404/`not_found`，避免存在性泄露。
 - `forbidden` 不用于任务详情，以免区分“存在但没权限”。
+
+`unauthorized`、`forbidden` 在 PR 1 只进入共享错误体词汇表；现有 `internal-api` 是受信入口，
+不新增不可达的鉴权分支，也不承诺产出这两个错误码。PR 6 的 Web app 真实路由必须产出并测试
+401/`unauthorized`，PR 7 的提交路由必须产出并测试 403/`forbidden`；只直接调用
+`error_body()` 不算路由行为证据。
 
 ### 4.4 渠道绑定与枚举闭集
 
@@ -634,12 +644,14 @@ Runtime 找回同一任务，再补齐相同 binding/subscription。未绑定的
 ```python
 class FeishuProjectionInput(Contract):
     task_view: TaskView
-    request_preview: StrictStr
+    request_preview: NonEmptyText = Field(max_length=8192)
     task_version: StrictInt = Field(ge=0)
-    detail_url: AnyHttpUrl
+    detail_url: HttpsUrl
 ```
 
-`request_preview` 由服务端从已授权读取的 TaskSubmission 生成，复用顶层脱敏规则并限长；
+`HttpsUrl` 在 `AnyHttpUrl` 的既有主机与长度约束上进一步只允许 `https`。`request_preview` 是
+服务端生成的展示文本，允许保留首尾空白，但不能为空；8192 与当前入口最大请求长度一致，为
+投影输入建立独立安全上界。服务端先脱敏并限长，再由 Renderer 按更小的飞书卡片预算截断。
 Renderer 不读取原始 submission，不读取 Evidence，不查数据库，不判断 capability。
 
 飞书卡片投影只从该输入产生：标题、状态、请求摘要、安全答案/sections 摘要、限制、下一步、refs、
@@ -942,6 +954,7 @@ PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现�
 **Files:**
 
 - Create: `docs/adr/ADR-013-m7-channel-boundary.md`
+- Modify: `README.md`
 - Create: `src/xiaowei_agent/contracts/channel.py`
 - Modify: `src/xiaowei_agent/contracts/enums.py`
 - Modify: `src/xiaowei_agent/contracts/task.py`
@@ -957,7 +970,8 @@ PR 1–8 均受 §0.3.1 离线实现门约束，并继续按顺序逐 PR 实现�
 1. 写失败测试钉死三个权限、principal 严格字段、分页 DTO、投影输入，以及
    `DestinationKind`、`ProjectionState`、`ProjectionErrorCode` 三个枚举闭集；未知字段和值一律拒绝。
    渠道枚举继续集中定义在 `contracts/enums.py`，不破坏既有枚举单一真源。
-2. 写失败测试证明 `unauthorized`/`forbidden` 加入闭集，但错误体不带 message/输入字段。
+2. 写失败测试证明 `unauthorized`/`forbidden` 作为后续 Web app 预留错误码加入闭集，且共享错误体
+   不带 message/输入字段；不把直接调用 `error_body()` 描述成现有 internal-api 已具备鉴权行为。
 3. 最小实现 contracts 和 error code；不创建身份 adapter。
 4. ADR-013 记录进程隔离、长连接选择、渠道出站不进 ToolGateway、TaskStore/ChannelStore 真源边界、
    webhook 和高层 SDK 被拒绝的原因、未来变更门。
@@ -1237,8 +1251,9 @@ mypy src
 
 1. 写 rev_0007 upgrade/downgrade 与 digest-only session 失败测试。
 2. 写 OAuth state 单次、过期、重放、code 错误、未知身份、session rotation 与注销测试。
-3. 写 Cookie/Origin/CSRF/CSP 失败测试和 route 闭集；每个 Web/OAuth/session 设置同时登记
-   `_FIELD_TO_ENV` 与 `.env.example`，安全门证明集合相等。
+3. 写 Cookie/Origin/CSRF/CSP 失败测试和 route 闭集；必须通过 Web app 的受保护真实路由断言
+   未登录返回 401/`unauthorized`，不能只直接调用 `error_body()`；每个 Web/OAuth/session 设置
+   同时登记 `_FIELD_TO_ENV` 与 `.env.example`，安全门证明集合相等。
 4. 写关键隔离测试：`web-app` 不注册 `/v1/tasks/*`；`internal-api` 不注册 `/app` 和 OAuth。
 5. 最小实现 Web app factory，只完成 auth 和空壳 `/app`，不实现任务业务路由；模块入口固定为
    `python -m xiaowei_agent.interfaces.web_app`，不增加 `[project.scripts]`。
@@ -1286,7 +1301,8 @@ mypy src
 
 1. 写 Web API 失败测试：普通用户只列自己、admin 列 scope、群详情首次读取与每次轮询都校验当前
    成员、成员撤销后下一次读取统一 404、非法游标和其他不可见任务统一 404。
-2. 写提交失败测试：权限、CSRF、server-scoped idempotency、网络重试复用任务、正文冲突 409。
+2. 写提交失败测试：通过 Web app 的真实提交路由断言缺提交权限返回 403/`forbidden`，并覆盖
+   CSRF、server-scoped idempotency、网络重试复用任务、正文冲突 409。
 3. 写静态资源安全失败测试：两个 shell 都无 inline script、无 `innerHTML`、满足 CSP、静态路径
    闭集且 `web_static/` 无 `__init__.py`；先检查实际 wheel 是否已包含 HTML/CSS/JS，只有失败证据
    证明 hatchling 默认遗漏时才修改 `pyproject.toml`。

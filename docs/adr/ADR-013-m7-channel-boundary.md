@@ -27,6 +27,9 @@ Web 与飞书入口只校验协议和大小、把服务端认证结果转换为 
 值班、查看人和审批人是身份目录标签，不进入核心权限枚举；数据库真实结果 artifact 的预览和
 导出不属于 M7。
 
+飞书卡片中的 Web 详情链接必须使用 HTTPS。链接 origin 只能来自受信配置，不能由飞书事件、
+浏览器 Host 或 Forwarded Header 拼接；具体 origin 绑定由引入链接构造器的 M7 PR 5 承重。
+
 ### D2 进程隔离同时隔离执行权
 
 内部 API、任务 Worker、飞书 listener、渠道投影 Worker 与 Web app 使用同一代码仓库和镜像，

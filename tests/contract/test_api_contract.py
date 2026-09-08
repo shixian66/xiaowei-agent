@@ -158,7 +158,8 @@ async def test_framework_404_405_and_validation_are_in_the_closed_protocol() -> 
 
 
 @pytest.mark.parametrize("code", ["unauthorized", "forbidden"])
-def test_auth_failures_use_the_same_minimal_closed_error_body(code: str) -> None:
+def test_reserved_web_auth_codes_have_the_same_minimal_error_body(code: str) -> None:
+    """这里只钉共享错误体；Web 路由行为由 M7 PR 6/7 的 app 测试承重。"""
     body = error_body(code)
 
     assert body == {"error": {"code": code}}

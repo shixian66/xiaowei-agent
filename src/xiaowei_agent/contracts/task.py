@@ -6,6 +6,7 @@
 """
 
 from collections.abc import Mapping
+from itertools import pairwise
 from types import MappingProxyType
 from typing import Final, Self
 from urllib.parse import quote
@@ -192,10 +193,30 @@ class StoredTaskRead(Contract):
 
 
 class StoredTaskPage(Contract):
-    """按 ``created_seq`` 游标分页的存储层读取结果。"""
+    """按 ``created_seq`` 游标分页的存储层读取结果。
+
+    ``next_created_seq`` 为 ``None`` 表示没有下一页；若存在，则必须指向本页最后
+    一条记录，确保它能原样成为下一次查询的排他游标。
+    """
 
     items: tuple[StoredTaskRead, ...]
-    next_created_seq: StrictInt | None
+    next_created_seq: StrictInt | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _cursor_matches_page(self) -> Self:
+        created_seqs = tuple(item.record.created_seq for item in self.items)
+        if any(current <= following for current, following in pairwise(created_seqs)):
+            raise ValueError("page items must be strictly descending by created_seq")
+        if not self.items:
+            if self.next_created_seq is not None:
+                raise ValueError("empty page cannot have a cursor")
+            return self
+        if (
+            self.next_created_seq is not None
+            and self.next_created_seq != self.items[-1].record.created_seq
+        ):
+            raise ValueError("cursor must match the last item created_seq")
+        return self
 
 
 class LeaseGrant(Contract):

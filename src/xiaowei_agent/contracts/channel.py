@@ -4,11 +4,22 @@
 原始证据或工具结果。
 """
 
-from pydantic import AnyHttpUrl, Field
+from typing import Annotated, TypeAlias
 
-from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+from pydantic import AfterValidator, AnyHttpUrl, Field
+
+from xiaowei_agent.contracts.base import Contract, NonEmptyText, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import ChannelPermission, IdentitySource
 from xiaowei_agent.contracts.task import TaskView
+
+
+def _require_https(value: AnyHttpUrl) -> AnyHttpUrl:
+    if value.scheme != "https":
+        raise ValueError("detail URL must use https")
+    return value
+
+
+HttpsUrl: TypeAlias = Annotated[AnyHttpUrl, AfterValidator(_require_https)]
 
 
 class AuthenticatedPrincipal(Contract):
@@ -26,6 +37,6 @@ class FeishuProjectionInput(Contract):
     """飞书卡片唯一允许消费的安全任务投影。"""
 
     task_view: TaskView
-    request_preview: StrictStr
+    request_preview: NonEmptyText = Field(max_length=8192)
     task_version: StrictInt = Field(ge=0)
-    detail_url: AnyHttpUrl
+    detail_url: HttpsUrl
