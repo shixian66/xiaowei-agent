@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 
-from xiaowei_agent.application.runtime import (
+from xiaowei_agent.application.task_view_runtime import (
     ApplicationFailure,
     classify_application_exception,
 )
@@ -26,7 +26,7 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.interfaces.auth import Clock, trusted_submission, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import SubmitTaskRequest, error_body
-from xiaowei_agent.interfaces.local_stack import build_postgres_local_stack
+from xiaowei_agent.interfaces.local_stack import build_postgres_task_view_stack
 from xiaowei_agent.log import configure_logging
 from xiaowei_agent.trace import bind_trace_id
 
@@ -134,7 +134,7 @@ def create_app(
 async def serve_api(settings: Settings) -> int:
     """装配并运行 API 进程；退出时释放唯一 Engine。"""
     configure_logging(settings)
-    stack = await build_postgres_local_stack(settings=settings)
+    stack = await build_postgres_task_view_stack(settings=settings)
     try:
         app = create_app(
             runtime=stack.runtime,

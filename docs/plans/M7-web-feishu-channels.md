@@ -52,12 +52,12 @@ HTML/CSS/ES Modules、`lark-oapi==1.7.3`、pytest、Ruff、mypy。
 
 ### 0.2 计划审核不等于实现授权
 
-本文 **V0.6 是已获项目负责人批准、尚待技术复核与合入的门槛修订**。V0.5 已通过技术复核；
+本文 **V0.6 已获项目负责人批准、通过技术复核并合入 `main`**。V0.5 已通过技术复核；
 项目负责人于 2026-09-08 进一步明确：M6a/M6b 的代码完成状态不应成为 M7 离线开发的技术阻塞，
 因此 PR 1–8 均可在离线门内实现；真实应用、凭据、网络连接、部署与 canary 继续使用独立硬门。
-上述批准只授权文档修订，
-不等于已经发出“开始 M7 离线实现”，也不授权安装新依赖、修改源码、注册飞书应用、连接真实
-飞书或连接真实运维目标。
+V0.6 已由提交 `289efe5` 合入；项目负责人随后明确发出“开始 M7 离线实现”。该口令只授权离线
+源码、测试和本地隔离基础设施，不授权注册飞书应用、读取真实凭据、连接真实飞书或运维目标、
+部署、canary 或用户验收。
 
 ### 0.3 分阶段且不可降低的实现入口门
 
@@ -72,13 +72,13 @@ PR 1–8 均可在 fake/recording 与本地隔离基础设施上离线实现和�
 - [x] V0.3 已通过 Claude 技术审核。
 - [x] V0.5（包含 V0.4 阶段门与本轮产品范围收口）已通过技术复核。
 - [x] 项目负责人已明确批准 V0.6：PR 1–8 均可离线实现，真实渠道激活仍保持硬门。
-- [ ] V0.6 已通过技术复核并作为纯文档基线合入 `main`。
-- [ ] 项目负责人在上述文档基线合入后明确说“开始 M7 离线实现”。
-- [ ] 届时重新按顺序完整读取最新 `AGENTS.md`、`ARCHITECTURE.md`、
+- [x] V0.6 已通过技术复核并作为纯文档基线合入 `main`。
+- [x] 项目负责人在上述文档基线合入后明确说“开始 M7 离线实现”。
+- [x] 届时重新按顺序完整读取最新 `AGENTS.md`、`ARCHITECTURE.md`、
   `AGENT_HANDOFF.md`、`README.md`、`DEVELOPMENT_PLAN.md`。
-- [ ] 届时重新核对 `git status --short --branch`、`HEAD`、`main`、`origin/main`、
+- [x] 届时重新核对 `git status --short --branch`、`HEAD`、`main`、`origin/main`、
   未提交文件和前一里程碑证据，不能依赖本文旧摘要。
-- [ ] 从当时最新 `main` 创建 `claude/<topic>` 分支，不直接在 `main` 开发。
+- [x] 从当时最新 `main` 创建 `claude/<topic>` 分支，不直接在 `main` 开发。
 
 该离线门是项目负责人对 `DEVELOPMENT_PLAN.md` 里程碑串行规则批准的窄例外，不改变 M6b 的
 `tests` 证据等级，不把 PR 1–8 表述为渠道可用，也不授权真实渠道激活。任一项准备不足时，
@@ -997,13 +997,18 @@ mypy src
 **Files:**
 
 - Create: `src/xiaowei_agent/application/task_view_runtime.py`
+- Modify: `src/xiaowei_agent/application/__init__.py`
 - Modify: `src/xiaowei_agent/application/runtime.py`
 - Modify: `src/xiaowei_agent/interfaces/api.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
+- Modify: `src/xiaowei_agent/runners/__init__.py`
 - Create: `tests/contract/test_task_view_runtime.py`
 - Modify: `tests/contract/test_runtime_async_lifecycle.py`
 - Modify: `tests/unit/test_local_stack.py`
 - Create: `tests/security/test_task_view_runtime_authority.py`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `README.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Interfaces:**
 
@@ -1031,10 +1036,12 @@ python -m pytest tests/contract/test_task_view_runtime.py \
 - [ ] **Step 4：把内部 API 改成窄装配。**
   在 `local_stack.py` 增加 `TaskViewStack` 和 `build_postgres_task_view_stack()`；把 tool/runner/目标
   adapter import 收进完整执行装配函数内部；`interfaces/api.py` 改用窄 builder，worker 仍使用
-  `build_postgres_local_stack()`。
+  `build_postgres_local_stack()`。同时移除 `application` 与 `runners` 包入口的 eager re-export；Python
+  加载子模块前会先执行包入口，保留 eager re-export 会让窄 Runtime 间接加载完整 Runtime/Runner。
 - [ ] **Step 5：写权限反证。**
   AST 测试断言 `task_view_runtime.py` 不 import/call governance、tools、runners、目标 adapter、
-  `TaskStore.transition()`；stack 测试断言 `TaskViewStack` 不含完整 Runtime/Runner/Gateway 字段。
+  `TaskStore.transition()`；stack 测试断言 `TaskViewStack` 不含完整 Runtime/Runner/Gateway 字段；独立
+  进程测试断言导入 internal-api 并装配窄 stack 不加载完整 Runtime、Runner、Gateway 或目标 adapter。
 - [ ] **Step 6：运行绿灯与安全门。**
 
 ```bash
@@ -1049,13 +1056,16 @@ mypy src
 
 ```bash
 git add src/xiaowei_agent/application/task_view_runtime.py \
+  src/xiaowei_agent/application/__init__.py \
   src/xiaowei_agent/application/runtime.py \
   src/xiaowei_agent/interfaces/api.py \
   src/xiaowei_agent/interfaces/local_stack.py \
+  src/xiaowei_agent/runners/__init__.py \
   tests/contract/test_task_view_runtime.py \
   tests/contract/test_runtime_async_lifecycle.py \
   tests/unit/test_local_stack.py \
-  tests/security/test_task_view_runtime_authority.py
+  tests/security/test_task_view_runtime_authority.py \
+  AGENT_HANDOFF.md README.md docs/plans/M7-web-feishu-channels.md
 git commit -m "refactor(m7): isolate task view runtime from execution"
 ```
 

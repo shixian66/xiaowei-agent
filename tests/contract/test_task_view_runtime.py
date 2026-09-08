@@ -1,0 +1,116 @@
+"""无执行权任务投影 Runtime 的共享行为契约。"""
+
+import pytest
+from tests.fakes.recordings import GOLDEN
+from tests.fakes.runtime import RuntimeHarness
+
+from xiaowei_agent.application import task_view_runtime as task_view_module
+from xiaowei_agent.application.capability_runtime import (
+    CapabilityBindingError,
+    CapabilityRuntimeBinding,
+)
+from xiaowei_agent.application.task_view_runtime import (
+    TaskViewRuntime,
+    assess_evidence,
+)
+from xiaowei_agent.contracts import (
+    AnswerabilityVerdict,
+    EvidenceEnvelope,
+    RenderPayload,
+    TaskRecord,
+    TaskStatus,
+)
+
+
+def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
+    return TaskViewRuntime(
+        task_store=harness.store,
+        plan_store=harness.plan_store,
+        ledger=harness.ledger,
+        bindings=harness.runtime._bindings,
+    )
+
+
+def test_public_evidence_assessor_preserves_preplan_rejection_semantics() -> None:
+    verdict = assess_evidence(binding=None, evidences=())
+
+    assert verdict.sufficient is False
+    assert verdict.downgrade_suggestion is True
+    assert verdict.needs_user_input is False
+    assert tuple(item.key for item in verdict.missing) == ("execution_plan",)
+
+
+async def test_public_evidence_assessor_rejects_evidence_without_a_plan() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+    evidences = await harness.ledger.load(task_id=harness.task_id)
+
+    with pytest.raises(
+        CapabilityBindingError,
+        match="evidence exists without a capability plan",
+    ):
+        assess_evidence(binding=None, evidences=evidences)
+
+
+async def test_full_and_narrow_runtimes_share_the_terminal_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+    narrow = _task_views(harness)
+    original = task_view_module.project_terminal
+    calls = 0
+
+    def counting_projection(
+        *,
+        record: TaskRecord,
+        evidences: tuple[EvidenceEnvelope, ...],
+        verdict: AnswerabilityVerdict,
+        binding: CapabilityRuntimeBinding,
+    ) -> RenderPayload:
+        nonlocal calls
+        calls += 1
+        return original(
+            record=record,
+            evidences=evidences,
+            verdict=verdict,
+            binding=binding,
+        )
+
+    monkeypatch.setattr(task_view_module, "project_terminal", counting_projection)
+
+    full_view = await harness.runtime.query_task(lookup=harness.lookup)
+    narrow_view = await narrow.query_task(lookup=harness.lookup)
+
+    assert full_view == narrow_view
+    assert calls == 2
+
+
+async def test_narrow_runtime_submit_only_persists_a_task() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    narrow = _task_views(harness)
+
+    view = await narrow.submit_task(
+        submission=harness.submission("最近30分钟有哪些慢查询")
+    )
+
+    assert view.status is TaskStatus.CREATED
+    assert view.render is None
+    assert harness.gateway.invocations == 0
+    assert await harness.store.load_step_executions(task_id=view.task_id) == ()
+
+
+async def test_narrow_runtime_replays_an_existing_terminal_submission_without_execution(
+) -> None:
+    harness = RuntimeHarness(GOLDEN)
+    rendered = await harness.handle("最近30分钟有哪些慢查询")
+    invocations = harness.gateway.invocations
+    narrow = _task_views(harness)
+
+    replayed = await narrow.submit_task(
+        submission=harness.submission("最近30分钟有哪些慢查询")
+    )
+
+    assert replayed.status is TaskStatus.SUCCEEDED
+    assert replayed.render == rendered
+    assert harness.gateway.invocations == invocations

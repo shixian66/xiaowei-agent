@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | `/Users/kloenguyen/Desktop/agent`；当前 M6b 隔离 worktree 为 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | `/Users/kloenguyen/Desktop/agent`；当前 M7 PR 2 隔离 worktree 为 `/private/tmp/xiaowei-m7-task-view-runtime`；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-08（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。项目负责人已批准 M7 PR 1–8 均可离线开发，真实应用、凭据、网络、部署与 canary 继续使用独立硬门；V0.6 文档修订尚待技术复核与合入，M7 源码尚未开始** |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6 与 PR 1 已合入 `main`，PR 2 正在隔离分支离线实现；真实应用、凭据、网络、部署与 canary 继续使用独立硬门** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.2；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，不授权真实渠道激活 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -49,8 +49,8 @@
 | M6a 合并后 CI | main push run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909) 精确绑定最终实现基线，八个 job 全绿 |
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
-| M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.5 已通过技术复核；项目负责人于 2026-09-08 明确批准 V0.6：PR 1–8 均可在 fake/recording 基础上离线实现，真实应用注册、凭据、网络连接、部署与 canary 继续由独立硬门阻塞。V0.6 基于 `main@aa2af2edcd4c30c611e0ed51d10263b26acef598`，尚待技术复核与合入 |
-| 下一步 | **先技术复核并以纯文档 PR 合入 M7 V0.6 基线；未在合入后收到新的“开始 M7 离线实现”前不进入 PR 1–8。** M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。以后恢复 M6b 时仍须核对最新 `main` 与授权，补齐唯一 canonical target、物理 identity、带外 digest、secret reference、actor/窗口、证据处置，并取得新的明确“现场 GO” |
+| M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.6 已通过技术复核并以 `289efe5` 合入；项目负责人已明确发出离线开工口令。PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 squash commit `04c2fcda2ef39e247bdf336d6dcf16ec1bdb7d59` 合入 PR 1 契约与 ADR。PR 1–8 只允许 fake/recording 离线实现；真实渠道门未放宽 |
+| 下一步 | **完成 M7 PR 2 的精确 SHA 审查与负责人合并；合入最新 `main` 后再单独创建 PR 3 分支。** 不堆叠未审核分支、不自行合并。M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。恢复 M6b 时仍须重新核对授权并取得新的“现场 GO” |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -155,15 +155,14 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 9. ~~M5 实现与验收~~ **已完成**：最终对象 `372c381` 经终审与项目负责人验收，以 fast-forward 合入 `main`；合并后 run `33952529021` 八项全绿，逐条提交历史已归档。
 10. ~~M6a 实现与验收~~ **已完成**：PR #11、#12、#13、#15、#14 均已合入；最终实现基线 `e2032fd` 的 main push CI 八项全绿，里程碑已获负责人验收并归档。
 11. **M6b 真实验证前暂停**：默认关闭的真实 adapter 已经 PR #17 审查并合入 `main`，合入后八项 CI 全绿；项目负责人明确将测试环境验证延期。恢复时必须从最新 `main` 重新核对授权和配置，唯一目标、物理身份、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、证据处置和新的“现场 GO”未全部落定前不连接真实服务。M6b 仍未验收、未归档。
-12. **M7 PR 1–8 均开放离线窄例外**：V0.5 技术复核已通过，项目负责人于 2026-09-08
-    明确批准把 M6 代码完成与 M7 离线开发解耦。V0.6 文档技术复核、合入并再次获得明确
-    “开始 M7 离线实现”前，不创建 PR 1 实现分支。真实应用注册、凭据、网络、部署与 canary
-    仍保持独立硬门，不因任何离线 PR 完成自动解锁。
+12. **M7 已进入逐 PR 离线实现**：V0.6 已通过技术复核并以 `289efe5` 合入，负责人已发出
+    “开始 M7 离线实现”口令；PR #20 已把 PR 1 契约与 ADR 合入 `main@04c2fcd`。当前只推进
+    PR 2；真实应用注册、凭据、网络、部署与 canary 仍保持独立硬门，不因任何离线 PR 完成自动解锁。
 
 ## 6. 仍需拍板的事项
 
-M7 的阶段门拆分已拍板，不再是待决项：PR 1–8 均可离线实现，且须在 V0.6 文档合入后
-再次取得明确开工口令；真实渠道激活权限没有放宽。
+M7 的阶段门拆分已拍板且离线开工口令已经发出：PR 1–8 可按顺序离线实现；真实渠道激活权限
+没有放宽。
 
 M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保证飞书链接单任务安全详情可读。
 未来的 Admin 配置治理、真实模型 API、审批/重跑和后续运维能力须另立里程碑与 ADR，不属于 M7，
@@ -223,6 +222,19 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 已验证
 
+- **M7 PR 1 已合入 `main`**：PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 squash
+  commit `04c2fcda2ef39e247bdf336d6dcf16ec1bdb7d59` 合入渠道契约与 ADR-013；该提交是 PR 2 的
+  实测基线，不构成真实渠道运行证据。
+- **M7 PR 2 当前隔离分支完成离线四门**：`python -m pytest -q` 为 2387 passed / 154 skipped /
+  5 warnings；`python -m pytest -m security -q` 为 1097 passed / 79 skipped / 1365 deselected /
+  5 warnings；Ruff 通过；mypy 136 个源文件通过。定向 Runtime/窄装配/安全回归为 53 passed。
+  这些结果仅证明当前工作树代码与 fake/本地装配边界，仍须按最终精确 SHA 复核。
+- **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
+  collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
+  `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export
+  后，同一反证转绿；本轮把进程保护从 denylist 改为精确模块闭集时，故意漏登记已加载的
+  `xiaowei_agent.trace`，测试准确以 extra item 转红，补齐经审查基线后转绿。internal-api 的窄
+  stack 不构造或加载完整 Runtime、Runner、Gateway 与目标 adapter。
 - **M6b 离线实现已合入 `main`**：PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入；PR 与合入后 main push CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 的 tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项均成功。该证据只把状态推进到 `tests`，不构成 `test-env verified`。
 - **M6b 独立审查修复后的离线工作树四门全绿**：`python -m pytest -q` 为 2330 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1085 passed / 79 skipped / 1320 deselected / 5 warnings；Ruff 通过；mypy 134 个源文件通过；`git diff --check` 无输出。154 个 skip 沿用无 `PYTEST_POSTGRES_DSN` 的本机口径，未提供新的 PostgreSQL/Compose 或真实 StarRocks 运行证据。修复覆盖 version digest、preflight 顺序/列契约/count 形状、driver timeout 内外层约束，以及 generic Gateway 失败与 target-bound metadata 的 Evidence 归因。
 - **M6b 六组隔离变异反证均按预期转红**：分别拆掉 Gateway exact fingerprint、ToolCall 连接参数污染拒绝、list 行数上限、identity digest、DDL digest 与异常路径 connection close；对应测试均非零退出。另以先红后绿补严 physical identity AST：错列、无 database、`WHERE SLEEP(...)` 与 `ORDER BY` 不再能进入受审探针闭集。所有变体只位于 `/private/tmp/m6b-mutation.I2tKU9`，未进入工作树。
@@ -259,10 +271,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **M7 仍无源码、测试、Compose、部署、canary 或用户验收证据**：当前只有 V0.5 技术复核结论、
-  负责人对 V0.6 阶段门和产品范围的批准，以及尚待技术复核与合入的 V0.6 文档修订。未来的
-  Admin 配置治理和真实模型 API 尚无源码或运行证据。PR 1–8 尚未获得合入后的离线开工口令；
-  真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。
+- **M7 仅有 PR 1 的 `main` 源码/契约证据和 PR 2 工作树的离线测试证据**：PR 2 尚未审查或合入；
+  PR 3–8 尚未实现。M7 仍无真实飞书/Web 进程、Compose、部署、canary 或用户验收证据。未来的
+  Admin 配置治理和真实模型 API 也尚无源码或运行证据；真实应用、凭据、网络连接、部署与 canary
+  仍被独立硬门阻塞。
 - **分支保护未建立**，且 private + GitHub Free 下无法建立（API 实证 403）。
 - 未部署、未 canary、未取得产品用户验收；M5/M6a 的“验收通过”都是项目里程碑验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
@@ -304,6 +316,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **`evidence/` 的纯度由一条 AST 测试承重**：删除 `tests/security/test_evidence_layer_purity.py` 即等于默默取消 `runners → evidence` 这条依赖边的正当性。
 - **重编译比对在原理上无法捕获编译器自身的改动**（它用同一个编译器重算）：这正是 T4 的集合等式断言必须独立存在的理由，不要因为"已经有 A36 了"就删掉它。
 - **`application` 是依赖面最宽的一层**（除 interfaces 外的全部业务包）：其正当性由 `tests/security/test_runtime_bypass.py` 的三条 AST 断言承重（不够到 Gateway、不自签凭证、只调 Runner 的 start/resume）。
+- **`LocalStack` 的完整 Runtime 注解只在静态检查期可解析**：为防止仅导入 `local_stack` 就加载
+  完整 Runtime/Runner/工具链，`XiaoweiRuntime` 必须留在 `TYPE_CHECKING` 下；因此无显式命名空间的
+  `get_type_hints(LocalStack)` 会得到 `NameError`。仓库当前无该调用者，`TaskViewStack` 可正常内省；
+  若未来需要内省完整栈，应设计显式类型命名空间或窄 Protocol，不得把执行导入搬回顶层。
 - **PromQL 不是通用解析器验证**：M6a 只允许两个代码内固定模板并做参数重编译比对。未来新增模板、真实 Prometheus API 参数、代理路径、限流和响应形状都必须独立评审，不能把 fake 全绿当作服务端兼容。
 - **本地 Prom metric recording 是有限 synthetic catalog**：装配时只生成默认 30 分钟窗口、中心时刻前后 120 分钟、两个固定告警样例的精确键。它服务短时本地/Compose smoke，不是长时间运行或非默认窗口的数据源；未命中会降级为 `INDETERMINATE`，不提供 fallback。
 - **Prometheus 可答性与渲染把步骤 ID 当作版本化隐式契约**：当前通过 Evidence ID 的 `:s1`/`:s2` 后缀区分告警与指标。现有 plan/answerability/render 测试固定该形状；未来改步骤命名必须同步升级并复核四层，不能只改 compiler。

@@ -2,12 +2,14 @@
 
 import asyncio
 import datetime as dt
+from dataclasses import fields
 from types import MappingProxyType
 
 import pytest
 from tests.fakes.clock import ManualClock
 
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -23,8 +25,10 @@ from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
     LocalStack,
     StarRocksLiveAssembly,
+    TaskViewStack,
     build_in_memory_local_stack,
     build_postgres_local_stack,
+    build_postgres_task_view_stack,
 )
 from xiaowei_agent.persistence.postgres import PostgresTaskStore
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
@@ -441,6 +445,76 @@ async def test_postgres_stack_uses_one_engine_and_disposes_it(
 
 
 @pytest.mark.asyncio
+async def test_postgres_task_view_stack_has_only_projection_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    stack = await build_postgres_task_view_stack(
+        settings=Settings(environment_id="dev")
+    )
+
+    assert isinstance(stack, TaskViewStack)
+    assert isinstance(stack.runtime, TaskViewRuntime)
+    assert {field.name for field in fields(TaskViewStack)} == {
+        "runtime",
+        "task_store",
+        "plan_store",
+        "evidence_ledger",
+        "clock",
+        "settings",
+        "readiness",
+        "aclose",
+        "policy_revision",
+    }
+    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert stack.task_store._engine is engine
+    assert stack.plan_store._engine is engine
+    assert stack.evidence_ledger._engine is engine
+    await stack.aclose()
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_task_view_stack_disposes_engine_when_assembly_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    def fail_bindings() -> object:
+        raise RuntimeError("constant task-view assembly failure")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack._build_capability_bindings",
+        fail_bindings,
+    )
+
+    with pytest.raises(RuntimeError, match="constant task-view assembly failure"):
+        await build_postgres_task_view_stack(settings=Settings(environment_id="dev"))
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
 async def test_postgres_stack_disposes_engine_when_assembly_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,7 +534,7 @@ async def test_postgres_stack_disposes_engine_when_assembly_fails(
         raise RuntimeError("constant assembly failure")
 
     monkeypatch.setattr(
-        "xiaowei_agent.interfaces.local_stack.StarRocksRecordingAdapter",
+        "xiaowei_agent.tools.starrocks_fake.StarRocksRecordingAdapter",
         fail_adapter,
     )
     with pytest.raises(RuntimeError, match="constant assembly failure"):
