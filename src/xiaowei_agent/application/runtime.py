@@ -30,7 +30,6 @@ import datetime as _dt
 import uuid
 from typing import Final
 
-from xiaowei_agent.application import task_view_runtime as task_view_module
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
     CapabilityBindingRegistry,
@@ -38,7 +37,11 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
-from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.application.task_view_runtime import (
+    TaskViewRuntime,
+    assess_evidence,
+    project_terminal,
+)
 from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
@@ -102,6 +105,7 @@ RENDER_REF: Final[None] = None
 它只由兼容的同步 ``handle()`` 返回，不另建 render store。M5 的异步查询从 TaskRecord
 与 Evidence 纯函数重建终态投影；非终态统一返回 ``render=None``。
 """
+
 
 class RequestRejectedError(RuntimeError):
     """请求在取数之前就被确定性地拒绝（无候选能力、目标不可解析、参数越界）。
@@ -527,7 +531,7 @@ class XiaoweiRuntime:
             grant=grant,
             binding=binding,
         )
-        payload = task_view_module.project_terminal(
+        payload = project_terminal(
             record=winner,
             evidences=evidences,
             verdict=verdict,
@@ -560,9 +564,7 @@ class XiaoweiRuntime:
         evidences: tuple[EvidenceEnvelope, ...] = await self._ledger.load(
             task_id=task_id
         )
-        verdict = task_view_module._assess_evidence(
-            binding=binding, evidences=evidences
-        )
+        verdict = assess_evidence(binding=binding, evidences=evidences)
         # REFLECTION 只在**执行本身没出问题、却仍然证据不足**时记为 REJECTED。
         # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
         # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
@@ -619,6 +621,7 @@ class XiaoweiRuntime:
                 "terminal transition rejected", rejection=result.rejection
             )
         return result.winner, evidences, verdict
+
 
 def _independent_delivery(task_id: str | None) -> Delivery:
     return Delivery.LOG_ONLY if task_id is None else Delivery.LOG_AND_DURABLE

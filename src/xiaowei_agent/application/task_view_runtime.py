@@ -23,7 +23,11 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.errors import PersistenceUnavailableError
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanNotFoundError, PlanStore
-from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.persistence.store import (
+    IdempotencyConflictError,
+    TaskNotFoundError,
+    TaskStore,
+)
 from xiaowei_agent.rendering.generic import render_preplan_rejection
 
 
@@ -38,11 +42,6 @@ class ApplicationFailure(StrEnum):
 
 def classify_application_exception(exc: Exception) -> ApplicationFailure:
     """把应用边界异常收敛为入口可消费的闭集，不暴露存储层类型。"""
-    from xiaowei_agent.persistence.store import (
-        IdempotencyConflictError,
-        TaskNotFoundError,
-    )
-
     if isinstance(exc, IdempotencyConflictError):
         return ApplicationFailure.CONFLICT
     if isinstance(exc, TaskNotFoundError):
@@ -88,7 +87,7 @@ class TaskViewRuntime:
                 return render_preplan_rejection(status=record.status)
             raise
         binding = self._bindings.runtime_for_plan(plan=stored.plan)
-        verdict = _assess_evidence(binding=binding, evidences=evidences)
+        verdict = assess_evidence(binding=binding, evidences=evidences)
         return project_terminal(
             record=record,
             evidences=evidences,
@@ -121,11 +120,12 @@ def project_terminal(
     )
 
 
-def _assess_evidence(
+def assess_evidence(
     *,
     binding: CapabilityRuntimeBinding | None,
     evidences: tuple[EvidenceEnvelope, ...],
 ) -> AnswerabilityVerdict:
+    """按已存计划的 binding 校验并评估证据；无计划时只接受空证据。"""
     if binding is None:
         if evidences:
             raise CapabilityBindingError("evidence exists without a capability plan")

@@ -225,14 +225,16 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **M7 PR 1 已合入 `main`**：PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 squash
   commit `04c2fcda2ef39e247bdf336d6dcf16ec1bdb7d59` 合入渠道契约与 ADR-013；该提交是 PR 2 的
   实测基线，不构成真实渠道运行证据。
-- **M7 PR 2 当前隔离分支完成离线四门**：`python -m pytest -q` 为 2384 passed / 154 skipped /
-  5 warnings；`python -m pytest -m security -q` 为 1096 passed / 79 skipped / 1363 deselected /
-  5 warnings；Ruff 通过；mypy 136 个源文件通过。定向 API/Runtime/窄装配回归为 82 passed。
+- **M7 PR 2 当前隔离分支完成离线四门**：`python -m pytest -q` 为 2387 passed / 154 skipped /
+  5 warnings；`python -m pytest -m security -q` 为 1097 passed / 79 skipped / 1365 deselected /
+  5 warnings；Ruff 通过；mypy 136 个源文件通过。定向 Runtime/窄装配/安全回归为 53 passed。
   这些结果仅证明当前工作树代码与 fake/本地装配边界，仍须按最终精确 SHA 复核。
 - **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
   collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
   `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export
-  后，同一反证转绿；internal-api 的窄 stack 不构造或加载完整 Runtime、Runner、Gateway 与目标 adapter。
+  后，同一反证转绿；本轮把进程保护从 denylist 改为精确模块闭集时，故意漏登记已加载的
+  `xiaowei_agent.trace`，测试准确以 extra item 转红，补齐经审查基线后转绿。internal-api 的窄
+  stack 不构造或加载完整 Runtime、Runner、Gateway 与目标 adapter。
 - **M6b 离线实现已合入 `main`**：PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入；PR 与合入后 main push CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 的 tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项均成功。该证据只把状态推进到 `tests`，不构成 `test-env verified`。
 - **M6b 独立审查修复后的离线工作树四门全绿**：`python -m pytest -q` 为 2330 passed / 154 skipped / 5 warnings；`python -m pytest -m security -q` 为 1085 passed / 79 skipped / 1320 deselected / 5 warnings；Ruff 通过；mypy 134 个源文件通过；`git diff --check` 无输出。154 个 skip 沿用无 `PYTEST_POSTGRES_DSN` 的本机口径，未提供新的 PostgreSQL/Compose 或真实 StarRocks 运行证据。修复覆盖 version digest、preflight 顺序/列契约/count 形状、driver timeout 内外层约束，以及 generic Gateway 失败与 target-bound metadata 的 Evidence 归因。
 - **M6b 六组隔离变异反证均按预期转红**：分别拆掉 Gateway exact fingerprint、ToolCall 连接参数污染拒绝、list 行数上限、identity digest、DDL digest 与异常路径 connection close；对应测试均非零退出。另以先红后绿补严 physical identity AST：错列、无 database、`WHERE SLEEP(...)` 与 `ORDER BY` 不再能进入受审探针闭集。所有变体只位于 `/private/tmp/m6b-mutation.I2tKU9`，未进入工作树。
@@ -314,6 +316,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **`evidence/` 的纯度由一条 AST 测试承重**：删除 `tests/security/test_evidence_layer_purity.py` 即等于默默取消 `runners → evidence` 这条依赖边的正当性。
 - **重编译比对在原理上无法捕获编译器自身的改动**（它用同一个编译器重算）：这正是 T4 的集合等式断言必须独立存在的理由，不要因为"已经有 A36 了"就删掉它。
 - **`application` 是依赖面最宽的一层**（除 interfaces 外的全部业务包）：其正当性由 `tests/security/test_runtime_bypass.py` 的三条 AST 断言承重（不够到 Gateway、不自签凭证、只调 Runner 的 start/resume）。
+- **`LocalStack` 的完整 Runtime 注解只在静态检查期可解析**：为防止仅导入 `local_stack` 就加载
+  完整 Runtime/Runner/工具链，`XiaoweiRuntime` 必须留在 `TYPE_CHECKING` 下；因此无显式命名空间的
+  `get_type_hints(LocalStack)` 会得到 `NameError`。仓库当前无该调用者，`TaskViewStack` 可正常内省；
+  若未来需要内省完整栈，应设计显式类型命名空间或窄 Protocol，不得把执行导入搬回顶层。
 - **PromQL 不是通用解析器验证**：M6a 只允许两个代码内固定模板并做参数重编译比对。未来新增模板、真实 Prometheus API 参数、代理路径、限流和响应形状都必须独立评审，不能把 fake 全绿当作服务端兼容。
 - **本地 Prom metric recording 是有限 synthetic catalog**：装配时只生成默认 30 分钟窗口、中心时刻前后 120 分钟、两个固定告警样例的精确键。它服务短时本地/Compose smoke，不是长时间运行或非默认窗口的数据源；未命中会降级为 `INDETERMINATE`，不提供 fallback。
 - **Prometheus 可答性与渲染把步骤 ID 当作版本化隐式契约**：当前通过 Evidence ID 的 `:s1`/`:s2` 后缀区分告警与指标。现有 plan/answerability/render 测试固定该形状；未来改步骤命名必须同步升级并复核四层，不能只改 compiler。

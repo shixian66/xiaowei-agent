@@ -38,6 +38,9 @@ from xiaowei_agent.persistence.postgres import (
 from xiaowei_agent.persistence.store import Clock, TaskStore
 
 if TYPE_CHECKING:
+    # 这些执行栈类型必须保持静态导入；移到顶层会让仅 import local_stack 的
+    # internal-api 一并加载完整 Runtime、Runner 与工具链。代价是 LocalStack 的
+    # 延迟注解不能用 get_type_hints() 无参解析；窄进程只内省 TaskViewStack。
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.contracts import (
         AdmissionCertificate,

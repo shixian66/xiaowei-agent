@@ -5,8 +5,14 @@ from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
 from xiaowei_agent.application import task_view_runtime as task_view_module
-from xiaowei_agent.application.capability_runtime import CapabilityRuntimeBinding
-from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.application.capability_runtime import (
+    CapabilityBindingError,
+    CapabilityRuntimeBinding,
+)
+from xiaowei_agent.application.task_view_runtime import (
+    TaskViewRuntime,
+    assess_evidence,
+)
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     EvidenceEnvelope,
@@ -23,6 +29,27 @@ def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
         ledger=harness.ledger,
         bindings=harness.runtime._bindings,
     )
+
+
+def test_public_evidence_assessor_preserves_preplan_rejection_semantics() -> None:
+    verdict = assess_evidence(binding=None, evidences=())
+
+    assert verdict.sufficient is False
+    assert verdict.downgrade_suggestion is True
+    assert verdict.needs_user_input is False
+    assert tuple(item.key for item in verdict.missing) == ("execution_plan",)
+
+
+async def test_public_evidence_assessor_rejects_evidence_without_a_plan() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+    evidences = await harness.ledger.load(task_id=harness.task_id)
+
+    with pytest.raises(
+        CapabilityBindingError,
+        match="evidence exists without a capability plan",
+    ):
+        assess_evidence(binding=None, evidences=evidences)
 
 
 async def test_full_and_narrow_runtimes_share_the_terminal_projection(
