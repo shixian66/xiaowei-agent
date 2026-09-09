@@ -88,6 +88,105 @@ def test_project_names_have_a_full_random_uuid_suffix() -> None:
     assert re.fullmatch(r"xiaowei_m5_smoke_[0-9a-f]{32}", first)
 
 
+def test_smoke_executes_each_channel_entrypoint_with_live_flags_disabled() -> None:
+    class DisabledRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            raise subprocess.CalledProcessError(
+                2,
+                argv,
+                output="",
+                stderr="",
+            )
+
+    runner = DisabledRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        up_started=True,
+    )
+
+    compose_smoke._require_disabled_channel_entrypoints(session)
+
+    assert [call[-6:] for call in runner.calls] == [
+        (
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "-m",
+            "xiaowei_agent.interfaces.feishu_listener",
+        ),
+        (
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "-m",
+            "xiaowei_agent.interfaces.feishu_worker",
+        ),
+        (
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "-m",
+            "xiaowei_agent.interfaces.web_app",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (0, "", ""),
+        (1, "", ""),
+        (2, "unexpected-output", ""),
+        (2, "", "unexpected-error"),
+    ],
+)
+def test_channel_entrypoint_smoke_rejects_any_non_silent_disabled_outcome(
+    returncode: int, stdout: str, stderr: str
+) -> None:
+    class OutcomeRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            result = subprocess.CompletedProcess(
+                argv,
+                returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            if returncode:
+                raise subprocess.CalledProcessError(
+                    returncode,
+                    argv,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            return result
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=OutcomeRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+        up_started=True,
+    )
+
+    with pytest.raises(
+        SmokeError, match=r"^SMOKE_CHANNEL_ENTRYPOINT_NOT_DISABLED$"
+    ) as caught:
+        compose_smoke._require_disabled_channel_entrypoints(session)
+    assert "unexpected" not in str(caught.value)
+
+
 def test_generated_secret_is_host_isolated_and_container_readable(tmp_path: Path) -> None:
     path = tmp_path / ".secrets" / "postgres_password"
     compose_smoke._create_secret(path)
