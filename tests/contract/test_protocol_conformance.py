@@ -168,7 +168,8 @@ def test_every_channel_store_implementation_keeps_the_protocol_keyword_arguments
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(ChannelStore)
-    assert len(methods) == 12, f"ChannelStore 的方法集变了：{methods}"
+    # 13：M7 PR 5 增加紧邻出站的 live-claim 续期；扩约必须显式过审。
+    assert len(methods) == 13, f"ChannelStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ChannelStore, method)

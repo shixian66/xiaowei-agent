@@ -20,6 +20,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Final, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -69,6 +70,60 @@ def _absolute_path(value: str) -> str:
 
 
 AbsolutePath = Annotated[StrictStr, AfterValidator(_absolute_path)]
+
+
+def _canonical_origin_hostname(value: str) -> str | None:
+    try:
+        address = ip_address(value)
+        return f"[{address.compressed}]" if address.version == 6 else address.compressed
+    except ValueError:
+        pass
+    try:
+        hostname = value.encode("idna").decode("ascii").lower().removesuffix(".")
+    except UnicodeError:
+        return None
+    if not hostname or len(hostname) > 253:
+        return None
+    labels = hostname.split(".")
+    if not all(
+        label
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(character.isalnum() or character == "-" for character in label)
+        for label in labels
+    ):
+        return None
+    return hostname
+
+
+def _https_origin(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError("must be an HTTPS origin") from None
+    hostname = (
+        None
+        if parsed.hostname is None
+        else _canonical_origin_hostname(parsed.hostname)
+    )
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("must be an HTTPS origin")
+    authority = hostname if port is None else f"{hostname}:{port}"
+    return f"https://{authority}"
+
+
+HttpsOrigin = Annotated[StrictStr, AfterValidator(_https_origin)]
 
 
 class ConfigError(RuntimeError):
@@ -138,11 +193,25 @@ class Settings(BaseModel):
     starrocks_write_timeout_seconds: int | None = Field(default=None, gt=0, le=30)
     starrocks_query_timeout_seconds: int | None = Field(default=None, gt=0, le=25)
     feishu_listener_enabled: bool = False
+    channel_worker_enabled: bool = False
     feishu_app_id: StrictStr | None = None
     feishu_app_secret_file: AbsolutePath | None = None
     feishu_tenant_key: StrictStr | None = None
     feishu_bot_open_id: StrictStr | None = None
     feishu_identity_file: AbsolutePath | None = None
+    web_detail_base_url: HttpsOrigin | None = None
+    feishu_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    projection_claim_ttl_seconds: int = Field(default=15, gt=0, le=300)
+    projection_batch_limit: int = Field(default=10, gt=0, le=100)
+    projection_provider_max_attempts: int = Field(default=3, gt=0, le=10)
+    projection_provider_backoff_base_seconds: float = Field(
+        default=1.0, gt=0, le=30
+    )
+    projection_retry_after_cap_seconds: float = Field(default=30.0, gt=0, le=300)
+    projection_tenant_concurrency: int = Field(default=2, gt=0, le=2)
+    projection_task_poll_base_seconds: float = Field(default=2.0, gt=0, le=60)
+    projection_task_poll_cap_seconds: float = Field(default=10.0, gt=0, le=300)
+    channel_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
 
     @model_validator(mode="after")
     def _worker_timings_are_consistent(self) -> "Settings":
@@ -161,6 +230,34 @@ class Settings(BaseModel):
             raise ValueError("database connect timeout must be below command timeout")
         if self.db_command_timeout_seconds >= self.lease_ttl_seconds:
             raise ValueError("database command timeout must be below lease ttl")
+        return self
+
+    @model_validator(mode="after")
+    def _projection_timings_are_consistent(self) -> "Settings":
+        if (
+            self.projection_claim_ttl_seconds
+            <= self.feishu_api_timeout_seconds + 2
+        ):
+            raise ValueError(
+                "projection claim ttl must exceed the API timeout and commit margin"
+            )
+        if (
+            self.projection_retry_after_cap_seconds
+            < self.projection_provider_backoff_base_seconds
+        ):
+            raise ValueError("projection provider backoff cap must not be below its base")
+        if (
+            self.projection_task_poll_cap_seconds
+            < self.projection_task_poll_base_seconds
+        ):
+            raise ValueError("projection task poll cap must not be below its base")
+        if (
+            self.channel_worker_poll_interval_seconds
+            > self.projection_claim_ttl_seconds / 4
+        ):
+            raise ValueError(
+                "projection worker poll interval must not exceed one quarter of claim ttl"
+            )
         return self
 
     @model_validator(mode="after")
@@ -230,20 +327,47 @@ class Settings(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _feishu_listener_profile_is_closed(self) -> "Settings":
-        profile = (
-            self.feishu_app_id,
-            self.feishu_app_secret_file,
+    def _feishu_profiles_are_closed(self) -> "Settings":
+        shared = (self.feishu_app_id, self.feishu_app_secret_file)
+        listener = (
             self.feishu_tenant_key,
             self.feishu_bot_open_id,
             self.feishu_identity_file,
         )
-        if not self.feishu_listener_enabled:
-            if any(value is not None for value in profile):
-                raise ValueError("disabled Feishu listener must not carry live configuration")
+        live_profile = shared + listener + (self.web_detail_base_url,)
+        if not self.feishu_listener_enabled and not self.channel_worker_enabled:
+            if any(value is not None for value in live_profile):
+                raise ValueError(
+                    "disabled Feishu listener and channel worker must not carry live "
+                    "configuration"
+                )
             return self
-        if any(value is None for value in profile):
-            raise ValueError("enabled listener requires the complete Feishu listener profile")
+        if any(value is None for value in shared):
+            if self.feishu_listener_enabled and not self.channel_worker_enabled:
+                raise ValueError(
+                    "enabled listener requires the complete Feishu listener profile"
+                )
+            raise ValueError(
+                "enabled worker requires the complete channel worker profile"
+            )
+        if self.feishu_listener_enabled:
+            if any(value is None for value in listener):
+                raise ValueError(
+                    "enabled listener requires the complete Feishu listener profile"
+                )
+        elif any(value is not None for value in listener):
+            raise ValueError(
+                "disabled Feishu listener must not carry listener configuration"
+            )
+        if self.channel_worker_enabled:
+            if self.web_detail_base_url is None:
+                raise ValueError(
+                    "enabled worker requires the complete channel worker profile"
+                )
+        elif self.web_detail_base_url is not None:
+            raise ValueError(
+                "disabled channel worker must not carry worker configuration"
+            )
         return self
 
     @property
@@ -339,11 +463,35 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "starrocks_write_timeout_seconds": "XIAOWEI_STARROCKS_WRITE_TIMEOUT_SECONDS",
     "starrocks_query_timeout_seconds": "XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS",
     "feishu_listener_enabled": "XIAOWEI_FEISHU_LISTENER_ENABLED",
+    "channel_worker_enabled": "XIAOWEI_CHANNEL_WORKER_ENABLED",
     "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
     "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
     "feishu_bot_open_id": "XIAOWEI_FEISHU_BOT_OPEN_ID",
     "feishu_identity_file": "XIAOWEI_FEISHU_IDENTITY_FILE",
+    "web_detail_base_url": "XIAOWEI_WEB_DETAIL_BASE_URL",
+    "feishu_api_timeout_seconds": "XIAOWEI_FEISHU_API_TIMEOUT_SECONDS",
+    "projection_claim_ttl_seconds": "XIAOWEI_PROJECTION_CLAIM_TTL_SECONDS",
+    "projection_batch_limit": "XIAOWEI_PROJECTION_BATCH_LIMIT",
+    "projection_provider_max_attempts": (
+        "XIAOWEI_PROJECTION_PROVIDER_MAX_ATTEMPTS"
+    ),
+    "projection_provider_backoff_base_seconds": (
+        "XIAOWEI_PROJECTION_PROVIDER_BACKOFF_BASE_SECONDS"
+    ),
+    "projection_retry_after_cap_seconds": (
+        "XIAOWEI_PROJECTION_RETRY_AFTER_CAP_SECONDS"
+    ),
+    "projection_tenant_concurrency": "XIAOWEI_PROJECTION_TENANT_CONCURRENCY",
+    "projection_task_poll_base_seconds": (
+        "XIAOWEI_PROJECTION_TASK_POLL_BASE_SECONDS"
+    ),
+    "projection_task_poll_cap_seconds": (
+        "XIAOWEI_PROJECTION_TASK_POLL_CAP_SECONDS"
+    ),
+    "channel_worker_poll_interval_seconds": (
+        "XIAOWEI_CHANNEL_WORKER_POLL_INTERVAL_SECONDS"
+    ),
 }
 
 
@@ -366,7 +514,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         for field, name in _FIELD_TO_ENV.items()
         if name in prefixed
         and not (
-            (field.startswith("starrocks_") or field.startswith("feishu_"))
+            (
+                field.startswith("starrocks_")
+                or field.startswith("feishu_")
+                or field == "web_detail_base_url"
+            )
             and not prefixed[name]
         )
     }

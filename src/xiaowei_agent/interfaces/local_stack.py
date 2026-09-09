@@ -42,6 +42,11 @@ if TYPE_CHECKING:
     # 这些执行栈类型必须保持静态导入；移到顶层会让仅 import local_stack 的
     # internal-api 一并加载完整 Runtime、Runner 与工具链。代价是 LocalStack 的
     # 延迟注解不能用 get_type_hints() 无参解析；窄进程只内省 TaskViewStack。
+    from xiaowei_agent.application.channel_projection import (
+        AsyncSleep,
+        ChannelMessagePort,
+        ChannelProjectionService,
+    )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.contracts import (
@@ -132,6 +137,22 @@ class FeishuListenerStack:
     channel_store: ChannelStore
     identity_directory: FeishuIdentityDirectory
     submission_service: ChannelSubmissionService
+    clock: Clock
+    settings: Settings
+    readiness: ReadinessProbe
+    aclose: AsyncClose
+    policy_revision: str
+
+
+@dataclass(frozen=True)
+class ChannelWorkerStack:
+    """无执行权的飞书出站投影进程装配。"""
+
+    service: ChannelProjectionService
+    message_port: ChannelMessagePort
+    runtime: TaskViewRuntime
+    task_store: TaskStore
+    channel_store: ChannelStore
     clock: Clock
     settings: Settings
     readiness: ReadinessProbe
@@ -633,6 +654,75 @@ async def build_postgres_feishu_listener_stack(
             channel_store=channel_store,
             identity_directory=identity_directory,
             submission_service=submission_service,
+            clock=clock,
+            settings=settings,
+            readiness=PostgresReadinessProbe(engine=engine, assembled=True),
+            aclose=close,
+            policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
+        )
+    except Exception:
+        await engine.dispose()
+        raise
+
+
+async def build_postgres_channel_worker_stack(
+    *,
+    settings: Settings,
+    clock: Clock = _utc_now,
+    message_port: ChannelMessagePort | None = None,
+    sleep: AsyncSleep = asyncio.sleep,
+) -> ChannelWorkerStack:
+    """装配默认关闭的渠道投影；不创建 Runner、Gateway 或目标 adapter。"""
+    from xiaowei_agent.application.channel_projection import ChannelProjectionService
+    from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkMessageAdapter
+
+    if not settings.channel_worker_enabled:
+        raise ValueError("channel worker is disabled")
+    engine = create_database_engine(settings)
+
+    async def close() -> None:
+        await engine.dispose()
+
+    try:
+        task_store = PostgresTaskStore(
+            engine=engine,
+            clock=clock,
+            task_failure_limit=settings.task_failure_limit,
+        )
+        plan_store = PostgresPlanStore(engine=engine)
+        ledger = PostgresEvidenceLedger(engine=engine)
+        channel_store = PostgresChannelStore(engine=engine, clock=clock)
+        _, bindings = _build_capability_bindings()
+        runtime = TaskViewRuntime(
+            task_store=task_store,
+            plan_store=plan_store,
+            ledger=ledger,
+            bindings=bindings,
+        )
+        messages = (
+            message_port
+            if message_port is not None
+            else FeishuSdkMessageAdapter(
+                app_id=cast(str, settings.feishu_app_id),
+                app_secret_file=cast(str, settings.feishu_app_secret_file),
+                timeout_seconds=settings.feishu_api_timeout_seconds,
+            )
+        )
+        service = ChannelProjectionService(
+            runtime=runtime,
+            task_store=task_store,
+            channel_store=channel_store,
+            message_port=messages,
+            clock=clock,
+            settings=settings,
+            sleep=sleep,
+        )
+        return ChannelWorkerStack(
+            service=service,
+            message_port=messages,
+            runtime=runtime,
+            task_store=task_store,
+            channel_store=channel_store,
             clock=clock,
             settings=settings,
             readiness=PostgresReadinessProbe(engine=engine, assembled=True),

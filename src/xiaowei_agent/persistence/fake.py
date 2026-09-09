@@ -61,6 +61,7 @@ from xiaowei_agent.persistence.channel import (
     ProjectionSubscriptionNotFoundError,
     ProjectionUpdateResult,
     RecordInitialProjectionCommand,
+    RenewProjectionClaimCommand,
     ScheduleProviderRetryCommand,
     ScheduleTaskRecheckCommand,
     authorize_claimed_task_lookup,
@@ -69,6 +70,7 @@ from xiaowei_agent.persistence.channel import (
     complete_projection,
     dead_letter_projection,
     record_initial_projection,
+    renew_projection_claim,
     schedule_provider_retry,
     schedule_task_recheck,
     subscription_matches_command,
@@ -336,6 +338,18 @@ class InMemoryChannelStore:
                 binding,
                 lookup,
                 now=self._clock(),
+            )
+
+    async def renew_projection_claim(
+        self, *, command: RenewProjectionClaimCommand
+    ) -> ProjectionUpdateResult:
+        async with self._lock:
+            return self._save(
+                renew_projection_claim(
+                    self._require_subscription(command.subscription_id),
+                    command,
+                    now=self._clock(),
+                )
             )
 
     async def record_initial_projection(

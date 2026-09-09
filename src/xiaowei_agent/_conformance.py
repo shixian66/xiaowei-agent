@@ -27,7 +27,12 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         CapabilityRenderer,
     )
     from xiaowei_agent.application.channel_access import FeishuMembershipPort
+    from xiaowei_agent.application.channel_projection import (
+        ChannelMessagePort,
+        TaskProjectionPort,
+    )
     from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
+    from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
     from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
     from xiaowei_agent.capabilities.resolver import (
         CapabilityRegistry,
@@ -43,6 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         FeishuInboundTransport,
         FeishuSdkInboundTransport,
         FeishuSdkMembershipAdapter,
+        FeishuSdkMessageAdapter,
     )
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
@@ -104,12 +110,19 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         identity: "StaticFeishuIdentityDirectory",
         inbound: "FeishuSdkInboundTransport",
         membership: "FeishuSdkMembershipAdapter",
+        messages: "FeishuSdkMessageAdapter",
     ) -> None:
-        """三个 SDK/身份实现必须保持应用层与入口层的本地窄协议。"""
+        """四个 SDK/身份实现必须保持应用层与入口层的本地窄协议。"""
         identity_port: FeishuIdentityDirectory = identity
         inbound_port: FeishuInboundTransport = inbound
         membership_port: FeishuMembershipPort = membership
-        _ = (identity_port, inbound_port, membership_port)
+        message_port: ChannelMessagePort = messages
+        _ = (identity_port, inbound_port, membership_port, message_port)
+
+    def _task_projection_anchor(runtime: "TaskViewRuntime") -> None:
+        """真实读取 Runtime 必须满足渠道只读投影的最小端口。"""
+        anchored: TaskProjectionPort = runtime
+        _ = anchored
 
     def _postgres_port_anchors(
         plans: "PostgresPlanStore", ledger: "PostgresEvidenceLedger"

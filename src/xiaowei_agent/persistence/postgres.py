@@ -83,6 +83,7 @@ from xiaowei_agent.persistence.channel import (
     ProjectionSubscriptionNotFoundError,
     ProjectionUpdateResult,
     RecordInitialProjectionCommand,
+    RenewProjectionClaimCommand,
     ScheduleProviderRetryCommand,
     ScheduleTaskRecheckCommand,
     authorize_claimed_task_lookup,
@@ -91,6 +92,7 @@ from xiaowei_agent.persistence.channel import (
     complete_projection,
     dead_letter_projection,
     record_initial_projection,
+    renew_projection_claim,
     schedule_provider_retry,
     schedule_task_recheck,
     subscription_matches_command,
@@ -757,6 +759,14 @@ class PostgresChannelStore:
             )
             result = decision(current, command, now=self._clock())
             return await self._persist_projection_result(connection, result)
+
+    @_persistence_boundary(write=True)
+    async def renew_projection_claim(
+        self, *, command: RenewProjectionClaimCommand
+    ) -> ProjectionUpdateResult:
+        return await self._mutate_projection(
+            command=command, decision=renew_projection_claim
+        )
 
     @_persistence_boundary(write=True)
     async def record_initial_projection(

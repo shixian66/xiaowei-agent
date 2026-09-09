@@ -56,12 +56,14 @@ import sys
 from xiaowei_agent.interfaces.feishu_listener import FeishuListener
 from xiaowei_agent.interfaces.feishu_sdk import (
     FeishuSdkInboundTransport,
+    FeishuSdkMessageAdapter,
     FeishuSdkMembershipAdapter,
 )
 FeishuSdkInboundTransport(app_id='app', app_secret_file='/missing')
 FeishuSdkMembershipAdapter(
     tenant_id='dev-local', app_id='app', app_secret_file='/missing'
 )
+FeishuSdkMessageAdapter(app_id='app', app_secret_file='/missing')
 assert 'lark_oapi' not in sys.modules
 assert FeishuListener is not None
 """

@@ -18,6 +18,7 @@ from xiaowei_agent.application.channel_submission import ChannelSubmitCommand
 from xiaowei_agent.persistence.channel import (
     ClaimedTaskLookup,
     ProjectionClaimNotFoundError,
+    RenewProjectionClaimCommand,
 )
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
 
@@ -102,6 +103,16 @@ def test_projection_worker_cannot_supply_the_task_scope_it_resolves() -> None:
 
     assert fields == {"subscription_id", "claim_owner", "fencing_token"}
     assert not {"task_id", "tenant_id", "environment_id", "actor"} & fields
+
+    renewal_fields = set(RenewProjectionClaimCommand.model_fields)
+    assert renewal_fields == {
+        "subscription_id",
+        "claim_owner",
+        "fencing_token",
+        "expected_state",
+        "ttl_seconds",
+    }
+    assert not {"task_id", "tenant_id", "environment_id", "actor"} & renewal_fields
 
 
 def test_not_found_error_has_one_constant_message_and_no_identifier_slot() -> None:

@@ -756,14 +756,17 @@ class ProjectionSubscription(Contract):
 - `create_projection_subscription`
 - `list_due_projection_subscriptions`（查询必须显式携带 tenant/environment）
 - `claim_projection_subscription`
+- `renew_projection_claim`（只允许同一 live owner/token 紧邻出站前续期，不生成新 fence）
 - `record_initial_projection`
 - `schedule_task_recheck`
 - `schedule_provider_retry`
 - `complete_projection`
 - `dead_letter_projection`
 
-所有更新都带 `subscription_id + claim_owner + fencing_token + expected_state`。存储层返回 winner，
-陈旧 claim 只能成为 loser，不能覆盖新状态。
+所有 claim 续期和状态更新都带
+`subscription_id + claim_owner + fencing_token + expected_state`。存储层返回 `applied + winner`；
+应用层必须检查每次返回值，陈旧 claim 只能记录为 `claim_lost` loser、返回未处理，不能覆盖新状态或
+被统计成成功处理。
 
 到期订阅发现以 `channel_bindings` 的 tenant/environment 为授权 scope，并只返回已有绑定的订阅；
 未绑定订阅 fail-closed，不会被任何 worker 发现。`projection_subscriptions` 不复制 scope 字段，
@@ -781,9 +784,13 @@ worker 实例先从受信配置取得唯一 tenant/environment，并用该 scope
    不写 `last_error_code`，也不增加供应商失败计数。
 4. 若任务终态，通过 Runtime 读取 `TaskView`，再读取已授权 submission 生成安全请求预览。
 5. 紧邻发送前再次回读 `TaskRecord.version`；版本变化则放弃本次 payload 并重新投影。
-6. 生成稳定 payload digest；同版本同目的地产生相同卡片内容。
-7. 调用异步飞书端口；群/私聊来源任务更新同一 message，Web 来源任务发送一次私聊。
-8. 以 claim/fencing 提交 `COMPLETED`；丢失 claim 的提交不生效。
+6. 在 provider 异常域之外解析群/私聊目的地；数据库、绑定与不变量失败不得计入 provider 重试预算。
+7. 取得 tenant 出站并发槽后、真正调用 provider 前，以同一 owner/token/fence 续期 live claim；续期
+   失败或返回时已过期则不发送，且不得复活旧 claim。
+8. 生成稳定 payload digest 并调用异步飞书端口；群/私聊来源任务更新同一 message，Web 来源任务
+   发送一次私聊。
+9. 以 claim/fencing 写回初始投影、任务重查、provider 重试/死信或 `COMPLETED`；每次都检查
+   `applied`，丢失 claim 时记录不含原始引用的闭集诊断并返回未处理。
 
 TaskStore 终态本身不可回退；投影只发送“受理”和“终态”，因此旧 running 卡片不会在终态后再次
 被计划发送。供应商调用成功但数据库提交前崩溃仍可能导致 Web 私聊重复，这是 at-least-once 的
@@ -796,7 +803,7 @@ TaskStore 终态本身不可回退；投影只发送“受理”和“终态”�
 | 参数 | 默认值 |
 | --- | --- |
 | 单次飞书 API timeout | 5 秒 |
-| projection claim lease | 15 秒，必须大于调用超时加提交余量 |
+| projection claim lease | 15 秒；读阶段后、出站前续期，续期租约必须大于调用超时加提交余量 |
 | provider 最大尝试次数 | 3 次 |
 | 默认 backoff | 1 秒、2 秒、4 秒 |
 | `Retry-After` 上限 | 30 秒 |
@@ -806,7 +813,8 @@ TaskStore 终态本身不可回退；投影只发送“受理”和“终态”�
 
 - 429、网络错误、超时、5xx：可重试。
 - 认证失败、权限不足、无效卡片 payload 等确定性 4xx：直接 `DEAD_LETTER`。
-- 错误日志仅记录闭集错误码、HTTP 状态类别、trace/task/subscription 摘要，不记录响应正文。
+- 错误日志仅记录受信 tenant/environment、闭集错误码、HTTP 状态类别与 task/subscription 摘要，
+  不记录响应正文或原始引用。
 - 不承诺同一 destination 下不同任务全局串行；它们是独立 subscription，可在 tenant 并发预算内并行。
 - 任务结果不受渠道重试次数影响；投递失败只体现在渠道审计和运维告警。
 
@@ -1278,17 +1286,27 @@ python -m pip_audit
 - Modify: `.env.example`
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `src/xiaowei_agent/config.py`
+- Modify: `src/xiaowei_agent/interfaces/feishu_sdk.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
+- Modify: `src/xiaowei_agent/persistence/channel.py`
 - Create: `src/xiaowei_agent/rendering/feishu.py`
 - Create: `src/xiaowei_agent/application/channel_projection.py`
 - Create: `src/xiaowei_agent/interfaces/feishu_worker.py`
+- Modify: `tests/contract/test_feishu_sdk_seam.py`
+- Create: `tests/contract/test_feishu_worker.py`
+- Modify: `tests/security/test_dependency_baseline.py`
+- Modify: `tests/security/test_feishu_sdk_boundary.py`
 - Modify: `tests/security/test_module_layering.py`
 - Create: `tests/unit/test_feishu_rendering.py`
+- Modify: `tests/unit/test_feishu_config.py`
 - Modify: `tests/unit/test_local_stack.py`
 - Create: `tests/contract/test_channel_projection_worker.py`
 - Create: `tests/security/test_feishu_projection_safety.py`
 - Create: `tests/security/test_projection_fencing.py`
 - Modify: `tests/security/test_task_submission_read_boundary.py`
+- Modify: `README.md`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 
@@ -1296,11 +1314,14 @@ python -m pip_audit
 2. 写 worker 状态机失败测试：worker 只按受信配置的 tenant/environment 查询 due，等待任务与
    provider failure 分开、版本变化重投影、陈旧 fencing 失败、同一 subscription 串行、terminal
    subscription 不重开；不写无法兑现的 destination 全局串行断言。
-3. 写 provider 失败矩阵和 5s/15s/3 次/退避/Retry-After 上限测试，使用 fake clock/sleep/client。
-4. 写 TDD 反证：临时移除发送前 version re-read 或 fencing 条件时，对应用例必须变红。
+3. 写 provider 失败矩阵和 5s/15s/3 次/退避/Retry-After 上限测试，使用 fake clock/sleep/client；
+   同时覆盖读阶段消耗租约后紧邻出站续期、续期返回即过期不发送，以及五类状态写回的
+   `applied=False` loser。
+4. 写 TDD 反证：临时移除发送前 version re-read、claim 续期、任一状态写回结果检查或 fencing
+   条件时，对应用例必须变红。
 5. 每个新增投递设置（含安全 Web 详情 base URL）同时登记 `_FIELD_TO_ENV` 与
-   `.env.example`，安全门证明集合相等；base URL 必须是配置的 HTTPS origin，不能由事件、Host
-   Header 或 Forwarded Header 拼出。
+   `.env.example`，安全门证明集合相等；base URL 必须是配置并以 IDNA ASCII hostname 规范化的
+   HTTPS origin，不能由事件、Host Header 或 Forwarded Header 拼出。
 6. 最小实现；投递 worker 只读 TaskViewRuntime/TaskStore，不触发任务状态迁移；模块入口固定为
    `python -m xiaowei_agent.interfaces.feishu_worker`，不增加 `[project.scripts]`。
 7. 在 `local_stack.py` 增加 `build_postgres_channel_worker_stack()`，只装配窄 task-view stack、
