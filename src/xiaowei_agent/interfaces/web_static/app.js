@@ -307,6 +307,7 @@ function schedulePoll() {
   }
   const delay = document.visibilityState === "hidden" ? Math.max(30000, pollDelay) : pollDelay;
   pollTimer = window.setTimeout(() => readSelectedTask(), delay);
+  pollDelay = Math.min(10000, Math.max(2000, Math.round(pollDelay * 1.6)));
 }
 
 async function readSelectedTask({ immediate = false } = {}) {
@@ -324,7 +325,6 @@ async function readSelectedTask({ immediate = false } = {}) {
     if (terminal) {
       return;
     }
-    pollDelay = Math.min(10000, Math.max(2000, Math.round(pollDelay * 1.6)));
   } catch (error) {
     setVisible(elements.progress, false);
     setVisible(elements.readError, true);

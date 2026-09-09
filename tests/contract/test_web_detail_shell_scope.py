@@ -37,3 +37,18 @@ def test_detail_css_has_a_real_narrow_screen_layout() -> None:
 
     assert "@media (max-width: 720px)" in css
     assert ".detail-shell" in css
+
+
+def test_each_poll_scheduler_owns_success_and_transient_error_backoff() -> None:
+    cases = (
+        ("app.js", "readSelectedTask"),
+        ("detail.js", "readTask"),
+    )
+    for asset_name, reader_name in cases:
+        script = (_STATIC / asset_name).read_text(encoding="utf-8")
+        scheduler_start = script.index("function schedulePoll()")
+        scheduler_end = script.index(f"async function {reader_name}(", scheduler_start)
+        scheduler = script[scheduler_start:scheduler_end]
+
+        assert "pollDelay * 1.6" in scheduler
+        assert script.count("pollDelay * 1.6") == 1

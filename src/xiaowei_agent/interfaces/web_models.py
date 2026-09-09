@@ -5,7 +5,13 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from xiaowei_agent.application.channel_access import AccessibleTask, TaskPage, TaskSummary
+from xiaowei_agent.application.channel_access import (
+    TASK_DETAIL_PREVIEW_LIMIT,
+    TASK_SUMMARY_PREVIEW_LIMIT,
+    AccessibleTask,
+    TaskPage,
+    TaskSummary,
+)
 from xiaowei_agent.application.channel_submission import SubmittedTask
 from xiaowei_agent.contracts import (
     AwareDatetime,
@@ -63,7 +69,7 @@ class WebCurrentUser(_WebModel):
 class WebTaskSummary(_WebModel):
     task_id: StrictStr
     status: TaskStatus
-    request_preview: NonEmptyText = Field(max_length=240)
+    request_preview: NonEmptyText = Field(max_length=TASK_SUMMARY_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     detail_path: StrictStr
 
@@ -120,7 +126,7 @@ class WebTaskAccepted(_WebModel):
 class WebTaskDetail(_WebModel):
     task_id: StrictStr
     status: TaskStatus
-    request_preview: NonEmptyText = Field(max_length=8192)
+    request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     task_version: StrictInt = Field(ge=0)
     detail_path: StrictStr

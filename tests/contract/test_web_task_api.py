@@ -7,6 +7,8 @@ from typing import Any
 import httpx
 
 from xiaowei_agent.application.channel_access import (
+    TASK_DETAIL_PREVIEW_LIMIT,
+    TASK_SUMMARY_PREVIEW_LIMIT,
     AccessibleTask,
     TaskAccessNotFoundError,
     TaskAccessQuery,
@@ -38,11 +40,20 @@ from xiaowei_agent.interfaces.web_auth import (
     WebCsrfError,
     WebOriginError,
 )
+from xiaowei_agent.interfaces.web_models import WebTaskDetail, WebTaskSummary
 from xiaowei_agent.persistence import IdempotencyConflictError
 
 _COOKIE = "session_value_for_web_task_api"
 _CSRF = "a" * 64
 _NOW = dt.datetime(2026, 9, 9, 9, 30, tzinfo=dt.UTC)
+
+
+def _field_max_length(model: type[Any], field_name: str) -> int | None:
+    for constraint in model.model_fields[field_name].metadata:
+        maximum = getattr(constraint, "max_length", None)
+        if isinstance(maximum, int):
+            return maximum
+    return None
 
 
 def _principal(
@@ -237,6 +248,17 @@ async def test_list_tasks_only_safe_summary_fields_and_server_cursor() -> None:
         )
     ]
     assert "query_path" not in response.text
+
+
+def test_web_preview_models_share_the_application_length_contract() -> None:
+    assert (
+        _field_max_length(WebTaskSummary, "request_preview")
+        == TASK_SUMMARY_PREVIEW_LIMIT
+    )
+    assert (
+        _field_max_length(WebTaskDetail, "request_preview")
+        == TASK_DETAIL_PREVIEW_LIMIT
+    )
 
 
 async def test_detail_preserves_complete_safe_render_without_internal_query_path() -> None:

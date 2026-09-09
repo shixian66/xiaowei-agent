@@ -320,14 +320,19 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   policy 或执行链。普通用户/admin 列表语义复用 `TaskAccessService`；提交复用
   `ChannelSubmissionService` 的权限与幂等语义；群详情每次读取都重新校验成员，撤权后统一 404。
   两个 shell 无 inline script，外部文本只经 `textContent`；详情 shell 不含 textarea、提交表单、
-  CSRF token、工作台导航或 `app.js`。本机全量为 2788 passed / 186 skipped / 5 warnings；安全门为
-  1183 passed / 79 skipped / 1712 deselected / 5 warnings；Ruff 与 mypy（151 个源文件）通过。
+  CSRF token、工作台导航或 `app.js`。精确 SHA 审查后的加固把摘要/详情预览上限收敛为
+  `TaskAccessService` 与 Web DTO 共用的单一常量，并把工作台与详情的退避推进移入各自共享
+  poll scheduler，使运行态成功和瞬时读取失败都从既定下限退避，401/404 仍立即停止。本机全量为
+  2790 passed / 186 skipped / 5 warnings；安全门为 1183 passed / 79 skipped / 1714 deselected /
+  5 warnings；Ruff 与 mypy（151 个源文件）通过。
   实际构建 wheel 已包含五个 HTML/CSS/JS 静态资源，因此 `pyproject.toml` 保持零 diff。以上仍是
   fake/memory 与离线契约证据，不构成真实 OAuth、部署、canary 或用户验收。
 - **M7 PR 7 有真实红灯与安全变异反证**：首轮新增契约/安全测试在任务 API、shell 与静态资源尚未
   实现时为 29 failed / 2 passed；自审新增的未登录畸形详情链接反例先得到 404，调整为 session 优先
   后固定返回 401。临时把一个动态状态标签从 `textContent` 改为 `innerHTML` 时，XSS 安全测试准确
-  转红；恢复生产实现后同一用例转绿，变体未提交。
+  转红；恢复生产实现后同一用例转绿。精确 SHA 审查后的两个新回归测试先分别因缺少公开单一预览
+  上限、退避只在成功分支推进而转红；修复后转绿。再把 Web 摘要边界人为缩短 1、移除 scheduler
+  退避时，对应用例均准确转红并在恢复后转绿；所有变体均未提交。
 - **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
   collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
   `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export

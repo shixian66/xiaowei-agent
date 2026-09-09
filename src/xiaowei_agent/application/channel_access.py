@@ -1,7 +1,7 @@
 """Web/飞书共用的任务读取授权与安全摘要投影。"""
 
 import logging
-from typing import Protocol
+from typing import Final, Protocol
 
 from pydantic import Field
 
@@ -31,8 +31,8 @@ from xiaowei_agent.persistence.channel import (
 from xiaowei_agent.persistence.store import TaskNotFoundError, TaskStore
 from xiaowei_agent.redaction import scrub_text
 
-_SUMMARY_PREVIEW_LIMIT = 240
-_DETAIL_PREVIEW_LIMIT = 8192
+TASK_SUMMARY_PREVIEW_LIMIT: Final[int] = 240
+TASK_DETAIL_PREVIEW_LIMIT: Final[int] = 8192
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -72,7 +72,7 @@ class TaskListQuery(Contract):
 
 class AccessibleTask(Contract):
     task_view: TaskView
-    request_preview: NonEmptyText = Field(max_length=_DETAIL_PREVIEW_LIMIT)
+    request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     task_version: StrictInt = Field(ge=0)
 
@@ -80,7 +80,7 @@ class AccessibleTask(Contract):
 class TaskSummary(Contract):
     task_id: StrictStr
     status: TaskStatus
-    request_preview: NonEmptyText = Field(max_length=_SUMMARY_PREVIEW_LIMIT)
+    request_preview: NonEmptyText = Field(max_length=TASK_SUMMARY_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
 
 
@@ -196,7 +196,7 @@ class TaskAccessService:
         return AccessibleTask(
             task_view=task_view,
             request_preview=_preview(
-                submission.envelope.text, limit=_DETAIL_PREVIEW_LIMIT
+                submission.envelope.text, limit=TASK_DETAIL_PREVIEW_LIMIT
             ),
             submitted_at=submission.as_of,
             task_version=record.version,
@@ -208,7 +208,7 @@ class TaskAccessService:
             task_id=item.record.task_id,
             status=item.record.status,
             request_preview=_preview(
-                item.submission.envelope.text, limit=_SUMMARY_PREVIEW_LIMIT
+                item.submission.envelope.text, limit=TASK_SUMMARY_PREVIEW_LIMIT
             ),
             submitted_at=item.submission.as_of,
         )
@@ -269,6 +269,8 @@ class TaskAccessService:
 
 
 __all__ = [
+    "TASK_DETAIL_PREVIEW_LIMIT",
+    "TASK_SUMMARY_PREVIEW_LIMIT",
     "AccessibleTask",
     "FeishuMembershipPort",
     "TaskAccessNotFoundError",

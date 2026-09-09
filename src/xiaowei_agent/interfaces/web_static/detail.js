@@ -203,6 +203,7 @@ function schedulePoll() {
   }
   const delay = document.visibilityState === "hidden" ? Math.max(30000, pollDelay) : pollDelay;
   pollTimer = window.setTimeout(readTask, delay);
+  pollDelay = Math.min(15000, Math.max(5000, Math.round(pollDelay * 1.6)));
 }
 
 async function readTask() {
@@ -230,7 +231,6 @@ async function readTask() {
       stopped = true;
       return;
     }
-    pollDelay = Math.min(15000, Math.max(5000, Math.round(pollDelay * 1.6)));
   } catch (error) {
     clearTaskDetail();
     const unavailable = error.status === 404 || error.status === 401;
