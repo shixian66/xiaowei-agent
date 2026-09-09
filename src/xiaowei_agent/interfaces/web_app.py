@@ -1,22 +1,43 @@
-"""默认关闭、无执行权的飞书认证 Web app。"""
+"""默认关闭、无执行权的飞书认证 Web 工作台。"""
 
 import json
+import re
 import sys
+from importlib.resources import files
 from typing import Annotated, Final
 
 from fastapi import FastAPI, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from xiaowei_agent.application.channel_access import (
+    TaskAccessNotFoundError,
+    TaskAccessQuery,
+    TaskAccessService,
+    TaskAccessSnapshotUnavailableError,
+    TaskListQuery,
+)
+from xiaowei_agent.application.channel_submission import (
+    ChannelSubmissionForbiddenError,
+    ChannelSubmissionService,
+    ChannelSubmitCommand,
+)
+from xiaowei_agent.application.task_view_runtime import (
+    ApplicationFailure,
+    classify_application_exception,
+)
 from xiaowei_agent.config import ConfigError, Settings, load_settings
-from xiaowei_agent.contracts import ReadinessProbe
+from xiaowei_agent.contracts import ChannelKind, ReadinessProbe
+from xiaowei_agent.interfaces.auth import Clock, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
 from xiaowei_agent.interfaces.web_auth import (
+    AuthenticatedWebSession,
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
@@ -25,7 +46,15 @@ from xiaowei_agent.interfaces.web_auth import (
     WebOAuthUnavailableError,
     WebOriginError,
 )
+from xiaowei_agent.interfaces.web_models import (
+    WebCurrentUser,
+    WebTaskAccepted,
+    WebTaskDetail,
+    WebTaskPage,
+    WebTaskSubmitRequest,
+)
 from xiaowei_agent.log import configure_logging
+from xiaowei_agent.trace import bind_trace_id
 
 SESSION_COOKIE_NAME: Final[str] = "__Host-xiaowei-session"
 OAUTH_STATE_COOKIE_NAME: Final[str] = "__Host-xiaowei-oauth-state"
@@ -42,11 +71,18 @@ _CSP: Final[str] = (
     "object-src 'none'"
 )
 _HSTS: Final[bytes] = b"max-age=31536000"
-_SHELL: Final[str] = """<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>小维 · 运维任务工作台</title></head>
-<body><main><h1>小维 · 运维任务工作台</h1><p>认证已完成。</p></main></body>
-</html>"""
+_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+_POSITIVE_INT_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]{0,18}")
+_MAX_CREATED_SEQ: Final[int] = 9_223_372_036_854_775_807
+_STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
+    "app.css": "text/css",
+    "app.js": "text/javascript",
+    "detail.js": "text/javascript",
+}
+
+
+class _WebInputError(ValueError):
+    """Web 协议字段形状不合法；异常正文不返回浏览器。"""
 
 
 class _SecurityHeadersMiddleware:
@@ -110,7 +146,26 @@ async def _forbidden(_: Request, __: Exception) -> Response:
     return _error(403, "forbidden")
 
 
-async def _internal_error(_: Request, __: Exception) -> Response:
+async def _input_error(_: Request, __: Exception) -> Response:
+    return _error(400, "invalid_request")
+
+
+async def _task_not_found(_: Request, __: Exception) -> Response:
+    return _error(404, "not_found")
+
+
+async def _task_snapshot_unavailable(_: Request, __: Exception) -> Response:
+    return _error(503, "unavailable")
+
+
+async def _application_error(_: Request, exc: Exception) -> Response:
+    failure = classify_application_exception(exc)
+    if failure is ApplicationFailure.CONFLICT:
+        return _error(409, "idempotency_conflict")
+    if failure is ApplicationFailure.NOT_FOUND:
+        return _error(404, "not_found")
+    if failure is ApplicationFailure.UNAVAILABLE:
+        return _error(503, "unavailable")
     return _error(500, "internal_error")
 
 
@@ -162,15 +217,115 @@ def _single_cookie(request: Request, *, name: str) -> tuple[str | None, bool]:
     return (matches[0] if matches else None), True
 
 
+def _asset_text(name: str) -> str:
+    """从源码 checkout 与已安装 wheel 的同一包资源位置读取静态文件。"""
+    return files("xiaowei_agent.interfaces").joinpath("web_static", name).read_text(
+        encoding="utf-8"
+    )
+
+
+def _task_id_or_not_found(task_id: str) -> str:
+    if _TASK_ID_RE.fullmatch(task_id) is None:
+        raise TaskAccessNotFoundError
+    return task_id
+
+
+def _list_query(request: Request) -> tuple[int | None, int]:
+    allowed = {"before_created_seq", "limit"}
+    if set(request.query_params) - allowed:
+        raise _WebInputError
+
+    cursor_values = request.query_params.getlist("before_created_seq")
+    if len(cursor_values) > 1:
+        raise TaskAccessNotFoundError
+    before_created_seq: int | None = None
+    if cursor_values:
+        raw_cursor = cursor_values[0]
+        if _POSITIVE_INT_RE.fullmatch(raw_cursor) is None:
+            raise TaskAccessNotFoundError
+        before_created_seq = int(raw_cursor)
+        if before_created_seq > _MAX_CREATED_SEQ:
+            raise TaskAccessNotFoundError
+
+    limit_values = request.query_params.getlist("limit")
+    if len(limit_values) > 1:
+        raise _WebInputError
+    if not limit_values:
+        return before_created_seq, 20
+    raw_limit = limit_values[0]
+    if _POSITIVE_INT_RE.fullmatch(raw_limit) is None:
+        raise _WebInputError
+    limit = int(raw_limit)
+    if limit > 100:
+        raise _WebInputError
+    return before_created_seq, limit
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _WebInputError
+        result[key] = value
+    return result
+
+
+def _reject_non_json_constant(_: str) -> None:
+    raise _WebInputError
+
+
+async def _task_submit_body(request: Request) -> WebTaskSubmitRequest:
+    try:
+        value = json.loads(
+            await request.body(),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_non_json_constant,
+        )
+        return WebTaskSubmitRequest.model_validate(value)
+    except (UnicodeError, ValueError, TypeError, ValidationError):
+        raise _WebInputError from None
+
+
+async def _authenticated(
+    request: Request, *, auth: WebAuthService
+) -> tuple[str, AuthenticatedWebSession]:
+    cookie, unambiguous = _single_cookie(request, name=SESSION_COOKIE_NAME)
+    if not unambiguous:
+        raise WebAuthenticationError
+    session = await auth.authenticate(session_cookie=cookie)
+    if cookie is None:  # authenticate() 已 fail-closed；保留窄化供类型检查。
+        raise WebAuthenticationError
+    return cookie, session
+
+
+def _validate_state_change(
+    request: Request, *, auth: WebAuthService, session_cookie: str
+) -> None:
+    origins = request.headers.getlist("origin")
+    csrf_tokens = request.headers.getlist(_CSRF_HEADER)
+    auth.validate_state_change(
+        session_cookie=session_cookie,
+        origin=origins[0] if len(origins) == 1 else None,
+        csrf_token=csrf_tokens[0] if len(csrf_tokens) == 1 else None,
+    )
+
+
 def create_app(
     *,
     auth: WebAuthService,
     settings: Settings,
     readiness: ReadinessProbe,
+    task_access: TaskAccessService,
+    submissions: ChannelSubmissionService,
+    clock: Clock,
+    policy_revision: str,
 ) -> FastAPI:
-    """只注册 PR 6 认证路由；任务业务路由留给 PR 7。"""
+    """注册认证与薄任务投影路由，不装配执行 Runtime。"""
     if not settings.web_app_enabled:
         raise ValueError("Web app is disabled")
+    index_shell = _asset_text("index.html")
+    detail_shell = _asset_text("detail.html")
+    static_assets = {name: _asset_text(name) for name in _STATIC_MEDIA_TYPES}
     app = FastAPI(
         redirect_slashes=False,
         docs_url=None,
@@ -180,7 +335,7 @@ def create_app(
     app.add_middleware(
         JsonBodyLimitMiddleware,
         limit=settings.api_request_body_limit_bytes,
-        paths=frozenset({"/app/api/logout"}),
+        paths=frozenset({"/app/api/logout", "/app/api/tasks"}),
     )
     app.add_middleware(_SecurityHeadersMiddleware)
     app.add_exception_handler(RequestValidationError, _validation_error)
@@ -191,7 +346,13 @@ def create_app(
     app.add_exception_handler(WebOAuthUnavailableError, _oauth_unavailable)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
-    app.add_exception_handler(Exception, _internal_error)
+    app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
+    app.add_exception_handler(TaskAccessNotFoundError, _task_not_found)
+    app.add_exception_handler(
+        TaskAccessSnapshotUnavailableError, _task_snapshot_unavailable
+    )
+    app.add_exception_handler(_WebInputError, _input_error)
+    app.add_exception_handler(Exception, _application_error)
 
     @app.get("/oauth/feishu/start")
     async def oauth_start() -> Response:
@@ -252,27 +413,69 @@ def create_app(
 
     @app.get("/app")
     async def shell(request: Request) -> Response:
-        session_cookie, _ = _single_cookie(request, name=SESSION_COOKIE_NAME)
-        await auth.authenticate(session_cookie=session_cookie)
-        return HTMLResponse(_SHELL)
+        await _authenticated(request, auth=auth)
+        return HTMLResponse(index_shell)
+
+    @app.get("/app/tasks/{task_id}")
+    async def detail_shell_route(request: Request, task_id: str) -> Response:
+        await _authenticated(request, auth=auth)
+        _task_id_or_not_found(task_id)
+        return HTMLResponse(detail_shell)
 
     @app.get("/app/api/me")
     async def current_user(request: Request) -> dict[str, object]:
-        session_cookie, _ = _single_cookie(request, name=SESSION_COOKIE_NAME)
-        session = await auth.authenticate(session_cookie=session_cookie)
-        return {
-            "actor": session.principal.actor,
-            "environment_id": session.principal.environment_id,
-            "permissions": sorted(
-                permission.value for permission in session.principal.permissions
-            ),
-            "csrf_token": session.csrf_token,
-        }
+        _, session = await _authenticated(request, auth=auth)
+        return WebCurrentUser.from_session(session).model_dump(mode="json")
+
+    @app.get("/app/api/tasks")
+    async def list_tasks(request: Request) -> dict[str, object]:
+        _, session = await _authenticated(request, auth=auth)
+        before_created_seq, limit = _list_query(request)
+        page = await task_access.list_tasks(
+            query=TaskListQuery(
+                principal=session.principal,
+                before_created_seq=before_created_seq,
+                limit=limit,
+            )
+        )
+        return WebTaskPage.from_page(page).model_dump(mode="json")
+
+    @app.post("/app/api/tasks", status_code=202)
+    async def submit_task(request: Request) -> dict[str, object]:
+        session_cookie, session = await _authenticated(request, auth=auth)
+        _validate_state_change(request, auth=auth, session_cookie=session_cookie)
+        body = await _task_submit_body(request)
+        trace_id = trusted_trace_id()
+        with bind_trace_id(trace_id):
+            submitted = await submissions.submit(
+                command=ChannelSubmitCommand(
+                    principal=session.principal,
+                    channel=ChannelKind.WEB,
+                    request_id=f"web:{trace_id}",
+                    trace_id=trace_id,
+                    policy_revision=policy_revision,
+                    text=body.text,
+                    client_submission_ref=body.client_submission_id,
+                    conversation_ref=None,
+                    submitted_at=clock(),
+                )
+            )
+        return WebTaskAccepted.from_submission(submitted).model_dump(mode="json")
+
+    @app.get("/app/api/tasks/{task_id}")
+    async def get_task(request: Request, task_id: str) -> dict[str, object]:
+        _, session = await _authenticated(request, auth=auth)
+        accessible = await task_access.get_task(
+            query=TaskAccessQuery(
+                principal=session.principal,
+                task_id=_task_id_or_not_found(task_id),
+            )
+        )
+        return WebTaskDetail.from_accessible(accessible).model_dump(mode="json")
 
     @app.post("/app/api/logout", status_code=204)
     async def logout(request: Request) -> Response:
-        cookie, _ = _single_cookie(request, name=SESSION_COOKIE_NAME)
-        await auth.authenticate(session_cookie=cookie)
+        cookie, _ = await _authenticated(request, auth=auth)
         if not _is_json_request(request):
             return _error(415, "unsupported_media_type")
         try:
@@ -281,17 +484,23 @@ def create_app(
             return _error(400, "invalid_request")
         if payload != {}:
             return _error(400, "invalid_request")
-        origins = request.headers.getlist("origin")
-        csrf_tokens = request.headers.getlist(_CSRF_HEADER)
-        auth.validate_state_change(
-            session_cookie=cookie or "",
-            origin=origins[0] if len(origins) == 1 else None,
-            csrf_token=csrf_tokens[0] if len(csrf_tokens) == 1 else None,
-        )
+        _validate_state_change(request, auth=auth, session_cookie=cookie)
         await auth.logout(session_cookie=cookie)
         response = Response(status_code=204)
         _clear_secret_cookie(response, name=SESSION_COOKIE_NAME)
         return response
+
+    @app.get("/app/static/app.css")
+    async def app_css() -> Response:
+        return Response(static_assets["app.css"], media_type="text/css")
+
+    @app.get("/app/static/app.js")
+    async def app_javascript() -> Response:
+        return Response(static_assets["app.js"], media_type="text/javascript")
+
+    @app.get("/app/static/detail.js")
+    async def detail_javascript() -> Response:
+        return Response(static_assets["detail.js"], media_type="text/javascript")
 
     @app.get("/healthz")
     async def health() -> dict[str, str]:

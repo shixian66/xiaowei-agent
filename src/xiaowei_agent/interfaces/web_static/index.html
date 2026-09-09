@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>小维 · 运维任务工作台</title>
+  <link rel="stylesheet" href="/app/static/app.css">
+</head>
+<body class="workbench-page">
+  <section class="desktop-width-notice" role="status">
+    <div class="brand-mark brand-mark-large" aria-hidden="true">维</div>
+    <h1>请使用宽度至少 1280px 的桌面浏览器</h1>
+    <p>工作台包含任务列表与结果双栏。飞书卡片中的单任务详情仍可在当前设备查看。</p>
+  </section>
+
+  <div class="app-shell" id="workbench-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">维</div>
+        <div>
+          <p class="eyebrow">XIAOWEI AIOPS</p>
+          <h1>小维 · 运维任务工作台</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="environment-pill" title="当前任务作用域">
+          <span class="presence-dot" aria-hidden="true"></span>
+          <span id="environment-name">正在读取环境</span>
+        </div>
+        <div class="user-chip">
+          <span class="user-avatar" id="user-avatar" aria-hidden="true">—</span>
+          <span>
+            <strong id="actor-name">正在认证</strong>
+            <small id="role-name">授权用户</small>
+          </span>
+        </div>
+        <button class="button button-quiet" id="logout-button" type="button">退出</button>
+      </div>
+    </header>
+
+    <div class="workspace-grid">
+      <aside class="task-sidebar" aria-label="任务导航">
+        <div class="sidebar-heading">
+          <div>
+            <p class="eyebrow">TASK STREAM</p>
+            <h2 id="task-list-title">我的任务</h2>
+          </div>
+          <button class="icon-button" id="refresh-list" type="button" aria-label="刷新任务列表">↻</button>
+        </div>
+
+        <div class="filter-tabs" role="group" aria-label="按状态筛选">
+          <button class="filter-tab is-active" type="button" data-filter="all">全部</button>
+          <button class="filter-tab" type="button" data-filter="active">处理中</button>
+          <button class="filter-tab" type="button" data-filter="terminal">已结束</button>
+        </div>
+
+        <div class="sidebar-state" id="list-loading" role="status">
+          <span class="spinner" aria-hidden="true"></span>
+          正在加载任务
+        </div>
+        <div class="sidebar-state is-hidden" id="list-empty">
+          <span class="empty-orbit" aria-hidden="true"></span>
+          <strong>还没有任务</strong>
+          <p>从右侧告诉小维你想检查什么。</p>
+        </div>
+        <div class="sidebar-state is-hidden" id="list-error" role="alert">
+          <strong>任务列表读取失败</strong>
+          <p>任务状态没有被修改，可以稍后重试。</p>
+        </div>
+
+        <ol class="task-list" id="task-list" aria-live="polite"></ol>
+        <button class="button button-secondary load-more is-hidden" id="load-more" type="button">加载更早任务</button>
+
+        <div class="sidebar-footnote">
+          <span class="shield-icon" aria-hidden="true">◆</span>
+          <p>这里只展示安全结果摘要。数据库真实结果行不在本工作台展示。</p>
+        </div>
+      </aside>
+
+      <main class="workbench-main">
+        <section class="assistant-hero" aria-labelledby="assistant-title">
+          <div class="assistant-heading">
+            <div class="ai-orb" aria-hidden="true"><span>AI</span></div>
+            <div>
+              <p class="eyebrow">XIAOWEI AI</p>
+              <h2 id="assistant-title">今天想让我检查什么？</h2>
+              <p>我会创建一条可追踪的只读运维任务，结果会保留状态与证据引用。</p>
+            </div>
+          </div>
+
+          <div class="composer-card">
+            <label class="sr-only" for="task-input">运维任务描述</label>
+            <textarea id="task-input" maxlength="8192" rows="4" placeholder="例如：检查最近三十分钟的慢查询，并说明证据和限制"></textarea>
+            <div class="composer-footer">
+              <div class="composer-hint">
+                <span class="keyboard-key">⌘</span><span class="keyboard-key">Enter</span>
+                <span>发送 · 每次发送是独立任务</span>
+              </div>
+              <button class="button button-primary" id="submit-task" type="button">
+                <span>发送任务</span><span aria-hidden="true">→</span>
+              </button>
+            </div>
+            <p class="form-message is-hidden" id="submit-message" role="status"></p>
+          </div>
+
+          <div class="capability-strip" aria-label="当前只读能力示例">
+            <span>可询问</span>
+            <span class="capability-chip">慢查询证据</span>
+            <span class="capability-chip">Prometheus 告警证据</span>
+            <span class="capability-chip">资产精确查询</span>
+          </div>
+        </section>
+
+        <section class="task-stage" aria-labelledby="current-task-title">
+          <div class="stage-heading">
+            <div>
+              <p class="eyebrow">CURRENT TASK</p>
+              <h2 id="current-task-title">当前任务</h2>
+            </div>
+            <a class="button button-secondary is-hidden" id="open-detail" href="/app">独立详情页</a>
+          </div>
+
+          <div class="empty-stage" id="task-empty">
+            <div class="empty-stage-graphic" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <h3>选择一条任务，或向小维发起新任务</h3>
+            <p>任务状态、完整安全结果、下一步和证据引用会在这里展示。</p>
+          </div>
+
+          <div class="task-detail is-hidden" id="task-detail">
+            <div class="task-overview">
+              <div>
+                <span class="status-badge" id="task-status"><span aria-hidden="true">●</span><span>读取中</span></span>
+                <h3 id="task-request">正在读取任务</h3>
+              </div>
+              <dl class="task-meta">
+                <div><dt>任务 ID</dt><dd id="task-id">—</dd></div>
+                <div><dt>提交时间</dt><dd id="task-submitted-at">—</dd></div>
+                <div><dt>版本</dt><dd id="task-version">—</dd></div>
+              </dl>
+            </div>
+
+            <div class="timeline-card" aria-label="任务状态时间线">
+              <span class="timeline-dot" aria-hidden="true"></span>
+              <div><small>当前状态</small><strong id="timeline-status">正在读取</strong></div>
+              <span class="timeline-line" aria-hidden="true"></span>
+              <div><small>刷新策略</small><strong id="polling-state">自动同步</strong></div>
+            </div>
+
+            <div class="result-card is-hidden" id="result-card">
+              <div class="section-label"><span aria-hidden="true">✦</span> 小维结论</div>
+              <p class="answer-text" id="result-answer"></p>
+              <div class="result-sections" id="result-sections"></div>
+              <section class="result-block is-hidden" id="next-steps-block">
+                <h4>下一步建议</h4>
+                <ol id="result-next-steps"></ol>
+              </section>
+              <section class="result-block refs-block is-hidden" id="refs-block">
+                <h4>证据引用</h4>
+                <ul id="result-refs"></ul>
+              </section>
+            </div>
+
+            <div class="progress-card" id="progress-card">
+              <span class="spinner spinner-large" aria-hidden="true"></span>
+              <div><strong>小维正在处理</strong><p>页面会自动读取最新任务事实，不会自行改写任务状态。</p></div>
+            </div>
+
+            <div class="read-error is-hidden" id="read-error" role="alert">
+              <div><strong>暂时无法读取最新状态</strong><p>这不代表任务失败，任务真相仍以服务端记录为准。</p></div>
+              <button class="button button-secondary" id="retry-detail" type="button">重试读取</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script type="module" src="/app/static/app.js"></script>
+</body>
+</html>

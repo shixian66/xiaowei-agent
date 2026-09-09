@@ -1,0 +1,84 @@
+"""浏览器动态内容必须保持纯文本，不获得 HTML/脚本解释权。"""
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+from tests.contract.test_web_task_api import _Access, _client
+
+from xiaowei_agent.application.channel_access import AccessibleTask
+from xiaowei_agent.contracts import (
+    RenderPayload,
+    RenderSection,
+    TaskStatus,
+    TaskView,
+    task_query_path,
+)
+
+pytestmark = pytest.mark.security
+
+_ROOT = Path(__file__).resolve().parents[2]
+_STATIC = _ROOT / "src" / "xiaowei_agent" / "interfaces" / "web_static"
+
+
+def test_javascript_has_no_html_execution_sink() -> None:
+    scripts = "\n".join(
+        (_STATIC / name).read_text(encoding="utf-8")
+        for name in ("app.js", "detail.js")
+    )
+    forbidden = (
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+    )
+
+    assert all(item not in scripts for item in forbidden)
+    assert ".textContent" in scripts
+
+
+def test_static_html_has_no_inline_handlers_or_template_interpolation() -> None:
+    html = "\n".join(
+        (_STATIC / name).read_text(encoding="utf-8")
+        for name in ("index.html", "detail.html")
+    )
+
+    assert "{{" not in html
+    assert "{%" not in html
+    assert " onerror=" not in html.lower()
+    assert " onload=" not in html.lower()
+    assert " onclick=" not in html.lower()
+
+
+async def test_untrusted_render_text_remains_json_data_not_html_response() -> None:
+    injected = '<img src=x onerror="alert(1)"><script>alert(2)</script>'
+    view = TaskView(
+        task_id="task-xss",
+        status=TaskStatus.SUCCEEDED,
+        render=RenderPayload(
+            answer=injected,
+            sections=(RenderSection(title=injected, body=injected, refs=(injected,)),),
+            next_steps=(injected,),
+            status=TaskStatus.SUCCEEDED,
+            refs=(injected,),
+        ),
+        query_path=task_query_path("task-xss"),
+    )
+    access = _Access()
+    access.detail_result = AccessibleTask(
+        task_view=view,
+        request_preview=injected,
+        submitted_at=dt.datetime(2026, 9, 9, tzinfo=dt.UTC),
+        task_version=2,
+    )
+    client, _, _ = _client(access=access)
+
+    async with client:
+        response = await client.get("/app/api/tasks/task-xss")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["render"]["answer"] == injected
+    assert "<script>alert(2)</script>" in response.text

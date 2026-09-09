@@ -6,9 +6,9 @@
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1
 > 渠道契约/ADR、PR 2 窄 TaskViewRuntime、PR 3 scoped channel access 与 PR 4 默认关闭的
 > 飞书 SDK seam、静态身份映射和长连接 listener，以及 PR 5 飞书卡片与 projection worker
-> 均已审查并合入。PR 6 Web OAuth/session 与空壳 Web app 已完成首轮精确 SHA 审查并按意见
-> 修复，等待最终 SHA 复审与 PR CI；真实 OAuth port 尚未激活，模块入口即使配置开启也会
-> fail-closed。
+> 均已审查并合入。PR 6 Web OAuth/session 与空壳 Web app 已通过复审及 CI，并以 PR #25
+> 合入 `main@6599bad`。PR 7 Web 运维任务工作台已在该基线上完成离线实现与本机验证，等待
+> 精确 SHA 审查；真实 OAuth port 尚未激活，模块入口即使配置开启也会 fail-closed。
 > PR 1–8 已获离线开发口令，后续 PR 仍须逐个审查、合入。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。

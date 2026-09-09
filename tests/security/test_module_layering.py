@@ -172,15 +172,22 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.log",
     },
     "interfaces/web_app.py": {
+        "xiaowei_agent.application",
         "xiaowei_agent.config",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.log",
+        "xiaowei_agent.trace",
     },
     "interfaces/web_auth.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.persistence",
+    },
+    "interfaces/web_models.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
     },
 }
 
