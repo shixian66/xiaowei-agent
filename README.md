@@ -3,11 +3,11 @@
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
 > 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
-> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–7
-> 已逐项审查并合入；PR 7 Web 运维任务工作台以 PR #26 合入 `main@0e7cb5c`。PR 8 已在该基线
-> 完成跨渠道一致性、默认关闭的 Compose 拓扑、安全 Eval 与离线闭环候选；PR #27 的代码/测试
-> head `09b6babf` 已取得八项远程 CI 全绿，当前等待报告收口提交的最终精确 SHA 复核与合入。
-> 本机没有 Docker 或 PostgreSQL DSN；隔离 PostgreSQL/Compose 证据来自该 PR 的 GitHub CI。
+> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
+> 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
+> `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机没有
+> Docker 或 PostgreSQL DSN，隔离 PostgreSQL/Compose 证据来自 GitHub CI。M7 尚未获得负责人
+> 里程碑验收或归档口令。
 > PR 1–8 只获得离线开发口令，真实 OAuth port 仍未激活。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
@@ -314,8 +314,9 @@ python -m scripts.compose_smoke
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed 或日志泄漏都会返回非零；脚本不允许 skip。渠道入口检查是在已构建并运行的同一 API
 镜像内执行三个 `python -m ...` 入口，要求全部返回 code 2 且无输出，不会连接飞书。当前开发机
-没有 Docker，因此本机只有静态契约与脚本测试证据；PR #27 run `34340238099` 已在 GitHub 隔离
-runner 实跑并输出 `compose-smoke: passed`。该单次 CI 不是本机、真实渠道或长期运行证据。
+没有 Docker，因此本机只有静态契约与脚本测试证据；PR #27 run `34341819892` 与合入后 main run
+`34343986339` 已在 GitHub 隔离 runner 实跑并输出 `compose-smoke: passed`。这些 CI 不是本机、
+真实渠道或长期运行证据。
 
 ### 尚未完成与能力边界
 

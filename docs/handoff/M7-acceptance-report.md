@@ -8,8 +8,8 @@
 > 本报告与事实文档会形成后续提交，因此最终候选 SHA 必须由
 > `git rev-parse HEAD` 提供，不在文件内写必然落后的自引用值。
 >
-> **状态：PR #27 已创建；代码与测试对象 `09b6babf…` 的远程 CI 八项全绿，PR 已包含本报告收口。
-> 当前待最终精确 SHA 复核与合入；M7 尚未完成真实渠道验证，未验收、未归档。**
+> **状态：PR #27 的最终受审 head `c50d820…` 已以 squash commit `ba5ecfe5…` 合入 `main`，M7
+> 离线实现范围 8/8 完成；真实渠道验证仍未开始，里程碑未验收、未归档。**
 
 ## 1. 已验证
 
@@ -18,6 +18,9 @@
 - PR 7 已以 PR #26 合入 `main@0e7cb5c`；其最终受审 head 为 `11d90b8`，PR run
   `34329735688` 与合入后 main run `34329993048` 均八个 CI job 全绿，前者 integration
   `2976 passed`、0 skipped。
+- PR 8 最终受审 head `c50d8201377588270e13fedc676b05f2a4433dd7` 已通过 PR #27 以 squash
+  commit `ba5ecfe5edffb408e20c4bb9cbf494bfbb035b82` 合入；因此 M7 计划内 PR 1–8 的离线实现范围
+  已全部进入 `main`。
 - PR 8 只修改跨渠道离线证据、默认关闭的 Compose 拓扑、canonical smoke 与事实文档；没有
   注册真实飞书应用、读取真实 secret、打开外部网络、部署或执行 canary，也没有开启 E1。
 - `docker-compose.smoke.yml` 经检查仍能复用既有短租约/轮询 override，因此保持零 diff；没有为
@@ -106,6 +109,10 @@ mypy src
   provider、部署、canary 或产品用户验收。
 - 本报告收口形成晚于上述代码/测试 head 的纯文档提交；该最终 SHA 及其 PR CI 由 Git/PR 外部
   记录提供，不在报告内循环自引用。
+- 最终 PR run [`34341819892`](https://github.com/shixian66/xiaowei-agent/actions/runs/34341819892)
+  与合入后 main run [`34343986339`](https://github.com/shixian66/xiaowei-agent/actions/runs/34343986339)
+  均八项全绿；main run 的 integration 为 `2995 passed`、0 skipped，compose-smoke 输出
+  `compose-smoke: passed`。
 
 ## 2. 只读推理
 
@@ -122,7 +129,7 @@ mypy src
   `PYTEST_POSTGRES_DSN`，新增 M7 同库 integration 在本机受控跳过。PR run `34340238099` 已在
   GitHub 隔离 runner 补得 PostgreSQL 0 skipped 与 Compose 容器运行证据，但不能改写本机未验证
   的事实。
-- PR #27 尚未完成报告收口提交的最终精确 SHA 复核，也未合入 `main`。
+- M7 离线代码范围虽已合入，但尚未获得项目负责人里程碑验收或归档口令。
 - 没有真实飞书 app、OAuth code exchange、成员接口、消息发送、长连接、真实凭据或网络调用；没有
   部署、canary、回滚演练或产品用户验收。
 - PR 7 的 1280/1440 桌面工作台及窄屏只读详情尚无真实浏览器截图；HTML/CSS/JS 契约不等于视觉
