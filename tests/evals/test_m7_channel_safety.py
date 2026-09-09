@@ -59,10 +59,15 @@ _CORPUS = json.loads(
     )
 )
 _CASES: list[dict[str, Any]] = _CORPUS["cases"]
+_REQUESTED_CARRIERS: set[str] = set()
 
 
 def _by(carrier: str) -> list[dict[str, Any]]:
-    return [case for case in _CASES if case["carrier"] == carrier]
+    matches = [case for case in _CASES if case["carrier"] == carrier]
+    if not matches:
+        raise AssertionError(f"M7 safety carrier has no corpus cases: {carrier}")
+    _REQUESTED_CARRIERS.add(carrier)
+    return matches
 
 
 def _principal(
@@ -179,7 +184,8 @@ async def _bound_projection(store, channels, memory_state, clock, context):
 
 def test_every_m7_safety_case_has_an_executing_driver() -> None:
     assert _CORPUS["version"] == 1
-    assert {case["carrier"] for case in _CASES} == {
+    corpus_carriers = {case["carrier"] for case in _CASES}
+    assert corpus_carriers == {
         "forged_identity",
         "cross_scope",
         "stale_membership",
@@ -189,7 +195,13 @@ def test_every_m7_safety_case_has_an_executing_driver() -> None:
         "provider_retry",
         "stale_claim",
     }
+    assert _REQUESTED_CARRIERS == corpus_carriers
     assert len({case["id"] for case in _CASES}) == len(_CASES)
+
+
+def test_unknown_m7_safety_driver_carrier_fails_instead_of_skipping() -> None:
+    with pytest.raises(AssertionError, match=r"carrier has no corpus cases"):
+        _by("misspelled_carrier")
 
 
 @pytest.mark.parametrize("case", _by("forged_identity"), ids=lambda case: case["id"])
