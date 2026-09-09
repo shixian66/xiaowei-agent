@@ -169,13 +169,22 @@ def test_web_detail_base_url_is_a_trusted_https_origin_only(url: str) -> None:
         ("https://127.0.0.1:8443", "https://127.0.0.1:8443"),
         ("https://[::1]:8443", "https://[::1]:8443"),
         ("https://täst.de", "https://xn--tst-qla.de"),
+        ("https://ops.example.test:443", "https://ops.example.test"),
         (
             "https://ops.example.test⁄evil",
             "https://ops.example.xn--testevil-h03d",
         ),
         ("https://OPS.EXAMPLE.TEST:8443/", "https://ops.example.test:8443"),
     ],
-    ids=["single-label", "ipv4", "ipv6", "idna", "confusable-slash", "case"],
+    ids=[
+        "single-label",
+        "ipv4",
+        "ipv6",
+        "idna",
+        "default-port",
+        "confusable-slash",
+        "case",
+    ],
 )
 def test_valid_https_origin_host_forms_are_stored_canonically(
     url: str, expected: str

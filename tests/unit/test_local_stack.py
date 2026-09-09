@@ -12,7 +12,9 @@ from tests.fakes.clock import ManualClock
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
+from xiaowei_agent.application.channel_submission import ChannelSubmissionService
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
@@ -32,13 +34,20 @@ from xiaowei_agent.interfaces.local_stack import (
     LocalStack,
     StarRocksLiveAssembly,
     TaskViewStack,
+    WebStack,
     build_in_memory_local_stack,
     build_postgres_channel_worker_stack,
     build_postgres_feishu_listener_stack,
     build_postgres_local_stack,
     build_postgres_task_view_stack,
+    build_postgres_web_stack,
 )
-from xiaowei_agent.persistence.postgres import PostgresChannelStore, PostgresTaskStore
+from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
+from xiaowei_agent.persistence.postgres import (
+    PostgresChannelStore,
+    PostgresTaskStore,
+    PostgresWebSessionStore,
+)
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
 from xiaowei_agent.tools.starrocks import PhysicalIdentityProbe
@@ -572,6 +581,26 @@ class _RecordingMessages:
         del message_ref, card
 
 
+class _OfflineOAuth:
+    def authorization_url(self, *, state: str, redirect_uri: str) -> str:
+        del redirect_uri
+        return f"https://feishu.example.test/authorize?state={state}"
+
+    async def exchange_code(
+        self, *, code: str, redirect_uri: str
+    ) -> FeishuOAuthIdentity:
+        del code, redirect_uri
+        return FeishuOAuthIdentity(subject_ref="user-open-id")
+
+
+class _OfflineMembership:
+    async def is_current_group_member(
+        self, *, tenant_id: str, conversation_ref: str, subject_ref: str
+    ) -> bool:
+        del tenant_id, conversation_ref, subject_ref
+        return True
+
+
 def _write_identity(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -590,6 +619,123 @@ def _write_identity(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _web_settings(identity_file: Path) -> Settings:
+    return Settings(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
+        feishu_identity_file=str(identity_file),
+        web_detail_base_url="https://ops.example.test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    identity_file = tmp_path / "identities.json"
+    _write_identity(identity_file)
+    oauth = _OfflineOAuth()
+    membership = _OfflineMembership()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    stack = await build_postgres_web_stack(
+        settings=_web_settings(identity_file),
+        oauth=oauth,
+        membership=membership,
+    )
+
+    assert isinstance(stack, WebStack)
+    assert isinstance(stack.auth, WebAuthService)
+    assert isinstance(stack.runtime, TaskViewRuntime)
+    assert isinstance(stack.task_access_service, TaskAccessService)
+    assert isinstance(stack.submission_service, ChannelSubmissionService)
+    assert isinstance(stack.channel_store, PostgresChannelStore)
+    assert isinstance(stack.web_session_store, PostgresWebSessionStore)
+    assert {field.name for field in fields(WebStack)} == {
+        "auth",
+        "oauth_port",
+        "membership",
+        "runtime",
+        "task_store",
+        "channel_store",
+        "web_session_store",
+        "identity_directory",
+        "task_access_service",
+        "submission_service",
+        "clock",
+        "settings",
+        "readiness",
+        "aclose",
+        "policy_revision",
+    }
+    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert stack.oauth_port is oauth
+    assert stack.membership is membership
+    assert stack.task_store._engine is engine
+    assert stack.channel_store._engine is engine
+    assert stack.web_session_store._engine is engine
+    assert stack.task_access_service._runtime is stack.runtime
+    assert stack.submission_service._runtime is stack.runtime
+    await stack.aclose()
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_web_stack_does_not_create_an_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_engine(_: object) -> object:
+        raise AssertionError("disabled Web app must stop before database assembly")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine", fail_engine
+    )
+
+    with pytest.raises(ValueError, match="Web app is disabled"):
+        await build_postgres_web_stack(
+            settings=Settings(environment_id="dev"),
+            oauth=_OfflineOAuth(),
+            membership=_OfflineMembership(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_stack_disposes_engine_when_identity_loading_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    with pytest.raises(Exception, match="identity configuration invalid"):
+        await build_postgres_web_stack(
+            settings=_web_settings(tmp_path / "missing-identities.json"),
+            oauth=_OfflineOAuth(),
+            membership=_OfflineMembership(),
+        )
+    assert engine.disposed is True
 
 
 @pytest.mark.asyncio

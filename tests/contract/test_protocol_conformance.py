@@ -17,6 +17,7 @@ from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.store import TaskStore
+from xiaowei_agent.persistence.web_session import WebSessionStore
 from xiaowei_agent.runners.binding import ExecutionBindingProvider, StepEvidenceBuilder
 from xiaowei_agent.runners.runner import WorkflowRunner
 from xiaowei_agent.tools.adapter import ToolAdapter
@@ -39,6 +40,7 @@ _ANCHORED = {
     "ChannelStore",
     "WorkflowRunner",
     "TraceSink",
+    "WebSessionStore",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
@@ -173,6 +175,28 @@ def test_every_channel_store_implementation_keeps_the_protocol_keyword_arguments
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ChannelStore, method)
+        ), f"{class_name}.{method}"
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.fake:InMemoryWebSessionStore",
+        "xiaowei_agent.persistence.postgres:PostgresWebSessionStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_every_web_session_store_implementation_keeps_protocol_keywords(
+    implementation_path: str,
+) -> None:
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(WebSessionStore)
+    # 5：state 签发/消费 + session 轮换/读取/撤销，扩约必须显式过审。
+    assert len(methods) == 5, f"WebSessionStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(WebSessionStore, method)
         ), f"{class_name}.{method}"
 
 

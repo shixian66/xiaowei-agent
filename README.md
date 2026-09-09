@@ -5,8 +5,10 @@
 > 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1
 > 渠道契约/ADR、PR 2 窄 TaskViewRuntime、PR 3 scoped channel access 与 PR 4 默认关闭的
-> 飞书 SDK seam、静态身份映射和长连接 listener 均已审查并合入；PR 5 飞书卡片与 projection
-> worker 的首轮精确 SHA 审查意见已按根因修复并通过本机深档验证，修订候选等待复审。
+> 飞书 SDK seam、静态身份映射和长连接 listener，以及 PR 5 飞书卡片与 projection worker
+> 均已审查并合入。PR 6 Web OAuth/session 与空壳 Web app 已完成首轮精确 SHA 审查并按意见
+> 修复，等待最终 SHA 复审与 PR CI；真实 OAuth port 尚未激活，模块入口即使配置开启也会
+> fail-closed。
 > PR 1–8 已获离线开发口令，后续 PR 仍须逐个审查、合入。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
@@ -198,17 +200,22 @@ export XIAOWEI_LOG_LEVEL=INFO
 `dev` 是当前确定性目标目录中已登记的本地 fake 环境；固定开发租户仍是
 `dev-local`。两者是不同的安全维度，不应复用同一个标识。
 
-M7 PR 4/5 增加的飞书 listener 与 projection worker 默认关闭：
+M7 PR 4–6 增加的飞书 listener、projection worker 与 Web app 默认关闭：
 
 ```bash
 export XIAOWEI_FEISHU_LISTENER_ENABLED=false
 export XIAOWEI_CHANNEL_WORKER_ENABLED=false
+export XIAOWEI_WEB_APP_ENABLED=false
 ```
 
-两个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
+三个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
 `XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
 `XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_DETAIL_BASE_URL` 必须全部留空。listener 开启时
 前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
+Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
+`XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。Web 默认监听
+`127.0.0.1:8080`，OAuth state 默认 300 秒、session 默认 3600 秒，code exchange 复用
+`XIAOWEI_FEISHU_API_TIMEOUT_SECONDS` 的固定超时且不重试。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
 两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
 `open_id` 精确映射，不按姓名或群角色猜权限：
@@ -229,10 +236,12 @@ export XIAOWEI_CHANNEL_WORKER_ENABLED=false
 ```
 
 `operator`、`dba`、`oncall` 可查看安全任务并发起只读任务；`viewer`、`approver` 只可查看；
-`admin` 拥有当前渠道权限闭集。映射在 listener 装配时一次读取，修改后必须重启进程才生效。即使
-配置完整，仍须先满足 M7 真实渠道门并取得负责人明确口令，才允许把任一开关改为 `true` 并运行
+`admin` 拥有当前渠道权限闭集。映射在 listener 或 Web app 装配时一次读取，修改后必须重启对应
+进程才生效。即使配置完整，仍须先满足 M7 真实渠道门并取得负责人明确口令，才允许把任一开关改为 `true` 并运行
 `python -m xiaowei_agent.interfaces.feishu_listener` 或
-`python -m xiaowei_agent.interfaces.feishu_worker`；离线验证不构成该授权。
+`python -m xiaowei_agent.interfaces.feishu_worker`。PR 6 只提供 fake OAuth port 和离线认证边界；
+真实 OAuth port 未经单独审核与授权前，`python -m xiaowei_agent.interfaces.web_app` 固定退出，
+不启动网络监听。离线验证不构成真实渠道授权。
 
 ### 集成测试（M4）
 

@@ -13,6 +13,7 @@ from xiaowei_agent.contracts import (
 
 if TYPE_CHECKING:
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
+    from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
 
 class InMemoryPersistenceState:
@@ -36,6 +37,8 @@ class InMemoryPersistenceState:
         self.projection_subscription_ids_by_destination: dict[
             tuple[str, str, str], str
         ] = {}
+        self.oauth_states: dict[str, OAuthState] = {}
+        self.web_sessions: dict[str, WebSession] = {}
         self.next_fencing_token = 1
         self.next_projection_fencing_token = 1
         self.next_created_seq = 1

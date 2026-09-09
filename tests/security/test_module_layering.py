@@ -171,6 +171,17 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.interfaces",
         "xiaowei_agent.log",
     },
+    "interfaces/web_app.py": {
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.log",
+    },
+    "interfaces/web_auth.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
 }
 
 # application 包为了 Runtime 编排拥有宽依赖面，但 Worker 只是调度入口，不能继承

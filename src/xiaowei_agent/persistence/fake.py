@@ -117,6 +117,18 @@ from xiaowei_agent.persistence.store import (
     submission_matches_record,
     validate_task_failure_limit,
 )
+from xiaowei_agent.persistence.web_session import (
+    ConsumeOAuthStateCommand,
+    IssueOAuthStateCommand,
+    OAuthState,
+    OAuthStateNotFoundError,
+    RevokeWebSessionCommand,
+    RotateWebSessionCommand,
+    WebSession,
+    WebSessionConflictError,
+    WebSessionLookup,
+    WebSessionNotFoundError,
+)
 
 _EntryT = TypeVar("_EntryT")
 
@@ -411,6 +423,90 @@ class InMemoryChannelStore:
                     now=self._clock(),
                 )
             )
+
+
+class InMemoryWebSessionStore:
+    """与其他内存存储共锁的 OAuth state 和浏览器 session 实现。"""
+
+    def __init__(self, *, clock: Clock, state: InMemoryPersistenceState | None = None) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    async def issue_oauth_state(
+        self, *, command: IssueOAuthStateCommand
+    ) -> OAuthState:
+        async with self._lock:
+            if command.state_digest in self._state.oauth_states:
+                raise WebSessionConflictError
+            now = self._clock()
+            state = OAuthState(
+                state_digest=command.state_digest,
+                issued_at=now,
+                expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+            )
+            self._state.oauth_states[state.state_digest] = state
+            return state
+
+    async def consume_oauth_state(
+        self, *, command: ConsumeOAuthStateCommand
+    ) -> OAuthState:
+        async with self._lock:
+            state = self._state.oauth_states.get(command.state_digest)
+            now = self._clock()
+            if (
+                state is None
+                or state.consumed_at is not None
+                or now >= state.expires_at
+            ):
+                raise OAuthStateNotFoundError
+            consumed = state.model_copy(update={"consumed_at": now})
+            self._state.oauth_states[state.state_digest] = consumed
+            return consumed
+
+    async def rotate_session(
+        self, *, command: RotateWebSessionCommand
+    ) -> WebSession:
+        async with self._lock:
+            if command.session_digest in self._state.web_sessions:
+                raise WebSessionConflictError
+            now = self._clock()
+            candidate = WebSession(
+                session_digest=command.session_digest,
+                subject_ref=command.subject_ref,
+                issued_at=now,
+                expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+            )
+            previous_digest = command.previous_session_digest
+            if previous_digest is not None:
+                previous = self._state.web_sessions.get(previous_digest)
+                if previous is not None and previous.revoked_at is None:
+                    self._state.web_sessions[previous_digest] = previous.model_copy(
+                        update={"revoked_at": now}
+                    )
+            self._state.web_sessions[candidate.session_digest] = candidate
+            return candidate
+
+    async def get_session(self, *, lookup: WebSessionLookup) -> WebSession:
+        async with self._lock:
+            session = self._state.web_sessions.get(lookup.session_digest)
+            if (
+                session is None
+                or session.revoked_at is not None
+                or self._clock() >= session.expires_at
+            ):
+                raise WebSessionNotFoundError
+            return session
+
+    async def revoke_session(self, *, command: RevokeWebSessionCommand) -> bool:
+        async with self._lock:
+            session = self._state.web_sessions.get(command.session_digest)
+            if session is None or session.revoked_at is not None:
+                return False
+            self._state.web_sessions[session.session_digest] = session.model_copy(
+                update={"revoked_at": self._clock()}
+            )
+            return True
 
 
 class InMemoryTaskStore:

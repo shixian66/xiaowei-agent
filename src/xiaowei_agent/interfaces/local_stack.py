@@ -35,6 +35,7 @@ from xiaowei_agent.persistence.postgres import (
     PostgresEvidenceLedger,
     PostgresPlanStore,
     PostgresTaskStore,
+    PostgresWebSessionStore,
 )
 from xiaowei_agent.persistence.store import Clock, TaskStore
 
@@ -42,6 +43,10 @@ if TYPE_CHECKING:
     # 这些执行栈类型必须保持静态导入；移到顶层会让仅 import local_stack 的
     # internal-api 一并加载完整 Runtime、Runner 与工具链。代价是 LocalStack 的
     # 延迟注解不能用 get_type_hints() 无参解析；窄进程只内省 TaskViewStack。
+    from xiaowei_agent.application.channel_access import (
+        FeishuMembershipPort,
+        TaskAccessService,
+    )
     from xiaowei_agent.application.channel_projection import (
         AsyncSleep,
         ChannelMessagePort,
@@ -59,7 +64,9 @@ if TYPE_CHECKING:
     from xiaowei_agent.interfaces.feishu_identity import FeishuIdentityDirectory
     from xiaowei_agent.interfaces.feishu_listener import FeishuListener
     from xiaowei_agent.interfaces.feishu_sdk import FeishuInboundTransport
+    from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort, WebAuthService
     from xiaowei_agent.persistence.channel import ChannelStore
+    from xiaowei_agent.persistence.web_session import WebSessionStore
     from xiaowei_agent.tools.adapter import AdapterResponse, ToolAdapter
     from xiaowei_agent.tools.gateway import TargetBoundAdapterBinding, ToolGateway
     from xiaowei_agent.tools.starrocks import (
@@ -153,6 +160,27 @@ class ChannelWorkerStack:
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
+    clock: Clock
+    settings: Settings
+    readiness: ReadinessProbe
+    aclose: AsyncClose
+    policy_revision: str
+
+
+@dataclass(frozen=True)
+class WebStack:
+    """无执行权的 Web 认证与任务投影进程装配。"""
+
+    auth: WebAuthService
+    oauth_port: FeishuOAuthPort
+    membership: FeishuMembershipPort
+    runtime: TaskViewRuntime
+    task_store: TaskStore
+    channel_store: ChannelStore
+    web_session_store: WebSessionStore
+    identity_directory: FeishuIdentityDirectory
+    task_access_service: TaskAccessService
+    submission_service: ChannelSubmissionService
     clock: Clock
     settings: Settings
     readiness: ReadinessProbe
@@ -723,6 +751,91 @@ async def build_postgres_channel_worker_stack(
             runtime=runtime,
             task_store=task_store,
             channel_store=channel_store,
+            clock=clock,
+            settings=settings,
+            readiness=PostgresReadinessProbe(engine=engine, assembled=True),
+            aclose=close,
+            policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
+        )
+    except Exception:
+        await engine.dispose()
+        raise
+
+
+async def build_postgres_web_stack(
+    *,
+    settings: Settings,
+    oauth: FeishuOAuthPort,
+    membership: FeishuMembershipPort,
+    clock: Clock = _utc_now,
+) -> WebStack:
+    """用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端。"""
+    from xiaowei_agent.application.channel_access import TaskAccessService
+    from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+    from xiaowei_agent.interfaces.feishu_identity import (
+        load_feishu_identity_directory,
+    )
+    from xiaowei_agent.interfaces.web_auth import WebAuthService
+
+    if not settings.web_app_enabled:
+        raise ValueError("Web app is disabled")
+    engine = create_database_engine(settings)
+
+    async def close() -> None:
+        await engine.dispose()
+
+    try:
+        task_store = PostgresTaskStore(
+            engine=engine,
+            clock=clock,
+            task_failure_limit=settings.task_failure_limit,
+        )
+        plan_store = PostgresPlanStore(engine=engine)
+        ledger = PostgresEvidenceLedger(engine=engine)
+        channel_store = PostgresChannelStore(engine=engine, clock=clock)
+        web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
+        _, bindings = _build_capability_bindings()
+        runtime = TaskViewRuntime(
+            task_store=task_store,
+            plan_store=plan_store,
+            ledger=ledger,
+            bindings=bindings,
+        )
+        identity_directory = load_feishu_identity_directory(
+            path=cast(str, settings.feishu_identity_file),
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        )
+        task_access_service = TaskAccessService(
+            runtime=runtime,
+            task_store=task_store,
+            channel_store=channel_store,
+            membership=membership,
+        )
+        submission_service = ChannelSubmissionService(
+            runtime=runtime,
+            channel_store=channel_store,
+        )
+        auth = WebAuthService(
+            sessions=web_session_store,
+            identities=identity_directory,
+            oauth=oauth,
+            public_origin=cast(str, settings.web_detail_base_url),
+            oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
+            session_ttl_seconds=settings.web_session_ttl_seconds,
+            oauth_timeout_seconds=settings.feishu_api_timeout_seconds,
+        )
+        return WebStack(
+            auth=auth,
+            oauth_port=oauth,
+            membership=membership,
+            runtime=runtime,
+            task_store=task_store,
+            channel_store=channel_store,
+            web_session_store=web_session_store,
+            identity_directory=identity_directory,
+            task_access_service=task_access_service,
+            submission_service=submission_service,
             clock=clock,
             settings=settings,
             readiness=PostgresReadinessProbe(engine=engine, assembled=True),

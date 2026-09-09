@@ -926,8 +926,11 @@ GET  /readyz
 ### 7.2 HTTP 安全契约
 
 - Cookie：`Secure`、`HttpOnly`、`SameSite=Lax`、host-only、短时过期，登录后轮换。
-- 所有状态变更 POST 检查 Origin、CSRF token 和 JSON Content-Type。
+- 所有状态变更 POST 检查 Origin、CSRF token 和 JSON Content-Type；Origin/CSRF 请求头必须先经过
+  ASCII/闭集形状校验，畸形头统一返回 `403/forbidden`，不得落入 `500`。
 - CSP 至少为 `default-src 'self'`，CSS/JS 独立静态文件，不使用 inline script。
+- `web-app` 自身为所有响应输出 `Strict-Transport-Security: max-age=31536000`；M7 不启用
+  `includeSubDomains` 或 `preload`，避免把未经本里程碑核对的其他子域纳入策略，反向代理不得移除该头。
 - JSON body 沿用全局大小限制；任务文本最大 8192 字符。
 - 浏览器发送 `client_submission_id`，服务端生成最终 idempotency key。
 - 所有用户文本通过 `textContent` 渲染；禁止 `innerHTML` 注入服务端/工具/用户文本。
@@ -1351,35 +1354,63 @@ mypy src
 - Modify: `.env.example`
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `src/xiaowei_agent/config.py`
+- Modify: `src/xiaowei_agent/interfaces/body_limit.py`
+- Modify: `src/xiaowei_agent/interfaces/feishu_listener.py`（补 PR 4 callback timeout 闭集诊断）
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
+- Modify: `src/xiaowei_agent/persistence/fake.py`
+- Modify: `src/xiaowei_agent/persistence/memory.py`
+- Modify: `src/xiaowei_agent/persistence/postgres.py`
+- Modify: `src/xiaowei_agent/persistence/rows.py`
+- Modify: `src/xiaowei_agent/persistence/schema.py`
 - Create: `src/xiaowei_agent/persistence/web_session.py`
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0007_web_sessions.py`
 - Create: `src/xiaowei_agent/interfaces/web_auth.py`
 - Create: `src/xiaowei_agent/interfaces/web_app.py`
+- Create: `tests/suites/web_session_store.py`
+- Modify: `tests/contract/test_feishu_listener.py`
+- Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/contract/test_schema_matches_migration.py`
+- Modify: `tests/contract/test_suite_bindings.py`
 - Modify: `tests/security/test_module_layering.py`
+- Modify: `tests/security/test_task_view_runtime_authority.py`
 - Create: `tests/contract/test_web_session_store.py`
 - Create: `tests/contract/test_web_auth.py`
 - Create: `tests/contract/test_web_app_routes.py`
 - Modify: `tests/unit/test_local_stack.py`
+- Modify: `tests/unit/test_feishu_config.py`（HTTPS origin 默认端口规范化）
+- Create: `tests/unit/test_web_config.py`
+- Modify: `tests/unit/test_readiness.py`
 - Create: `tests/integration/test_web_session_postgres.py`
+- Modify: `tests/integration/test_migration_paths.py`
 - Create: `tests/security/test_web_auth_boundary.py`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `README.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 
-1. 写 rev_0007 upgrade/downgrade 与 digest-only session 失败测试。
-2. 写 OAuth state 单次、过期、重放、code 错误、未知身份、session rotation 与注销测试。
-3. 写 Cookie/Origin/CSRF/CSP 失败测试和 route 闭集；必须通过 Web app 的受保护真实路由断言
-   未登录返回 401/`unauthorized`，不能只直接调用 `error_body()`；每个 Web/OAuth/session 设置
+1. 先补 PR 4 遗留的 callback timeout 闭集诊断，继续取消在途 future 后向 SDK 抛出超时；日志不得
+   带事件、主体、会话或供应商正文。
+2. 写 rev_0007 upgrade/downgrade、digest-only session 与内存/PostgreSQL 同一共享套件失败测试；
+   schema、row mapping、migration 与 readiness head 必须同步。
+3. 写 OAuth state 单次、过期、重放、code 错误、未知身份、session rotation 与注销测试；授权 URL
+   必须精确携带一次服务端 state 并拒绝控制字符，code exchange 固定超时且不重试，外部异常链不得保留。
+4. 写 Cookie/Origin/CSRF/CSP/HSTS、非 ASCII 与重复 query/header/cookie、body 上限失败测试和 route
+   闭集；非 ASCII Origin/CSRF 必须通过真实状态变更路由返回 `403/forbidden`，且 session 不被误撤销；
+   必须通过 Web app 的受保护真实路由断言未登录返回 401/`unauthorized`，不能只直接调用
+   `error_body()`；每个 Web/OAuth/session 设置
    同时登记 `_FIELD_TO_ENV` 与 `.env.example`，安全门证明集合相等。
-4. 写关键隔离测试：`web-app` 不注册 `/v1/tasks/*`；`internal-api` 不注册 `/app` 和 OAuth。
-5. 最小实现 Web app factory，只完成 auth 和空壳 `/app`，不实现任务业务路由；模块入口固定为
-   `python -m xiaowei_agent.interfaces.web_app`，不增加 `[project.scripts]`。
-6. 在 `local_stack.py` 增加 `build_postgres_web_stack()`：只装配窄 task-view stack、ChannelStore、
+5. 写关键隔离测试：`web-app` 不注册 `/v1/tasks/*`；`internal-api` 不注册 `/app` 和 OAuth；构建
+   Web stack 后项目模块集合为经审查闭集，且不加载 `lark_oapi`。
+6. 最小实现 Web app factory，只完成 auth 和空壳 `/app`，不实现任务业务路由；模块入口固定为
+   `python -m xiaowei_agent.interfaces.web_app`，不增加 `[project.scripts]`。真实 OAuth port 未获授权
+   前，模块入口即使配置开启也必须以固定诊断 fail-closed，不能用占位实现伪装成可运行登录。
+7. 在 `local_stack.py` 增加 `build_postgres_web_stack()`：只装配窄 task-view stack、ChannelStore、
    WebSessionStore、IdentityDirectory、TaskAccessService、ChannelSubmissionService 和 OAuth/Membership
    ports；stack 类型不得出现完整 Runtime/Runner/Gateway/目标 adapter。
-7. 同一提交登记 `web_auth.py`、`web_app.py` 的最小 import 白名单，并在 `_conformance.py` 锚定
+8. 同一提交登记 `web_auth.py`、`web_app.py` 的最小 import 白名单，并在 `_conformance.py` 锚定
    内存/PostgreSQL WebSessionStore 实现。
-8. 运行：
+9. 运行：
 
 ```bash
 python -m pytest tests/contract/test_web_session_store.py tests/contract/test_web_auth.py \
@@ -1390,7 +1421,10 @@ ruff check .
 mypy src
 ```
 
-9. 提交：`feat(m7): add isolated Feishu-authenticated web app`。
+本机没有 `PYTEST_POSTGRES_DSN` 时，`test_web_session_postgres.py` 的 skip 只能记为未覆盖；合并前必须
+由 CI `integration` job 在 PostgreSQL service 上 0 skip 实跑，不能用本机全绿替代。
+
+10. 提交：`feat(m7): add isolated Feishu-authenticated web app`。
 
 ### PR 7：Web 运维任务工作台
 

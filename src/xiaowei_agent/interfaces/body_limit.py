@@ -23,17 +23,24 @@ async def _send_error(send: Send, *, status: int, code: str) -> None:
 
 
 class JsonBodyLimitMiddleware:
-    """只缓冲 POST /v1/tasks，最大内存占用被 limit 硬限制。"""
+    """只缓冲显式登记的 JSON POST，最大内存占用被 limit 硬限制。"""
 
-    def __init__(self, app: ASGIApp, *, limit: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        limit: int,
+        paths: frozenset[str] = frozenset({"/v1/tasks"}),
+    ) -> None:
         self._app = app
         self._limit = limit
+        self._paths = paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if not (
             scope["type"] == "http"
             and scope["method"] == "POST"
-            and scope["path"] == "/v1/tasks"
+            and scope["path"] in self._paths
         ):
             await self._app(scope, receive, send)
             return
