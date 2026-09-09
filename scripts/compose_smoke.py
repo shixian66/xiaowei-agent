@@ -1,4 +1,4 @@
-"""M5 API/Worker/PostgreSQL Compose 的可恢复 fake 闭环验收。"""
+"""API/Worker/PostgreSQL fake 闭环与 M7 渠道进程离线装配验收。"""
 
 from __future__ import annotations
 
@@ -37,6 +37,11 @@ _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: database_error", "SMOKE_MIGRATION_DATABASE_ERROR"),
     ("xiaowei-migrate: migration_command_error", "SMOKE_MIGRATION_COMMAND_ERROR"),
     ("xiaowei-migrate: io_error", "SMOKE_MIGRATION_IO_ERROR"),
+)
+_DISABLED_CHANNEL_ENTRYPOINTS = (
+    "xiaowei_agent.interfaces.feishu_listener",
+    "xiaowei_agent.interfaces.feishu_worker",
+    "xiaowei_agent.interfaces.web_app",
 )
 
 
@@ -434,6 +439,33 @@ def _migration_failure_code(logs: str) -> str:
     return "SMOKE_MIGRATION_FAILED"
 
 
+def _require_disabled_channel_entrypoints(session: ComposeSession) -> None:
+    """从已构建镜像运行三条入口；离线基线只能静默返回 disabled(2)。"""
+    for module in _DISABLED_CHANNEL_ENTRYPOINTS:
+        argv = session.argv("exec", "-T", "api", "python", "-m", module)
+        returncode: int
+        stdout: object
+        stderr: object
+        try:
+            result = session.runner(argv, timeout=60.0)
+        except subprocess.CalledProcessError as exc:
+            returncode = exc.returncode
+            stdout = exc.stdout
+            stderr = exc.stderr
+        except (OSError, subprocess.SubprocessError):
+            raise SmokeError("SMOKE_CHANNEL_ENTRYPOINT_NOT_DISABLED") from None
+        else:
+            returncode = result.returncode
+            stdout = result.stdout
+            stderr = result.stderr
+        if returncode != 2 or stdout not in (None, "", b"") or stderr not in (
+            None,
+            "",
+            b"",
+        ):
+            raise SmokeError("SMOKE_CHANNEL_ENTRYPOINT_NOT_DISABLED")
+
+
 def _full_workflow(session: ComposeSession) -> None:
     sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
     session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
@@ -459,6 +491,7 @@ def _full_workflow(session: ComposeSession) -> None:
     session.failure_code = "SMOKE_API_COMMAND_FAILED"
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)
+    _require_disabled_channel_entrypoints(session)
 
     session.failure_code = "SMOKE_BASELINE_COMMAND_FAILED"
     session.run(

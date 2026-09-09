@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "M7-L0-identity-1",
+      "carrier": "forged_identity",
+      "expected": "no_task"
+    },
+    {
+      "id": "M7-L0-scope-1",
+      "carrier": "cross_scope",
+      "expected": "hidden_not_found"
+    },
+    {
+      "id": "M7-L0-membership-1",
+      "carrier": "stale_membership",
+      "expected": "hidden_not_found"
+    },
+    {
+      "id": "M7-L0-guess-1",
+      "carrier": "guessed_task",
+      "expected": "hidden_not_found"
+    },
+    {
+      "id": "M7-L0-content-1",
+      "carrier": "external_text",
+      "expected": "plain_text_only"
+    },
+    {
+      "id": "M7-L0-rows-1",
+      "carrier": "database_rows",
+      "expected": "contract_rejected"
+    },
+    {
+      "id": "M7-L0-provider-1",
+      "carrier": "provider_retry",
+      "expected": "bounded_retry"
+    },
+    {
+      "id": "M7-L0-fencing-1",
+      "carrier": "stale_claim",
+      "expected": "new_claim_wins"
+    }
+  ]
+}

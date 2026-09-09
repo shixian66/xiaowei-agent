@@ -8,7 +8,15 @@ import yaml
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
 
 _ROOT = Path(__file__).resolve().parents[2]
-_APP_SERVICES = {"api", "worker", "migrate"}
+_PROCESS_SERVICES = {
+    "api",
+    "worker",
+    "feishu-listener",
+    "channel-worker",
+    "web-app",
+}
+_APP_SERVICES = _PROCESS_SERVICES | {"migrate"}
+_CHANNEL_SERVICES = {"feishu-listener", "channel-worker", "web-app"}
 
 
 def _yaml(name: str) -> dict[str, Any]:
@@ -29,7 +37,7 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
     assert services["migrate"]["depends_on"] == {
         "postgres": {"condition": "service_healthy"}
     }
-    for name in ("api", "worker"):
+    for name in _PROCESS_SERVICES:
         assert services[name]["depends_on"] == {
             "migrate": {"condition": "service_completed_successfully"}
         }
@@ -49,10 +57,11 @@ def test_local_environment_exists_in_the_registered_target_directory() -> None:
     ).read_text(encoding="utf-8").splitlines()
 
 
-def test_compose_exposes_only_api_on_host_loopback() -> None:
+def test_compose_exposes_only_http_apps_on_distinct_host_loopback_ports() -> None:
     services = _yaml("docker-compose.yml")["services"]
     assert services["api"]["ports"] == ["127.0.0.1:8000:8000"]
-    for name in {"postgres", "worker", "migrate"}:
+    assert services["web-app"]["ports"] == ["127.0.0.1:8080:8080"]
+    for name in {"postgres", "worker", "migrate", "feishu-listener", "channel-worker"}:
         assert "ports" not in services[name]
     for service in services.values():
         assert "container_name" not in service
@@ -104,6 +113,9 @@ def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None
         "api": "xiaowei_agent.interfaces.api",
         "worker": "xiaowei_agent.interfaces.worker",
         "migrate": "xiaowei_agent.interfaces.migrate",
+        "feishu-listener": "xiaowei_agent.interfaces.feishu_listener",
+        "channel-worker": "xiaowei_agent.interfaces.feishu_worker",
+        "web-app": "xiaowei_agent.interfaces.web_app",
     }
     for name, module in expected_modules.items():
         service = services[name]
@@ -112,6 +124,35 @@ def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None
         assert service["cap_drop"] == ["ALL"]
         assert service["security_opt"] == ["no-new-privileges:true"]
         assert service["init"] is True
+
+
+def test_channel_processes_are_profile_gated_and_default_fail_closed() -> None:
+    services = _yaml("docker-compose.yml")["services"]
+    expected_flags = {
+        "feishu-listener": "XIAOWEI_FEISHU_LISTENER_ENABLED",
+        "channel-worker": "XIAOWEI_CHANNEL_WORKER_ENABLED",
+        "web-app": "XIAOWEI_WEB_APP_ENABLED",
+    }
+    for name in _CHANNEL_SERVICES:
+        assert services[name]["profiles"] == ["m7-channels"]
+        environment = services[name]["environment"]
+        assert environment[expected_flags[name]] == "false"
+        assert not any(
+            key in environment
+            for key in {
+                "XIAOWEI_FEISHU_APP_ID",
+                "XIAOWEI_FEISHU_APP_SECRET_FILE",
+                "XIAOWEI_FEISHU_TENANT_KEY",
+                "XIAOWEI_FEISHU_BOT_OPEN_ID",
+                "XIAOWEI_FEISHU_IDENTITY_FILE",
+                "XIAOWEI_WEB_DETAIL_BASE_URL",
+            }
+        )
+
+    assert services["web-app"]["environment"]["XIAOWEI_WEB_BIND_HOST"] == (
+        "0.0." + "0.0"
+    )
+    assert services["web-app"]["environment"]["XIAOWEI_WEB_BIND_PORT"] == "8080"
 
 
 def test_compose_healthchecks_use_available_binaries_and_no_shell() -> None:

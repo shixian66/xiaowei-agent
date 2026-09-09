@@ -9,6 +9,11 @@ x-app-environment: &app-environment
   XIAOWEI_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
   XIAOWEI_API_BIND_HOST: "0.0.0.0"
   XIAOWEI_API_BIND_PORT: "8000"
+  XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
+  XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
+  XIAOWEI_WEB_APP_ENABLED: "false"
+  XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
+  XIAOWEI_WEB_BIND_PORT: "8080"
 
 x-app-service: &app-service
   image: xiaowei-agent:m5-local
@@ -79,6 +84,32 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  feishu-listener:
+    <<: *app-service
+    profiles: ["m7-channels"]
+    command: ["python", "-m", "xiaowei_agent.interfaces.feishu_listener"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  channel-worker:
+    <<: *app-service
+    profiles: ["m7-channels"]
+    command: ["python", "-m", "xiaowei_agent.interfaces.feishu_worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web-app:
+    <<: *app-service
+    profiles: ["m7-channels"]
+    command: ["python", "-m", "xiaowei_agent.interfaces.web_app"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8080:8080"
 
 secrets:
   postgres_password:

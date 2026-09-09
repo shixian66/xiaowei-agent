@@ -446,17 +446,34 @@ ExternalContent(
 
 ```text
 docker compose
-├── api        Agent Gateway + 同步 Runtime
-├── worker     WorkflowRunner 异步执行进程
-├── migrate    一次性 schema upgrade，成功后 API/Worker 才启动
-└── postgres   TaskStore / approval / audit / evidence index
+├── api               薄 internal API + TaskView/提交投影
+├── worker            完整 Runtime + WorkflowRunner 异步执行进程
+├── feishu-listener   飞书入站协议、身份上下文与任务提交
+├── channel-worker    TaskView → 飞书卡片投影
+├── web-app           OAuth/session、工作台与安全任务详情
+├── migrate           一次性 schema upgrade，成功后应用进程才启动
+└── postgres          TaskStore / ChannelStore / session / audit / evidence index
 ```
 
-API 与 worker 可以共用一个应用镜像和 Python 包，通过进程角色区分；镜像内部不直接绑定某个渠道。真实基础设施通过网络配置和 adapter 接入，不能把凭证 bake 进镜像。
+五个长驻应用角色与 migrate 共用一个应用镜像和 Python 包，通过进程命令区分。API、飞书 listener、
+channel worker 与 Web app 只装配各自所需的窄端口，不复制业务路由、Policy、Guard、执行或终态语义；
+只有 task worker 持有完整 Runtime、WorkflowRunner、ToolGateway 与目标 adapter。真实基础设施通过
+网络配置和 adapter 接入，不能把凭证 bake 进镜像。
 
-API、worker 与 migrate 使用同一个应用镜像。`ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，API 不直接依赖 Engine 或 persistence。secret 只通过文件引用挂载；API 只向宿主 loopback 发布端口，PostgreSQL 与 Worker 不发布宿主端口。
+`ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于
+`contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，入口不直接
+依赖 Engine。secret 只通过文件引用挂载；API 与 Web 只向宿主 loopback 发布端口，PostgreSQL、
+task worker、listener 与 channel worker 不发布宿主端口。三个渠道进程在 Compose 中属于
+`m7-channels` profile，且各自 feature flag 默认 `false`；离线 smoke 只证明默认关闭入口在同一
+镜像内静默 fail-closed。真实应用、凭据、网络、部署和 canary 未获独立授权前，不得把该拓扑写成
+已激活渠道。
 
-`/healthz` 只回答 API 进程是否存活，不触碰 TaskStore；`/readyz` 才检查数据库连接、migration head 与装配状态。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过带 lease/fencing 的唯一领取事务取得执行权。migration 是一次性前置服务，失败时 API 与 Worker 不得启动。M5 本地栈只装配确定性无模型 interpreter 与 fake/recording ToolGateway；Compose 可运行不等于获得真实模型或真实运维目标的调用许可。
+`/healthz` 只回答对应 HTTP 进程是否存活，不触碰 TaskStore；`/readyz` 才检查数据库连接、
+migration head 与装配状态。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过
+带 lease/fencing 的唯一领取事务取得执行权。channel worker 只从 ChannelStore 领取投影订阅并回读
+同一 TaskView；渠道投递状态不改写任务真相。migration 是一次性前置服务，失败时应用进程不得启动。
+M5/M7 离线栈只装配确定性无模型 interpreter、fake/recording ToolGateway 与 fake 渠道 port；
+Compose 可运行不等于获得真实模型、真实渠道或真实运维目标的调用许可。
 
 初始不强制 Redis。只有出现可测的队列吞吐、分布式租约或缓存需求时，才增加服务，并先更新契约、迁移和运维文档。PostgreSQL 的全文检索先满足知识/证据索引；只有 eval 和查询指标证明不足时才引入 pgvector。
 

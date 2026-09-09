@@ -1494,7 +1494,7 @@ mypy src
 **Files:**
 
 - Modify: `docker-compose.yml`
-- Modify: `docker-compose.smoke.yml`
+- Inspect only: `docker-compose.smoke.yml`（既有短租约 override 足够时保持零 diff）
 - Modify: `scripts/compose_smoke.py`
 - Modify: `tests/contract/test_compose_contract.py`
 - Modify: `tests/contract/test_compose_smoke_script.py`
@@ -1526,9 +1526,13 @@ python -m pytest -q
 python -m pytest -m security -q
 ruff check .
 mypy src
-docker compose -f docker-compose.yml -f docker-compose.smoke.yml up \
-  --build --abort-on-container-exit --exit-code-from smoke
+python -m scripts.compose_smoke
 ```
+
+`scripts.compose_smoke` 是唯一 Compose smoke 入口：它构建 canonical 同一镜像，启动隔离
+PostgreSQL/migrate/API/task worker 的 fake Runtime 闭环，并在该镜像内以三个 feature flag 全为
+`false` 执行渠道模块入口，要求全部静默返回 code 2。不得为文档中不存在的 `smoke` service
+另建第二套入口，也不得在该步骤读取真实渠道配置或连接飞书。
 
 7. 运行 TDD 反证：至少撤掉 actor/scope 授权、成员 fail-closed、projection fencing、Web route 隔离中
    的承重保护，分别确认对应测试变红；变异文件不得提交。
