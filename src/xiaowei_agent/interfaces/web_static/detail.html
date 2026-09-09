@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>小维 · 安全任务详情</title>
+  <link rel="stylesheet" href="/app/static/app.css">
+</head>
+<body class="detail-page">
+  <main class="detail-shell">
+    <header class="detail-header">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">维</div>
+        <div><p class="eyebrow">XIAOWEI AIOPS</p><h1>安全任务详情</h1></div>
+      </div>
+      <span class="safe-view-pill"><span aria-hidden="true">◆</span> 安全结果视图</span>
+    </header>
+
+    <section class="detail-loading" id="detail-loading" role="status">
+      <span class="spinner spinner-large" aria-hidden="true"></span>
+      <div><strong>正在读取任务</strong><p>请稍候，页面正在校验你的当前访问权限。</p></div>
+    </section>
+
+    <section class="detail-unavailable is-hidden" id="detail-unavailable" role="alert">
+      <div class="unavailable-mark" aria-hidden="true">!</div>
+      <h2>当前无法查看这条任务</h2>
+      <p id="detail-error-message">任务不存在、权限已变化，或服务暂时不可用。</p>
+      <button class="button button-secondary" id="detail-retry" type="button">重试读取</button>
+    </section>
+
+    <article class="detail-content is-hidden" id="detail-content">
+      <section class="detail-summary">
+        <div class="detail-title-row">
+          <span class="status-badge" id="detail-status"><span aria-hidden="true">●</span><span>读取中</span></span>
+          <span class="live-indicator" id="detail-polling"><span aria-hidden="true"></span> 自动同步</span>
+        </div>
+        <h2 id="detail-request">正在读取任务</h2>
+        <dl class="detail-meta">
+          <div><dt>任务 ID</dt><dd id="detail-task-id">—</dd></div>
+          <div><dt>提交时间</dt><dd id="detail-submitted-at">—</dd></div>
+          <div><dt>任务版本</dt><dd id="detail-version">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="timeline-card detail-timeline" aria-label="当前任务状态">
+        <span class="timeline-dot" aria-hidden="true"></span>
+        <div><small>当前状态</small><strong id="detail-timeline-status">正在读取</strong></div>
+        <span class="timeline-line" aria-hidden="true"></span>
+        <div><small>页面说明</small><strong>仅展示安全任务结果</strong></div>
+      </section>
+
+      <section class="progress-card" id="detail-progress">
+        <span class="spinner spinner-large" aria-hidden="true"></span>
+        <div><strong>小维正在处理</strong><p>任务完成后，这里会显示完整的安全结果和证据引用。</p></div>
+      </section>
+
+      <section class="result-card is-hidden" id="detail-result">
+        <div class="section-label"><span aria-hidden="true">✦</span> 小维结论</div>
+        <p class="answer-text" id="detail-answer"></p>
+        <div class="result-sections" id="detail-sections"></div>
+        <section class="result-block is-hidden" id="detail-next-block">
+          <h3>下一步建议</h3>
+          <ol id="detail-next-steps"></ol>
+        </section>
+        <section class="result-block refs-block is-hidden" id="detail-refs-block">
+          <h3>证据引用</h3>
+          <ul id="detail-refs"></ul>
+        </section>
+      </section>
+    </article>
+
+    <footer class="detail-footer">
+      <span class="shield-icon" aria-hidden="true">◆</span>
+      本页只展示经过统一投影的安全结果，不包含数据库真实结果行或原始工具输出。
+    </footer>
+  </main>
+  <script type="module" src="/app/static/detail.js"></script>
+</body>
+</html>

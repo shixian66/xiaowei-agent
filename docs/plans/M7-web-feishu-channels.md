@@ -908,6 +908,9 @@ GET  /app/api/tasks
 POST /app/api/tasks
 GET  /app/api/tasks/{task_id}
 POST /app/api/logout
+GET  /app/static/app.css
+GET  /app/static/app.js
+GET  /app/static/detail.js
 GET  /healthz
 GET  /readyz
 ```
@@ -1439,6 +1442,8 @@ mypy src
 - Create: `src/xiaowei_agent/interfaces/web_static/app.css`
 - Create: `src/xiaowei_agent/interfaces/web_static/app.js`
 - Create: `src/xiaowei_agent/interfaces/web_static/detail.js`
+- Modify: `tests/contract/test_web_app_routes.py`
+- Modify: `tests/security/test_web_auth_boundary.py`
 - Modify if required: `pyproject.toml`（先实测 wheel 内容；只有 hatchling 默认未包含静态资源时才补
   最小打包声明，否则该文件保持零 diff；不重复定义进程入口）
 - Modify: `tests/security/test_module_layering.py`
@@ -1447,6 +1452,9 @@ mypy src
 - Create: `tests/contract/test_web_detail_shell_scope.py`
 - Create: `tests/security/test_web_task_access.py`
 - Create: `tests/security/test_web_xss.py`
+- Modify: `README.md`
+- Modify: `AGENT_HANDOFF.md`
+- Modify: `docs/plans/M7-web-feishu-channels.md`
 
 **Steps:**
 

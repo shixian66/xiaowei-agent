@@ -109,7 +109,29 @@ def _web_app(clock, memory_state, *, subject_ref: str = "subject-alice") -> Any:
         session_ttl_seconds=3600,
         token_factory=lambda: next(token_values),
     )
-    return create_app(auth=auth, settings=_settings(), readiness=_Probe()), oauth
+    class TaskAccess:
+        async def list_tasks(self, *, query: object) -> object:
+            raise AssertionError(query)
+
+        async def get_task(self, *, query: object) -> object:
+            raise AssertionError(query)
+
+    class Submissions:
+        async def submit(self, *, command: object) -> object:
+            raise AssertionError(command)
+
+    return (
+        create_app(
+            auth=auth,
+            settings=_settings(),
+            readiness=_Probe(),
+            task_access=TaskAccess(),
+            submissions=Submissions(),
+            clock=clock,
+            policy_revision="policy-2026-09-01",
+        ),
+        oauth,
+    )
 
 
 def _client(app: Any) -> httpx.AsyncClient:
@@ -132,7 +154,13 @@ async def _login(client: httpx.AsyncClient, oauth: _OAuth) -> httpx.Response:
 async def test_real_protected_routes_return_401_unauthorized(clock, memory_state) -> None:
     app, _ = _web_app(clock, memory_state)
     async with _client(app) as client:
-        for path in ("/app", "/app/api/me"):
+        for path in (
+            "/app",
+            "/app/tasks/task-1",
+            "/app/api/me",
+            "/app/api/tasks",
+            "/app/api/tasks/task-1",
+        ):
             response = await client.get(path)
             assert response.status_code == 401
             assert response.json() == {"error": {"code": "unauthorized"}}
@@ -181,7 +209,8 @@ async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
         assert shell.status_code == 200
         assert shell.headers["content-type"].startswith("text/html")
         assert "小维 · 运维任务工作台" in shell.text
-        assert "<script" not in shell.text
+        assert '<script type="module" src="/app/static/app.js"></script>' in shell.text
+        assert "<script>" not in shell.text
 
         me = await client.get("/app/api/me")
         assert me.status_code == 200
@@ -378,8 +407,15 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("GET", "/oauth/feishu/start"),
         ("GET", "/oauth/feishu/callback"),
         ("GET", "/app"),
+        ("GET", "/app/tasks/{task_id}"),
         ("GET", "/app/api/me"),
+        ("GET", "/app/api/tasks"),
+        ("POST", "/app/api/tasks"),
+        ("GET", "/app/api/tasks/{task_id}"),
         ("POST", "/app/api/logout"),
+        ("GET", "/app/static/app.css"),
+        ("GET", "/app/static/app.js"),
+        ("GET", "/app/static/detail.js"),
         ("GET", "/healthz"),
         ("GET", "/readyz"),
     }
@@ -403,8 +439,6 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
             ("GET", "/v1/tasks"),
             ("POST", "/v1/tasks"),
             ("GET", "/v1/tasks/task-1"),
-            ("GET", "/app/api/tasks"),
-            ("GET", "/app/tasks/task-1"),
         ):
             response = await client.request(method, path)
             assert response.status_code == 404
@@ -439,6 +473,27 @@ async def test_every_response_has_browser_security_headers_and_no_cache(
             assert response.headers["strict-transport-security"] == (
                 "max-age=31536000"
             )
+
+
+async def test_static_assets_are_served_from_exact_routes_with_safe_media_types(
+    clock, memory_state
+) -> None:
+    app, _ = _web_app(clock, memory_state)
+    expected = {
+        "/app/static/app.css": ("text/css", ".workbench-main"),
+        "/app/static/app.js": ("text/javascript", "function renderTaskList"),
+        "/app/static/detail.js": ("text/javascript", "function clearTaskDetail"),
+    }
+
+    async with _client(app) as client:
+        for path, (media_type, marker) in expected.items():
+            response = await client.get(path)
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith(media_type)
+            assert response.headers["cache-control"] == "no-store"
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert marker in response.text
+        assert (await client.get("/app/static/missing.js")).status_code == 404
 
 
 async def test_health_readiness_and_framework_errors_use_closed_bodies(

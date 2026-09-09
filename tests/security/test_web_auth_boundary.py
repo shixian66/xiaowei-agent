@@ -44,6 +44,31 @@ class _Probe:
         )
 
 
+class _UnusedTaskAccess:
+    async def list_tasks(self, *, query: object) -> object:
+        raise AssertionError(query)
+
+    async def get_task(self, *, query: object) -> object:
+        raise AssertionError(query)
+
+
+class _UnusedSubmissions:
+    async def submit(self, *, command: object) -> object:
+        raise AssertionError(command)
+
+
+def _auth_app(*, service: WebAuthService, settings: Settings, clock) -> object:
+    return create_app(
+        auth=service,
+        settings=settings,
+        readiness=_Probe(),
+        task_access=_UnusedTaskAccess(),
+        submissions=_UnusedSubmissions(),
+        clock=clock,
+        policy_revision="policy-2026-09-01",
+    )
+
+
 class _OAuth:
     def __init__(
         self,
@@ -323,7 +348,7 @@ async def test_oversized_logout_is_rejected_before_auth_state_changes(
         feishu_identity_file="/run/config/feishu-identities.json",
         web_detail_base_url="https://ops.example.test",
     )
-    app = create_app(auth=service, settings=settings, readiness=_Probe())
+    app = _auth_app(service=service, settings=settings, clock=clock)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
@@ -378,7 +403,7 @@ async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
         feishu_identity_file="/run/config/feishu-identities.json",
         web_detail_base_url="https://ops.example.test",
     )
-    app = create_app(auth=service, settings=settings, readiness=_Probe())
+    app = _auth_app(service=service, settings=settings, clock=clock)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
