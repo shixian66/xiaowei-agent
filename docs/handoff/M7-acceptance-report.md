@@ -1,4 +1,4 @@
-# M7 Web 与飞书薄渠道——离线候选验收报告
+# M7 Web 与飞书薄渠道——离线范围验收报告
 
 > 按 DEVELOPMENT_PLAN 的四段格式：已验证 / 只读推理 / 未覆盖 / 残余风险。
 >
@@ -9,12 +9,16 @@
 > `git rev-parse HEAD` 提供，不在文件内写必然落后的自引用值。
 >
 > **状态：PR #27 的最终受审 head `c50d820…` 已以 squash commit `ba5ecfe5…` 合入 `main`，M7
-> 离线实现范围 8/8 完成；真实渠道验证仍未开始，里程碑未验收、未归档。**
+> 离线实现范围 8/8 完成。项目负责人于 2026-09-09 明确批准按离线范围验收并归档；最强证据仍为
+> `tests`，真实渠道验证尚未开始，`DEVELOPMENT_PLAN.md` 的 M7 完整退出标准仍未通过。**
 
 ## 1. 已验证
 
 ### 1.1 基线与范围
 
+- 项目负责人于 2026-09-09 明确说“合并归档吧”，批准 M7 离线范围验收并授权归档；历史事实见
+  [M7 离线范围归档](archive/2026-09-09-M7-web-feishu-offline.md)。该授权只关闭 PR 1–8 的离线
+  实施任务，不授权真实渠道，也不解锁只读 V1 发布点或 M8。
 - PR 7 已以 PR #26 合入 `main@0e7cb5c`；其最终受审 head 为 `11d90b8`，PR run
   `34329735688` 与合入后 main run `34329993048` 均八个 CI job 全绿，前者 integration
   `2976 passed`、0 skipped。
@@ -113,6 +117,11 @@ mypy src
   与合入后 main run [`34343986339`](https://github.com/shixian66/xiaowei-agent/actions/runs/34343986339)
   均八项全绿；main run 的 integration 为 `2995 passed`、0 skipped，compose-smoke 输出
   `compose-smoke: passed`。
+- 离线完成交接 PR [#28](https://github.com/shixian66/xiaowei-agent/pull/28) 的 head
+  `35b0d0f4da459700ed0f847083477bac3fe7a40c` 已以 squash commit
+  `a5c88cbc285658f7f38355a9470bfdd725858ba5` 合入；run
+  [`34344702378`](https://github.com/shixian66/xiaowei-agent/actions/runs/34344702378) 八项全绿，
+  integration 为 `2995 passed`、0 skipped，compose-smoke 输出 `compose-smoke: passed`。
 
 ## 2. 只读推理
 
@@ -129,7 +138,6 @@ mypy src
   `PYTEST_POSTGRES_DSN`，新增 M7 同库 integration 在本机受控跳过。PR run `34340238099` 已在
   GitHub 隔离 runner 补得 PostgreSQL 0 skipped 与 Compose 容器运行证据，但不能改写本机未验证
   的事实。
-- M7 离线代码范围虽已合入，但尚未获得项目负责人里程碑验收或归档口令。
 - 没有真实飞书 app、OAuth code exchange、成员接口、消息发送、长连接、真实凭据或网络调用；没有
   部署、canary、回滚演练或产品用户验收。
 - PR 7 的 1280/1440 桌面工作台及窄屏只读详情尚无真实浏览器截图；HTML/CSS/JS 契约不等于视觉

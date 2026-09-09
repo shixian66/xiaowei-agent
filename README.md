@@ -6,8 +6,10 @@
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
 > 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
 > `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机没有
-> Docker 或 PostgreSQL DSN，隔离 PostgreSQL/Compose 证据来自 GitHub CI。M7 尚未获得负责人
-> 里程碑验收或归档口令。
+> Docker 或 PostgreSQL DSN，隔离 PostgreSQL/Compose 证据来自 GitHub CI。项目负责人已于
+> 2026-09-09 按**离线范围**验收并授权归档，历史事实见
+> [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
+> 真实渠道退出标准已经通过。
 > PR 1–8 只获得离线开发口令，真实 OAuth port 仍未激活。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
