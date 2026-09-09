@@ -13,6 +13,7 @@ from xiaowei_agent.contracts import (
     content_digest,
     task_query_path,
 )
+from xiaowei_agent.rendering import feishu as feishu_renderer
 from xiaowei_agent.rendering.feishu import render_feishu_card
 
 
@@ -68,6 +69,10 @@ def _plain_text_contents(value: object) -> list[str]:
         for child in value:
             found.extend(_plain_text_contents(child))
     return found
+
+
+def test_status_presentation_is_exhaustive() -> None:
+    assert set(feishu_renderer._STATUS_PRESENTATION) == set(TaskStatus)
 
 
 def test_nonterminal_card_is_an_acceptance_projection() -> None:

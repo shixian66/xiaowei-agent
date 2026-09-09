@@ -17,6 +17,7 @@ from tests.security.test_task_view_runtime_authority import (
     _loaded_xiaowei_modules_after,
 )
 
+from xiaowei_agent.application import channel_projection as projection_module
 from xiaowei_agent.application.channel_projection import (
     ChannelMessageError,
     ChannelProjectionService,
@@ -31,7 +32,10 @@ from xiaowei_agent.contracts import (
     task_query_path,
 )
 from xiaowei_agent.interfaces.local_stack import ChannelWorkerStack
-from xiaowei_agent.persistence.channel import ProjectionSubscription
+from xiaowei_agent.persistence.channel import (
+    ProjectionSubscription,
+    ProjectionUpdateResult,
+)
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 
@@ -264,6 +268,10 @@ def test_provider_failure_log_contains_only_closed_code_and_hashed_refs(
         provider_failure_count=0,
     )
     service = object.__new__(ChannelProjectionService)
+    service._settings = SimpleNamespace(
+        tenant_id="dev-local",
+        environment_id="dev",
+    )
 
     with caplog.at_level(logging.WARNING):
         service._log_provider_failure(
@@ -274,9 +282,77 @@ def test_provider_failure_log_contains_only_closed_code_and_hashed_refs(
         )
 
     assert "provider_unavailable" in caplog.records[0].failure_kind
+    assert caplog.records[0].tenant_id == "dev-local"
+    assert caplog.records[0].environment_id == "dev"
     assert task_id not in caplog.text
     assert subscription_id not in caplog.text
     assert destination not in caplog.text
+
+
+def test_claim_lost_log_contains_scope_but_no_raw_identifiers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = dt.datetime(2026, 9, 8, tzinfo=dt.UTC)
+    task_id = "task-sensitive-claim-reference"
+    subscription_id = "subscription-sensitive-claim-reference"
+    destination = "chat-sensitive-claim-reference"
+    subscription = ProjectionSubscription(
+        subscription_id=subscription_id,
+        task_id=task_id,
+        destination_kind=DestinationKind.FEISHU_MESSAGE_CARD,
+        destination_ref=destination,
+        state=ProjectionState.PENDING_INITIAL,
+        next_attempt_at=now,
+        attempt_number=1,
+        provider_failure_count=0,
+    )
+    service = object.__new__(ChannelProjectionService)
+    service._settings = SimpleNamespace(
+        tenant_id="dev-local",
+        environment_id="dev",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        service._log_claim_lost(subscription)
+
+    record = caplog.records[0]
+    assert record.failure_kind == "claim_lost"
+    assert record.tenant_id == "dev-local"
+    assert record.environment_id == "dev"
+    assert task_id not in caplog.text
+    assert subscription_id not in caplog.text
+    assert destination not in caplog.text
+
+
+def test_claim_lost_logging_failure_does_not_turn_a_loser_into_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime(2026, 9, 8, tzinfo=dt.UTC)
+    subscription = ProjectionSubscription(
+        subscription_id="subscription-logging-failure",
+        task_id="task-logging-failure",
+        destination_kind=DestinationKind.FEISHU_MESSAGE_CARD,
+        destination_ref="chat-logging-failure",
+        state=ProjectionState.PENDING_INITIAL,
+        next_attempt_at=now,
+        attempt_number=1,
+        provider_failure_count=0,
+    )
+    service = object.__new__(ChannelProjectionService)
+    service._settings = SimpleNamespace(
+        tenant_id="dev-local",
+        environment_id="dev",
+    )
+
+    def fail_logging(*_: object, **__: object) -> None:
+        raise RuntimeError("logging backend unavailable")
+
+    monkeypatch.setattr(projection_module._LOGGER, "warning", fail_logging)
+
+    assert not service._claim_update_applied(
+        subscription=subscription,
+        result=ProjectionUpdateResult(applied=False, winner=subscription),
+    )
 
 
 def test_rendered_card_contract_cannot_carry_raw_fact_or_row_fields() -> None:

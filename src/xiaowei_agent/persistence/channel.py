@@ -192,6 +192,12 @@ class ProjectionClaimMutation(Contract):
     expected_state: ProjectionState
 
 
+class RenewProjectionClaimCommand(ProjectionClaimMutation):
+    """在出站调用前为同一 live owner/token 刷新租约，不生成新 fence。"""
+
+    ttl_seconds: StrictInt = Field(gt=0)
+
+
 class ClaimedTaskLookup(Contract):
     """解析投影任务 scope 所需的最小 live-claim 凭据。"""
 
@@ -324,6 +330,27 @@ def claim_matches(
         and current.claim_expires_at is not None
         and current.claim_expires_at > now
     )
+
+
+def renew_projection_claim(
+    current: ProjectionSubscription,
+    command: RenewProjectionClaimCommand,
+    *,
+    now: dt.datetime,
+) -> ProjectionUpdateResult:
+    """只允许当前 live claim 延长自身租约；不得缩短或复活租约。"""
+    if (
+        not claim_matches(current, command, now=now)
+        or current.claim_expires_at is None
+    ):
+        return ProjectionUpdateResult(applied=False, winner=current)
+    requested_expiry = now + dt.timedelta(seconds=command.ttl_seconds)
+    winner = current.model_copy(
+        update={
+            "claim_expires_at": max(current.claim_expires_at, requested_expiry),
+        }
+    )
+    return ProjectionUpdateResult(applied=True, winner=winner)
 
 
 def authorize_claimed_task_lookup(
@@ -512,6 +539,11 @@ class ChannelStore(Protocol):
     ) -> TaskLookup:
         """仅为 live projection claim 解析 TaskStore 所需 scope。"""
 
+    async def renew_projection_claim(
+        self, *, command: RenewProjectionClaimCommand
+    ) -> ProjectionUpdateResult:
+        """紧邻出站前续期同一 live claim；不得复活过期 claim。"""
+
     async def record_initial_projection(
         self, *, command: RecordInitialProjectionCommand
     ) -> ProjectionUpdateResult: ...
@@ -554,7 +586,9 @@ __all__ = [
     "ProjectionSubscriptionNotFoundError",
     "ProjectionUpdateResult",
     "RecordInitialProjectionCommand",
+    "RenewProjectionClaimCommand",
     "ScheduleProviderRetryCommand",
     "ScheduleTaskRecheckCommand",
     "authorize_claimed_task_lookup",
+    "renew_projection_claim",
 ]

@@ -6,7 +6,7 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
-from typing import Protocol
+from typing import Final, Protocol
 
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
 from xiaowei_agent.config import ConfigError, Settings, load_settings
@@ -18,6 +18,12 @@ _LOGGER = logging.getLogger(__name__)
 class _FailureKind(StrEnum):
     CONFIGURATION_INVALID = "configuration_invalid"
     CHANNEL_WORKER_FAILURE = "channel_worker_failure"
+
+
+_FAILURE_MESSAGES: Final[dict[_FailureKind, str]] = {
+    _FailureKind.CONFIGURATION_INVALID: "channel projection worker configuration invalid",
+    _FailureKind.CHANNEL_WORKER_FAILURE: "channel projection worker stopped",
+}
 
 
 class _WorkerProcessStack(Protocol):
@@ -32,7 +38,7 @@ def _record_process_failure(failure_kind: _FailureKind) -> None:
     """只记录进程级闭集原因，不保留配置或供应商异常正文。"""
     try:
         _LOGGER.error(
-            "channel projection worker stopped",
+            _FAILURE_MESSAGES[failure_kind],
             extra={"failure_kind": failure_kind.value},
         )
     except Exception:

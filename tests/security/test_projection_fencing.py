@@ -214,7 +214,7 @@ async def _bind_task(
 
 @pytest.mark.asyncio
 async def test_stale_sender_cannot_overwrite_a_reclaimed_subscription(
-    clock, context
+    clock, context, caplog: pytest.LogCaptureFixture
 ) -> None:
     tasks, channels, state = _stores(clock)
     task, subscription = await _bind_task(
@@ -255,7 +255,14 @@ async def test_stale_sender_cannot_overwrite_a_reclaimed_subscription(
         owner="worker-stale",
     )
 
-    assert await stale.poll_once() == 1
+    with caplog.at_level("WARNING"):
+        assert await stale.poll_once() == 0
+
+    assert [
+        record.failure_kind
+        for record in caplog.records
+        if getattr(record, "failure_kind", None) == "claim_lost"
+    ] == ["claim_lost"]
 
     while_winner_is_live = state.projection_subscriptions[
         subscription.subscription_id

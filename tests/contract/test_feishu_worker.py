@@ -106,6 +106,33 @@ def test_real_module_entry_is_silent_and_closed_with_default_profile() -> None:
     assert completed.stderr == ""
 
 
+def test_real_module_entry_distinguishes_invalid_configuration() -> None:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("XIAOWEI_")
+    }
+    env.update(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_CHANNEL_WORKER_ENABLED": "true",
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "xiaowei_agent.interfaces.feishu_worker"],
+        cwd=os.fspath(os.getcwd()),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == "channel projection worker configuration invalid\n"
+
+
 def test_process_main_reports_only_a_closed_failure_kind(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -132,3 +159,10 @@ def test_process_main_reports_only_a_closed_failure_kind(
     assert [record.failure_kind for record in caplog.records] == [
         "channel_worker_failure"
     ]
+    assert [record.getMessage() for record in caplog.records] == [
+        "channel projection worker stopped"
+    ]
+
+
+def test_process_failure_messages_cover_the_closed_taxonomy() -> None:
+    assert set(feishu_worker._FAILURE_MESSAGES) == set(feishu_worker._FailureKind)

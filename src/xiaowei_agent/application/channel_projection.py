@@ -7,7 +7,7 @@ import logging
 import math
 import uuid
 from collections.abc import Callable, Coroutine
-from typing import Any, Protocol
+from typing import Any, Final, Literal, Protocol
 from urllib.parse import quote
 
 from xiaowei_agent.contracts import (
@@ -32,7 +32,9 @@ from xiaowei_agent.persistence.channel import (
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
     ProjectionSubscription,
+    ProjectionUpdateResult,
     RecordInitialProjectionCommand,
+    RenewProjectionClaimCommand,
     ScheduleProviderRetryCommand,
     ScheduleTaskRecheckCommand,
 )
@@ -43,6 +45,7 @@ from xiaowei_agent.rendering.feishu import RenderedFeishuCard, render_feishu_car
 AsyncSleep = Callable[[float], Coroutine[Any, Any, None]]
 _LOGGER = logging.getLogger(__name__)
 _PROJECTION_READ_ATTEMPTS = 3
+_CLAIM_LOST_KIND: Final[str] = "claim_lost"
 _RETRYABLE_PROVIDER_ERRORS = frozenset(
     {
         ProjectionErrorCode.PROVIDER_RATE_LIMITED,
@@ -79,7 +82,7 @@ class ChannelMessageError(RuntimeError):
 
 
 class ChannelMessagePort(Protocol):
-    """飞书出站窄端口；目标类型由方法名固定，不靠引用形状猜测。"""
+    """飞书出站窄端口；供应商失败必须归一为 ``ChannelMessageError``。"""
 
     async def send_to_chat(
         self,
@@ -223,25 +226,15 @@ class ChannelProjectionService:
             )
         )
 
-    async def _send_new_card(
+    async def _new_message_target(
         self,
         *,
         subscription: ProjectionSubscription,
         lookup: TaskLookup,
-        task_version: int,
-        card: RenderedFeishuCard,
-    ) -> str:
-        idempotency_ref = self._idempotency_ref(
-            subscription=subscription,
-            task_version=task_version,
-            card=card,
-        )
+    ) -> tuple[Literal["chat", "user"], str]:
+        """在 provider 异常域之外解析新消息目的地。"""
         if subscription.destination_kind is DestinationKind.FEISHU_PRIVATE_NOTICE:
-            return await self._messages.send_to_user(
-                subject_ref=subscription.destination_ref,
-                card=card,
-                idempotency_ref=idempotency_ref,
-            )
+            return "user", subscription.destination_ref
         if subscription.destination_kind is not DestinationKind.FEISHU_MESSAGE_CARD:
             raise ChannelProjectionInvariantError("unsupported projection destination")
 
@@ -254,17 +247,35 @@ class ChannelProjectionService:
                 )
             )
         except ChannelBindingNotFoundError:
-            return await self._messages.send_to_user(
-                subject_ref=subscription.destination_ref,
-                card=card,
-                idempotency_ref=idempotency_ref,
-            )
+            return "user", subscription.destination_ref
         if binding.conversation_ref != subscription.destination_ref:
             raise ChannelProjectionInvariantError(
                 "projection destination differs from its group binding"
             )
-        return await self._messages.send_to_chat(
-            conversation_ref=subscription.destination_ref,
+        return "chat", subscription.destination_ref
+
+    async def _send_new_card(
+        self,
+        *,
+        subscription: ProjectionSubscription,
+        target: tuple[Literal["chat", "user"], str],
+        task_version: int,
+        card: RenderedFeishuCard,
+    ) -> str:
+        idempotency_ref = self._idempotency_ref(
+            subscription=subscription,
+            task_version=task_version,
+            card=card,
+        )
+        target_kind, target_ref = target
+        if target_kind == "chat":
+            return await self._messages.send_to_chat(
+                conversation_ref=target_ref,
+                card=card,
+                idempotency_ref=idempotency_ref,
+            )
+        return await self._messages.send_to_user(
+            subject_ref=target_ref,
             card=card,
             idempotency_ref=idempotency_ref,
         )
@@ -273,32 +284,33 @@ class ChannelProjectionService:
         self,
         *,
         subscription: ProjectionSubscription,
-        lookup: TaskLookup,
+        new_message_target: tuple[Literal["chat", "user"], str] | None,
         task_version: int,
         card: RenderedFeishuCard,
     ) -> str:
-        async with self._outbound:
-            if subscription.source_message_ref is not None:
-                await self._messages.update_card(
-                    message_ref=subscription.source_message_ref,
-                    card=card,
-                )
-                return subscription.source_message_ref
-            message_ref = await self._send_new_card(
-                subscription=subscription,
-                lookup=lookup,
-                task_version=task_version,
+        if subscription.source_message_ref is not None:
+            await self._messages.update_card(
+                message_ref=subscription.source_message_ref,
                 card=card,
             )
-            if (
-                not isinstance(message_ref, str)
-                or not message_ref
-                or message_ref != message_ref.strip()
-            ):
-                raise ChannelMessageError(
-                    error_code=ProjectionErrorCode.PROVIDER_INTERNAL
-                )
-            return message_ref
+            return subscription.source_message_ref
+        if new_message_target is None:
+            raise ChannelProjectionInvariantError("new projection has no destination")
+        message_ref = await self._send_new_card(
+            subscription=subscription,
+            target=new_message_target,
+            task_version=task_version,
+            card=card,
+        )
+        if (
+            not isinstance(message_ref, str)
+            or not message_ref
+            or message_ref != message_ref.strip()
+        ):
+            raise ChannelMessageError(
+                error_code=ProjectionErrorCode.PROVIDER_INTERNAL
+            )
+        return message_ref
 
     def _retry_delay(self, error: ChannelMessageError, failure_count: int) -> float:
         exponential = self._bounded_exponential(
@@ -346,6 +358,8 @@ class ChannelProjectionService:
                 "channel projection delivery failed",
                 extra={
                     "failure_kind": error.error_code.value,
+                    "tenant_id": self._settings.tenant_id,
+                    "environment_id": self._settings.environment_id,
                     "task_ref": content_digest(subscription.task_id)[:16],
                     "subscription_ref": content_digest(
                         subscription.subscription_id
@@ -355,12 +369,41 @@ class ChannelProjectionService:
         except Exception:
             return
 
+    def _log_claim_lost(self, subscription: ProjectionSubscription) -> None:
+        """记录不含原始标识的 fencing loser；日志故障不改变处理结果。"""
+        try:
+            _LOGGER.warning(
+                "channel projection claim lost",
+                extra={
+                    "failure_kind": _CLAIM_LOST_KIND,
+                    "tenant_id": self._settings.tenant_id,
+                    "environment_id": self._settings.environment_id,
+                    "task_ref": content_digest(subscription.task_id)[:16],
+                    "subscription_ref": content_digest(
+                        subscription.subscription_id
+                    )[:16],
+                },
+            )
+        except Exception:
+            return
+
+    def _claim_update_applied(
+        self,
+        *,
+        subscription: ProjectionSubscription,
+        result: ProjectionUpdateResult,
+    ) -> bool:
+        if result.applied:
+            return True
+        self._log_claim_lost(subscription)
+        return False
+
     async def _record_provider_failure(
         self,
         *,
         subscription: ProjectionSubscription,
         error: ChannelMessageError,
-    ) -> None:
+    ) -> bool:
         self._log_provider_failure(subscription, error)
         lookup = self._claim_lookup(subscription)
         attempts_exhausted = (
@@ -368,7 +411,7 @@ class ChannelProjectionService:
             >= self._settings.projection_provider_max_attempts
         )
         if error.error_code not in _RETRYABLE_PROVIDER_ERRORS or attempts_exhausted:
-            await self._channels.dead_letter_projection(
+            result = await self._channels.dead_letter_projection(
                 command=DeadLetterProjectionCommand(
                     subscription_id=lookup.subscription_id,
                     claim_owner=lookup.claim_owner,
@@ -377,9 +420,12 @@ class ChannelProjectionService:
                     error_code=error.error_code,
                 )
             )
-            return
+            return self._claim_update_applied(
+                subscription=subscription,
+                result=result,
+            )
         delay = self._retry_delay(error, subscription.provider_failure_count)
-        await self._channels.schedule_provider_retry(
+        result = await self._channels.schedule_provider_retry(
             command=ScheduleProviderRetryCommand(
                 subscription_id=lookup.subscription_id,
                 claim_owner=lookup.claim_owner,
@@ -388,6 +434,10 @@ class ChannelProjectionService:
                 next_attempt_at=self._clock() + dt.timedelta(seconds=delay),
                 error_code=error.error_code,
             )
+        )
+        return self._claim_update_applied(
+            subscription=subscription,
+            result=result,
         )
 
     async def _process_due(self, due: ProjectionSubscription) -> int:
@@ -407,6 +457,7 @@ class ChannelProjectionService:
                 lookup=self._claim_lookup(subscription)
             )
         except ProjectionClaimNotFoundError:
+            self._log_claim_lost(subscription)
             return 0
         record = await self._tasks.get(lookup=lookup)
         if (
@@ -414,7 +465,7 @@ class ChannelProjectionService:
             and record.status not in TERMINAL_STATUSES
         ):
             claim = self._claim_lookup(subscription)
-            await self._channels.schedule_task_recheck(
+            result = await self._channels.schedule_task_recheck(
                 command=ScheduleTaskRecheckCommand(
                     subscription_id=claim.subscription_id,
                     claim_owner=claim.claim_owner,
@@ -426,7 +477,12 @@ class ChannelProjectionService:
                     ),
                 )
             )
-            return 1
+            return int(
+                self._claim_update_applied(
+                    subscription=subscription,
+                    result=result,
+                )
+            )
         if subscription.state not in {
             ProjectionState.PENDING_INITIAL,
             ProjectionState.DELIVERING_TERMINAL,
@@ -440,34 +496,66 @@ class ChannelProjectionService:
             # 任务连续变化时不发送混合版本；让短租约过期后再重新领取。
             return 1
         card, task_version, task_terminal = projected
-        try:
-            message_ref = await self._deliver(
+        message_ref: str | None = None
+        message_error: ChannelMessageError | None = None
+        async with self._outbound:
+            new_message_target = None
+            if subscription.source_message_ref is None:
+                new_message_target = await self._new_message_target(
+                    subscription=subscription,
+                    lookup=lookup,
+                )
+            claim = self._claim_lookup(subscription)
+            renewed = await self._channels.renew_projection_claim(
+                command=RenewProjectionClaimCommand(
+                    subscription_id=claim.subscription_id,
+                    claim_owner=claim.claim_owner,
+                    fencing_token=claim.fencing_token,
+                    expected_state=subscription.state,
+                    ttl_seconds=self._settings.projection_claim_ttl_seconds,
+                )
+            )
+            if not self._claim_update_applied(
                 subscription=subscription,
-                lookup=lookup,
-                task_version=task_version,
-                card=card,
+                result=renewed,
+            ):
+                return 0
+            subscription = renewed.winner
+            if (
+                subscription.claim_expires_at is None
+                or subscription.claim_expires_at <= self._clock()
+            ):
+                self._log_claim_lost(subscription)
+                return 0
+            try:
+                message_ref = await self._deliver(
+                    subscription=subscription,
+                    new_message_target=new_message_target,
+                    task_version=task_version,
+                    card=card,
+                )
+            except ChannelMessageError as caught:
+                message_error = caught
+            except ChannelProjectionInvariantError:
+                raise
+            except Exception:
+                message_error = ChannelMessageError(
+                    error_code=ProjectionErrorCode.PROVIDER_INTERNAL
+                )
+
+        if message_error is not None:
+            return int(
+                await self._record_provider_failure(
+                    subscription=subscription,
+                    error=message_error,
+                )
             )
-        except ChannelMessageError as message_error:
-            await self._record_provider_failure(
-                subscription=subscription,
-                error=message_error,
-            )
-            return 1
-        except ChannelProjectionInvariantError:
-            raise
-        except Exception:
-            internal_error = ChannelMessageError(
-                error_code=ProjectionErrorCode.PROVIDER_INTERNAL
-            )
-            await self._record_provider_failure(
-                subscription=subscription,
-                error=internal_error,
-            )
-            return 1
+        if message_ref is None:
+            raise ChannelProjectionInvariantError("provider returned no message result")
 
         claim = self._claim_lookup(subscription)
         if subscription.state is ProjectionState.PENDING_INITIAL:
-            await self._channels.record_initial_projection(
+            result = await self._channels.record_initial_projection(
                 command=RecordInitialProjectionCommand(
                     subscription_id=claim.subscription_id,
                     claim_owner=claim.claim_owner,
@@ -483,8 +571,13 @@ class ChannelProjectionService:
                     ),
                 )
             )
-            return 1
-        await self._channels.complete_projection(
+            return int(
+                self._claim_update_applied(
+                    subscription=subscription,
+                    result=result,
+                )
+            )
+        result = await self._channels.complete_projection(
             command=CompleteProjectionCommand(
                 subscription_id=claim.subscription_id,
                 claim_owner=claim.claim_owner,
@@ -495,7 +588,12 @@ class ChannelProjectionService:
                 payload_digest=card.payload_digest,
             )
         )
-        return 1
+        return int(
+            self._claim_update_applied(
+                subscription=subscription,
+                result=result,
+            )
+        )
 
     async def poll_once(self) -> int:
         """按受信 scope 处理一批；同一订阅仍由 claim/fencing 串行。"""

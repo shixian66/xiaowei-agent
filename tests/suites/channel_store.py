@@ -28,6 +28,7 @@ from xiaowei_agent.persistence.channel import (
     ProjectionDueQuery,
     ProjectionSubscriptionConflictError,
     RecordInitialProjectionCommand,
+    RenewProjectionClaimCommand,
     ScheduleProviderRetryCommand,
     ScheduleTaskRecheckCommand,
 )
@@ -528,6 +529,77 @@ async def test_only_a_live_projection_claim_can_resolve_its_task_scope(
         await channel_store.resolve_claimed_task_lookup(lookup=lookup)
 
 
+async def test_only_the_live_claim_owner_can_extend_the_same_fence(
+    channel_store: Any, store: Any, context: Any, clock: Any
+) -> None:
+    task = await _task(store, context, "claim-renewal")
+    subscription = await channel_store.create_projection_subscription(
+        command=_subscription(task.task_id, clock())
+    )
+    claimed = await channel_store.claim_projection_subscription(
+        command=ClaimProjectionCommand(
+            subscription_id=subscription.subscription_id,
+            claim_owner="worker-a",
+            ttl_seconds=30,
+            expected_state=ProjectionState.PENDING_INITIAL,
+        )
+    )
+    assert claimed.applied and claimed.winner.fencing_token is not None
+    original_fence = claimed.winner.fencing_token
+    original_attempt = claimed.winner.attempt_number
+    original_expiry = claimed.winner.claim_expires_at
+    shortened = await channel_store.renew_projection_claim(
+        command=RenewProjectionClaimCommand(
+            subscription_id=subscription.subscription_id,
+            claim_owner="worker-a",
+            fencing_token=original_fence,
+            expected_state=ProjectionState.PENDING_INITIAL,
+            ttl_seconds=1,
+        )
+    )
+    assert shortened.applied
+    assert shortened.winner.claim_expires_at == original_expiry
+    for invalid in (
+        RenewProjectionClaimCommand(
+            subscription_id=subscription.subscription_id,
+            claim_owner="worker-b",
+            fencing_token=original_fence,
+            expected_state=ProjectionState.PENDING_INITIAL,
+            ttl_seconds=30,
+        ),
+        RenewProjectionClaimCommand(
+            subscription_id=subscription.subscription_id,
+            claim_owner="worker-a",
+            fencing_token=original_fence + 1,
+            expected_state=ProjectionState.PENDING_INITIAL,
+            ttl_seconds=30,
+        ),
+    ):
+        rejected = await channel_store.renew_projection_claim(command=invalid)
+        assert not rejected.applied
+        assert rejected.winner == shortened.winner
+    command = RenewProjectionClaimCommand(
+        subscription_id=subscription.subscription_id,
+        claim_owner="worker-a",
+        fencing_token=original_fence,
+        expected_state=ProjectionState.PENDING_INITIAL,
+        ttl_seconds=30,
+    )
+
+    clock.advance(seconds=20)
+    renewed = await channel_store.renew_projection_claim(command=command)
+
+    assert renewed.applied
+    assert renewed.winner.claim_expires_at == clock() + dt.timedelta(seconds=30)
+    assert renewed.winner.fencing_token == original_fence
+    assert renewed.winner.attempt_number == original_attempt
+
+    clock.advance(seconds=30)
+    expired = await channel_store.renew_projection_claim(command=command)
+    assert not expired.applied
+    assert expired.winner == renewed.winner
+
+
 async def test_claim_without_a_channel_binding_cannot_resolve_task_scope(
     channel_store: Any, store: Any, context: Any, clock: Any
 ) -> None:
@@ -754,6 +826,7 @@ CHANNEL_STORE_CASES = (
     test_due_scan_returns_only_the_requested_tenant_and_environment,
     test_expired_claim_gets_a_higher_fence_and_stale_worker_cannot_commit,
     test_only_a_live_projection_claim_can_resolve_its_task_scope,
+    test_only_the_live_claim_owner_can_extend_the_same_fence,
     test_claim_without_a_channel_binding_cannot_resolve_task_scope,
     test_task_wait_releases_claim_without_counting_a_provider_failure,
     test_initial_projection_and_provider_retry_follow_separate_paths,

@@ -6,7 +6,7 @@
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1
 > 渠道契约/ADR、PR 2 窄 TaskViewRuntime、PR 3 scoped channel access 与 PR 4 默认关闭的
 > 飞书 SDK seam、静态身份映射和长连接 listener 均已审查并合入；PR 5 飞书卡片与 projection
-> worker 已形成离线候选并完成本机深档验证，等待精确 SHA 审查。
+> worker 的首轮精确 SHA 审查意见已按根因修复并通过本机深档验证，修订候选等待复审。
 > PR 1–8 已获离线开发口令，后续 PR 仍须逐个审查、合入。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
@@ -209,6 +209,7 @@ export XIAOWEI_CHANNEL_WORKER_ENABLED=false
 `XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
 `XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_DETAIL_BASE_URL` 必须全部留空。listener 开启时
 前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
+详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
 两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
 `open_id` 精确映射，不按姓名或群角色猜权限：
 

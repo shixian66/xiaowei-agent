@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as dt
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -532,6 +533,216 @@ async def test_claim_expiry_before_scope_resolution_is_a_normal_loser(
     assert await harness.service.poll_once() == 0
     assert harness.messages.chat_sends == []
     assert harness.messages.user_sends == []
+
+
+@pytest.mark.asyncio
+async def test_claim_is_renewed_after_reads_before_a_slow_provider_failure(
+    clock, context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def consume_read_budget(_: TaskRecord) -> None:
+        clock.advance(seconds=14)
+
+    harness = _harness(clock, runtime=_Runtime(on_project=consume_read_budget))
+    _, subscription = await _bound_task(
+        harness, context, suffix="renew-before-provider"
+    )
+
+    async def slow_rate_limit(**_: object) -> str:
+        clock.advance(seconds=2)
+        raise ChannelMessageError(
+            error_code=ProjectionErrorCode.PROVIDER_RATE_LIMITED,
+            retry_after_seconds=5,
+        )
+
+    monkeypatch.setattr(harness.messages, "send_to_chat", slow_rate_limit)
+
+    assert await harness.service.poll_once() == 1
+    retry = _stored_subscription(harness, subscription)
+    assert retry.provider_failure_count == 1
+    assert retry.last_error_code is ProjectionErrorCode.PROVIDER_RATE_LIMITED
+    assert retry.next_attempt_at == clock() + dt.timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_claim_that_expires_while_renewal_returns_never_reaches_provider(
+    clock, context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(clock)
+    _, subscription = await _bound_task(
+        harness, context, suffix="renewal-returned-expired"
+    )
+    original = harness.channels.renew_projection_claim
+
+    async def expire_after_renewal(*, command):
+        result = await original(command=command)
+        clock.advance(seconds=15)
+        return result
+
+    monkeypatch.setattr(
+        harness.channels, "renew_projection_claim", expire_after_renewal
+    )
+
+    assert await harness.service.poll_once() == 0
+    assert harness.messages.chat_sends == []
+    assert harness.messages.user_sends == []
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.provider_failure_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        ProjectionErrorCode.PROVIDER_RATE_LIMITED,
+        ProjectionErrorCode.PROVIDER_FORBIDDEN,
+    ],
+)
+async def test_provider_state_write_after_renewed_claim_expiry_is_reported_as_lost(
+    clock,
+    context,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_code: ProjectionErrorCode,
+) -> None:
+    harness = _harness(clock)
+    _, subscription = await _bound_task(
+        harness, context, suffix="provider-outlives-renewal"
+    )
+
+    async def outlive_claim(**_: object) -> str:
+        clock.advance(seconds=15)
+        raise ChannelMessageError(error_code=error_code)
+
+    monkeypatch.setattr(harness.messages, "send_to_chat", outlive_claim)
+
+    with caplog.at_level(logging.WARNING):
+        assert await harness.service.poll_once() == 0
+
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.provider_failure_count == 0
+    assert persisted.state is ProjectionState.PENDING_INITIAL
+    claim_lost = [
+        record for record in caplog.records if record.failure_kind == "claim_lost"
+    ]
+    assert len(claim_lost) == 1
+    assert claim_lost[0].tenant_id == "dev-local"
+    assert claim_lost[0].environment_id == "dev"
+
+
+@pytest.mark.asyncio
+async def test_task_recheck_write_after_claim_expiry_is_reported_as_lost(
+    clock,
+    context,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = _harness(clock)
+    _, subscription = await _bound_task(
+        harness,
+        context,
+        suffix="task-recheck-claim-lost",
+        initial_state=ProjectionState.WAITING_TERMINAL,
+    )
+    original = harness.channels.schedule_task_recheck
+
+    async def expire_before_write(*, command):
+        clock.advance(seconds=15)
+        return await original(command=command)
+
+    monkeypatch.setattr(
+        harness.channels, "schedule_task_recheck", expire_before_write
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert await harness.service.poll_once() == 0
+
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.state is ProjectionState.DELIVERING_TERMINAL
+    assert persisted.provider_failure_count == 0
+    assert [
+        record.failure_kind
+        for record in caplog.records
+        if getattr(record, "failure_kind", None) == "claim_lost"
+    ] == ["claim_lost"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_completion_write_after_claim_expiry_is_reported_as_lost(
+    clock,
+    context,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = _harness(clock)
+    task, subscription = await _bound_task(
+        harness, context, suffix="completion-claim-lost"
+    )
+    assert await harness.service.poll_once() == 1
+    await drive_to_terminal(harness.tasks, lookup_for(task), TaskStatus.SUCCEEDED)
+    clock.advance(seconds=2)
+
+    async def outlive_claim(**_: object) -> None:
+        clock.advance(seconds=15)
+
+    monkeypatch.setattr(harness.messages, "update_card", outlive_claim)
+
+    with caplog.at_level(logging.WARNING):
+        assert await harness.service.poll_once() == 0
+
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.state is ProjectionState.DELIVERING_TERMINAL
+    assert persisted.source_message_ref == "message-1"
+    assert [
+        record.failure_kind
+        for record in caplog.records
+        if getattr(record, "failure_kind", None) == "claim_lost"
+    ] == ["claim_lost"]
+
+
+@pytest.mark.asyncio
+async def test_group_binding_storage_failure_is_not_charged_to_provider_budget(
+    clock, context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(clock)
+    _, subscription = await _bound_task(
+        harness, context, suffix="binding-storage-failure"
+    )
+
+    async def fail_binding_read(**_: object):
+        raise RuntimeError("database failure must remain infrastructure failure")
+
+    monkeypatch.setattr(harness.channels, "get_group_binding", fail_binding_read)
+
+    with pytest.raises(
+        RuntimeError, match="database failure must remain infrastructure failure"
+    ):
+        await harness.service.poll_once()
+
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.provider_failure_count == 0
+    assert persisted.last_error_code is None
+    assert harness.messages.chat_sends == []
+    assert harness.messages.user_sends == []
+
+
+@pytest.mark.asyncio
+async def test_untyped_message_port_failure_remains_a_sanitized_provider_failure(
+    clock, context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(clock)
+    _, subscription = await _bound_task(
+        harness, context, suffix="untyped-provider-failure"
+    )
+
+    async def fail_provider(**_: object) -> str:
+        raise RuntimeError("provider response body must not escape")
+
+    monkeypatch.setattr(harness.messages, "send_to_chat", fail_provider)
+
+    assert await harness.service.poll_once() == 1
+    persisted = _stored_subscription(harness, subscription)
+    assert persisted.provider_failure_count == 1
+    assert persisted.last_error_code is ProjectionErrorCode.PROVIDER_INTERNAL
 
 
 @pytest.mark.asyncio

@@ -72,40 +72,46 @@ def _absolute_path(value: str) -> str:
 AbsolutePath = Annotated[StrictStr, AfterValidator(_absolute_path)]
 
 
-def _valid_origin_hostname(value: str) -> bool:
+def _canonical_origin_hostname(value: str) -> str | None:
     try:
-        ip_address(value)
-        return True
+        address = ip_address(value)
+        return f"[{address.compressed}]" if address.version == 6 else address.compressed
     except ValueError:
         pass
     try:
-        hostname = value.encode("idna").decode("ascii").removesuffix(".")
+        hostname = value.encode("idna").decode("ascii").lower().removesuffix(".")
     except UnicodeError:
-        return False
+        return None
     if not hostname or len(hostname) > 253:
-        return False
+        return None
     labels = hostname.split(".")
-    return all(
+    if not all(
         label
         and len(label) <= 63
         and not label.startswith("-")
         and not label.endswith("-")
         and all(character.isalnum() or character == "-" for character in label)
         for label in labels
-    )
+    ):
+        return None
+    return hostname
 
 
 def _https_origin(value: str) -> str:
     try:
         parsed = urlsplit(value)
-        _ = parsed.port
+        port = parsed.port
     except ValueError:
         raise ValueError("must be an HTTPS origin") from None
+    hostname = (
+        None
+        if parsed.hostname is None
+        else _canonical_origin_hostname(parsed.hostname)
+    )
     if (
         parsed.scheme != "https"
         or not parsed.netloc
-        or parsed.hostname is None
-        or not _valid_origin_hostname(parsed.hostname)
+        or hostname is None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in {"", "/"}
@@ -113,7 +119,8 @@ def _https_origin(value: str) -> str:
         or parsed.fragment
     ):
         raise ValueError("must be an HTTPS origin")
-    return value.removesuffix("/")
+    authority = hostname if port is None else f"{hostname}:{port}"
+    return f"https://{authority}"
 
 
 HttpsOrigin = Annotated[StrictStr, AfterValidator(_https_origin)]
