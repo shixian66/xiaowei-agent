@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | `/Users/kloenguyen/Desktop/agent` 主 checkout 仍停在旧计划分支且未用于本轮开发；当前 M7 PR 7 隔离 worktree 为 `/private/tmp/xiaowei-m7-web-workbench`；已合入的 PR 4–6 临时 worktree 已清理；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | `/Users/kloenguyen/Desktop/agent` 主 checkout 仍停在旧计划分支且未用于本轮开发；当前 M7 PR 8 隔离 worktree 为 `/private/tmp/xiaowei-m7-channel-integration`；已合入的 PR 4–7 临时 worktree 已清理；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-09（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6 与 PR 1–6 已合入 `main@6599bad`；PR 7 Web 运维任务工作台已在该基线上完成离线实现与本机深档验证，等待精确 SHA 审查。真实 OAuth port、应用、凭据、网络、部署与 canary 继续使用独立硬门** |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6 与 PR 1–7 已合入 `main@0e7cb5c`；PR 8 跨渠道一致性与默认关闭 Compose 拓扑的离线候选实现为 `8a5d43f`，正在做文档收口与最终验证，尚未审查、推送、CI 或合入。真实 OAuth port、应用、凭据、网络、部署与 canary 继续使用独立硬门** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.2；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，不授权真实渠道激活 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -49,8 +49,8 @@
 | M6a 合并后 CI | main push run [`33976421909`](https://github.com/shixian66/xiaowei-agent/actions/runs/33976421909) 精确绑定最终实现基线，八个 job 全绿 |
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
-| M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.6 已通过技术复核并以 `289efe5` 合入；项目负责人已明确发出离线开工口令。PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 `04c2fcd` 合入契约与 ADR；PR [#21](https://github.com/shixian66/xiaowei-agent/pull/21) 以 `1ec2b5c` 合入窄 TaskViewRuntime；PR [#22](https://github.com/shixian66/xiaowei-agent/pull/22) 的受审 head `3e61ae5` 以 `dd7d18f` 合入 scoped channel access；PR [#23](https://github.com/shixian66/xiaowei-agent/pull/23) 的受审 head `7e109d1` 以 `3487808` 合入默认关闭的飞书 listener；PR [#24](https://github.com/shixian66/xiaowei-agent/pull/24) 的受审 head `2f3d83e` 以 `2b66cf9` 合入飞书卡片与 projection worker；PR [#25](https://github.com/shixian66/xiaowei-agent/pull/25) 的受审 head `ed6f4ac` 以 `6599bad` 合入 Web OAuth/session 与隔离 Web app。PR #25 run `34317195209` 与合入后 main run `34318141689` 均八个 CI job 全绿，前者 integration 为 `2947 passed`、0 skipped。PR 1–8 只允许 fake/recording 离线实现；真实渠道门未放宽 |
-| 下一步 | **按当前分支精确 SHA 审查 M7 PR 7；通过后才由负责人决定是否推送、创建 PR 和合并。** PR 8 必须基于 PR 7 已审查并合入后的最新 `main`，不堆叠未审核分支、不自行合并。M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。恢复 M6b 时仍须重新核对授权并取得新的“现场 GO” |
+| M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.6 已通过技术复核并以 `289efe5` 合入；项目负责人已明确发出离线开工口令。PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 `04c2fcd` 合入契约与 ADR；PR [#21](https://github.com/shixian66/xiaowei-agent/pull/21) 以 `1ec2b5c` 合入窄 TaskViewRuntime；PR [#22](https://github.com/shixian66/xiaowei-agent/pull/22) 的受审 head `3e61ae5` 以 `dd7d18f` 合入 scoped channel access；PR [#23](https://github.com/shixian66/xiaowei-agent/pull/23) 的受审 head `7e109d1` 以 `3487808` 合入默认关闭的飞书 listener；PR [#24](https://github.com/shixian66/xiaowei-agent/pull/24) 的受审 head `2f3d83e` 以 `2b66cf9` 合入飞书卡片与 projection worker；PR [#25](https://github.com/shixian66/xiaowei-agent/pull/25) 的受审 head `ed6f4ac` 以 `6599bad` 合入 Web OAuth/session；PR [#26](https://github.com/shixian66/xiaowei-agent/pull/26) 的受审 head `11d90b8` 以 `0e7cb5c` 合入 Web 工作台。PR #26 run `34329735688` 与合入后 main run `34329993048` 均八个 CI job 全绿，前者 integration 为 `2976 passed`、0 skipped。PR 8 当前只有本地候选 `8a5d43f`；PR 1–8 只允许 fake/recording 离线实现，真实渠道门未放宽 |
+| 下一步 | **完成 PR 8 文档与最终四门后，按最终分支 SHA 做独立审查；通过后才由负责人决定是否推送、创建 PR 和合并。** 本轮不自行推送或合并，也不把本机静态 Compose 契约写成 Docker 运行证据。M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。恢复 M6b 时仍须重新核对授权并取得新的“现场 GO” |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -155,11 +155,11 @@ M6a 的 Prometheus/资产两个 fake 闭环、两条上游修复链、扩展数�
 9. ~~M5 实现与验收~~ **已完成**：最终对象 `372c381` 经终审与项目负责人验收，以 fast-forward 合入 `main`；合并后 run `33952529021` 八项全绿，逐条提交历史已归档。
 10. ~~M6a 实现与验收~~ **已完成**：PR #11、#12、#13、#15、#14 均已合入；最终实现基线 `e2032fd` 的 main push CI 八项全绿，里程碑已获负责人验收并归档。
 11. **M6b 真实验证前暂停**：默认关闭的真实 adapter 已经 PR #17 审查并合入 `main`，合入后八项 CI 全绿；项目负责人明确将测试环境验证延期。恢复时必须从最新 `main` 重新核对授权和配置，唯一目标、物理身份、带外 version/grants/DDL/identity digest、secret reference、actor/窗口、证据处置和新的“现场 GO”未全部落定前不连接真实服务。M6b 仍未验收、未归档。
-12. **M7 已进入逐 PR 离线实现**：V0.6 已通过技术复核并以 `289efe5` 合入，负责人已发出
-    “开始 M7 离线实现”口令；PR #20–#25 已把 PR 1–6 的渠道契约、窄 Runtime、scoped channel
-    access、默认关闭的飞书 listener/projection worker 与 Web OAuth/session 合入 `main@6599bad`。
-    当前只推进 PR 7 Web 运维任务工作台；真实 OAuth port、应用注册、凭据、网络、部署与 canary
-    仍保持独立硬门，不因任何离线 PR 完成自动解锁。
+12. **M7 正在完成最后一个离线 PR**：V0.6 已通过技术复核并以 `289efe5` 合入，负责人已发出
+    “开始 M7 离线实现”口令；PR #20–#26 已把 PR 1–7 的渠道契约、窄 Runtime、scoped channel
+    access、默认关闭的飞书 listener/projection worker、Web OAuth/session 与工作台合入
+    `main@0e7cb5c`。当前只推进 PR 8 的跨渠道一致性、Compose 与离线安全证据；真实 OAuth port、
+    应用注册、凭据、网络、部署与 canary 仍保持独立硬门，不因离线 PR 8 完成自动解锁。
 
 ## 6. 仍需拍板的事项
 
@@ -315,8 +315,14 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   转红；修复后同组转绿。在隔离源码副本移除 OAuth state 的已消费判定时，重放与并发单 winner 两条
   测试准确转红；放宽 Origin 精确相等时，恶意 origin 的注销反例准确从 403 变成 204 并转红；本轮在
   隔离副本移除 ASCII 比较保护时，非 ASCII Origin 用例准确回退为 500 并转红。变体已删除，未进入工作树。
-- **M7 PR 7 离线候选已完成本机深档验证**：Web app 新增服务端作用域的任务列表、提交与详情
-  JSON API，桌面运维任务工作台和独立只读详情 shell 共享安全 `RenderPayload`，但不复制业务路由、
+- **M7 PR 7 已审查并合入 `main`**：PR [#26](https://github.com/shixian66/xiaowei-agent/pull/26)
+  的最终受审 head 为 `11d90b81025c4804d7aba75aa03bf39bf3470661`，以提交
+  `0e7cb5c1e9db8ce34ed6f2a3e90f7374b16d2e6a` 合入；PR run
+  [`34329735688`](https://github.com/shixian66/xiaowei-agent/actions/runs/34329735688) 与合入后 main run
+  [`34329993048`](https://github.com/shixian66/xiaowei-agent/actions/runs/34329993048) 均八个 CI job
+  全绿，前者 integration 为 `2976 passed`、0 skipped。该 PR 的 Web app 新增服务端作用域的任务
+  列表、提交与详情 JSON API，桌面运维任务工作台和独立只读详情 shell 共享安全
+  `RenderPayload`，但不复制业务路由、
   policy 或执行链。普通用户/admin 列表语义复用 `TaskAccessService`；提交复用
   `ChannelSubmissionService` 的权限与幂等语义；群详情每次读取都重新校验成员，撤权后统一 404。
   两个 shell 无 inline script，外部文本只经 `textContent`；详情 shell 不含 textarea、提交表单、
@@ -333,6 +339,19 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   转红；恢复生产实现后同一用例转绿。精确 SHA 审查后的两个新回归测试先分别因缺少公开单一预览
   上限、退避只在成功分支推进而转红；修复后转绿。再把 Web 摘要边界人为缩短 1、移除 scheduler
   退避时，对应用例均准确转红并在恢复后转绿；所有变体均未提交。
+- **M7 PR 8 离线实现对象为 `8a5d43f36803835ae94fabdcee0e1ee5e1bff865`**：同一终态
+  `TaskView`/`RenderPayload` 经 internal API、CLI、Web 与飞书卡片投影保持 status、安全字段和 refs
+  一致，飞书只按 provider 预算显式截断；fake 飞书事件、完整 task worker、原卡片更新、Web 详情、
+  普通用户一次私聊与 admin 零额外私聊构成同库闭环。Compose 静态契约新增默认关闭且 profile-gated
+  的 listener/channel worker/Web 三个进程，并让 canonical smoke 在同一镜像内验证三个模块入口以
+  code 2 且无输出 fail-closed。最终工作树本机四门为全量 `2807 passed / 187 skipped / 5 warnings`、
+  security `1192 passed / 79 skipped / 1723 deselected / 5 warnings`、Ruff 通过、mypy 151 个源文件
+  通过；文档/Compose 聚焦门为 59 passed。
+- **M7 PR 8 的 TDD 与四类变异反证已落地**：Compose 服务缺失时 5 条契约先红，smoke 默认关闭
+  helper 缺失时 5 条先红，安全 Eval 的外部文本断言曾准确暴露 JSON 表示层与纯文本层混淆，纠正
+  测试后 9 条 Eval 转绿。隔离变异分别把 task lookup 环境固定为 `dev`、忽略群成员否定、删除同
+  owner 重领后的 fencing token 比对、向 Web app 注入 `/v1/tasks`；四条对应测试均因越权或闭集
+  破坏转红。生产保护恢复后相关 10 条通过，临时 worktree 零 diff 后已删除。
 - **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
   collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
   `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export
@@ -375,9 +394,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **M7 只有 PR 1–6 的 `main` 源码/测试证据和 PR 7 工作树的离线候选**：PR 7 尚未通过精确
-  SHA 审查、PR CI 或合入，PR 8 尚未实现。M7 仍无真实飞书/Web 进程、渠道 Compose、部署、
-  canary 或用户验收证据。未来的
+- **M7 只有 PR 1–7 的 `main` 源码/测试证据和 PR 8 工作树的离线候选**：PR 8 尚未通过独立精确
+  SHA 审查、PR CI 或合入；本机没有 Docker，也未提供 PostgreSQL DSN，因此新增 M7 同库 integration
+  是受控 skip，渠道 Compose 只有静态契约和脚本单测，没有容器运行证据。M7 仍无真实飞书/Web
+  渠道进程、部署、canary 或用户验收证据。未来的
   Admin 配置治理和真实模型 API 也尚无源码或运行证据；真实应用、凭据、网络连接、部署与 canary
   仍被独立硬门阻塞。
 - **PR 7 的真实浏览器视觉截图尚未取得**：当前浏览器安全策略阻止访问本机预览地址及离线页面；
@@ -388,7 +408,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
 - 当前开发机未提供 `PYTEST_POSTGRES_DSN` 且没有 Docker，因此本机资产 PostgreSQL integration 是受控 skip、Compose 未实跑；最终 PR #14 run `33975532006` 与 main run `33976421909` 已在 GitHub 隔离 runner 补证。单次 CI 仍不能外推到其他 PostgreSQL/Docker/Compose 版本或长期运行。
-- 主 `main` checkout 的旧 M6a 同路径计划稿已在 PR 1 合入前移到临时目录备份；当前仍保留两份与本任务无关的用户未跟踪文档 `docs/plans/development-route-v3-proposal.md` 与 `docs/plans/legacy-capability-migration-matrix.md`，本任务不读取、不修改、不暂存。
+- 主 `main` checkout 的旧 M6a 同路径计划稿已在 PR 1 合入前移到临时目录备份；当前仍保留三份与
+  本任务无关的用户未跟踪文档 `docs/plans/M8-dinky-controlled-stop.md`、
+  `docs/plans/development-route-v3-proposal.md` 与
+  `docs/plans/legacy-capability-migration-matrix.md`，本任务不读取、不修改、不暂存。
 - **`StepConditionKind` 四个成员已有三个被消费**：`ALWAYS`、`EVIDENCE_ROW_COUNT_BELOW` 与 `PRIOR_STEP_RESULT_IS`。后者由 Prom 两步计划消费，并只读取持久化 step journal 的 committed `OK`；`FAILED`/`TIMEOUT`/无记录均不运行后续步骤。`EVIDENCE_FIELD_ABSENT` 仍未消费、未验证。
 - **M3 未验证真实恢复**：`resume()` 的漂移拒绝有测试，但"审批通过后恢复并真的执行副作用步骤"这条路径**永远不会在 M0-M7 走通**（E1 硬闸），因此只验证了控制流。
 - 攻击矩阵中 A26/A29/A30 是链路层用例，A31-A36 是 SQL 层用例；**未覆盖**的是真实 StarRocks 的语法差异——全部 AST 结论都基于 sqlglot 30.17.0 的 starrocks 方言实现，不是真实服务端的解析结果。
@@ -402,7 +425,7 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **M7 PR 4 虽已合入，但只验证了锁定 wheel 的源码形状与 fake SDK 对象**：尚未验证测试企业的真实长连接握手、
   回调对象、应用权限、成员可见性与分页返回形状；这些只能在 §0.3.2 门齐备后 canary。身份 allowlist
   在 listener 和 Web app 装配时读取一次，撤权或改权限必须受控重启；同步 SDK 线程的优雅停止与进程崩溃恢复
-  还要由 PR 8 的 Compose 进程契约承重。
+  已有 PR 8 的静态进程契约与默认关闭入口检查，但尚无 Docker 容器运行或真实 provider 证据。
 - **M7 PR 6 只实现 fake OAuth port、digest-only state/session 与默认关闭的 Web 认证边界**：真实
   provider 的授权 URL、code exchange、错误/延迟/限流语义均未验证；模块入口在真实 port 未获审核和
   授权前固定 fail-closed。过期 state/session 的后台清理与公网入口速率限制也尚未实现，真实激活前
@@ -412,6 +435,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   延迟、限流、消息幂等或事件循环影响，须在真实渠道门满足后由 canary 测量。
 - **飞书外部可见投递只有 at-least-once**：发送成功但订阅提交前崩溃时仍可能重试；稳定目的地、
   payload digest、创建消息 UUID 与 fencing 降低重复风险，但不能宣称 exactly-once。
+- **M7 PR 8 的 Compose 变更尚未在本机执行**：当前只由 YAML 闭集、canonical smoke 脚本单测与
+  默认关闭模块入口契约承重；不同 Docker/Compose 版本的 profile、depends-on、loopback 端口和容器
+  生命周期兼容性须由 PR CI 先补证，真实渠道长期运行仍只能由独立 canary 证明。
 - **M7 PR 3 的普通用户列表为避免建立“所在群任务”聚合权限，最多按 actor 扫描 100 条，再以一次
   scoped ChannelStore batch 排除群绑定**：群任务密集时一页可以为空但携带继续游标，Web 客户端
   必须按游标继续而不能把空页误判为已到底；N+1 已消除，但这条查询尚无真实负载基准。

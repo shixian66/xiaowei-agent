@@ -3,13 +3,11 @@
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
 > 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
-> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1
-> 渠道契约/ADR、PR 2 窄 TaskViewRuntime、PR 3 scoped channel access 与 PR 4 默认关闭的
-> 飞书 SDK seam、静态身份映射和长连接 listener，以及 PR 5 飞书卡片与 projection worker
-> 均已审查并合入。PR 6 Web OAuth/session 与空壳 Web app 已通过复审及 CI，并以 PR #25
-> 合入 `main@6599bad`。PR 7 Web 运维任务工作台已在该基线上完成离线实现与本机验证，等待
-> 精确 SHA 审查；真实 OAuth port 尚未激活，模块入口即使配置开启也会 fail-closed。
-> PR 1–8 已获离线开发口令，后续 PR 仍须逐个审查、合入。
+> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–7
+> 已逐项审查并合入；PR 7 Web 运维任务工作台以 PR #26 合入 `main@0e7cb5c`。PR 8 已在该基线
+> 完成跨渠道一致性、默认关闭的 Compose 拓扑、安全 Eval 与离线闭环候选，等待精确 SHA 审查和
+> 远程 CI；本机没有 Docker，新增 PostgreSQL/Compose 路径尚未取得本机运行证据。
+> PR 1–8 只获得离线开发口令，真实 OAuth port 仍未激活。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -117,7 +115,7 @@ agent/
 │   ├── plans/                 # 里程碑详细实施计划（M2 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # 已建立（M1）
-├── docker-compose.yml          # API / Worker / migration / PostgreSQL 基线
+├── docker-compose.yml          # API / Worker / 三个渠道角色 / migration / PostgreSQL
 ├── docker-compose.smoke.yml    # smoke 的短租约与轮询 override
 ├── docker-compose.barrier.yml  # 仅用于恢复测试的 barrier override
 ├── docker-compose.m6b-test.yml # M6b 临时测试环境显式 override；默认不可激活
@@ -207,6 +205,11 @@ export XIAOWEI_FEISHU_LISTENER_ENABLED=false
 export XIAOWEI_CHANNEL_WORKER_ENABLED=false
 export XIAOWEI_WEB_APP_ENABLED=false
 ```
+
+`docker-compose.yml` 以 `m7-channels` profile 声明 `feishu-listener`、`channel-worker` 与
+`web-app`，三个 flag 仍固定默认 `false`。它们与 API/Worker 共用同一镜像；listener/worker
+不发布宿主端口，Web 只发布 loopback `127.0.0.1:8080`。这只是离线装配资产，真实渠道门满足前
+不得注入真实配置或把任一 flag 改为 `true`；只允许以全关闭配置做离线装配验证。
 
 三个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
 `XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
@@ -307,7 +310,11 @@ docker compose down --volumes --remove-orphans
 python -m scripts.compose_smoke
 ```
 
-缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败或日志泄漏都会返回非零；脚本不允许 skip。当前开发机没有 Docker，因此上述运行步骤未在本机验证；合并后 GitHub CI run `33952529021` 已实际通过同一 Compose smoke。
+缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
+fail-closed 或日志泄漏都会返回非零；脚本不允许 skip。渠道入口检查是在已构建并运行的同一 API
+镜像内执行三个 `python -m ...` 入口，要求全部返回 code 2 且无输出，不会连接飞书。当前开发机
+没有 Docker，因此 PR 8 新增断言只有静态契约与脚本测试证据，尚待远程 CI 实跑；既有 M5
+Compose 基线最后一次明确证据仍是 GitHub CI run `33952529021`。
 
 ### 尚未完成与能力边界
 
