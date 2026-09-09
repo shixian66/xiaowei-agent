@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` 主 checkout 仍停在旧计划分支且未用于本轮开发；当前 M7 PR 6 隔离 worktree 为 `/private/tmp/xiaowei-m7-web-auth`；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-09（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6 与 PR 1–5 已合入 `main@2b66cf9`；PR 6 Web OAuth/session 与空壳 Web app 已在该基线上形成离线候选并通过本机深档验证，等待精确 SHA 审查。真实 OAuth port、应用、凭据、网络、部署与 canary 继续使用独立硬门** |
+| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 V0.6 与 PR 1–5 已合入 `main@2b66cf9`；PR 6 Web OAuth/session 与空壳 Web app 已在该基线上完成首轮精确 SHA 审查、根因修复和本机深档验证，等待最终 SHA 复审与 PR CI。真实 OAuth port、应用、凭据、网络、部署与 canary 继续使用独立硬门** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.2；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，不授权真实渠道激活 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -50,7 +50,7 @@
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
 | M7 计划与阶段门 | [docs/plans/M7-web-feishu-channels.md](docs/plans/M7-web-feishu-channels.md) V0.6 已通过技术复核并以 `289efe5` 合入；项目负责人已明确发出离线开工口令。PR [#20](https://github.com/shixian66/xiaowei-agent/pull/20) 以 `04c2fcd` 合入契约与 ADR；PR [#21](https://github.com/shixian66/xiaowei-agent/pull/21) 以 `1ec2b5c` 合入窄 TaskViewRuntime；PR [#22](https://github.com/shixian66/xiaowei-agent/pull/22) 的受审 head `3e61ae5` 以 `dd7d18f` 合入 scoped channel access；PR [#23](https://github.com/shixian66/xiaowei-agent/pull/23) 的受审 head `7e109d1` 以 `3487808` 合入默认关闭的飞书 listener；PR [#24](https://github.com/shixian66/xiaowei-agent/pull/24) 的受审 head `2f3d83e` 以 `2b66cf9` 合入飞书卡片与 projection worker，run `34302373730` 八个 CI job 全绿。PR 1–8 只允许 fake/recording 离线实现；真实渠道门未放宽 |
-| 下一步 | **完成 M7 PR 6 离线候选的本机深档验证，再按精确 SHA 审查；审查通过后才允许推送、创建 PR 和由负责人决定合并。** 不堆叠未审核分支、不自行推送或合并。M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。恢复 M6b 时仍须重新核对授权并取得新的“现场 GO” |
+| 下一步 | **提交并推送 M7 PR 6 审查修复候选、创建 PR，确认 CI `integration` 对 PostgreSQL session 路径 0 skip 实跑，再按最终精确 SHA 复审；只有复审与 CI 均通过后才由负责人决定合并。** 不堆叠未审核分支、不自行合并。M6b 真实验证继续独立延期；M7 离线证据不得提升 M6b 状态。恢复 M6b 时仍须重新核对授权并取得新的“现场 GO” |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -295,15 +295,20 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   state 消费、登录 session 轮换、实时身份目录重解析、固定超时且不重试的 fake OAuth port，以及只含
   认证和空壳 `/app` 的隔离 Web app。Cookie 使用 `__Host-`/Secure/HttpOnly/SameSite=Lax，状态变更
   同时校验 JSON Content-Type、严格 Origin 和 session 派生 CSRF；重复 query/header/cookie、控制字符
-  URL、默认 HTTPS 端口、错误上下文泄漏、路由与进程模块闭集均有反例。PR 4 遗留的 callback timeout
-  现在会在取消在途 future 后记录不含事件/主体/会话引用的闭集诊断并继续向 SDK 抛出超时。全量为
-  2759 passed / 186 skipped / 5 warnings；安全门为 1168 passed / 79 skipped / 1698 deselected /
-  5 warnings；PR 6 相关测试 192 passed；Ruff 通过，mypy 150 个源文件通过。所有测试继续处于全局
+  URL、默认 HTTPS 端口、错误上下文泄漏、路由与进程模块闭集均有反例。首轮审查发现非 ASCII
+  Origin/CSRF 会让 `compare_digest` 抛错并落入 500；当前统一在比较前收窄为 ASCII，并以真实注销
+  路由证明畸形头固定返回 403 且不会误撤销 session。所有响应由 Web app 自身增加一年期 HSTS，未把
+  未审查子域纳入 `includeSubDomains`/`preload`。PR 4 遗留的 callback timeout 现在会在取消在途
+  future 后记录不含事件/主体/会话引用的闭集诊断并继续向 SDK 抛出超时。全量为
+  2761 passed / 186 skipped / 5 warnings；安全门为 1170 passed / 79 skipped / 1698 deselected /
+  5 warnings；Ruff 通过，mypy 150 个源文件通过。所有测试继续处于全局
   `--disable-socket` 下；没有读取真实 secret、连接飞书或启动真实 OAuth 回调。
 - **M7 PR 6 有真实红灯与隔离变异反证**：新增反例先分别暴露 URL 解析会吞掉换行/制表符、`:443`
   未按浏览器 Origin 规范化、框架会从重复认证 Cookie 中静默择一、OAuth subject ref 无上界；修复后
-  同组转绿。在隔离源码副本移除 OAuth state 的已消费判定时，重放与并发单 winner 两条测试准确转红；
-  放宽 Origin 精确相等时，恶意 origin 的注销反例准确从 403 变成 204 并转红。变体已删除，未进入工作树。
+  同组转绿。非 ASCII Origin/CSRF 两条真实路由反例在修复前均以 500 转红，HSTS 契约在实现前以缺头
+  转红；修复后同组转绿。在隔离源码副本移除 OAuth state 的已消费判定时，重放与并发单 winner 两条
+  测试准确转红；放宽 Origin 精确相等时，恶意 origin 的注销反例准确从 403 变成 204 并转红；本轮在
+  隔离副本移除 ASCII 比较保护时，非 ASCII Origin 用例准确回退为 500 并转红。变体已删除，未进入工作树。
 - **PR 2 的执行权隔离有真实红灯证据**：新增模块前，契约测试因 `task_view_runtime` 不存在在
   collection 阶段失败；把 `runners/__init__.py` 的 eager re-export 保留时，独立进程反证以
   `execution module loaded: xiaowei_agent.runners.runner` 失败。移除两个包入口的 eager re-export

@@ -926,8 +926,11 @@ GET  /readyz
 ### 7.2 HTTP 安全契约
 
 - Cookie：`Secure`、`HttpOnly`、`SameSite=Lax`、host-only、短时过期，登录后轮换。
-- 所有状态变更 POST 检查 Origin、CSRF token 和 JSON Content-Type。
+- 所有状态变更 POST 检查 Origin、CSRF token 和 JSON Content-Type；Origin/CSRF 请求头必须先经过
+  ASCII/闭集形状校验，畸形头统一返回 `403/forbidden`，不得落入 `500`。
 - CSP 至少为 `default-src 'self'`，CSS/JS 独立静态文件，不使用 inline script。
+- `web-app` 自身为所有响应输出 `Strict-Transport-Security: max-age=31536000`；M7 不启用
+  `includeSubDomains` 或 `preload`，避免把未经本里程碑核对的其他子域纳入策略，反向代理不得移除该头。
 - JSON body 沿用全局大小限制；任务文本最大 8192 字符。
 - 浏览器发送 `client_submission_id`，服务端生成最终 idempotency key。
 - 所有用户文本通过 `textContent` 渲染；禁止 `innerHTML` 注入服务端/工具/用户文本。
@@ -1392,8 +1395,10 @@ mypy src
    schema、row mapping、migration 与 readiness head 必须同步。
 3. 写 OAuth state 单次、过期、重放、code 错误、未知身份、session rotation 与注销测试；授权 URL
    必须精确携带一次服务端 state 并拒绝控制字符，code exchange 固定超时且不重试，外部异常链不得保留。
-4. 写 Cookie/Origin/CSRF/CSP、重复 query/header/cookie、body 上限失败测试和 route 闭集；必须通过 Web app 的受保护真实路由断言
-   未登录返回 401/`unauthorized`，不能只直接调用 `error_body()`；每个 Web/OAuth/session 设置
+4. 写 Cookie/Origin/CSRF/CSP/HSTS、非 ASCII 与重复 query/header/cookie、body 上限失败测试和 route
+   闭集；非 ASCII Origin/CSRF 必须通过真实状态变更路由返回 `403/forbidden`，且 session 不被误撤销；
+   必须通过 Web app 的受保护真实路由断言未登录返回 401/`unauthorized`，不能只直接调用
+   `error_body()`；每个 Web/OAuth/session 设置
    同时登记 `_FIELD_TO_ENV` 与 `.env.example`，安全门证明集合相等。
 5. 写关键隔离测试：`web-app` 不注册 `/v1/tasks/*`；`internal-api` 不注册 `/app` 和 OAuth；构建
    Web stack 后项目模块集合为经审查闭集，且不加载 `lark_oapi`。

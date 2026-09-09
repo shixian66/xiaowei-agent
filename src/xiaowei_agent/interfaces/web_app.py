@@ -41,6 +41,7 @@ _CSP: Final[str] = (
     "form-action 'self'; "
     "object-src 'none'"
 )
+_HSTS: Final[bytes] = b"max-age=31536000"
 _SHELL: Final[str] = """<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>小维 · 运维任务工作台</title></head>
@@ -65,6 +66,7 @@ class _SecurityHeadersMiddleware:
                         (b"x-content-type-options", b"nosniff"),
                         (b"referrer-policy", b"no-referrer"),
                         (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                        (b"strict-transport-security", _HSTS),
                     )
                 )
                 message["headers"] = headers

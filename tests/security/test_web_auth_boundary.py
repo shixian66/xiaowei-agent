@@ -355,6 +355,64 @@ async def test_oversized_logout_is_rejected_before_auth_state_changes(
         assert (await client.get("/app/api/me")).status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("malformed_header", "malformed_value"),
+    (
+        (b"origin", b"https://ops.example.test/\xff"),
+        (b"x-csrf-token", b"\xff" * 64),
+    ),
+)
+async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
+    clock,
+    memory_state,
+    malformed_header: bytes,
+    malformed_value: bytes,
+) -> None:
+    oauth = _OAuth()
+    service = _service(clock, memory_state, oauth=oauth)
+    settings = Settings(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
+        feishu_identity_file="/run/config/feishu-identities.json",
+        web_detail_base_url="https://ops.example.test",
+    )
+    app = create_app(auth=service, settings=settings, readiness=_Probe())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="https://ops.example.test",
+        follow_redirects=False,
+    ) as client:
+        assert (await client.get("/oauth/feishu/start")).status_code == 302
+        callback = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "provider-code", "state": oauth.states[-1]},
+        )
+        assert callback.status_code == 302
+        me = await client.get("/app/api/me")
+        csrf = me.json()["csrf_token"]
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"origin", b"https://ops.example.test"),
+            (b"x-csrf-token", csrf.encode("ascii")),
+        ]
+        headers = [
+            (name, malformed_value if name == malformed_header else value)
+            for name, value in headers
+        ]
+
+        rejected = await client.post(
+            "/app/api/logout",
+            content=b"{}",
+            headers=headers,
+        )
+
+        assert rejected.status_code == 403
+        assert rejected.json() == {"error": {"code": "forbidden"}}
+        assert (await client.get("/app/api/me")).status_code == 200
+
+
 def test_web_stack_field_surface_has_no_execution_authority() -> None:
     names = {field.name for field in fields(WebStack)}
     assert not names & {

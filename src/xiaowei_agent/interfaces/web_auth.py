@@ -127,6 +127,17 @@ def _secret_is_valid(value: str | None) -> TypeGuard[str]:
     return isinstance(value, str) and _SECRET_RE.fullmatch(value) is not None
 
 
+def _constant_time_ascii_equal(left: str | None, right: str | None) -> bool:
+    """仅在双方都是 ASCII 时调用拒绝非 ASCII 文本的 compare_digest。"""
+    return (
+        isinstance(left, str)
+        and isinstance(right, str)
+        and left.isascii()
+        and right.isascii()
+        and hmac.compare_digest(left, right)
+    )
+
+
 def _digest(*, domain: str, secret: str) -> str:
     return sha256(f"{domain}:{secret}".encode()).hexdigest()
 
@@ -256,7 +267,7 @@ class WebAuthService:
         if (
             not _secret_is_valid(state)
             or not _secret_is_valid(state_cookie)
-            or not hmac.compare_digest(state, state_cookie)
+            or not _constant_time_ascii_equal(state, state_cookie)
         ):
             raise WebOAuthStateError
         state_missing = False
@@ -352,12 +363,12 @@ class WebAuthService:
         csrf_token: str | None,
     ) -> None:
         """校验严格同源和当前 session 派生的 CSRF token。"""
-        if origin is None or not hmac.compare_digest(origin, self._public_origin):
+        if not _constant_time_ascii_equal(origin, self._public_origin):
             raise WebOriginError
         if not _secret_is_valid(session_cookie):
             raise WebCsrfError
         expected = _digest(domain="csrf:v1", secret=session_cookie)
-        if not isinstance(csrf_token, str) or not hmac.compare_digest(
+        if not _secret_is_valid(csrf_token) or not _constant_time_ascii_equal(
             csrf_token, expected
         ):
             raise WebCsrfError

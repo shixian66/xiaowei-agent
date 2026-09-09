@@ -422,7 +422,9 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
             assert response.json() == {"error": {"code": "not_found"}}
 
 
-async def test_every_response_has_a_strict_csp_and_no_cache(clock, memory_state) -> None:
+async def test_every_response_has_browser_security_headers_and_no_cache(
+    clock, memory_state
+) -> None:
     app, _ = _web_app(clock, memory_state)
     async with _client(app) as client:
         for path in ("/missing", "/app", "/healthz", "/readyz"):
@@ -434,6 +436,9 @@ async def test_every_response_has_a_strict_csp_and_no_cache(clock, memory_state)
             assert "unsafe-inline" not in csp
             assert response.headers["cache-control"] == "no-store"
             assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.headers["strict-transport-security"] == (
+                "max-age=31536000"
+            )
 
 
 async def test_health_readiness_and_framework_errors_use_closed_bodies(
