@@ -54,15 +54,21 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.observability.sink import TraceSink
     from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
-    from xiaowei_agent.persistence.fake import InMemoryChannelStore, InMemoryTaskStore
+    from xiaowei_agent.persistence.fake import (
+        InMemoryChannelStore,
+        InMemoryTaskStore,
+        InMemoryWebSessionStore,
+    )
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
         PostgresChannelStore,
         PostgresEvidenceLedger,
         PostgresPlanStore,
         PostgresTaskStore,
+        PostgresWebSessionStore,
     )
     from xiaowei_agent.persistence.store import Clock, TaskStore
+    from xiaowei_agent.persistence.web_session import WebSessionStore
     from xiaowei_agent.runners.binding import (
         ExecutionBindingProvider,
         StepEvidenceBuilder,
@@ -82,6 +88,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         gateway: ToolGateway = DeterministicToolGateway(adapters={"starrocks": adapter})
         store: TaskStore = InMemoryTaskStore(clock=clock)
         channels: ChannelStore = InMemoryChannelStore(clock=clock)
+        sessions: WebSessionStore = InMemoryWebSessionStore(clock=clock)
         runner: WorkflowRunner = ScriptedRunner(
             store, outcome_status=TaskStatus.SUCCEEDED
         )
@@ -90,7 +97,17 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         sink: TraceSink = StructuredLogTraceSink()
         plans: PlanStore = InMemoryPlanStore()
         ledger: EvidenceLedger = InMemoryEvidenceLedger()
-        _ = (gateway, runner, registry, resolver, sink, plans, ledger, channels)
+        _ = (
+            gateway,
+            runner,
+            registry,
+            resolver,
+            sink,
+            plans,
+            ledger,
+            channels,
+            sessions,
+        )
 
     def _postgres_store_anchor(store: "PostgresTaskStore") -> None:
         """PostgreSQL 实现必须**就是**一个 ``TaskStore``。
@@ -104,6 +121,13 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     def _postgres_channel_store_anchor(store: "PostgresChannelStore") -> None:
         """PostgreSQL 渠道实现必须保持与内存实现相同的 ``ChannelStore`` 端口。"""
         anchored: ChannelStore = store
+        _ = anchored
+
+    def _postgres_web_session_store_anchor(
+        store: "PostgresWebSessionStore",
+    ) -> None:
+        """PostgreSQL Web session 实现必须保持 digest-only 原子存储端口。"""
+        anchored: WebSessionStore = store
         _ = anchored
 
     def _feishu_port_anchors(

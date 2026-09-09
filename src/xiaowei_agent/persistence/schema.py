@@ -358,6 +358,44 @@ sa.Index(
 )
 """渠道投影投递状态；任务当前真相必须回读 ``tasks``。"""
 
+WEB_OAUTH_STATES: Final = sa.Table(
+    "web_oauth_states",
+    METADATA,
+    sa.Column("state_digest", sa.CHAR(64), primary_key=True),
+    sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint(
+        "expires_at > issued_at",
+        name="ck_web_oauth_states_expiry_after_issue",
+    ),
+    sa.CheckConstraint(
+        "consumed_at IS NULL OR"
+        " (consumed_at >= issued_at AND consumed_at < expires_at)",
+        name="ck_web_oauth_states_consumption_window",
+    ),
+)
+"""OAuth state 的单次消费事实；只保存不可逆摘要。"""
+
+WEB_SESSIONS: Final = sa.Table(
+    "web_sessions",
+    METADATA,
+    sa.Column("session_digest", sa.CHAR(64), primary_key=True),
+    sa.Column("subject_ref", sa.Text, nullable=False),
+    sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint(
+        "expires_at > issued_at",
+        name="ck_web_sessions_expiry_after_issue",
+    ),
+    sa.CheckConstraint(
+        "revoked_at IS NULL OR revoked_at >= issued_at",
+        name="ck_web_sessions_revocation_after_issue",
+    ),
+)
+"""浏览器 session；不保存 cookie 明文、权限或租户环境快照。"""
+
 ALL_TABLES: Final = (
     TASKS,
     TASK_SUBMISSIONS,
@@ -368,4 +406,6 @@ ALL_TABLES: Final = (
     TASK_AUDIT_EVENTS,
     CHANNEL_BINDINGS,
     PROJECTION_SUBSCRIPTIONS,
+    WEB_OAUTH_STATES,
+    WEB_SESSIONS,
 )

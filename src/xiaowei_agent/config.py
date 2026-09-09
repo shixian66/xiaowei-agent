@@ -119,7 +119,7 @@ def _https_origin(value: str) -> str:
         or parsed.fragment
     ):
         raise ValueError("must be an HTTPS origin")
-    authority = hostname if port is None else f"{hostname}:{port}"
+    authority = hostname if port in {None, 443} else f"{hostname}:{port}"
     return f"https://{authority}"
 
 
@@ -194,6 +194,7 @@ class Settings(BaseModel):
     starrocks_query_timeout_seconds: int | None = Field(default=None, gt=0, le=25)
     feishu_listener_enabled: bool = False
     channel_worker_enabled: bool = False
+    web_app_enabled: bool = False
     feishu_app_id: StrictStr | None = None
     feishu_app_secret_file: AbsolutePath | None = None
     feishu_tenant_key: StrictStr | None = None
@@ -212,6 +213,10 @@ class Settings(BaseModel):
     projection_task_poll_base_seconds: float = Field(default=2.0, gt=0, le=60)
     projection_task_poll_cap_seconds: float = Field(default=10.0, gt=0, le=300)
     channel_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    web_bind_host: IpLiteral = "127.0.0.1"
+    web_bind_port: int = Field(default=8080, gt=0, le=65_535)
+    web_oauth_state_ttl_seconds: int = Field(default=300, gt=0, le=600)
+    web_session_ttl_seconds: int = Field(default=3600, gt=0, le=86_400)
 
     @model_validator(mode="after")
     def _worker_timings_are_consistent(self) -> "Settings":
@@ -329,44 +334,51 @@ class Settings(BaseModel):
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
         shared = (self.feishu_app_id, self.feishu_app_secret_file)
-        listener = (
-            self.feishu_tenant_key,
-            self.feishu_bot_open_id,
-            self.feishu_identity_file,
-        )
-        live_profile = shared + listener + (self.web_detail_base_url,)
-        if not self.feishu_listener_enabled and not self.channel_worker_enabled:
+        listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
+        identity = (self.feishu_identity_file,)
+        web_origin = (self.web_detail_base_url,)
+        live_profile = shared + listener_only + identity + web_origin
+        if not (
+            self.feishu_listener_enabled
+            or self.channel_worker_enabled
+            or self.web_app_enabled
+        ):
             if any(value is not None for value in live_profile):
                 raise ValueError(
-                    "disabled Feishu listener and channel worker must not carry live "
-                    "configuration"
+                    "disabled Feishu listener, channel worker, and Web app must not "
+                    "carry live configuration"
                 )
             return self
-        if any(value is None for value in shared):
-            if self.feishu_listener_enabled and not self.channel_worker_enabled:
-                raise ValueError(
-                    "enabled listener requires the complete Feishu listener profile"
-                )
-            raise ValueError(
-                "enabled worker requires the complete channel worker profile"
-            )
         if self.feishu_listener_enabled:
-            if any(value is None for value in listener):
+            if any(value is None for value in shared + listener_only + identity):
                 raise ValueError(
                     "enabled listener requires the complete Feishu listener profile"
                 )
-        elif any(value is not None for value in listener):
+        elif any(value is not None for value in listener_only):
             raise ValueError(
                 "disabled Feishu listener must not carry listener configuration"
             )
         if self.channel_worker_enabled:
-            if self.web_detail_base_url is None:
+            if any(value is None for value in shared + web_origin):
                 raise ValueError(
                     "enabled worker requires the complete channel worker profile"
                 )
-        elif self.web_detail_base_url is not None:
+        if self.web_app_enabled:
+            if any(value is None for value in shared + identity + web_origin):
+                raise ValueError(
+                    "enabled Web app requires the complete Web authentication profile"
+                )
+        if not self.feishu_listener_enabled and not self.web_app_enabled and any(
+            value is not None for value in identity
+        ):
             raise ValueError(
-                "disabled channel worker must not carry worker configuration"
+                "disabled Web app and Feishu listener must not carry identity configuration"
+            )
+        if not self.channel_worker_enabled and not self.web_app_enabled and any(
+            value is not None for value in web_origin
+        ):
+            raise ValueError(
+                "disabled Web app and channel worker must not carry Web origin"
             )
         return self
 
@@ -464,6 +476,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "starrocks_query_timeout_seconds": "XIAOWEI_STARROCKS_QUERY_TIMEOUT_SECONDS",
     "feishu_listener_enabled": "XIAOWEI_FEISHU_LISTENER_ENABLED",
     "channel_worker_enabled": "XIAOWEI_CHANNEL_WORKER_ENABLED",
+    "web_app_enabled": "XIAOWEI_WEB_APP_ENABLED",
     "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
     "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
@@ -492,6 +505,10 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "channel_worker_poll_interval_seconds": (
         "XIAOWEI_CHANNEL_WORKER_POLL_INTERVAL_SECONDS"
     ),
+    "web_bind_host": "XIAOWEI_WEB_BIND_HOST",
+    "web_bind_port": "XIAOWEI_WEB_BIND_PORT",
+    "web_oauth_state_ttl_seconds": "XIAOWEI_WEB_OAUTH_STATE_TTL_SECONDS",
+    "web_session_ttl_seconds": "XIAOWEI_WEB_SESSION_TTL_SECONDS",
 }
 
 

@@ -350,6 +350,7 @@ async def test_process_bridge_does_not_ack_persistence_uncertainty() -> None:
 
 async def test_process_bridge_cancels_timed_out_submission(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     cancelled = asyncio.Event()
 
@@ -380,12 +381,23 @@ async def test_process_bridge_cancels_timed_out_submission(
 
     monkeypatch.setattr(feishu_listener_module, "_CALLBACK_TIMEOUT_SECONDS", 0.01)
 
-    with pytest.raises(TimeoutError):
-        await serve_listener(stack=Stack())
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(TimeoutError):
+            await serve_listener(stack=Stack())
 
     await asyncio.wait_for(cancelled.wait(), timeout=1)
     assert transport.callbacks_completed == 0
     assert closed is True
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "feishu listener callback timed out"
+    ]
+    assert len(records) == 1
+    assert records[0].failure_kind == "callback_timeout"
+    serialized = f"{records[0].getMessage()} {records[0].__dict__}"
+    for forbidden in ("event-1", "message-1", "chat-1", "user-open-id"):
+        assert forbidden not in serialized
 
 
 async def test_process_bridge_allows_only_one_inflight_callback() -> None:

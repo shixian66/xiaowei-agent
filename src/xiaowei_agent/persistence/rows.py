@@ -38,6 +38,7 @@ from xiaowei_agent.contracts import (
 if TYPE_CHECKING:
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.store import StepExecutionRecord
+    from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
 _C = TypeVar("_C", bound=Contract)
 
@@ -202,6 +203,52 @@ def row_to_projection_subscription(row: Mapping[Any, Any]) -> "ProjectionSubscri
         if error_code is None
         else ProjectionErrorCode(error_code),
         payload_digest=row["payload_digest"],
+    )
+
+
+def oauth_state_to_row(state: "OAuthState") -> dict[str, Any]:
+    """OAuth state 契约到列；明文 state 永不进入本映射。"""
+    return {
+        "state_digest": state.state_digest,
+        "issued_at": state.issued_at,
+        "expires_at": state.expires_at,
+        "consumed_at": state.consumed_at,
+    }
+
+
+def row_to_oauth_state(row: Mapping[Any, Any]) -> "OAuthState":
+    """数据库列到一次性 OAuth state 契约。"""
+    from xiaowei_agent.persistence.web_session import OAuthState
+
+    return OAuthState(
+        state_digest=row["state_digest"],
+        issued_at=row["issued_at"],
+        expires_at=row["expires_at"],
+        consumed_at=row["consumed_at"],
+    )
+
+
+def web_session_to_row(session: "WebSession") -> dict[str, Any]:
+    """浏览器 session 契约到列；只展开 cookie 摘要与时效事实。"""
+    return {
+        "session_digest": session.session_digest,
+        "subject_ref": session.subject_ref,
+        "issued_at": session.issued_at,
+        "expires_at": session.expires_at,
+        "revoked_at": session.revoked_at,
+    }
+
+
+def row_to_web_session(row: Mapping[Any, Any]) -> "WebSession":
+    """数据库列到浏览器 session 契约。"""
+    from xiaowei_agent.persistence.web_session import WebSession
+
+    return WebSession(
+        session_digest=row["session_digest"],
+        subject_ref=row["subject_ref"],
+        issued_at=row["issued_at"],
+        expires_at=row["expires_at"],
+        revoked_at=row["revoked_at"],
     )
 
 

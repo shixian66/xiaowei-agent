@@ -54,6 +54,7 @@ class _FailureKind(StrEnum):
     SUBMIT_FORBIDDEN = "submit_forbidden"
     SUBMISSION_CONFLICT = "submission_conflict"
     CONFIGURATION_INVALID = "configuration_invalid"
+    CALLBACK_TIMEOUT = "callback_timeout"
     LISTENER_FAILURE = "listener_failure"
 
 
@@ -217,6 +218,7 @@ def _record_process_failure(failure_kind: _FailureKind) -> None:
     """记录不含配置取值或供应商错误的进程级闭集诊断。"""
     message = {
         _FailureKind.CONFIGURATION_INVALID: "feishu listener configuration invalid",
+        _FailureKind.CALLBACK_TIMEOUT: "feishu listener callback timed out",
         _FailureKind.LISTENER_FAILURE: "feishu listener stopped",
     }[failure_kind]
     try:
@@ -245,6 +247,7 @@ async def serve_listener(*, stack: _ListenerProcessStack) -> int:
             except FutureTimeoutError:
                 future.add_done_callback(_consume_callback_failure)
                 future.cancel()
+                _record_process_failure(_FailureKind.CALLBACK_TIMEOUT)
                 raise
 
     try:

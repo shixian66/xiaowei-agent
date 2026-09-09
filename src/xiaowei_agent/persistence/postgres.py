@@ -130,13 +130,17 @@ from xiaowei_agent.persistence.rows import (
     channel_binding_to_row,
     dump_contract,
     load_contract,
+    oauth_state_to_row,
     projection_subscription_to_row,
     record_to_row,
     row_to_channel_binding,
+    row_to_oauth_state,
     row_to_projection_subscription,
     row_to_record,
     row_to_step_execution,
+    row_to_web_session,
     step_execution_to_row,
+    web_session_to_row,
 )
 from xiaowei_agent.persistence.schema import (
     CHANNEL_BINDINGS,
@@ -151,6 +155,8 @@ from xiaowei_agent.persistence.schema import (
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
+    WEB_OAUTH_STATES,
+    WEB_SESSIONS,
 )
 from xiaowei_agent.persistence.store import (
     Clock,
@@ -180,6 +186,18 @@ from xiaowei_agent.persistence.store import (
     submission_digest,
     submission_matches_record,
     validate_task_failure_limit,
+)
+from xiaowei_agent.persistence.web_session import (
+    ConsumeOAuthStateCommand,
+    IssueOAuthStateCommand,
+    OAuthState,
+    OAuthStateNotFoundError,
+    RevokeWebSessionCommand,
+    RotateWebSessionCommand,
+    WebSession,
+    WebSessionConflictError,
+    WebSessionLookup,
+    WebSessionNotFoundError,
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
@@ -807,6 +825,133 @@ class PostgresChannelStore:
         return await self._mutate_projection(
             command=command, decision=dead_letter_projection
         )
+
+
+class PostgresWebSessionStore:
+    """WebSessionStore 的 PostgreSQL 实现；消费与轮换均由事务裁决。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    @_persistence_boundary(write=True)
+    async def issue_oauth_state(
+        self, *, command: IssueOAuthStateCommand
+    ) -> OAuthState:
+        now = self._clock()
+        candidate = OAuthState(
+            state_digest=command.state_digest,
+            issued_at=now,
+            expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+        )
+        async with _write_transaction(self._engine) as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.dialects.postgresql.insert(WEB_OAUTH_STATES)
+                        .values(**oauth_state_to_row(candidate))
+                        .on_conflict_do_nothing()
+                        .returning(WEB_OAUTH_STATES)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise WebSessionConflictError
+            return row_to_oauth_state(row)
+
+    @_persistence_boundary(write=True)
+    async def consume_oauth_state(
+        self, *, command: ConsumeOAuthStateCommand
+    ) -> OAuthState:
+        now = self._clock()
+        async with _write_transaction(self._engine) as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(WEB_OAUTH_STATES)
+                        .where(
+                            WEB_OAUTH_STATES.c.state_digest == command.state_digest,
+                            WEB_OAUTH_STATES.c.consumed_at.is_(None),
+                            WEB_OAUTH_STATES.c.expires_at > now,
+                        )
+                        .values(consumed_at=now)
+                        .returning(WEB_OAUTH_STATES)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise OAuthStateNotFoundError
+            return row_to_oauth_state(row)
+
+    @_persistence_boundary(write=True)
+    async def rotate_session(
+        self, *, command: RotateWebSessionCommand
+    ) -> WebSession:
+        now = self._clock()
+        candidate = WebSession(
+            session_digest=command.session_digest,
+            subject_ref=command.subject_ref,
+            issued_at=now,
+            expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+        )
+        async with _write_transaction(self._engine) as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.dialects.postgresql.insert(WEB_SESSIONS)
+                        .values(**web_session_to_row(candidate))
+                        .on_conflict_do_nothing()
+                        .returning(WEB_SESSIONS)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise WebSessionConflictError
+            previous_digest = command.previous_session_digest
+            if previous_digest is not None:
+                await connection.execute(
+                    sa.update(WEB_SESSIONS)
+                    .where(
+                        WEB_SESSIONS.c.session_digest == previous_digest,
+                        WEB_SESSIONS.c.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=now)
+                )
+            return row_to_web_session(row)
+
+    @_persistence_boundary(write=False)
+    async def get_session(self, *, lookup: WebSessionLookup) -> WebSession:
+        now = self._clock()
+        statement = sa.select(WEB_SESSIONS).where(
+            WEB_SESSIONS.c.session_digest == lookup.session_digest,
+            WEB_SESSIONS.c.revoked_at.is_(None),
+            WEB_SESSIONS.c.expires_at > now,
+        )
+        async with self._engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().first()
+        if row is None:
+            raise WebSessionNotFoundError
+        return row_to_web_session(row)
+
+    @_persistence_boundary(write=True)
+    async def revoke_session(self, *, command: RevokeWebSessionCommand) -> bool:
+        async with _write_transaction(self._engine) as connection:
+            digest = await connection.scalar(
+                sa.update(WEB_SESSIONS)
+                .where(
+                    WEB_SESSIONS.c.session_digest == command.session_digest,
+                    WEB_SESSIONS.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=self._clock())
+                .returning(WEB_SESSIONS.c.session_digest)
+            )
+        return digest is not None
 
 
 class PostgresTaskStore:

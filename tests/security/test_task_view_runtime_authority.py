@@ -86,6 +86,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.persistence.rows
     xiaowei_agent.persistence.schema
     xiaowei_agent.persistence.store
+    xiaowei_agent.persistence.web_session
     xiaowei_agent.planning
     xiaowei_agent.planning.assets
     xiaowei_agent.planning.assets.compiler

@@ -252,6 +252,6 @@ def test_task_id_columns_are_text_not_uuid() -> None:
     strict 模式会直接拒绝那个对象。写 DDL 时"主键当然用 uuid"的直觉在这里恰好是
     错的，因此钉死。
     """
-    for table in ALL_TABLES:
+    for table in (table for table in ALL_TABLES if "task_id" in table.c):
         column = table.c["task_id"]
         assert isinstance(column.type, sa.Text), f"{table.name}.task_id 必须是 text"
