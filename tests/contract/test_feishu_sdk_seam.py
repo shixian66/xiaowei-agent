@@ -1,6 +1,9 @@
 """真实 SDK 被压缩在一个 typed seam 内，测试不建立任何网络连接。"""
 
 import logging
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -814,7 +817,9 @@ def test_transport_startup_error_is_generic_and_drops_the_original_context(
     assert caught.value.__context__ is None
 
 
-@pytest.mark.parametrize("kind", ["symlink", "multiline", "oversized", "directory"])
+@pytest.mark.parametrize(
+    "kind", ["symlink", "multiline", "oversized", "invalid-utf8", "directory"]
+)
 def test_transport_rejects_unsafe_secret_files_before_loading_sdk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -829,6 +834,8 @@ def test_transport_rejects_unsafe_secret_files_before_loading_sdk(
         secret_file.write_text(_FAKE_SECRET + "\nsecond-line", encoding="utf-8")
     elif kind == "oversized":
         secret_file.write_bytes(b"x" * 4097)
+    elif kind == "invalid-utf8":
+        secret_file.write_bytes(b"\xff")
     else:
         secret_file.mkdir()
 
@@ -844,6 +851,46 @@ def test_transport_rejects_unsafe_secret_files_before_loading_sdk(
         transport.run_forever(on_event=lambda _: None)
 
     assert str(caught.value) == "feishu sdk unavailable"
+    assert caught.value.__context__ is None
+
+
+def test_secret_reader_rejects_fifo_without_blocking_on_missing_writer(
+    tmp_path: Path,
+) -> None:
+    fifo = tmp_path / "credential-fifo"
+    os.mkfifo(fifo)
+    script = f"""
+from xiaowei_agent.interfaces.secret_file import _read_secret_file, _SecretFileError
+try:
+    _read_secret_file({str(fifo)!r})
+except _SecretFileError:
+    pass
+else:
+    raise AssertionError('FIFO must be rejected')
+"""
+
+    completed = subprocess.run(  # noqa: S603 -- interpreter/script are test-controlled
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=1.0,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_secret_reader_rejects_character_device() -> None:
+    from xiaowei_agent.interfaces.secret_file import (
+        _read_secret_file,
+        _SecretFileError,
+    )
+
+    with pytest.raises(_SecretFileError) as caught:
+        _read_secret_file("/dev/null")
+
+    assert str(caught.value) == "secret file unavailable"
     assert caught.value.__context__ is None
 
 

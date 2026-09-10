@@ -34,6 +34,7 @@ _USER_TOKEN_URL: Final[str] = (
 _MAX_RESPONSE_BYTES: Final[int] = 32_768
 _MAX_PROVIDER_STRING_BYTES: Final[int] = 8192
 _MAX_CALLBACK_BYTES: Final[int] = 2048
+_JSON_CONTENT_TYPE: Final[str] = "application/json; charset=utf-8"
 _STATE_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_-]{16,512}")
 
 _USER_STRING_FIELDS: Final[frozenset[str]] = frozenset(
@@ -108,11 +109,12 @@ def _has_control(value: str) -> bool:
 
 
 def _bounded_string(value: object, *, max_bytes: int = _MAX_PROVIDER_STRING_BYTES) -> bool:
-    return (
-        isinstance(value, str)
-        and not _has_control(value)
-        and len(value.encode("utf-8")) <= max_bytes
-    )
+    if not isinstance(value, str) or _has_control(value):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= max_bytes
+    except UnicodeEncodeError:
+        return False
 
 
 def _callback_is_valid(value: str) -> bool:
@@ -155,7 +157,7 @@ def _decode_object(response: _HttpResponse) -> dict[str, object] | None:
     try:
         decoded = response.body.decode("utf-8")
         value = json.loads(decoded, object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -229,6 +231,7 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
         if (
             not _bounded_string(app_id, max_bytes=256)
             or not app_id
+            or app_id != app_id.strip()
             or isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, int | float)
             or not math.isfinite(timeout_seconds)
@@ -315,7 +318,7 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
         deadline = time.monotonic() + self._timeout_seconds
         app_response = await self._request(
             url=_APP_TOKEN_URL,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": _JSON_CONTENT_TYPE},
             body={"app_id": self._app_id, "app_secret": app_secret},
             deadline=deadline,
         )
@@ -329,7 +332,7 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
             url=_USER_TOKEN_URL,
             headers={
                 "Authorization": f"Bearer {app_token}",
-                "Content-Type": "application/json",
+                "Content-Type": _JSON_CONTENT_TYPE,
             },
             body={"grant_type": "authorization_code", "code": code},
             deadline=deadline,

@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import threading
-import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
@@ -115,10 +115,24 @@ def test_authorization_url_is_the_exact_official_v1_request(
     )
 
     parsed = urlsplit(url)
-    assert (parsed.scheme, parsed.hostname, parsed.path) == (
+    assert (
+        parsed.scheme,
+        parsed.netloc,
+        parsed.hostname,
+        parsed.port,
+        parsed.username,
+        parsed.password,
+        parsed.path,
+        parsed.fragment,
+    ) == (
         "https",
         "open.feishu.cn",
+        "open.feishu.cn",
+        None,
+        None,
+        None,
         "/open-apis/authen/v1/index",
+        "",
     )
     assert parse_qsl(parsed.query, keep_blank_values=True) == [
         ("app_id", "cli_test_app"),
@@ -151,6 +165,13 @@ def test_real_transport_installs_no_redirect_handler(
                 "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
             )
             assert request.method == "POST"
+            assert json.loads(request.data.decode("utf-8")) == {
+                "app_id": "app",
+                "app_secret": "fake",
+            }
+            assert dict(request.header_items()) == {
+                "Content-type": "application/json; charset=utf-8"
+            }
             assert timeout == 0.5
             return Response()
 
@@ -162,7 +183,7 @@ def test_real_transport_installs_no_redirect_handler(
 
     response = feishu_oauth._post_json(
         url="https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json; charset=utf-8"},
         body={"app_id": "app", "app_secret": "fake"},
         timeout_seconds=0.5,
     )
@@ -214,14 +235,16 @@ async def test_exchange_uses_exact_v1_wire_order_bodies_and_headers(
         "app_id": "cli_test_app",
         "app_secret": _FAKE_SECRET,
     }
-    assert calls[0]["headers"] == {"Content-Type": "application/json"}
+    assert calls[0]["headers"] == {
+        "Content-Type": "application/json; charset=utf-8"
+    }
     assert calls[1]["body"] == {
         "grant_type": "authorization_code",
         "code": "one-time-code",
     }
     assert calls[1]["headers"] == {
         "Authorization": f"Bearer {_FAKE_APP_TOKEN}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
     }
     assert len(calls) == 2
     assert all(0 < float(call["timeout_seconds"]) < 1.0 for call in calls)
@@ -277,6 +300,22 @@ async def test_exchange_rejects_invalid_code_without_transport(
     assert calls == []
 
 
+@pytest.mark.parametrize("kind", ["code", "callback"])
+async def test_unpaired_surrogate_in_local_oauth_input_maps_to_closed_code_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    adapter, calls = _adapter(tmp_path, monkeypatch)
+    code = "bad\ud800code" if kind == "code" else "one-time-code"
+    callback = _CALLBACK + "\ud800" if kind == "callback" else _CALLBACK
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthCodeError) as caught:
+        await adapter.exchange_code(code=code, redirect_uri=callback)
+
+    assert str(caught.value) == ""
+    assert caught.value.__context__ is None
+    assert calls == []
+
+
 async def test_exchange_requires_an_already_bound_trace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,6 +360,7 @@ async def test_provider_failure_unions_map_to_closed_errors(
     [
         feishu_oauth._HttpResponse(status=500, body=b"provider-private-body"),
         feishu_oauth._HttpResponse(status=200, body=b"not-json-provider-private-body"),
+        feishu_oauth._HttpResponse(status=200, body=b"\xff"),
         feishu_oauth._HttpResponse(
             status=200,
             body=b'{"code":0,"code":0,"msg":"ok","app_access_token":"x","expire":1}',
@@ -402,6 +442,70 @@ async def test_identity_top_level_rejects_duplicate_and_unknown_fields(
         await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
 
 
+@pytest.mark.parametrize("location", ["app-message", "data-string", "app-token", "open-id"])
+async def test_provider_surrogate_strings_map_to_closed_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+) -> None:
+    responses = _success_responses()
+    if location == "app-message":
+        responses = [
+            _json_response(
+                {
+                    "code": 0,
+                    "msg": "bad\ud800message",
+                    "app_access_token": _FAKE_APP_TOKEN,
+                    "expire": 3600,
+                }
+            )
+        ]
+    elif location == "app-token":
+        responses = [
+            _json_response(
+                {
+                    "code": 0,
+                    "msg": "ok",
+                    "app_access_token": "bad\ud800token",
+                    "expire": 3600,
+                }
+            )
+        ]
+    else:
+        payload = json.loads(responses[1].body)
+        field = "name" if location == "data-string" else "open_id"
+        payload["data"][field] = "bad\ud800value"
+        responses[1] = _json_response(payload)
+    adapter, _ = _adapter(tmp_path, monkeypatch, responses)
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(
+        FeishuOAuthUnavailableError
+    ) as caught:
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+
+    assert str(caught.value) == ""
+    assert caught.value.__context__ is None
+
+
+async def test_deep_json_recursion_maps_to_closed_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deep_json = b"[" * 1200 + b"0" + b"]" * 1200
+    adapter, _ = _adapter(
+        tmp_path,
+        monkeypatch,
+        [feishu_oauth._HttpResponse(status=200, body=deep_json)],
+    )
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(
+        FeishuOAuthUnavailableError
+    ) as caught:
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+
+    assert str(caught.value) == ""
+    assert caught.value.__context__ is None
+
+
 @pytest.mark.parametrize("timeout_seconds", [0, -1, 5.01, float("inf"), float("nan"), True])
 def test_constructor_rejects_invalid_deadlines(
     tmp_path: Path, timeout_seconds: float
@@ -412,6 +516,21 @@ def test_constructor_rejects_invalid_deadlines(
             app_secret_file=str(_secret_file(tmp_path)),
             timeout_seconds=timeout_seconds,
         )
+
+
+@pytest.mark.parametrize("app_id", ["bad\ud800app", " padded-app ", "é" * 129])
+def test_constructor_maps_invalid_app_id_to_generic_value_error(
+    tmp_path: Path, app_id: str
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        FeishuOAuthAdapter(
+            app_id=app_id,
+            app_secret_file=str(_secret_file(tmp_path)),
+            timeout_seconds=1.0,
+        )
+
+    assert str(caught.value) == "feishu oauth configuration invalid"
+    assert caught.value.__context__ is None
 
 
 def test_constructor_eagerly_rejects_unsafe_secret_and_exchange_rereads_it(
@@ -437,19 +556,40 @@ def test_constructor_eagerly_rejects_unsafe_secret_and_exchange_rereads_it(
     assert calls == []
 
 
+@pytest.mark.parametrize("suffix", ["\ud800", "\x00"])
+def test_constructor_maps_unrepresentable_secret_path_to_generic_value_error(
+    suffix: str,
+) -> None:
+    path = "/private/tmp/invalid-credential-" + suffix
+
+    with pytest.raises(ValueError) as caught:
+        FeishuOAuthAdapter(
+            app_id="cli_test_app",
+            app_secret_file=path,
+            timeout_seconds=1.0,
+        )
+
+    assert str(caught.value) == "feishu oauth configuration invalid"
+    assert caught.value.__context__ is None
+
+
 async def test_both_posts_share_one_total_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     responses = _success_responses()
     timeouts: list[float] = []
+    ticks = iter((100.0, 100.0, 100.12))
 
     def post_json(**kwargs: object):
         timeouts.append(float(kwargs["timeout_seconds"]))
-        if len(timeouts) == 1:
-            time.sleep(0.03)
         return responses[len(timeouts) - 1]
 
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
+    monkeypatch.setattr(
+        feishu_oauth,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
         app_secret_file=str(_secret_file(tmp_path)),
@@ -460,7 +600,7 @@ async def test_both_posts_share_one_total_deadline(
         await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
 
     assert len(timeouts) == 2
-    assert 0 < timeouts[1] < timeouts[0] < 0.2
+    assert timeouts == pytest.approx([0.1, 0.04])
 
 
 async def test_late_first_response_cannot_trigger_a_second_request(
@@ -468,6 +608,7 @@ async def test_late_first_response_cannot_trigger_a_second_request(
 ) -> None:
     started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
     calls = 0
 
     def post_json(**_kwargs: object):
@@ -475,6 +616,7 @@ async def test_late_first_response_cannot_trigger_a_second_request(
         calls += 1
         started.set()
         release.wait(1)
+        finished.set()
         return _success_responses()[0]
 
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
@@ -489,7 +631,7 @@ async def test_late_first_response_cannot_trigger_a_second_request(
         assert started.wait(1)
     finally:
         release.set()
-    await asyncio.sleep(0.02)
+    assert await asyncio.to_thread(finished.wait, 1)
     assert calls == 1
 
 
@@ -498,6 +640,7 @@ async def test_direct_cancellation_is_not_converted_and_late_result_is_unused(
 ) -> None:
     started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
     calls = 0
 
     def post_json(**_kwargs: object):
@@ -505,6 +648,7 @@ async def test_direct_cancellation_is_not_converted_and_late_result_is_unused(
         calls += 1
         started.set()
         release.wait(1)
+        finished.set()
         return _success_responses()[0]
 
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
@@ -513,16 +657,18 @@ async def test_direct_cancellation_is_not_converted_and_late_result_is_unused(
         app_secret_file=str(_secret_file(tmp_path)),
         timeout_seconds=1.0,
     )
-    with bind_trace_id(_TRACE_ID):
-        task = asyncio.create_task(
-            adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
-        )
-        await asyncio.to_thread(started.wait, 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    release.set()
-    await asyncio.sleep(0.02)
+    try:
+        with bind_trace_id(_TRACE_ID):
+            task = asyncio.create_task(
+                adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+            )
+            assert await asyncio.to_thread(started.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 1)
     assert calls == 1
 
 
@@ -531,6 +677,7 @@ async def test_late_second_response_cannot_construct_an_identity(
 ) -> None:
     second_started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
     calls = 0
 
     def post_json(**_kwargs: object):
@@ -540,6 +687,7 @@ async def test_late_second_response_cannot_construct_an_identity(
             return _success_responses()[0]
         second_started.set()
         release.wait(1)
+        finished.set()
         return _success_responses()[1]
 
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
@@ -561,7 +709,7 @@ async def test_late_second_response_cannot_construct_an_identity(
         assert second_started.wait(1)
     finally:
         release.set()
-    await asyncio.sleep(0.02)
+    assert await asyncio.to_thread(finished.wait, 1)
     assert calls == 2
     assert constructed == []
 

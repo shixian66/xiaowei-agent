@@ -16,6 +16,10 @@ def _read_secret_file(path: str) -> str:
     if not isinstance(path, str) or not os.path.isabs(path):
         raise _SecretFileError("secret file unavailable")
     flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
@@ -27,7 +31,7 @@ def _read_secret_file(path: str) -> str:
             failed = True
         else:
             payload = os.read(descriptor, _MAX_SECRET_BYTES + 1)
-    except OSError:
+    except (OSError, ValueError):
         failed = True
     finally:
         if descriptor is not None:
