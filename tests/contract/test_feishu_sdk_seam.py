@@ -845,3 +845,44 @@ def test_transport_rejects_unsafe_secret_files_before_loading_sdk(
 
     assert str(caught.value) == "feishu sdk unavailable"
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("value", ["contains\ttab", "contains\x1fcontrol", "double\n\n"])
+def test_transport_rejects_every_control_character_in_secret_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    secret_file = tmp_path / "secret"
+    secret_file.write_text(value, encoding="utf-8")
+    monkeypatch.setattr(
+        feishu_sdk,
+        "_load_lark_oapi",
+        lambda: (_ for _ in ()).throw(AssertionError("SDK must not load")),
+    )
+
+    with pytest.raises(FeishuSdkError) as caught:
+        FeishuSdkInboundTransport(
+            app_id="cli_test_app", app_secret_file=str(secret_file)
+        ).run_forever(on_event=lambda _: None)
+
+    assert str(caught.value) == "feishu sdk unavailable"
+    assert caught.value.__context__ is None
+
+
+def test_transport_rejects_relative_secret_path_before_loading_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feishu_sdk,
+        "_load_lark_oapi",
+        lambda: (_ for _ in ()).throw(AssertionError("SDK must not load")),
+    )
+
+    with pytest.raises(FeishuSdkError) as caught:
+        FeishuSdkInboundTransport(
+            app_id="cli_test_app", app_secret_file="relative-" + "credential"
+        ).run_forever(on_event=lambda _: None)
+
+    assert str(caught.value) == "feishu sdk unavailable"
+    assert caught.value.__context__ is None

@@ -6,8 +6,6 @@ import importlib
 import json
 import logging
 import math
-import os
-import stat
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -22,7 +20,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 _SDK_LOGGER_NAME: Final[str] = "Lark"
-_MAX_SECRET_BYTES: Final[int] = 4096
 _MAX_CONTENT_BYTES: Final[int] = 32_768
 _MEMBERS_PAGE_SIZE: Final[int] = 100
 _MAX_MEMBER_PAGES: Final[int] = 100
@@ -166,30 +163,18 @@ def _convert_message_event(raw: object) -> FeishuMessageEvent:
 
 
 def _read_secret_file(path: str) -> str:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor: int | None = None
+    from xiaowei_agent.interfaces.secret_file import (
+        _read_secret_file as _read_shared_secret_file,
+    )
+    from xiaowei_agent.interfaces.secret_file import _SecretFileError
+
+    failed = False
+    secret = ""
     try:
-        descriptor = os.open(path, flags)
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("not a regular file")
-        payload = os.read(descriptor, _MAX_SECRET_BYTES + 1)
-    except (OSError, ValueError):
-        raise FeishuSdkError("feishu sdk unavailable") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    if not payload or len(payload) > _MAX_SECRET_BYTES:
-        raise FeishuSdkError("feishu sdk unavailable")
-    try:
-        secret = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        raise FeishuSdkError("feishu sdk unavailable") from None
-    if secret.endswith("\n"):
-        secret = secret[:-1]
-    if not secret or any(character in secret for character in ("\n", "\r", "\x00")):
+        secret = _read_shared_secret_file(path)
+    except _SecretFileError:
+        failed = True
+    if failed:
         raise FeishuSdkError("feishu sdk unavailable")
     return secret
 

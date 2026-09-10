@@ -15,6 +15,8 @@ import pytest
 
 from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
 from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.store import TaskStore
 from xiaowei_agent.persistence.web_session import WebSessionStore
@@ -32,6 +34,7 @@ _ANCHORED = {
     "ExecutionBindingProvider",
     "FeishuIdentityDirectory",
     "FeishuInboundTransport",
+    "FeishuOAuthPort",
     "FeishuMembershipPort",
     "StepEvidenceBuilder",
     "ToolGateway",
@@ -89,6 +92,15 @@ def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
     """关键字参数漂移不会被结构兼容性检查发现，但会在调用点炸掉。"""
     assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(
         ToolGateway.invoke
+    )
+
+
+def test_oauth_adapter_keeps_the_protocol_keyword_arguments() -> None:
+    assert _keyword_params(FeishuOAuthAdapter.authorization_url) == _keyword_params(
+        FeishuOAuthPort.authorization_url
+    )
+    assert _keyword_params(FeishuOAuthAdapter.exchange_code) == _keyword_params(
+        FeishuOAuthPort.exchange_code
     )
 
 
