@@ -110,7 +110,10 @@ Admin   --> 只管理版本化配置和 secret reference --> 显式发布后 com
 - Admin application service 不能 import/调用 `ToolGateway`，不能构造 `PlanStep`、`ToolCall` 或
   `AdmissionCertificate`。它只持久化配置与测试请求；StarRocks 测试由默认关闭的独立测试 worker
   复用完整 `XiaoweiRuntime → DeterministicStepRunner → StepAdmission → ToolGateway` 主链。只有
-  `interfaces/local_stack.py` 能 import tools 并装配该候选栈；worker 入口只消费窄 stack。
+  `interfaces/local_stack.py` 能 import tools 并装配该候选栈；worker 入口只消费窄 stack。候选任务
+  使用持久化 `configuration_test` dispatch lane；TaskStore 对普通/候选暴露两组无 lane 入参的窄
+  方法，内部固定期望 lane，active task-worker 只能查询/领取 `user` lane。列表过滤与领取事务内的
+  lane 二次核对都由 TaskStore 承重，用户 task page 不投影候选任务。
 - PostgreSQL 继续作为任务、session、证据和审计事实真源；secret 字节不进入 PostgreSQL。
 
 ## 6. 关键数据流
@@ -167,7 +170,8 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    不接受 host、port、任意 endpoint、绝对路径或相对路径。
 2. “测试连接”只创建有频率限制、可审计且绑定 draft digest 的测试请求。飞书/模型使用各自窄
    provider port；StarRocks 请求由独立测试 worker 通过正常任务生命周期执行固定只读 count，
-   Admin application/API 不直接探测网络。
+   Admin application/API 不直接探测网络。候选任务只进入 `configuration_test` lane；普通 worker
+   即使与测试 worker 并发或知道 task_id，也不能列出、领取或恢复该任务。
 3. admin 显式发布后生成不可变版本和审计记录。
 4. composition root 读取 active version，校验 readback 后才激活对应 provider。
 5. 回滚指向上一已发布版本；旧版本和审计保留，secret 始终由只读文件挂载提供。
@@ -220,12 +224,14 @@ binding 的独立 `tool_timeout_seconds`、ADR 和测试。Runner 不得再从 p
 
 | 等级 | 必须具备 | 不能宣称 |
 | --- | --- | --- |
-| source reviewed | 精确 SHA 的真实 diff 审查 | 测试通过、可运行 |
+| 源码审查事实（非能力状态） | 精确 SHA 的真实 diff 审查 | 测试通过、可运行 |
+| declared | capability/config 契约已声明且默认关闭 | 已配置、已测试或可调用 |
+| configured | 获批配置已保存为版本，secret reference 可解析且不泄露 | 进程已加载或真实调用可用 |
 | tests | 四条基线命令和相关契约/eval 通过 | 真实服务可用 |
 | test-env verified | 获批测试环境、精确 SHA、真实调用清单与脱敏 evidence | 已部署、canary、生产可用 |
-| deployed | 指定环境运行指定镜像/SHA，健康检查与回滚材料齐全 | 产品行为已验收 |
+| deployed SHA | 指定环境运行指定镜像/SHA，健康检查与回滚材料齐全 | 产品行为已验收 |
 | canary | 生产环境小范围真实用户/流量，明确窗口和观测结果 | 全量用户验收 |
-| user accepted | 产品负责人按验收清单确认 | 未列出的能力也可用 |
+| user-accepted | 产品负责人按验收清单确认 | 未列出的能力也可用 |
 
 每阶段证据必须记录：代码 SHA、镜像 digest、配置版本、启用开关、目标环境、执行时间、操作者、验证命令/场景、脱敏结果和回滚结果。PR 描述不能代替这些事实。
 
@@ -310,4 +316,5 @@ RI6 部署/canary/UAT ---- 前序证据 + 回滚演练门
 | 其他同步 provider 也可能使用 `to_thread` | OAuth/模型外层已超时后，线程或远端仍可能继续并产生迟到响应 | OAuth 与模型同样要求内层 deadline、取消/迟到反例和结果丢弃；不能把 coroutine 取消写成远端取消 |
 | 新 configuration-test worker 自行 import tools | 破坏“只有 local_stack 是工具装配根”的静态等式，最容易诱发修改安全测试白名单的 workaround | worker 只消费 `local_stack.py` 返回的窄 `ConfigurationTestStack`；`test_only_local_stack_can_import_the_tools_layer` 期望集合保持原样并增加反例 |
 | 候选配置测试悄悄增加第二个完整执行进程 | 与 M7“只有 task-worker 装配完整 Runtime”冲突，且没有解释为何不能复用 active worker | ADR-016 显式记录唯一例外：候选凭证/目标不能热切换 active Gateway、进入普通任务协议或影响用户任务；默认关闭、单请求 claim、无端口、完成即关闭候选连接 |
+| 独立测试进程仍把候选任务放入普通 dispatch 池 | active task-worker 可能抢先用已发布配置执行，导致错误目标调用和伪造候选测试证据 | TaskStore 增加不可变 `user/configuration_test` lane；普通/候选窄方法不接收 lane 参数，内部按 lane 过滤并在领取事务再核对；并发、崩溃恢复、retry、普通 `acquire_lease`、已知 task_id 和用户任务列表均做跨 lane 反例 |
 | 把生产连接禁令拆成 H 生产只读授权与 E2 生产写禁令 | 如果作为编号整理合并，可能在负责人未意识到时实质扩大生产网络权限 | ADR-007 增加单独签认框；未签认时 RI6 只能 provider 全关闭或沿用 test-env 目标，不能建立/宣称生产只读能力 |

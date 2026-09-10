@@ -110,7 +110,7 @@ git commit -m "chore(deploy): add immutable compose production profile"
 
 - [ ] **Step 1: 写 RED runbook 契约**
 
-检查四份文档包含：精确 SHA/image digest、配置版本/readback、数据库备份与 migration、旧小维停机、健康检查、回滚触发条件、canary 范围、观察指标、UAT 场景、证据等级和 owner。禁止把 test-env、deployed、canary、UAT 合并成一个勾。
+检查四份文档包含：精确 SHA/image digest、配置版本/readback、数据库备份与 migration、旧小维停机、健康检查、回滚触发条件、canary 范围、观察指标、UAT 场景、证据等级和 owner。禁止把 `test-env verified`、`deployed SHA`、`canary`、`user-accepted` 合并成一个勾。
 
 - [ ] **Step 2: 写部署 runbook**
 
@@ -165,7 +165,7 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 
 - [ ] **Step 4: 健康与 readback**
 
-核对所有进程健康、实际 image digest、policy revision、active config version 与 loaded readback。此时最多标记 `deployed`，还不是 canary/UAT。
+核对所有进程健康、实际 image digest、policy revision、active config version 与 loaded readback。此时最多标记 `deployed SHA`，还不是 `canary`/`user-accepted`。
 
 - [ ] **Step 5: 回滚演练**
 
@@ -223,7 +223,7 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 
 - [ ] **Step 2: 更新 handoff**
 
-按“已验证、只读推理、未覆盖、残余风险”写清证据。只有验收人明确签字/确认的场景才标记 `user accepted`。
+按“已验证、只读推理、未覆盖、残余风险”写清证据。只有验收人明确签字/确认的场景才标记 `user-accepted`。
 
 - [ ] **Step 3: 提交 PR 6B**
 
@@ -254,7 +254,8 @@ git diff origin/main...HEAD --check
 - 已证明旧小维与 2.0 不双跑，并完成可复现的回滚演练。
 - canary 有明确用户范围、观察窗口和无阻断问题的证据。
 - UAT 只覆盖本轮目标并由指定产品用户明确确认。
-- `AGENT_HANDOFF.md` 分开记录 source/tests/test-env/deployed/canary/user accepted。
+- `AGENT_HANDOFF.md` 分开记录源码审查事实，以及 `declared`、`configured`、`tests`、
+  `test-env verified`、`deployed SHA`、`canary`、`user-accepted` 中实际取得的最强状态。
 - 不自行合并、归档或宣布全量上线。
 
 ## 回滚

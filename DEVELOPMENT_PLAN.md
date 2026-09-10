@@ -374,7 +374,7 @@ readback 与回滚。但该控制面、真实模型调用、审批/重跑和 Jen
 RI2 计划不得复制或另立一份较弱的授权清单。
 
 **退出标准**：成功、失败和回滚路径绑定精确 SHA/镜像 digest，最高只写
-`test-env verified`；不写 deployed、canary 或 user accepted。
+`test-env verified`；不写 `deployed SHA`、`canary` 或 `user-accepted`。
 
 ### RI3：单一真实模型供应商
 
@@ -411,12 +411,15 @@ PyMySQL worker thread/服务端会话作为残余风险记录，不新增 `KILL`
 测试请求由默认关闭的独立 worker 通过完整 Runtime/Runner/Admission/Gateway 执行，但只有
 `interfaces/local_stack.py` 可以 import tools，worker 入口只能消费其窄 stack。ADR-016 必须明确该
 进程是对 M7“只有 task-worker 装配完整执行 Runtime”口径的唯一例外，并记录不能让 active worker
-热切换候选凭证/目标的理由。测试请求有持久限流、审计和 draft digest 绑定；新增 Protocol 实现均
-有 conformance 锚。
+热切换候选凭证/目标的理由。TaskStore 以不可变 `user/configuration_test` dispatch lane、普通/候选
+两组无 lane 入参的窄方法、列表过滤和领取事务二次核对阻止 active worker 抢候选任务；用户任务
+列表不投影候选任务，崩溃恢复和 retry 不能换 lane。测试请求有持久限流、审计和 draft digest 绑定；
+新增 Protocol 实现均有 conformance 锚。
 
 ### RI6：Compose 正式部署、canary 与用户验收
 
-**目标**：用生产 override 发布已审查的不可变镜像，分开取得 deployed、canary 和 user accepted 证据。
+**目标**：用生产 override 发布已审查的不可变镜像，分开取得 `deployed SHA`、`canary` 和
+`user-accepted` 证据。
 
 **进入条件**：前序必需 provider 达到各自退出门；项目负责人指定主机、窗口、canary 范围、
 验收人、旧小维恢复和回滚责任。生产 override 才可发布 `IP:8080`，而 OAuth/session 路由仍只接受

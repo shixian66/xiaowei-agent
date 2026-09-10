@@ -40,14 +40,17 @@ secret 真源、不可变版本、测试请求绑定、持久限流、CAS 发布
 权限和 StarRocks 正常任务链。ADR 还必须显式修订 M7/`ARCHITECTURE.md`“只有 task-worker 装配完整
 执行 Runtime”的口径：configuration-test worker 是唯一窄例外，原因是它必须验证尚未发布的候选
 凭证/目标，不能热切换正在服务普通任务的 active Gateway，也不能把候选 credential 放进普通
-`TaskSubmission`/`ToolCall`。
+`TaskSubmission`/`ToolCall`。候选任务使用 PostgreSQL 承重的闭集 `configuration_test` dispatch lane；
+普通 task-worker 只能领取 `user` lane，不能靠进程约定隔离。
 
 ## PR 边界
 
 - PR 5A：ADR、配置契约、权限。
 - PR 5B：持久化、无网络应用服务、发布/readback/回滚状态机。
-- PR 5C：默认关闭的 configuration-test worker、`local_stack.py` 唯一装配根和真实主链测试。
-- PR 5D：薄 Web Admin API/页面与 Compose 装配。
+- PR 5C1：TaskStore 持久化 dispatch lane、migration、普通 worker 领取边界与并发反证。
+- PR 5C2：默认关闭的 configuration-test worker、`local_stack.py` 唯一装配根和真实主链测试。
+- PR 5D：薄 Web Admin API 与最小页面。
+- PR 5E：启动 readback 与 Compose 装配。
 - ADR-016 在 PR 5A 中先于 migration 和应用实现。
 
 ## 进入条件
@@ -228,10 +231,91 @@ git add src/xiaowei_agent/application/configuration.py tests/contract/test_confi
 git commit -m "feat(admin): add tested publish and rollback service"
 ```
 
-### Task 4：默认关闭、与 active task-worker 隔离的配置测试 worker
+### Task 4：用持久化 dispatch lane 隔离候选探测任务
 
 **Files:**
 
+- Modify: `src/xiaowei_agent/contracts/enums.py`
+- Modify: `src/xiaowei_agent/contracts/task.py`
+- Modify: `src/xiaowei_agent/persistence/store.py`
+- Modify: `src/xiaowei_agent/persistence/decisions.py`
+- Modify: `src/xiaowei_agent/persistence/rows.py`
+- Modify: `src/xiaowei_agent/persistence/schema.py`
+- Modify: `src/xiaowei_agent/persistence/postgres.py`
+- Modify: `src/xiaowei_agent/persistence/fake.py`
+- Modify: `src/xiaowei_agent/persistence/memory.py`
+- Modify: `src/xiaowei_agent/application/task_view_runtime.py`
+- Modify: `src/xiaowei_agent/_conformance.py`
+- Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0009_configuration_test_dispatch_lane.py`
+- Modify: `tests/suites/task_store.py`
+- Modify: `tests/contract/test_task_submission.py`
+- Modify: `tests/contract/test_dispatch_and_attempts.py`
+- Modify: `tests/contract/test_lease_decisions.py`
+- Modify: `tests/contract/test_worker_loop.py`
+- Modify: `tests/contract/test_task_view_runtime.py`
+- Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/contract/test_schema_matches_migration.py`
+- Modify: `tests/integration/test_dispatch_and_attempts_postgres.py`
+- Modify: `tests/integration/test_task_submission_postgres.py`
+- Modify: `tests/integration/test_migration_paths.py`
+- Create: `tests/security/test_configuration_dispatch_lane.py`
+
+- [ ] **Step 1: 写 RED lane 契约和迁移测试**
+
+新增闭集 `TaskDispatchLane.USER` 与 `TaskDispatchLane.CONFIGURATION_TEST`，并把 lane 放进不可变
+`TaskRecord`，而不是 `TaskSubmission`。普通内存/测试构造可使用兼容默认值 `USER`，但两个持久化
+创建入口必须显式写入并断言自己的固定 lane。lane 是服务端持久化事实，不能来自
+`RequestEnvelope`、HTTP body、用户文本、模型输出或 adapter payload。已有任务在 migration 中回填
+`USER`。
+
+现有 `create_task`、`list_dispatchable_tasks`、`list_stale_leases`、`begin_task_attempt` 与
+`acquire_lease` 的公开签名不增加 lane 参数，而是在存储实现内部固定使用 `USER`；另建只供候选栈
+持有的窄 `ConfigurationTestTaskStore`，其 create/list-dispatchable/list-stale/begin 方法固定使用
+`CONFIGURATION_TEST`。两组公开方法调用同一私有实现，私有领取方法在加锁/同一数据库事务内核对
+期望 lane。这样正常调用点无需批量传一个形式化默认值，也不存在用户或普通 worker 伪造 lane 的
+入口。候选列表过滤和领取检查缺一不可：只过滤列表会被已知 task_id 绕过，只检查领取会造成跨
+lane 扫描和饥饿。
+
+Run: `python -m pytest tests/contract/test_task_submission.py tests/contract/test_dispatch_and_attempts.py tests/contract/test_lease_decisions.py tests/contract/test_task_view_runtime.py tests/integration/test_task_submission_postgres.py tests/integration/test_dispatch_and_attempts_postgres.py tests/security/test_configuration_dispatch_lane.py -q`
+
+Expected: 当前 TaskStore 没有 lane，跨 worker 领取反例失败。
+
+- [ ] **Step 2: 实现 schema、migration 与 store 原子约束**
+
+任务行持久化不可变 `dispatch_lane` 并进入 dispatch index；配置测试结果/evidence 绑定 task lane。
+用户 task page 和 `TaskViewRuntime` 只投影 `USER`，候选结果只从配置测试 readback 读取，不能混入
+普通任务列表。fake/PostgreSQL 共享同一 contract suite。retry、stale recovery、lease/fencing 和
+终态保护必须保留原 lane，禁止通过重试把 configuration-test 任务改回 user lane。rev_0009 调整
+幂等唯一约束时必须把 lane 作为独立维度并安全回填既有行为，不能让内部配置请求被同字符串的用户
+idempotency key 抢占；不修改已合并的 rev_0008。`renew_lease`、retry 和后续 step 方法可保持
+lane 无关，因为它们必须携带已签发 grant 的 owner/fencing 事实，且不得修改 lane。
+
+- [ ] **Step 3: 把普通 task-worker 固定在 user lane**
+
+现有 `WorkerLoop` 不改调用形状：它拿到的 `TaskStore` 普通方法在 store 内部固定为 `USER`；API/Web/
+飞书提交仍只调用固定创建 USER 的 `create_task`，请求 DTO 中根本不存在 lane 字段。候选 worker 只
+拿到窄 `ConfigurationTestTaskStore` port。configuration-test lane 尚未启用时，现有任务行为保持
+不变。
+
+- [ ] **Step 4: 做并发与 TDD 反证**
+
+用 barrier 同时启动 user worker 和 configuration-test claimant：user worker 看到/领取候选任务次数
+必须为 0；configuration claimant 只能领取 configuration-test lane；普通 `begin_task_attempt`、
+`acquire_lease`、过期 lease 恢复、retry 和直接 task_id 领取都不能跨 lane，用户 task page 也不返回
+候选任务。临时移除列表过滤或领取二次核对，分别确认安全测试变红，恢复后全绿。
+
+- [ ] **Step 5: 提交 PR 5C1**
+
+```bash
+git add src/xiaowei_agent/contracts/enums.py src/xiaowei_agent/contracts/task.py src/xiaowei_agent/persistence/store.py src/xiaowei_agent/persistence/decisions.py src/xiaowei_agent/persistence/rows.py src/xiaowei_agent/persistence/schema.py src/xiaowei_agent/persistence/postgres.py src/xiaowei_agent/persistence/fake.py src/xiaowei_agent/persistence/memory.py src/xiaowei_agent/application/task_view_runtime.py src/xiaowei_agent/_conformance.py src/xiaowei_agent/persistence/migrations/versions/rev_0009_configuration_test_dispatch_lane.py tests/suites/task_store.py tests/contract/test_task_submission.py tests/contract/test_dispatch_and_attempts.py tests/contract/test_lease_decisions.py tests/contract/test_worker_loop.py tests/contract/test_task_view_runtime.py tests/contract/test_protocol_conformance.py tests/contract/test_schema_matches_migration.py tests/integration/test_task_submission_postgres.py tests/integration/test_dispatch_and_attempts_postgres.py tests/integration/test_migration_paths.py tests/security/test_configuration_dispatch_lane.py
+git commit -m "feat(worker): isolate configuration test dispatch lane"
+```
+
+### Task 5：默认关闭的候选配置测试 worker
+
+**Files:**
+
+- Create: `src/xiaowei_agent/application/configuration_probe.py`
 - Create: `src/xiaowei_agent/interfaces/configuration_test_worker.py`
 - Create: `src/xiaowei_agent/interfaces/configuration_registry.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
@@ -242,6 +326,7 @@ git commit -m "feat(admin): add tested publish and rollback service"
 - Create: `tests/security/test_configuration_probe_boundary.py`
 - Modify: `tests/security/test_gateway_boundary.py`
 - Modify: `tests/security/test_module_layering.py`
+- Modify: `tests/security/test_runtime_bypass.py`
 
 - [ ] **Step 1: 写 RED worker/registry/限流测试**
 
@@ -258,8 +343,8 @@ adapter 调用为 0。`target_ref`/`credential_ref` 必须精确命中启动时�
 预登记 credential。复用现有进程将迫使它热切换 Gateway、把候选 credential 放入普通任务协议，或
 让候选探测影响正在执行的用户任务，三者均否决。ADR-016 与 `ARCHITECTURE.md` 必须把本 worker 写
 成 M7 单执行进程口径的唯一例外：默认关闭、不发布端口、每次只 claim 一个绑定 digest/revision 的
-请求、候选栈不进入普通任务池、完成后关闭全部连接。未来若有证据证明 active worker 可安全复用，
-只能先修订 ADR，不能静默合并进程。
+请求、只处理 `CONFIGURATION_TEST` lane、完成后关闭全部连接。未来若有证据证明 active worker 可
+安全复用，只能先修订 ADR，不能静默合并进程。
 
 - [ ] **Step 3: 飞书与模型使用既有窄 port**
 
@@ -267,17 +352,25 @@ adapter 调用为 0。`target_ref`/`credential_ref` 必须精确命中启动时�
 计入预算且不带用户数据。worker 只保存闭集结果、耗时、draft digest/registry revisions 和 safe error
 code；provider 正文、endpoint、路径和 secret 不保存。
 
-- [ ] **Step 4: StarRocks 复用正常任务生命周期**
+- [ ] **Step 4: StarRocks 复用隔离 lane 内的正常任务生命周期**
 
 `interfaces/local_stack.py` 是唯一 composition root：它把 candidate 的逻辑 target/credential 名解析
 为预登记 target-bound binding，返回已装配的 `ConfigurationTestStack`。worker 入口只调用该 builder
-和 stack 的窄运行方法，不 import `tools/`，不自行构造 Runtime/Runner/Gateway。栈内提交并执行固定的
-现有 `count_queries_in_window` 只读任务，复用 `XiaoweiRuntime`、`DeterministicStepRunner`、
-`StepAdmission` 和 `DeterministicToolGateway`。必须持久化正常 task/evidence refs；adapter 调用次数
-必须等于 Gateway invocation 且每次都有 admission。禁止局部简化 plan、手签 certificate、直接
-`adapter.execute()` 或在 application service/worker 入口中构造 Gateway。
+和 stack 的窄运行方法，不 import `tools/`，不自行构造 Runtime/Runner/Gateway。栈内只创建
+`CONFIGURATION_TEST` lane 的固定现有 `count_queries_in_window` 只读任务，并只用窄 store port 的
+对应领取方法，复用 `XiaoweiRuntime`、`DeterministicStepRunner`、`StepAdmission` 和
+`DeterministicToolGateway`。必须持久化正常 task/evidence refs；adapter 调用次数必须等于 Gateway
+invocation 且每次都有 admission。禁止局部简化 plan、手签 certificate、直接 `adapter.execute()`
+或在 application service/worker 入口中构造 Gateway。
 
-- [ ] **Step 5: Protocol 锚与安全反证**
+- [ ] **Step 5: 证明 active worker 永远抢不到候选任务**
+
+PostgreSQL 集成测试同时运行 active task-worker 与 configuration-test worker；前者的 candidate、
+attempt、Gateway 和 adapter 次数都为 0，后者恰好执行一次。config worker 崩溃/lease 过期后，只能
+由同 lane 的 config worker 恢复；普通 worker 即使知道 task_id 且伪造领取也被 store 拒绝。测试结果
+必须绑定 config request、task_id、draft digest、registry revisions 和 lane。
+
+- [ ] **Step 6: Protocol 锚与安全反证**
 
 测试请求 store/claim port、飞书/模型 probe port 的每个新生产实现都在
 `src/xiaowei_agent/_conformance.py` 有类型赋值锚；`tests/contract/test_protocol_conformance.py`
@@ -285,18 +378,18 @@ code；provider 正文、endpoint、路径和 secret 不保存。
 直调 adapter、worker import `xiaowei_agent.tools`，确认 security gate 变红；不得修改
 `test_only_local_stack_can_import_the_tools_layer` 的期望集合来放行新 worker。
 
-Run: `python -m pytest tests/contract/test_configuration_test_worker.py tests/contract/test_configuration_registry.py tests/contract/test_protocol_conformance.py tests/security/test_configuration_probe_boundary.py tests/security/test_gateway_boundary.py tests/security/test_module_layering.py tests/security/test_runtime_bypass.py -q`
+Run: `python -m pytest tests/contract/test_configuration_test_worker.py tests/contract/test_configuration_registry.py tests/contract/test_protocol_conformance.py tests/integration/test_dispatch_and_attempts_postgres.py tests/security/test_configuration_dispatch_lane.py tests/security/test_configuration_probe_boundary.py tests/security/test_gateway_boundary.py tests/security/test_module_layering.py tests/security/test_runtime_bypass.py -q`
 
 Expected: 全部通过。
 
-- [ ] **Step 6: 提交 PR 5C**
+- [ ] **Step 7: 提交 PR 5C2**
 
 ```bash
-git add src/xiaowei_agent/interfaces/configuration_test_worker.py src/xiaowei_agent/interfaces/configuration_registry.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/_conformance.py tests/contract/test_configuration_test_worker.py tests/contract/test_configuration_registry.py tests/contract/test_protocol_conformance.py tests/security/test_configuration_probe_boundary.py tests/security/test_gateway_boundary.py tests/security/test_module_layering.py tests/security/test_runtime_bypass.py
-git commit -m "feat(admin): run bounded configuration tests"
+git add src/xiaowei_agent/application/configuration_probe.py src/xiaowei_agent/interfaces/configuration_test_worker.py src/xiaowei_agent/interfaces/configuration_registry.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/_conformance.py tests/contract/test_configuration_test_worker.py tests/contract/test_configuration_registry.py tests/contract/test_protocol_conformance.py tests/integration/test_dispatch_and_attempts_postgres.py tests/security/test_configuration_dispatch_lane.py tests/security/test_configuration_probe_boundary.py tests/security/test_gateway_boundary.py tests/security/test_module_layering.py tests/security/test_runtime_bypass.py
+git commit -m "feat(admin): run isolated configuration tests"
 ```
 
-### Task 5：薄 Admin API 和最小页面
+### Task 6：薄 Admin API 和最小页面
 
 **Files:**
 
@@ -347,7 +440,7 @@ git add src/xiaowei_agent/interfaces/web_models.py src/xiaowei_agent/interfaces/
 git commit -m "feat(web): add minimal configuration admin"
 ```
 
-### Task 6：启动 readback 与 Compose 装配
+### Task 7：启动 readback 与 Compose 装配
 
 **Files:**
 
@@ -380,7 +473,7 @@ Run: `python -m pytest tests/contract/test_compose_contract.py tests/security/te
 
 Expected: 全部通过。
 
-- [ ] **Step 4: 提交装配**
+- [ ] **Step 4: 提交 PR 5E**
 
 ```bash
 git add .env.example src/xiaowei_agent/config.py src/xiaowei_agent/interfaces/local_stack.py docker-compose.yml tests/contract/test_compose_contract.py tests/integration/test_configuration_readback.py README.md AGENT_HANDOFF.md
@@ -406,8 +499,10 @@ git diff origin/main...HEAD --check
 - PostgreSQL、API、UI、日志和测试均不保存或回显 secret 明文和真实路径。
 - StarRocks DTO 不含 host/port/path；只选择部署者闭集 registry 中的逻辑 target/credential 名。
 - application/API 只持久化测试请求；StarRocks 测试经完整 Runtime/Runner/`StepAdmission -> ToolGateway`
-  主链；只有 `local_stack.py` import tools，独立测试进程的架构例外已由 ADR-016 明示，新 Protocol
-  实现有 conformance 锚，测试请求有持久限流与审计。
+  主链；只有 `local_stack.py` import tools，独立测试进程的架构例外已由 ADR-016 明示。普通 worker
+  只能领取 `user` lane，候选 worker 只能领取 `configuration_test` lane，TaskStore 的列表过滤、领取
+  二次核对、retry 和崩溃恢复共同保持边界；新 Protocol 实现有 conformance 锚，测试请求有持久限流
+  与审计。
 - 页面只使用现有 Web 技术栈；未做热更新、插件系统或通用 DSL。
 - RI6 未获开工口令前停止。
 

@@ -61,7 +61,7 @@
 | C | 本地隔离基础设施（本地 PostgreSQL、本地 Docker Compose） | **M4 / M5 经各自里程碑批准后允许**；仅限本地隔离实例，不连共享或生产实例，不承载真实业务数据 |
 | D | 非生产真实只读（StarRocks 测试环境） | **M6b/RI4，仍需同一套单独授权**：环境、只读账号的逻辑 credential reference、查询范围、调用时窗、脱敏方式、recording 删除方式和证据保留周期均须逐项确认；RI4 是完成 M6b 延期现场门，不建立第二套授权清单 |
 | F | 真实飞书 OAuth、长连接、消息与群成员网络调用 | RI1 只允许默认关闭的 adapter/装配与离线测试；RI2 必须逐项满足 M7 详细计划 §0.3.2 并取得现场 GO，最高证据为 `test-env verified` |
-| G | Web Admin 配置治理与连接测试 | RI5 的 Admin 权限只管理不可变配置、逻辑 target/credential 名、测试请求、发布/readback/回滚；不授予任意 endpoint、文件路径、Gateway 调用或 E1。StarRocks 测试请求必须由独立 worker 复用正常 Runtime/Runner/Admission/Gateway 链；只有 `interfaces/local_stack.py` 可 import tools。该候选进程边界须由 ADR-016 显式修订 M7 的单执行进程口径后方可实施 |
+| G | Web Admin 配置治理与连接测试 | RI5 的 Admin 权限只管理不可变配置、逻辑 target/credential 名、测试请求、发布/readback/回滚；不授予任意 endpoint、文件路径、Gateway 调用或 E1。StarRocks 测试请求必须由独立 worker 复用正常 Runtime/Runner/Admission/Gateway 链；只有 `interfaces/local_stack.py` 可 import tools。该候选进程边界须由 ADR-016 显式修订 M7 的单执行进程口径，并由 TaskStore 持久化 `configuration_test` dispatch lane、普通/候选窄方法、列表过滤及领取事务二次核对承重后方可实施；lane 不进入用户或入口 DTO |
 | H | 正式环境中的真实 provider 与生产只读目标网络调用 | RI6 可以先部署所有 provider 默认关闭的制品；启用任一 provider/只读目标还必须逐项批准精确 provider/目标、逻辑凭证名、tenant/environment/actor 范围、只读授权、数据处置/保留、变更窗口、canary 范围和现场 GO。test-env 证据只是进入条件，不自动授予生产网络调用权 |
 | E1 | **任何可能修改被管运维目标状态的操作**（含非生产环境），与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；完整定义见 D7 | **持续禁止，直到单独获批的受控写里程碑明确修订本 ADR。**RI1–RI6、只读接入、模型、渠道、Admin、部署或里程碑编号变化都不授予 E1；当前候选 M8 仍须同时满足 D6 三项条件 |
 | E2 | 生产写 | **默认禁止**，不在本 ADR 授权范围内。生产写需要新的独立授权和独立验收计划，**不能由 M8 的测试环境结论或 RI6 的生产只读授权推导得出** |

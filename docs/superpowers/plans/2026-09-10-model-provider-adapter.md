@@ -331,7 +331,8 @@ git commit -m "docs(model): add test environment validation gate"
 - [ ] **Step 5: 关闭、清理并提交 evidence**
 
 关闭模型开关并核对规则解释器 readback；清理测试主机的临时 secret mount，不删除供应商侧账单/
-审计事实。只在真实场景完成后更新 handoff，最高写 `test-env verified`，不得写 deployed/canary/UAT。
+审计事实。只在真实场景完成后更新 handoff，最高写 `test-env verified`，不得写 `deployed SHA`、
+`canary` 或 `user-accepted`。
 
 ```bash
 git add docs/checklists/model-test-environment-evidence.md AGENT_HANDOFF.md
