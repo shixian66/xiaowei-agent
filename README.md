@@ -227,8 +227,9 @@ Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没�
 前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
 Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
 `XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
-Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒，code exchange 复用
-`XIAOWEI_FEISHU_API_TIMEOUT_SECONDS` 的固定超时且不重试。
+Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
+code exchange 使用代码固定的 5 秒总预算且不重试，并没有读取
+`XIAOWEI_FEISHU_API_TIMEOUT_SECONDS`；后者目前只装配给渠道消息发送路径。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
 两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
 `open_id` 精确映射，不按姓名或群角色猜权限：
@@ -352,10 +353,17 @@ python -m scripts.compose_smoke
 ```
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
-fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本以 `O_EXCL` 创建
-三个 fake 输入，只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
+fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
+下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入三个 fake 输入和一个不含 secret 值的
+JSON Compose override；override 只把本次 secret/config 引用指向该私有目录，不读取或覆盖上文供
+人工启动使用的三个固定文件。清理时先原子隔离该目录，再核对目录与四个已知文件的 inode，且不递归
+删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback，脚本只访问 `/healthz`、`/readyz`，不请求 OAuth start/callback，也不调用 provider。
 镜像 build 仍可能访问镜像仓库或依赖源，因此这不是“全程零外网”的证明。
+
+这条清理边界防止正常并发 smoke、其他 UID 进程或人工固定文件被误删；它不承诺对抗主动恶意的
+同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
+脚本会固定失败并保留现场，不会递归清理。
 
 当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
 smoke 尚未在本机启动容器；目前只有脚本测试与 Compose 静态合并证据。PR #27 和旧 main 的
