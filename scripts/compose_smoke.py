@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Protocol
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SECRET_PATH = _ROOT / ".secrets/postgres_password"
+_POSTGRES_SECRET_PATH = _ROOT / ".secrets/postgres_password"
+_FEISHU_SECRET_PATH = _ROOT / ".secrets/feishu_app_secret"
+_FEISHU_IDENTITY_PATH = _ROOT / ".secrets/feishu-identities.json"
+_API_READY_URL = "http://127.0.0.1:8000/readyz"
+_WEB_READY_URL = "http://127.0.0.1:8080/readyz"
 _COMMAND_TIMEOUT = 180.0
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _NON_SUCCESS_CODES = {
@@ -72,6 +76,23 @@ def project_name() -> str:
     return f"xiaowei_m5_smoke_{uuid.uuid4().hex}"
 
 
+def _resolve_compose_command(
+    *, docker: str, runner: CommandRunner
+) -> tuple[str, ...]:
+    """选择实际可工作的 Compose CLI，且不回显探测输出。"""
+    candidates = [(docker, "compose")]
+    standalone = shutil.which("docker-compose")
+    if standalone is not None:
+        candidates.append((standalone,))
+    for command in candidates:
+        try:
+            runner((*command, "version"), timeout=15.0)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        return command
+    raise SmokeError("SMOKE_COMPOSE_NOT_FOUND") from None
+
+
 def _project_label(name: str) -> str:
     return f"label=com.docker.compose.project={name}"
 
@@ -97,31 +118,157 @@ def _preflight(
             raise SmokeError("SMOKE_PROJECT_COLLISION")
 
 
-def _create_secret(path: Path) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+@dataclass(frozen=True)
+class _OwnedInput:
+    path: Path
+    parent_device: int
+    parent_inode: int
+    device: int
+    inode: int
+
+
+def _create_input(path: Path, content: str) -> _OwnedInput:
     try:
-        parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError:
-        raise SmokeError("SMOKE_SECRET_DIRECTORY_INVALID") from None
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    directory_flags = (
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        directory = os.open(path.parent, directory_flags)
+    except OSError:
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    try:
+        parent_stat = os.fstat(directory)
+    except OSError:
+        os.close(directory)
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    parent_mode = stat.S_IMODE(parent_stat.st_mode)
     if parent_mode != 0o700:
-        raise SmokeError("SMOKE_SECRET_DIRECTORY_PERMISSIONS")
+        os.close(directory)
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS")
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(
+            path.name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory,
+        )
     except FileExistsError:
-        raise SmokeError("SMOKE_SECRET_ALREADY_EXISTS") from None
+        os.close(directory)
+        raise SmokeError("SMOKE_INPUT_ALREADY_EXISTS") from None
     except OSError:
-        raise SmokeError("SMOKE_SECRET_CREATE_FAILED") from None
+        os.close(directory)
+        raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
     failed = False
+    file_stat: os.stat_result | None = None
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(secrets.token_urlsafe(32))
-            stream.write("\n")
-        path.chmod(0o444)
-    except OSError:
+            stream.write(content)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o444)
+            file_stat = os.fstat(stream.fileno())
+    except (OSError, UnicodeError):
         failed = True
     if failed:
-        path.unlink(missing_ok=True)
-        raise SmokeError("SMOKE_SECRET_CREATE_FAILED")
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(path.name, dir_fd=directory)
+        except OSError:
+            pass
+        os.close(directory)
+        raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
+    os.close(directory)
+    if file_stat is None:
+        raise RuntimeError("missing created input identity")
+    return _OwnedInput(
+        path=path,
+        parent_device=parent_stat.st_dev,
+        parent_inode=parent_stat.st_ino,
+        device=file_stat.st_dev,
+        inode=file_stat.st_ino,
+    )
+
+
+def _create_secret(path: Path) -> tuple[str, _OwnedInput]:
+    value = secrets.token_urlsafe(32)
+    owned = _create_input(path, f"{value}\n")
+    return value, owned
+
+
+def _remove_owned_inputs(inputs: Sequence[_OwnedInput]) -> None:
+    failed = False
+    for owned in inputs:
+        path = owned.path
+        try:
+            directory = os.open(
+                path.parent,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+        except OSError:
+            failed = True
+            continue
+        try:
+            parent_stat = os.fstat(directory)
+            if (parent_stat.st_dev, parent_stat.st_ino) != (
+                owned.parent_device,
+                owned.parent_inode,
+            ):
+                failed = True
+                continue
+            file_stat = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if (file_stat.st_dev, file_stat.st_ino) != (owned.device, owned.inode):
+                failed = True
+                continue
+            os.unlink(path.name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failed = True
+        finally:
+            os.close(directory)
+    if failed:
+        raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
+
+
+def _create_smoke_inputs(
+    *, postgres_secret: Path, feishu_secret: Path, identity: Path
+) -> tuple[tuple[str, ...], tuple[_OwnedInput, ...]]:
+    created: list[_OwnedInput] = []
+    try:
+        postgres_value, postgres_owned = _create_secret(postgres_secret)
+        created.append(postgres_owned)
+        feishu_value, feishu_owned = _create_secret(feishu_secret)
+        created.append(feishu_owned)
+        identity_owned = _create_input(
+            identity,
+            json.dumps(
+                {
+                    "version": 1,
+                    "tenant_id": "dev-local",
+                    "environment_id": "dev",
+                    "entries": [],
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+        )
+        created.append(identity_owned)
+    except SmokeError:
+        _remove_owned_inputs(created)
+        raise
+    return (postgres_value, feishu_value), tuple(created)
 
 
 @dataclass
@@ -130,15 +277,33 @@ class ComposeSession:
     runner: CommandRunner
     project: str
     files: tuple[Path, ...]
+    compose_command: tuple[str, ...]
+    sensitive_values: tuple[str, ...] = ()
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
 
     def argv(self, *arguments: str) -> list[str]:
-        command = [self.docker, "compose", "-p", self.project]
+        command = list(self.compose_command)
+        command.extend(("--profile", "m7-channels", "-p", self.project))
         for path in self.files:
             command.extend(("-f", str(path)))
         command.extend(arguments)
         return command
+
+    def derive(
+        self, *, files: tuple[Path, ...], failure_code: str
+    ) -> ComposeSession:
+        """为同一 project 派生 override session，保持 CLI 与归属不变。"""
+        return ComposeSession(
+            docker=self.docker,
+            runner=self.runner,
+            project=self.project,
+            files=files,
+            compose_command=self.compose_command,
+            sensitive_values=self.sensitive_values,
+            up_started=self.up_started,
+            failure_code=failure_code,
+        )
 
     def run(
         self,
@@ -178,19 +343,28 @@ Workflow = Callable[[ComposeSession], None]
 def run_smoke(
     *,
     docker: str,
+    compose_command: tuple[str, ...],
     runner: CommandRunner = _default_runner,
     workflow: Workflow,
-    secret_path: Path = _SECRET_PATH,
+    postgres_secret_path: Path = _POSTGRES_SECRET_PATH,
+    feishu_secret_path: Path = _FEISHU_SECRET_PATH,
+    identity_path: Path = _FEISHU_IDENTITY_PATH,
 ) -> None:
     """只清理本次通过预检且实际尝试启动的随机 Compose project。"""
     project = project_name()
     _preflight(docker=docker, runner=runner, project=project)
-    _create_secret(secret_path)
+    sensitive_values, owned_inputs = _create_smoke_inputs(
+        postgres_secret=postgres_secret_path,
+        feishu_secret=feishu_secret_path,
+        identity=identity_path,
+    )
     session = ComposeSession(
         docker=docker,
         runner=runner,
         project=project,
         files=(_ROOT / "docker-compose.yml", _ROOT / "docker-compose.smoke.yml"),
+        compose_command=compose_command,
+        sensitive_values=sensitive_values,
     )
     try:
         workflow(session)
@@ -205,7 +379,7 @@ def run_smoke(
                     timeout=60.0,
                 )
         finally:
-            secret_path.unlink(missing_ok=True)
+            _remove_owned_inputs(owned_inputs)
 
 
 def _task(
@@ -262,12 +436,13 @@ def _require_succeeded(value: dict[str, object]) -> None:
     raise SmokeError(code or "SMOKE_TASK_STATUS_INVALID")
 
 
-def _wait_ready(*, timeout: float) -> None:
+def _wait_ready(*, web: bool = False, timeout: float) -> None:
+    url = _WEB_READY_URL if web else _API_READY_URL
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(
-                "http://127.0.0.1:8000/readyz", timeout=2.0
+            with urllib.request.urlopen(  # noqa: S310 -- URL 来自上述闭集
+                url, timeout=2.0
             ) as response:
                 if response.status == 200:
                     return
@@ -304,6 +479,94 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
     if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
         raise SmokeError("SMOKE_INSPECT_PROTOCOL_ERROR")
     return set(values)
+
+
+def _require_web_container_boundary(session: ComposeSession) -> None:
+    container = _container_id(session, "web-app")
+    result = session.run_docker(
+        (
+            session.docker,
+            "inspect",
+            "--format",
+            "[{{json .Config.User}},{{json .Config.Env}},"
+            "{{json .HostConfig.ReadonlyRootfs}},{{json .Mounts}}]",
+            container,
+        ),
+        timeout=15.0,
+        failure_code="SMOKE_WEB_INSPECT_FAILED",
+    )
+    try:
+        values = json.loads(result.stdout)
+    except (json.JSONDecodeError, RecursionError):
+        raise SmokeError("SMOKE_WEB_INSPECT_PROTOCOL_ERROR") from None
+    if not isinstance(values, list) or len(values) != 4:
+        raise SmokeError("SMOKE_WEB_INSPECT_PROTOCOL_ERROR")
+    user, environment, read_only, mounts = values
+    if not isinstance(user, str) or not isinstance(environment, list) or not all(
+        isinstance(item, str) for item in environment
+    ) or not isinstance(mounts, list):
+        raise SmokeError("SMOKE_WEB_INSPECT_PROTOCOL_ERROR")
+    user_name = user.partition(":")[0].lower()
+    numeric_user = user_name.lstrip("+-")
+    is_root = user_name == "root" or (
+        numeric_user.isdecimal() and int(user_name) == 0
+    )
+    required_environment = {
+        "XIAOWEI_FEISHU_APP_SECRET_FILE=/run/secrets/feishu_app_secret",
+        "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
+    }
+    required_mounts = {
+        "/run/secrets/feishu_app_secret",
+        "/run/config/feishu-identities.json",
+    }
+    reference_boundary_ok = all(
+        expected in environment
+        and sum(item.startswith(f"{expected.partition('=')[0]}=") for item in environment)
+        == 1
+        for expected in required_environment
+    )
+    matches_by_destination = [
+        [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict) and mount.get("Destination") == destination
+        ]
+        for destination in required_mounts
+    ]
+    mount_boundary_ok = all(
+        len(matches) == 1 and matches[0].get("RW") is False
+        for matches in matches_by_destination
+    )
+    if (
+        not user_name
+        or is_root
+        or read_only is not True
+        or not mount_boundary_ok
+        or not reference_boundary_ok
+        or any(
+            value and value in item
+            for value in session.sensitive_values
+            for item in environment
+        )
+    ):
+        raise SmokeError("SMOKE_WEB_CONTAINER_BOUNDARY_INVALID")
+
+
+def _start_web(session: ComposeSession) -> None:
+    """只启动 Web 并检查健康、ready 与容器边界，不触发 OAuth 路由。"""
+    session.failure_code = "SMOKE_WEB_COMMAND_FAILED"
+    session.run(
+        "up",
+        "-d",
+        "--wait",
+        "--pull",
+        "never",
+        "--no-deps",
+        "web-app",
+        timeout=120.0,
+    )
+    _wait_ready(web=True, timeout=60.0)
+    _require_web_container_boundary(session)
 
 
 def _require_worker_scale(session: ComposeSession) -> None:
@@ -466,6 +729,25 @@ def _require_disabled_channel_entrypoints(session: ComposeSession) -> None:
             raise SmokeError("SMOKE_CHANNEL_ENTRYPOINT_NOT_DISABLED")
 
 
+def _require_logs_clean(session: ComposeSession, *additional: str) -> None:
+    result = session.run(
+        "logs",
+        "--no-color",
+        "migrate",
+        "api",
+        "worker",
+        "postgres",
+        "web-app",
+        timeout=30.0,
+    )
+    logs = f"{result.stdout}{result.stderr}"
+    if any(
+        value and value in logs
+        for value in (*session.sensitive_values, *additional)
+    ):
+        raise SmokeError("SMOKE_LOG_REDACTION_FAILED")
+
+
 def _full_workflow(session: ComposeSession) -> None:
     sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
     session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
@@ -492,6 +774,7 @@ def _full_workflow(session: ComposeSession) -> None:
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)
     _require_disabled_channel_entrypoints(session)
+    _start_web(session)
 
     session.failure_code = "SMOKE_BASELINE_COMMAND_FAILED"
     session.run(
@@ -514,12 +797,8 @@ def _full_workflow(session: ComposeSession) -> None:
     )
 
     barrier_files = (*session.files, _ROOT / "docker-compose.barrier.yml")
-    barrier = ComposeSession(
-        docker=session.docker,
-        runner=session.runner,
-        project=session.project,
+    barrier = session.derive(
         files=barrier_files,
-        up_started=True,
         failure_code="SMOKE_BARRIER_COMMAND_FAILED",
     )
     barrier.run(
@@ -668,12 +947,7 @@ def _full_workflow(session: ComposeSession) -> None:
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)
-    logs = "".join(
-        session.run("logs", "--no-color", service, timeout=30.0).stdout
-        for service in ("migrate", "api", "worker", "postgres")
-    )
-    if sensitive_canary in logs:
-        raise SmokeError("SMOKE_LOG_REDACTION_FAILED")
+    _require_logs_clean(session, sensitive_canary)
 
 
 def main() -> int:
@@ -682,7 +956,14 @@ def main() -> int:
         sys.stderr.write("compose-smoke: docker_not_found\n")
         return 1
     try:
-        run_smoke(docker=docker, workflow=_full_workflow)
+        compose_command = _resolve_compose_command(
+            docker=docker, runner=_default_runner
+        )
+        run_smoke(
+            docker=docker,
+            compose_command=compose_command,
+            workflow=_full_workflow,
+        )
     except SmokeError as exc:
         sys.stderr.write(f"compose-smoke: {exc}\n")
         return 1

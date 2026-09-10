@@ -17,6 +17,23 @@ _PROCESS_SERVICES = {
 }
 _APP_SERVICES = _PROCESS_SERVICES | {"migrate"}
 _CHANNEL_SERVICES = {"feishu-listener", "channel-worker", "web-app"}
+_NON_CHANNEL_APP_SERVICES = _APP_SERVICES - _CHANNEL_SERVICES
+_FEISHU_LIVE_ENVIRONMENT = {
+    "XIAOWEI_FEISHU_APP_ID",
+    "XIAOWEI_FEISHU_APP_SECRET_FILE",
+    "XIAOWEI_FEISHU_TENANT_KEY",
+    "XIAOWEI_FEISHU_BOT_OPEN_ID",
+    "XIAOWEI_FEISHU_IDENTITY_FILE",
+    "XIAOWEI_WEB_DETAIL_BASE_URL",
+}
+_CHANNEL_ONLY_ENVIRONMENT = _FEISHU_LIVE_ENVIRONMENT | {
+    "XIAOWEI_FEISHU_LISTENER_ENABLED",
+    "XIAOWEI_CHANNEL_WORKER_ENABLED",
+    "XIAOWEI_WEB_APP_ENABLED",
+    "XIAOWEI_FEISHU_OAUTH_ENABLED",
+    "XIAOWEI_WEB_BIND_HOST",
+    "XIAOWEI_WEB_BIND_PORT",
+}
 
 
 def _yaml(name: str) -> dict[str, Any]:
@@ -30,7 +47,11 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
     services = compose["services"]
     assert set(services) == _APP_SERVICES | {"postgres"}
     images = {services[name]["image"] for name in _APP_SERVICES}
-    assert images == {"xiaowei-agent:m5-local"}
+    assert images == {"xiaowei-agent:${COMPOSE_XIAOWEI_IMAGE_TAG:-m5-local}"}
+    assert "latest" not in images.pop()
+    assert "COMPOSE_XIAOWEI_IMAGE_TAG" not in (
+        _ROOT / ".env.example"
+    ).read_text(encoding="utf-8")
     assert {services[name]["build"]["dockerfile"] for name in _APP_SERVICES} == {
         "Dockerfile"
     }
@@ -93,9 +114,11 @@ def test_compose_resources_remain_project_scoped_named_resources() -> None:
 def test_secrets_are_file_references_and_never_environment_values() -> None:
     compose = _yaml("docker-compose.yml")
     assert compose["secrets"] == {
-        "postgres_password": {"file": "./.secrets/postgres_password"}
+        "postgres_password": {"file": "./.secrets/postgres_password"},
+        "feishu_app_secret": {"file": "./.secrets/feishu_app_secret"},
     }
-    for service in compose["services"].values():
+    services = compose["services"]
+    for service in services.values():
         environment = service.get("environment", {})
         password_keys = {key for key in environment if "PASSWORD" in key}
         assert all(key.endswith("_FILE") for key in password_keys)
@@ -103,8 +126,34 @@ def test_secrets_are_file_references_and_never_environment_values() -> None:
             assert environment["POSTGRES_PASSWORD_FILE"] == (
                 "/run/secrets/postgres_" + "password"
             )
-            assert service["secrets"] == ["postgres_password"]
+    for name in _CHANNEL_SERVICES:
+        assert services[name]["secrets"] == [
+            "postgres_password",
+            "feishu_app_secret",
+        ]
+    for name in _NON_CHANNEL_APP_SERVICES:
+        assert services[name]["secrets"] == ["postgres_password"]
+    assert services["postgres"]["secrets"] == ["postgres_password"]
     assert not (_ROOT / ".secrets/postgres_password").exists()
+    assert not (_ROOT / ".secrets/feishu_app_secret").exists()
+
+
+def test_feishu_identity_bind_is_read_only_and_scoped_to_its_consumers() -> None:
+    compose = _yaml("docker-compose.yml")
+    services = compose["services"]
+    assert "configs" not in compose
+    expected = {
+        "type": "bind",
+        "source": "./.secrets/feishu-identities.json",
+        "target": "/run/config/feishu-identities.json",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
+    assert services["feishu-listener"]["volumes"] == [expected]
+    assert services["web-app"]["volumes"] == [expected]
+    for name in (_APP_SERVICES | {"postgres"}) - {"feishu-listener", "web-app"}:
+        assert expected not in services[name].get("volumes", [])
+    assert not (_ROOT / ".secrets/feishu-identities.json").exists()
 
 
 def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None:
@@ -127,27 +176,25 @@ def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None
 
 
 def test_channel_processes_are_profile_gated_and_default_fail_closed() -> None:
-    services = _yaml("docker-compose.yml")["services"]
+    compose = _yaml("docker-compose.yml")
+    services = compose["services"]
     expected_flags = {
-        "feishu-listener": "XIAOWEI_FEISHU_LISTENER_ENABLED",
-        "channel-worker": "XIAOWEI_CHANNEL_WORKER_ENABLED",
-        "web-app": "XIAOWEI_WEB_APP_ENABLED",
+        "feishu-listener": {"XIAOWEI_FEISHU_LISTENER_ENABLED": "false"},
+        "channel-worker": {"XIAOWEI_CHANNEL_WORKER_ENABLED": "false"},
+        "web-app": {
+            "XIAOWEI_WEB_APP_ENABLED": "false",
+            "XIAOWEI_FEISHU_OAUTH_ENABLED": "false",
+        },
     }
     for name in _CHANNEL_SERVICES:
         assert services[name]["profiles"] == ["m7-channels"]
         environment = services[name]["environment"]
-        assert environment[expected_flags[name]] == "false"
-        assert not any(
-            key in environment
-            for key in {
-                "XIAOWEI_FEISHU_APP_ID",
-                "XIAOWEI_FEISHU_APP_SECRET_FILE",
-                "XIAOWEI_FEISHU_TENANT_KEY",
-                "XIAOWEI_FEISHU_BOT_OPEN_ID",
-                "XIAOWEI_FEISHU_IDENTITY_FILE",
-                "XIAOWEI_WEB_DETAIL_BASE_URL",
-            }
-        )
+        assert expected_flags[name].items() <= environment.items()
+        assert not (_FEISHU_LIVE_ENVIRONMENT & environment.keys())
+
+    assert not (_CHANNEL_ONLY_ENVIRONMENT & compose["x-app-environment"].keys())
+    for name in _NON_CHANNEL_APP_SERVICES | {"postgres"}:
+        assert not (_CHANNEL_ONLY_ENVIRONMENT & services[name]["environment"].keys())
 
     assert services["web-app"]["environment"]["XIAOWEI_WEB_BIND_HOST"] == (
         "0.0." + "0.0"
@@ -161,14 +208,18 @@ def test_compose_healthchecks_use_available_binaries_and_no_shell() -> None:
     api_test = services["api"]["healthcheck"]["test"]
     assert api_test[:3] == ["CMD", "python", "-c"]
     assert "/healthz" in api_test[3]
+    web_test = services["web-app"]["healthcheck"]["test"]
+    assert web_test[:3] == ["CMD", "python", "-c"]
+    assert "http://127.0.0.1:8080/healthz" in web_test[3]
     assert "curl" not in str(services)
 
 
 def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
+    base = _yaml("docker-compose.yml")
     smoke = _yaml("docker-compose.smoke.yml")
     barrier = _yaml("docker-compose.barrier.yml")
     assert set(smoke) == {"services"}
-    assert set(smoke["services"]) == {"worker"}
+    assert set(smoke["services"]) == {"worker", "web-app"}
     assert set(smoke["services"]["worker"]) == {"environment"}
     assert set(smoke["services"]["worker"]["environment"]) == {
         "XIAOWEI_LEASE_TTL_SECONDS",
@@ -177,6 +228,24 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
         "XIAOWEI_DB_CONNECT_TIMEOUT_SECONDS",
         "XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS",
     }
+    web = smoke["services"]["web-app"]
+    assert set(web) == {"environment", "extra_hosts"}
+    assert web["environment"] == {
+        "XIAOWEI_WEB_APP_ENABLED": "true",
+        "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
+        "XIAOWEI_FEISHU_APP_ID": "cli_smoke_fake_app",
+        "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
+        "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
+        "XIAOWEI_WEB_DETAIL_BASE_URL": "https://sso.example.invalid",
+    }
+    assert web["extra_hosts"] == ["open.feishu.cn:127.0.0.1"]
+
+    for name in _NON_CHANNEL_APP_SERVICES | {"postgres"}:
+        merged_environment = dict(base["services"][name].get("environment", {}))
+        merged_environment.update(
+            smoke["services"].get(name, {}).get("environment", {})
+        )
+        assert not (_CHANNEL_ONLY_ENVIRONMENT & merged_environment.keys())
     assert barrier == {
         "services": {
             "worker": {

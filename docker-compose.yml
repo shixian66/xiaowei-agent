@@ -9,14 +9,9 @@ x-app-environment: &app-environment
   XIAOWEI_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
   XIAOWEI_API_BIND_HOST: "0.0.0.0"
   XIAOWEI_API_BIND_PORT: "8000"
-  XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
-  XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
-  XIAOWEI_WEB_APP_ENABLED: "false"
-  XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
-  XIAOWEI_WEB_BIND_PORT: "8080"
 
 x-app-service: &app-service
-  image: xiaowei-agent:m5-local
+  image: xiaowei-agent:${COMPOSE_XIAOWEI_IMAGE_TAG:-m5-local}
   build:
     context: .
     dockerfile: Dockerfile
@@ -89,6 +84,19 @@ services:
     <<: *app-service
     profiles: ["m7-channels"]
     command: ["python", "-m", "xiaowei_agent.interfaces.feishu_listener"]
+    environment:
+      <<: *app-environment
+      XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
+    secrets:
+      - postgres_password
+      - feishu_app_secret
+    volumes:
+      - type: bind
+        source: ./.secrets/feishu-identities.json
+        target: /run/config/feishu-identities.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -97,6 +105,12 @@ services:
     <<: *app-service
     profiles: ["m7-channels"]
     command: ["python", "-m", "xiaowei_agent.interfaces.feishu_worker"]
+    environment:
+      <<: *app-environment
+      XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
+    secrets:
+      - postgres_password
+      - feishu_app_secret
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -105,15 +119,43 @@ services:
     <<: *app-service
     profiles: ["m7-channels"]
     command: ["python", "-m", "xiaowei_agent.interfaces.web_app"]
+    environment:
+      <<: *app-environment
+      XIAOWEI_WEB_APP_ENABLED: "false"
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "false"
+      XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
+      XIAOWEI_WEB_BIND_PORT: "8080"
+    secrets:
+      - postgres_password
+      - feishu_app_secret
+    volumes:
+      - type: bind
+        source: ./.secrets/feishu-identities.json
+        target: /run/config/feishu-identities.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       migrate:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
 
 secrets:
   postgres_password:
     file: ./.secrets/postgres_password
+  feishu_app_secret:
+    file: ./.secrets/feishu_app_secret
 
 volumes:
   postgres_data:
