@@ -207,10 +207,16 @@ def test_compose_healthchecks_use_available_binaries_and_no_shell() -> None:
     assert services["postgres"]["healthcheck"]["test"][0] == "CMD"
     api_test = services["api"]["healthcheck"]["test"]
     assert api_test[:3] == ["CMD", "python", "-c"]
-    assert "/healthz" in api_test[3]
+    assert "http.client.HTTPConnection('127.0.0.1',8000,timeout=2)" in api_test[3]
+    assert "request('GET','/healthz')" in api_test[3]
+    assert "status == 200" in api_test[3]
     web_test = services["web-app"]["healthcheck"]["test"]
     assert web_test[:3] == ["CMD", "python", "-c"]
-    assert "http://127.0.0.1:8080/healthz" in web_test[3]
+    assert "http.client.HTTPConnection('127.0.0.1',8080,timeout=2)" in web_test[3]
+    assert "request('GET','/healthz')" in web_test[3]
+    assert "status == 200" in web_test[3]
+    assert "urllib" not in api_test[3]
+    assert "urllib" not in web_test[3]
     assert "curl" not in str(services)
 
 

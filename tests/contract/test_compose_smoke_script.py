@@ -5,8 +5,11 @@ import os
 import re
 import stat
 import subprocess
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.response import addinfourl
 
 import pytest
 from scripts import compose_smoke
@@ -49,9 +52,7 @@ def test_collision_preflight_never_mutates_or_cleans_existing_project(
             compose_command=("/usr/bin/docker", "compose"),
             runner=runner,
             workflow=workflow,
-            postgres_secret_path=tmp_path / ".secrets/postgres_password",
-            feishu_secret_path=tmp_path / ".secrets/feishu_app_secret",
-            identity_path=tmp_path / ".secrets/feishu-identities.json",
+            input_root=tmp_path / ".secrets",
         )
     assert workflow_called is False
     assert not _mutating_commands(runner.calls)
@@ -78,9 +79,7 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
             compose_command=("/usr/bin/docker", "compose"),
             runner=runner,
             workflow=workflow,
-            postgres_secret_path=tmp_path / ".secrets/postgres_password",
-            feishu_secret_path=tmp_path / ".secrets/feishu_app_secret",
-            identity_path=tmp_path / ".secrets/feishu-identities.json",
+            input_root=tmp_path / ".secrets",
         )
     down = [call for call in runner.calls if "down" in call]
     assert len(down) == 1
@@ -134,6 +133,38 @@ def test_compose_session_uses_one_resolved_command_for_derived_sessions() -> Non
     assert derived.argv("config")[:5] == session.argv("config")[:5]
     assert derived.compose_command == session.compose_command
     assert derived.files[-1] == Path("docker-compose.barrier.yml")
+
+
+def test_barrier_recovery_start_inherits_the_resolved_standalone_command() -> None:
+    runner = RecordingRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker-compose",),
+        up_started=True,
+    )
+
+    barrier = compose_smoke._run_barrier_recovery_start(session)
+
+    assert barrier.compose_command == ("/usr/bin/docker-compose",)
+    assert barrier.files == (
+        *session.files,
+        compose_smoke._ROOT / "docker-compose.barrier.yml",
+    )
+    call = runner.calls[-1]
+    assert call[0] == "/usr/bin/docker-compose"
+    assert call.count("--profile") == 1
+    assert call[call.index("--profile") + 1] == "m7-channels"
+    assert str(compose_smoke._ROOT / "docker-compose.barrier.yml") in call
+    assert call[-5:] == (
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "worker",
+    )
 
 
 def test_smoke_executes_each_channel_entrypoint_with_live_flags_disabled() -> None:
@@ -248,14 +279,19 @@ def test_generated_secret_is_host_isolated_and_container_readable(tmp_path: Path
 
 def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -> None:
     parent = tmp_path / ".secrets"
-    postgres = parent / "postgres_password"
-    feishu = parent / "feishu_app_secret"
-    identities = parent / "feishu-identities.json"
+    observed_paths: tuple[Path, ...] = ()
     observed_sensitive_values: tuple[str, ...] = ()
 
     def workflow(session: ComposeSession) -> None:
-        nonlocal observed_sensitive_values
+        nonlocal observed_paths, observed_sensitive_values
         observed_sensitive_values = session.sensitive_values
+        override = json.loads(session.files[-1].read_text(encoding="utf-8"))
+        postgres = Path(override["secrets"]["postgres_password"]["file"])
+        feishu = Path(override["secrets"]["feishu_app_secret"]["file"])
+        identities = Path(
+            override["services"]["web-app"]["volumes"][0]["source"]
+        )
+        observed_paths = (postgres, feishu, identities)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
@@ -275,42 +311,121 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         compose_command=("/usr/bin/docker-compose",),
         runner=RecordingRunner(),
         workflow=workflow,
-        postgres_secret_path=postgres,
-        feishu_secret_path=feishu,
-        identity_path=identities,
+        input_root=parent,
     )
 
     assert len(observed_sensitive_values) == 2
-    assert not any(path.exists() for path in (postgres, feishu, identities))
+    assert not any(path.exists() for path in observed_paths)
 
 
-@pytest.mark.parametrize("existing_name", ["feishu_app_secret", "feishu-identities.json"])
-def test_partial_input_creation_failure_preserves_existing_file_and_cleans_only_owned(
-    tmp_path: Path, existing_name: str
+def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
+    tmp_path: Path,
 ) -> None:
-    parent = tmp_path / ".secrets"
-    parent.mkdir(mode=0o700)
-    postgres = parent / "postgres_password"
-    feishu = parent / "feishu_app_secret"
-    identities = parent / "feishu-identities.json"
-    existing = parent / existing_name
-    existing.write_text("user-owned\n", encoding="utf-8")
+    input_root = tmp_path / ".secrets"
+    fixed_user_file = input_root / "postgres_password"
+    input_root.mkdir(mode=0o700)
+    fixed_user_file.write_text("user-owned\n", encoding="utf-8")
+    observed_private_directory: Path | None = None
 
-    with pytest.raises(SmokeError, match=r"^SMOKE_INPUT_ALREADY_EXISTS$"):
+    def workflow(session: ComposeSession) -> None:
+        nonlocal observed_private_directory
+        override = session.files[-1]
+        observed_private_directory = override.parent
+        assert override.name == "compose-smoke-inputs.json"
+        assert override.parent.parent == input_root
+        assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", override.parent.name)
+        assert stat.S_IMODE(override.parent.stat().st_mode) == 0o700
+        document = json.loads(override.read_text(encoding="utf-8"))
+        postgres = Path(document["secrets"]["postgres_password"]["file"])
+        feishu = Path(document["secrets"]["feishu_app_secret"]["file"])
+        identity_mount = document["services"]["web-app"]["volumes"][0]
+        identity = Path(identity_mount["source"])
+        assert {path.parent for path in (postgres, feishu, identity)} == {
+            override.parent
+        }
+        assert {path.name for path in (postgres, feishu, identity)} == {
+            "postgres_password",
+            "feishu_app_secret",
+            "feishu-identities.json",
+        }
+        assert identity_mount["target"] == "/run/config/feishu-identities.json"
+        assert identity_mount["read_only"] is True
+        assert document["services"]["feishu-listener"]["volumes"] == [
+            identity_mount
+        ]
+        override_text = override.read_text(encoding="utf-8")
+        assert all(value not in override_text for value in session.sensitive_values)
+
+    run_smoke(
+        docker="/usr/bin/docker",
+        compose_command=("/usr/bin/docker-compose",),
+        runner=RecordingRunner(),
+        workflow=workflow,
+        input_root=input_root,
+    )
+
+    assert observed_private_directory is not None
+    assert not observed_private_directory.exists()
+    assert fixed_user_file.read_text(encoding="utf-8") == "user-owned\n"
+
+
+def test_partial_private_input_failure_cleans_only_the_private_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_root = tmp_path / ".secrets"
+    input_root.mkdir(mode=0o700)
+    fixed_user_file = input_root / "feishu_app_secret"
+    fixed_user_file.write_text("user-owned\n", encoding="utf-8")
+    real_create = compose_smoke._create_input
+    calls = 0
+
+    def fail_third_input(path: Path, content: str) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise SmokeError("SMOKE_INPUT_CREATE_FAILED")
+        return real_create(path, content)
+
+    monkeypatch.setattr(compose_smoke, "_create_input", fail_third_input)
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_INPUT_CREATE_FAILED$"):
         run_smoke(
             docker="/usr/bin/docker",
             compose_command=("/usr/bin/docker-compose",),
             runner=RecordingRunner(),
             workflow=lambda _: pytest.fail("workflow must not run"),
-            postgres_secret_path=postgres,
-            feishu_secret_path=feishu,
-            identity_path=identities,
+            input_root=input_root,
         )
 
+    assert fixed_user_file.read_text(encoding="utf-8") == "user-owned\n"
+    assert list(input_root.iterdir()) == [fixed_user_file]
+
+
+@pytest.mark.parametrize("existing_name", ["feishu_app_secret", "feishu-identities.json"])
+def test_private_input_namespace_preserves_fixed_user_files(
+    tmp_path: Path, existing_name: str
+) -> None:
+    parent = tmp_path / ".secrets"
+    parent.mkdir(mode=0o700)
+    existing = parent / existing_name
+    existing.write_text("user-owned\n", encoding="utf-8")
+    workflow_called = False
+
+    def workflow(_: ComposeSession) -> None:
+        nonlocal workflow_called
+        workflow_called = True
+
+    run_smoke(
+        docker="/usr/bin/docker",
+        compose_command=("/usr/bin/docker-compose",),
+        runner=RecordingRunner(),
+        workflow=workflow,
+        input_root=parent,
+    )
+
+    assert workflow_called is True
     assert existing.read_text(encoding="utf-8") == "user-owned\n"
-    for path in (postgres, feishu, identities):
-        if path != existing:
-            assert not path.exists()
+    assert list(parent.iterdir()) == [existing]
 
 
 def test_cleanup_refuses_a_replaced_parent_directory_and_preserves_new_files(
@@ -319,8 +434,6 @@ def test_cleanup_refuses_a_replaced_parent_directory_and_preserves_new_files(
     parent = tmp_path / ".secrets"
     moved = tmp_path / "owned-inputs"
     postgres = parent / "postgres_password"
-    feishu = parent / "feishu_app_secret"
-    identities = parent / "feishu-identities.json"
 
     def replace_parent(_: ComposeSession) -> None:
         parent.rename(moved)
@@ -333,13 +446,11 @@ def test_cleanup_refuses_a_replaced_parent_directory_and_preserves_new_files(
             compose_command=("/usr/bin/docker", "compose"),
             runner=RecordingRunner(),
             workflow=replace_parent,
-            postgres_secret_path=postgres,
-            feishu_secret_path=feishu,
-            identity_path=identities,
+            input_root=parent,
         )
 
     assert postgres.read_text(encoding="utf-8") == "user-owned\n"
-    assert (moved / "postgres_password").exists()
+    assert any(path.name.startswith("compose-smoke-") for path in moved.iterdir())
 
 
 def test_secret_creation_rejects_a_traversable_parent_directory(tmp_path: Path) -> None:
@@ -385,6 +496,122 @@ def test_input_creation_closes_the_parent_fd_when_directory_inspection_fails(
     assert inspected_fd is not None
     with pytest.raises(OSError):
         real_fstat(inspected_fd)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError])
+def test_input_creation_cleans_its_file_without_masking_a_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    path = tmp_path / ".secrets" / "feishu_app_secret"
+    real_open = os.open
+    real_fstat = os.fstat
+    created_descriptor: int | None = None
+
+    def track_open(target: Any, *args: Any, **kwargs: Any) -> int:
+        nonlocal created_descriptor
+        descriptor = real_open(target, *args, **kwargs)
+        if target == path.name and kwargs.get("dir_fd") is not None:
+            created_descriptor = descriptor
+        return descriptor
+
+    def interrupt_fchmod(_: int, __: int) -> None:
+        raise error_type("private-interrupt-detail")
+
+    monkeypatch.setattr(compose_smoke.os, "open", track_open)
+    monkeypatch.setattr(compose_smoke.os, "fchmod", interrupt_fchmod)
+
+    with pytest.raises(error_type, match="private-interrupt-detail"):
+        compose_smoke._create_input(path, "fake-value\n")
+
+    assert not path.exists()
+    assert created_descriptor is not None
+    with pytest.raises(OSError):
+        real_fstat(created_descriptor)
+
+
+def test_failed_input_creation_does_not_delete_a_replacement_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / ".secrets" / "feishu_app_secret"
+    displaced = tmp_path / ".secrets" / "displaced-owned-input"
+
+    def replace_then_fail(_: int, __: int) -> None:
+        path.rename(displaced)
+        path.write_text("user-owned\n", encoding="utf-8")
+        raise OSError("private-fchmod-detail")
+
+    monkeypatch.setattr(compose_smoke.os, "fchmod", replace_then_fail)
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_INPUT_CREATE_FAILED$"):
+        compose_smoke._create_input(path, "fake-value\n")
+
+    assert path.read_text(encoding="utf-8") == "user-owned\n"
+    assert displaced.read_text(encoding="utf-8") == "fake-value\n"
+
+
+def test_private_namespace_cleanup_preserves_a_replacement_after_atomic_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = compose_smoke._create_smoke_inputs(input_root=tmp_path / ".secrets")
+    namespace = bundle.namespace
+    real_rename = os.rename
+    replacement_created = False
+
+    def capture_then_replace(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replacement_created
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+        if source == namespace.path.name and src_dir_fd == dst_dir_fd:
+            namespace.path.mkdir(mode=0o700)
+            (namespace.path / "user-file").write_text(
+                "user-owned\n", encoding="utf-8"
+            )
+            replacement_created = True
+
+    monkeypatch.setattr(compose_smoke.os, "rename", capture_then_replace)
+
+    compose_smoke._remove_private_input_namespace(
+        namespace,
+        bundle.owned_inputs,
+    )
+
+    assert replacement_created is True
+    assert (namespace.path / "user-file").read_text(encoding="utf-8") == (
+        "user-owned\n"
+    )
+
+
+def test_private_namespace_cleanup_never_recursively_deletes_unknown_content(
+    tmp_path: Path,
+) -> None:
+    bundle = compose_smoke._create_smoke_inputs(input_root=tmp_path / ".secrets")
+    unknown = bundle.namespace.path / "unexpected"
+    unknown.mkdir()
+    (unknown / "user-file").write_text("user-owned\n", encoding="utf-8")
+    with pytest.raises(SmokeError, match=r"^SMOKE_INPUT_CLEANUP_FAILED$"):
+        compose_smoke._remove_private_input_namespace(
+            bundle.namespace,
+            bundle.owned_inputs,
+        )
+
+    retired = list(bundle.namespace.root.glob(".compose-smoke-retired-*"))
+    assert len(retired) == 1
+    preserved = retired[0]
+    assert (preserved / "unexpected" / "user-file").read_text(
+        encoding="utf-8"
+    ) == "user-owned\n"
 
 
 def test_missing_docker_is_a_hard_failure(
@@ -496,6 +723,30 @@ def test_main_reports_only_the_fixed_smoke_error_code(
     assert capsys.readouterr().err == "compose-smoke: SMOKE_BASELINE_COMMAND_FAILED\n"
 
 
+def test_main_passes_the_resolved_compose_command_to_run_smoke(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resolved = ("/usr/bin/docker-compose",)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(
+        compose_smoke,
+        "_resolve_compose_command",
+        lambda **_: resolved,
+    )
+
+    def capture_smoke(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(compose_smoke, "run_smoke", capture_smoke)
+
+    assert compose_smoke.main() == 0
+    assert capsys.readouterr().out == "compose-smoke: passed\n"
+    assert captured["docker"] == "/usr/bin/docker"
+    assert captured["compose_command"] is resolved
+    assert captured["workflow"] is compose_smoke._full_workflow
+
+
 def test_web_smoke_uses_profile_health_wait_and_only_the_readiness_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -550,15 +801,83 @@ def test_web_readiness_requests_only_the_local_readyz_route(
         def __exit__(self, *_: object) -> None:
             return None
 
-    def open_url(url: str, *, timeout: float) -> Response:
-        calls.append((url, timeout))
-        return Response()
+    class Opener:
+        def open(self, url: str, *, timeout: float) -> Response:
+            calls.append((url, timeout))
+            return Response()
 
-    monkeypatch.setattr(compose_smoke.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(
+        compose_smoke, "_build_readiness_opener", lambda: Opener()
+    )
 
     compose_smoke._wait_ready(web=True, timeout=0.1)
 
     assert calls == [("http://127.0.0.1:8080/readyz", 2.0)]
+
+
+def test_readiness_opener_ignores_hostile_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.setattr(
+        compose_smoke.urllib.request,
+        "getproxies",
+        lambda: pytest.fail("host proxy discovery must not run"),
+    )
+
+    opener = compose_smoke._build_readiness_opener()
+
+    assert not any(
+        isinstance(handler, compose_smoke.urllib.request.ProxyHandler)
+        and handler.proxies
+        for handler in opener.handlers
+    )
+
+
+def test_readiness_redirect_is_rejected_without_an_external_second_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_url = "http://127.0.0.1:8080/readyz"
+    external_url = "https://open.feishu.cn/provider-path"
+    calls: list[str] = []
+
+    class RedirectTransport(compose_smoke.urllib.request.BaseHandler):
+        handler_order = 100
+
+        def http_open(self, request: Any) -> Any:
+            calls.append(request.full_url)
+            headers = Message()
+            if request.full_url == local_url:
+                headers["Location"] = external_url
+                response = addinfourl(BytesIO(), headers, local_url, 302)
+                response.msg = "Found"
+                return response
+            response = addinfourl(BytesIO(), headers, external_url, 200)
+            response.msg = "OK"
+            return response
+
+        def https_open(self, request: Any) -> Any:
+            return self.http_open(request)
+
+    real_build_opener = compose_smoke.urllib.request.build_opener
+
+    def build_with_redirect_transport(*handlers: Any) -> Any:
+        return real_build_opener(*handlers, RedirectTransport())
+
+    monkeypatch.setattr(
+        compose_smoke.urllib.request,
+        "build_opener",
+        build_with_redirect_transport,
+    )
+    moments = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(compose_smoke.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(compose_smoke.time, "sleep", lambda _: None)
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_READINESS_TIMEOUT$"):
+        compose_smoke._wait_ready(web=True, timeout=0.1)
+
+    assert calls == [local_url]
 
 
 @pytest.mark.parametrize(
@@ -650,31 +969,98 @@ def _web_inspect_payload(
     )
 
 
-def test_web_container_boundary_accepts_non_root_readonly_reference_mounts() -> None:
-    class InspectRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
-            result = super().__call__(argv, timeout=timeout)
-            if tuple(argv)[-3:] == ("ps", "--quiet", "web-app"):
-                return subprocess.CompletedProcess(
-                    argv, 0, stdout="web-container\n", stderr=""
-                )
-            if tuple(argv)[:2] == ("/usr/bin/docker", "inspect"):
-                return subprocess.CompletedProcess(
-                    argv, 0, stdout=_web_inspect_payload(), stderr=""
-                )
-            return result
+class WebBoundaryRunner(RecordingRunner):
+    def __init__(
+        self,
+        *,
+        payload: str | None = None,
+        euid: str = "1000",
+        fail_euid: bool = False,
+    ) -> None:
+        super().__init__()
+        self.payload = payload or _web_inspect_payload()
+        self.euid = euid
+        self.fail_euid = fail_euid
 
+    def __call__(
+        self, argv: Any, *, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(argv, timeout=timeout)
+        call = tuple(argv)
+        if call[-3:] == ("ps", "--quiet", "web-app"):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="web-container\n", stderr=""
+            )
+        if call[:2] == ("/usr/bin/docker", "inspect"):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=self.payload, stderr=""
+            )
+        if call[-6:-1] == ("exec", "-T", "web-app", "python", "-c"):
+            if self.fail_euid:
+                raise subprocess.CalledProcessError(
+                    1, argv, stderr="private-euid-command-output"
+                )
+            return subprocess.CompletedProcess(argv, 0, stdout=self.euid, stderr="")
+        return result
+
+
+def test_web_container_boundary_accepts_non_root_readonly_reference_mounts() -> None:
+    runner = WebBoundaryRunner()
     session = ComposeSession(
         docker="/usr/bin/docker",
-        runner=InspectRunner(),
+        runner=runner,
         project="isolated",
         files=(Path("docker-compose.yml"),),
         compose_command=("/usr/bin/docker", "compose"),
         sensitive_values=("private-fake-secret",),
     )
     compose_smoke._require_web_container_boundary(session)
+    assert "os.geteuid" in runner.calls[-1][-1]
+
+
+def test_web_container_boundary_rejects_an_actual_root_process() -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=WebBoundaryRunner(euid="0"),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_WEB_CONTAINER_BOUNDARY_INVALID$"):
+        compose_smoke._require_web_container_boundary(session)
+
+
+@pytest.mark.parametrize("euid", ["", "1000\n", "+1000", "1 000", "1\n2", "root"])
+def test_web_container_boundary_rejects_a_malformed_euid(euid: str) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=WebBoundaryRunner(euid=euid),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_WEB_EUID_PROTOCOL_ERROR$"):
+        compose_smoke._require_web_container_boundary(session)
+
+
+def test_web_euid_command_failure_exposes_only_a_fixed_error() -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=WebBoundaryRunner(fail_euid=True),
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+
+    with pytest.raises(
+        SmokeError, match=r"^SMOKE_WEB_EUID_COMMAND_FAILED$"
+    ) as caught:
+        compose_smoke._require_web_container_boundary(session)
+
+    assert caught.value.__context__ is None
+    assert "private-euid-command-output" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -700,22 +1086,9 @@ def test_web_container_boundary_accepts_non_root_readonly_reference_mounts() -> 
 def test_web_container_boundary_rejects_privilege_mount_or_secret_leak(
     payload: str,
 ) -> None:
-    class InspectRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
-            result = super().__call__(argv, timeout=timeout)
-            if tuple(argv)[-3:] == ("ps", "--quiet", "web-app"):
-                return subprocess.CompletedProcess(
-                    argv, 0, stdout="web-container\n", stderr=""
-                )
-            if tuple(argv)[:2] == ("/usr/bin/docker", "inspect"):
-                return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
-            return result
-
     session = ComposeSession(
         docker="/usr/bin/docker",
-        runner=InspectRunner(),
+        runner=WebBoundaryRunner(payload=payload),
         project="isolated",
         files=(Path("docker-compose.yml"),),
         compose_command=("/usr/bin/docker", "compose"),

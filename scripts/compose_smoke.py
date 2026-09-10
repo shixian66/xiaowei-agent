@@ -19,11 +19,10 @@ from pathlib import Path
 from typing import Protocol
 
 _ROOT = Path(__file__).resolve().parents[1]
-_POSTGRES_SECRET_PATH = _ROOT / ".secrets/postgres_password"
-_FEISHU_SECRET_PATH = _ROOT / ".secrets/feishu_app_secret"
-_FEISHU_IDENTITY_PATH = _ROOT / ".secrets/feishu-identities.json"
+_SMOKE_INPUT_ROOT = _ROOT / ".secrets"
 _API_READY_URL = "http://127.0.0.1:8000/readyz"
 _WEB_READY_URL = "http://127.0.0.1:8080/readyz"
+_EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _NON_SUCCESS_CODES = {
@@ -80,7 +79,7 @@ def _resolve_compose_command(
     *, docker: str, runner: CommandRunner
 ) -> tuple[str, ...]:
     """选择实际可工作的 Compose CLI，且不回显探测输出。"""
-    candidates = [(docker, "compose")]
+    candidates: list[tuple[str, ...]] = [(docker, "compose")]
     standalone = shutil.which("docker-compose")
     if standalone is not None:
         candidates.append((standalone,))
@@ -121,13 +120,80 @@ def _preflight(
 @dataclass(frozen=True)
 class _OwnedInput:
     path: Path
-    parent_device: int
-    parent_inode: int
     device: int
     inode: int
 
 
+@dataclass(frozen=True)
+class _PrivateInputNamespace:
+    root: Path
+    path: Path
+    root_device: int
+    root_inode: int
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class _SmokeInputs:
+    namespace: _PrivateInputNamespace
+    sensitive_values: tuple[str, ...]
+    owned_inputs: tuple[_OwnedInput, ...]
+    override_path: Path
+
+
+def _cleanup_unreturned_input(
+    *,
+    directory: int,
+    descriptor: int | None,
+    name: str,
+    created: bool,
+    identity: tuple[int, int] | None,
+    primary_error: BaseException | None,
+) -> None:
+    """清理尚未移交给调用方的 inode，且不覆盖原始异常。"""
+    cleanup_failed = False
+    created_identity = identity
+    if created and created_identity is None and descriptor is not None:
+        try:
+            created_stat = os.fstat(descriptor)
+            created_identity = (created_stat.st_dev, created_stat.st_ino)
+        except BaseException:  # 保留正在传播的 KeyboardInterrupt 等原始异常
+            cleanup_failed = True
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except BaseException:  # 同上；错误细节不得越过 smoke 边界
+            cleanup_failed = True
+    if created and created_identity is not None:
+        try:
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            cleanup_failed = True
+        else:
+            if (current.st_dev, current.st_ino) == created_identity:
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except BaseException:
+                    cleanup_failed = True
+    try:
+        os.close(directory)
+    except BaseException:
+        cleanup_failed = True
+    if cleanup_failed:
+        if primary_error is not None:
+            primary_error.add_note("SMOKE_INPUT_CLEANUP_FAILED")
+            return
+        raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
+
+
 def _create_input(path: Path, content: str) -> _OwnedInput:
+    try:
+        payload = content.encode("utf-8")
+    except UnicodeError:
+        raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError:
@@ -148,54 +214,77 @@ def _create_input(path: Path, content: str) -> _OwnedInput:
     if parent_mode != 0o700:
         os.close(directory)
         raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS")
+    descriptor: int | None = None
+    created = False
+    identity: tuple[int, int] | None = None
+    owned: _OwnedInput | None = None
     try:
-        descriptor = os.open(
-            path.name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=directory,
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=directory,
+            )
+            created = descriptor is not None
+        except FileExistsError:
+            raise SmokeError("SMOKE_INPUT_ALREADY_EXISTS") from None
+        except OSError:
+            raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
+        file_stat = os.fstat(descriptor)
+        identity = (file_stat.st_dev, file_stat.st_ino)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError
+            remaining = remaining[written:]
+        os.fchmod(descriptor, 0o444)
+        current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != identity:
+            raise OSError
+        owned = _OwnedInput(
+            path=path,
+            device=file_stat.st_dev,
+            inode=file_stat.st_ino,
         )
-    except FileExistsError:
-        os.close(directory)
-        raise SmokeError("SMOKE_INPUT_ALREADY_EXISTS") from None
     except OSError:
-        os.close(directory)
         raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
-    failed = False
-    file_stat: os.stat_result | None = None
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fchmod(stream.fileno(), 0o444)
-            file_stat = os.fstat(stream.fileno())
-    except (OSError, UnicodeError):
-        failed = True
-    if failed:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        try:
-            os.unlink(path.name, dir_fd=directory)
-        except OSError:
-            pass
-        os.close(directory)
-        raise SmokeError("SMOKE_INPUT_CREATE_FAILED") from None
-    os.close(directory)
-    if file_stat is None:
-        raise RuntimeError("missing created input identity")
-    return _OwnedInput(
-        path=path,
-        parent_device=parent_stat.st_dev,
-        parent_inode=parent_stat.st_ino,
-        device=file_stat.st_dev,
-        inode=file_stat.st_ino,
-    )
+    finally:
+        primary_error = sys.exception()
+        if owned is None or primary_error is not None:
+            _cleanup_unreturned_input(
+                directory=directory,
+                descriptor=descriptor,
+                name=path.name,
+                created=created,
+                identity=identity,
+                primary_error=primary_error,
+            )
+        else:
+            try:
+                if descriptor is None:
+                    raise RuntimeError("missing created input descriptor")
+                os.close(descriptor)
+                descriptor = None
+                os.close(directory)
+            except BaseException as error:
+                _cleanup_unreturned_input(
+                    directory=directory,
+                    descriptor=descriptor,
+                    name=path.name,
+                    created=created,
+                    identity=identity,
+                    primary_error=error,
+                )
+                raise
+    if owned is None:
+        raise RuntimeError("missing created input ownership")
+    return owned
 
 
 def _create_secret(path: Path) -> tuple[str, _OwnedInput]:
@@ -204,47 +293,170 @@ def _create_secret(path: Path) -> tuple[str, _OwnedInput]:
     return value, owned
 
 
-def _remove_owned_inputs(inputs: Sequence[_OwnedInput]) -> None:
-    failed = False
-    for owned in inputs:
-        path = owned.path
-        try:
-            directory = os.open(
-                path.parent,
-                os.O_RDONLY
-                | os.O_DIRECTORY
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0),
-            )
-        except OSError:
-            failed = True
-            continue
-        try:
-            parent_stat = os.fstat(directory)
-            if (parent_stat.st_dev, parent_stat.st_ino) != (
-                owned.parent_device,
-                owned.parent_inode,
-            ):
-                failed = True
-                continue
-            file_stat = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-            if (file_stat.st_dev, file_stat.st_ino) != (owned.device, owned.inode):
-                failed = True
-                continue
-            os.unlink(path.name, dir_fd=directory)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            failed = True
-        finally:
-            os.close(directory)
-    if failed:
+def _create_private_input_namespace(root: Path) -> _PrivateInputNamespace:
+    """创建单次 smoke 独占的不可预测 0700 目录。"""
+    root = Path(os.path.abspath(root))
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        root_descriptor = os.open(root, flags)
+    except OSError:
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    name = f"compose-smoke-{uuid.uuid4().hex}"
+    created = False
+    try:
+        root_stat = os.fstat(root_descriptor)
+        if stat.S_IMODE(root_stat.st_mode) != 0o700:
+            raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS")
+        os.mkdir(name, mode=0o700, dir_fd=root_descriptor)
+        created = True
+        private_stat = os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(private_stat.st_mode):
+            raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID")
+        if stat.S_IMODE(private_stat.st_mode) != 0o700:
+            raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS")
+        return _PrivateInputNamespace(
+            root=root,
+            path=root / name,
+            root_device=root_stat.st_dev,
+            root_inode=root_stat.st_ino,
+            device=private_stat.st_dev,
+            inode=private_stat.st_ino,
+        )
+    except SmokeError:
+        raise
+    except OSError:
+        raise SmokeError("SMOKE_INPUT_DIRECTORY_INVALID") from None
+    finally:
+        if created and sys.exception() is not None:
+            try:
+                os.rmdir(name, dir_fd=root_descriptor)
+            except OSError:
+                pass
+        os.close(root_descriptor)
+
+
+def _input_override_document(
+    *, postgres: Path, feishu: Path, identity: Path
+) -> str:
+    identity_mount = {
+        "type": "bind",
+        "source": str(identity),
+        "target": "/run/config/feishu-identities.json",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
+    return (
+        json.dumps(
+            {
+                "secrets": {
+                    "postgres_password": {"file": str(postgres)},
+                    "feishu_app_secret": {"file": str(feishu)},
+                },
+                "services": {
+                    "feishu-listener": {"volumes": [identity_mount]},
+                    "web-app": {"volumes": [identity_mount]},
+                },
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
+def _remove_private_input_namespace(
+    namespace: _PrivateInputNamespace, inputs: Sequence[_OwnedInput]
+) -> None:
+    """原子隔离目录后只清理已验证的已知文件，不递归删除未知树。"""
+    try:
+        root = os.open(
+            namespace.root,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
         raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
+    quarantine_name = f".compose-smoke-retired-{uuid.uuid4().hex}"
+    retired = False
+    failure = False
+    retired_directory: int | None = None
+    try:
+        root_stat = os.fstat(root)
+        if (root_stat.st_dev, root_stat.st_ino) != (
+            namespace.root_device,
+            namespace.root_inode,
+        ):
+            raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED")
+        os.rename(
+            namespace.path.name,
+            quarantine_name,
+            src_dir_fd=root,
+            dst_dir_fd=root,
+        )
+        retired = True
+        retired_directory = os.open(
+            quarantine_name,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=root,
+        )
+        retired_stat = os.fstat(retired_directory)
+        if (retired_stat.st_dev, retired_stat.st_ino) != (
+            namespace.device,
+            namespace.inode,
+        ):
+            raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED")
+        for owned in inputs:
+            try:
+                current = os.stat(
+                    owned.path.name,
+                    dir_fd=retired_directory,
+                    follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) != (
+                    owned.device,
+                    owned.inode,
+                ):
+                    failure = True
+                    continue
+                os.unlink(owned.path.name, dir_fd=retired_directory)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failure = True
+        os.close(retired_directory)
+        retired_directory = None
+        try:
+            os.rmdir(quarantine_name, dir_fd=root)
+        except OSError:
+            failure = True
+        if failure:
+            raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED")
+    except FileNotFoundError:
+        if not retired:
+            return
+        raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
+    except OSError:
+        raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
+    finally:
+        if retired_directory is not None:
+            os.close(retired_directory)
+        os.close(root)
 
 
-def _create_smoke_inputs(
-    *, postgres_secret: Path, feishu_secret: Path, identity: Path
-) -> tuple[tuple[str, ...], tuple[_OwnedInput, ...]]:
+def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
+    namespace = _create_private_input_namespace(input_root)
+    postgres_secret = namespace.path / "postgres_password"
+    feishu_secret = namespace.path / "feishu_app_secret"
+    identity = namespace.path / "feishu-identities.json"
+    override = namespace.path / "compose-smoke-inputs.json"
     created: list[_OwnedInput] = []
     try:
         postgres_value, postgres_owned = _create_secret(postgres_secret)
@@ -265,10 +477,27 @@ def _create_smoke_inputs(
             + "\n",
         )
         created.append(identity_owned)
-    except SmokeError:
-        _remove_owned_inputs(created)
+        override_owned = _create_input(
+            override,
+            _input_override_document(
+                postgres=postgres_secret,
+                feishu=feishu_secret,
+                identity=identity,
+            ),
+        )
+        created.append(override_owned)
+    except BaseException as exc:
+        try:
+            _remove_private_input_namespace(namespace, created)
+        except SmokeError:
+            exc.add_note("SMOKE_INPUT_CLEANUP_FAILED")
         raise
-    return (postgres_value, feishu_value), tuple(created)
+    return _SmokeInputs(
+        namespace=namespace,
+        sensitive_values=(postgres_value, feishu_value),
+        owned_inputs=tuple(created),
+        override_path=override,
+    )
 
 
 @dataclass
@@ -346,25 +575,23 @@ def run_smoke(
     compose_command: tuple[str, ...],
     runner: CommandRunner = _default_runner,
     workflow: Workflow,
-    postgres_secret_path: Path = _POSTGRES_SECRET_PATH,
-    feishu_secret_path: Path = _FEISHU_SECRET_PATH,
-    identity_path: Path = _FEISHU_IDENTITY_PATH,
+    input_root: Path = _SMOKE_INPUT_ROOT,
 ) -> None:
-    """只清理本次通过预检且实际尝试启动的随机 Compose project。"""
+    """只清理本次随机 Compose project 与私有输入命名空间。"""
     project = project_name()
     _preflight(docker=docker, runner=runner, project=project)
-    sensitive_values, owned_inputs = _create_smoke_inputs(
-        postgres_secret=postgres_secret_path,
-        feishu_secret=feishu_secret_path,
-        identity=identity_path,
-    )
+    smoke_inputs = _create_smoke_inputs(input_root=input_root)
     session = ComposeSession(
         docker=docker,
         runner=runner,
         project=project,
-        files=(_ROOT / "docker-compose.yml", _ROOT / "docker-compose.smoke.yml"),
+        files=(
+            _ROOT / "docker-compose.yml",
+            _ROOT / "docker-compose.smoke.yml",
+            smoke_inputs.override_path,
+        ),
         compose_command=compose_command,
-        sensitive_values=sensitive_values,
+        sensitive_values=smoke_inputs.sensitive_values,
     )
     try:
         workflow(session)
@@ -379,7 +606,10 @@ def run_smoke(
                     timeout=60.0,
                 )
         finally:
-            _remove_owned_inputs(owned_inputs)
+            _remove_private_input_namespace(
+                smoke_inputs.namespace,
+                smoke_inputs.owned_inputs,
+            )
 
 
 def _task(
@@ -436,14 +666,27 @@ def _require_succeeded(value: dict[str, object]) -> None:
     raise SmokeError(code or "SMOKE_TASK_STATUS_INVALID")
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_: object, **__: object) -> None:
+        """Host readiness 不允许把本地探测重定向到第二跳。"""
+        return None
+
+
+def _build_readiness_opener() -> urllib.request.OpenerDirector:
+    """构造不读取宿主代理变量、也不跟随重定向的本地 opener。"""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+
+
 def _wait_ready(*, web: bool = False, timeout: float) -> None:
     url = _WEB_READY_URL if web else _API_READY_URL
+    opener = _build_readiness_opener()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(  # noqa: S310 -- URL 来自上述闭集
-                url, timeout=2.0
-            ) as response:
+            with opener.open(url, timeout=2.0) as response:
                 if response.status == 200:
                     return
         except OSError:
@@ -549,6 +792,25 @@ def _require_web_container_boundary(session: ComposeSession) -> None:
             for item in environment
         )
     ):
+        raise SmokeError("SMOKE_WEB_CONTAINER_BOUNDARY_INVALID")
+    result = session.run(
+        "exec",
+        "-T",
+        "web-app",
+        "python",
+        "-c",
+        _EUID_PROBE_CODE,
+        timeout=15.0,
+        failure_code="SMOKE_WEB_EUID_COMMAND_FAILED",
+    )
+    euid = result.stdout
+    if (
+        not isinstance(euid, str)
+        or not euid
+        or any(character < "0" or character > "9" for character in euid)
+    ):
+        raise SmokeError("SMOKE_WEB_EUID_PROTOCOL_ERROR")
+    if not euid.strip("0"):
         raise SmokeError("SMOKE_WEB_CONTAINER_BOUNDARY_INVALID")
 
 
@@ -748,6 +1010,23 @@ def _require_logs_clean(session: ComposeSession, *additional: str) -> None:
         raise SmokeError("SMOKE_LOG_REDACTION_FAILED")
 
 
+def _run_barrier_recovery_start(session: ComposeSession) -> ComposeSession:
+    """用同一已解析 Compose CLI 派生并启动 barrier worker。"""
+    barrier = session.derive(
+        files=(*session.files, _ROOT / "docker-compose.barrier.yml"),
+        failure_code="SMOKE_BARRIER_COMMAND_FAILED",
+    )
+    barrier.run(
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "worker",
+        timeout=60.0,
+    )
+    return barrier
+
+
 def _full_workflow(session: ComposeSession) -> None:
     sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
     session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
@@ -796,19 +1075,7 @@ def _full_workflow(session: ComposeSession) -> None:
         failure_code="SMOKE_BASELINE_WORKER_STOP_FAILED",
     )
 
-    barrier_files = (*session.files, _ROOT / "docker-compose.barrier.yml")
-    barrier = session.derive(
-        files=barrier_files,
-        failure_code="SMOKE_BARRIER_COMMAND_FAILED",
-    )
-    barrier.run(
-        "up",
-        "-d",
-        "--force-recreate",
-        "--no-deps",
-        "worker",
-        timeout=60.0,
-    )
+    barrier = _run_barrier_recovery_start(session)
     if "XIAOWEI_SMOKE_STEP_BARRIER=true" not in _container_env(barrier, "worker"):
         raise SmokeError("SMOKE_BARRIER_NOT_ENABLED")
     session.failure_code = "SMOKE_BARRIER_COMMAND_FAILED"
