@@ -114,7 +114,7 @@ agent/
 ├── .gitignore
 ├── docs/
 │   ├── CAPABILITIES.md        # 能力地图；由 Registry/代码生成并由 CI 检查
-│   ├── adr/                   # 架构决策记录（当前至 ADR-013）
+│   ├── adr/                   # 架构决策记录（当前至 ADR-014）
 │   ├── plans/                 # 里程碑详细实施计划（M2 已建立）
 │   └── handoff/archive/       # 历史交接和复盘
 ├── pyproject.toml              # 已建立（M1）

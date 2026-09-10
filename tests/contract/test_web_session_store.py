@@ -58,8 +58,8 @@ def test_oauth_state_capacity_contract_is_fixed_and_non_sensitive() -> None:
     assert error.args == ("oauth state capacity exhausted",)
 
 
-@pytest.mark.parametrize("invalid", [True, 0, -1])
-def test_web_session_stores_reject_non_positive_or_boolean_capacity(
+@pytest.mark.parametrize("invalid", [True, 0, -1, 1025, 10**9])
+def test_web_session_stores_reject_capacity_outside_the_fixed_safety_bound(
     clock, memory_state, invalid: object
 ) -> None:
     factories = (
@@ -75,7 +75,7 @@ def test_web_session_stores_reject_non_positive_or_boolean_capacity(
         ),
     )
     for factory in factories:
-        with pytest.raises(ValueError, match="oauth state capacity must be positive"):
+        with pytest.raises(ValueError, match="oauth state capacity out of bounds"):
             factory()
 
 

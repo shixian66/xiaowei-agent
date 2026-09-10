@@ -141,8 +141,12 @@ class WebSessionStore(Protocol):
 
 def validate_oauth_state_capacity(value: int) -> int:
     """校验仅供受信 store 装配覆盖的 OAuth state 容量。"""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError("oauth state capacity must be positive")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= DEFAULT_OAUTH_STATE_CAPACITY
+    ):
+        raise ValueError("oauth state capacity out of bounds")
     return value
 
 
