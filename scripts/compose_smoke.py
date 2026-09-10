@@ -593,23 +593,37 @@ def run_smoke(
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
     )
+    primary_error: BaseException | None = None
     try:
         workflow(session)
-    finally:
+    except BaseException as exc:
+        primary_error = exc
+    if session.up_started:
         try:
-            if session.up_started:
-                session.failure_code = "SMOKE_CLEANUP_COMMAND_FAILED"
-                session.run(
-                    "down",
-                    "--volumes",
-                    "--remove-orphans",
-                    timeout=60.0,
-                )
-        finally:
-            _remove_private_input_namespace(
-                smoke_inputs.namespace,
-                smoke_inputs.owned_inputs,
+            session.failure_code = "SMOKE_CLEANUP_COMMAND_FAILED"
+            session.run(
+                "down",
+                "--volumes",
+                "--remove-orphans",
+                timeout=60.0,
             )
+        except BaseException as exc:
+            if primary_error is None:
+                primary_error = exc
+            else:
+                primary_error.add_note("SMOKE_CLEANUP_COMMAND_FAILED")
+    try:
+        _remove_private_input_namespace(
+            smoke_inputs.namespace,
+            smoke_inputs.owned_inputs,
+        )
+    except BaseException as exc:
+        if primary_error is None:
+            primary_error = exc
+        else:
+            primary_error.add_note("SMOKE_INPUT_CLEANUP_FAILED")
+    if primary_error is not None:
+        raise primary_error
 
 
 def _task(

@@ -102,6 +102,70 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
     )
 
 
+@pytest.mark.parametrize("first_failure", ["workflow", "down"])
+def test_smoke_preserves_first_interrupt_while_all_later_cleanup_still_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_failure: str,
+) -> None:
+    primary_error = KeyboardInterrupt("private-primary-detail")
+
+    class DownFailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if "down" in argv:
+                if first_failure == "down":
+                    raise primary_error
+                raise subprocess.CalledProcessError(
+                    1,
+                    argv,
+                    stderr="private-down-detail",
+                )
+            return result
+
+    runner = DownFailingRunner()
+    input_cleanup_calls = 0
+    real_remove = compose_smoke._remove_private_input_namespace
+
+    def fail_after_input_cleanup(*args: Any, **kwargs: Any) -> None:
+        nonlocal input_cleanup_calls
+        input_cleanup_calls += 1
+        real_remove(*args, **kwargs)
+        raise RuntimeError("private-input-cleanup-detail")
+
+    def workflow(session: ComposeSession) -> None:
+        session.up_started = True
+        if first_failure == "workflow":
+            raise primary_error
+
+    monkeypatch.setattr(
+        compose_smoke,
+        "_remove_private_input_namespace",
+        fail_after_input_cleanup,
+    )
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker-compose",),
+            runner=runner,
+            workflow=workflow,
+            input_root=tmp_path / ".secrets",
+        )
+
+    assert caught.value is primary_error
+    assert caught.value.__notes__ == (
+        ["SMOKE_CLEANUP_COMMAND_FAILED", "SMOKE_INPUT_CLEANUP_FAILED"]
+        if first_failure == "workflow"
+        else ["SMOKE_INPUT_CLEANUP_FAILED"]
+    )
+    assert len([call for call in runner.calls if "down" in call]) == 1
+    assert input_cleanup_calls == 1
+    assert list((tmp_path / ".secrets").iterdir()) == []
+
+
 def test_project_names_have_a_full_random_uuid_suffix() -> None:
     first = project_name()
     second = project_name()
@@ -165,6 +229,70 @@ def test_barrier_recovery_start_inherits_the_resolved_standalone_command() -> No
         "--no-deps",
         "worker",
     )
+
+
+def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UntilBarrierRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            call = tuple(argv)
+            if call[:2] == ("/usr/bin/docker", "inspect"):
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout="0\n",
+                    stderr="",
+                )
+            return result
+
+    class BarrierReachedError(RuntimeError):
+        pass
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=UntilBarrierRunner(),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker-compose",),
+    )
+    received: list[ComposeSession] = []
+
+    monkeypatch.setattr(compose_smoke, "_container_id", lambda *_, **__: "migrate")
+    monkeypatch.setattr(compose_smoke, "_wait_ready", lambda **_: None)
+    monkeypatch.setattr(
+        compose_smoke,
+        "_require_disabled_channel_entrypoints",
+        lambda _: None,
+    )
+    monkeypatch.setattr(compose_smoke, "_start_web", lambda _: None)
+    monkeypatch.setattr(compose_smoke, "_submit", lambda *_, **__: "task-id")
+    monkeypatch.setattr(
+        compose_smoke,
+        "_wait_task",
+        lambda *_, **__: {"status": "succeeded"},
+    )
+    monkeypatch.setattr(compose_smoke, "_normalised_evidence", lambda *_: ())
+
+    def reach_barrier(candidate: ComposeSession) -> ComposeSession:
+        received.append(candidate)
+        assert candidate is session
+        assert candidate.compose_command == ("/usr/bin/docker-compose",)
+        raise BarrierReachedError
+
+    monkeypatch.setattr(
+        compose_smoke,
+        "_run_barrier_recovery_start",
+        reach_barrier,
+    )
+
+    with pytest.raises(BarrierReachedError):
+        compose_smoke._full_workflow(session)
+
+    assert received == [session]
 
 
 def test_smoke_executes_each_channel_entrypoint_with_live_flags_disabled() -> None:
@@ -399,6 +527,43 @@ def test_partial_private_input_failure_cleans_only_the_private_namespace(
 
     assert fixed_user_file.read_text(encoding="utf-8") == "user-owned\n"
     assert list(input_root.iterdir()) == [fixed_user_file]
+
+
+@pytest.mark.parametrize(
+    ("failure_at", "error_type"),
+    [
+        (2, KeyboardInterrupt),
+        (2, RuntimeError),
+        (3, KeyboardInterrupt),
+        (3, RuntimeError),
+    ],
+)
+def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: int,
+    error_type: type[BaseException],
+) -> None:
+    input_root = tmp_path / ".secrets"
+    real_create = compose_smoke._create_input
+    injected = error_type("private-input-interrupt-detail")
+    calls = 0
+
+    def fail_selected_input(path: Path, content: str) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == failure_at:
+            raise injected
+        return real_create(path, content)
+
+    monkeypatch.setattr(compose_smoke, "_create_input", fail_selected_input)
+
+    with pytest.raises(error_type) as caught:
+        compose_smoke._create_smoke_inputs(input_root=input_root)
+
+    assert caught.value is injected
+    assert input_root.is_dir()
+    assert list(input_root.iterdir()) == []
 
 
 @pytest.mark.parametrize("existing_name", ["feishu_app_secret", "feishu-identities.json"])
