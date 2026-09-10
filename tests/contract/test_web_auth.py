@@ -79,6 +79,16 @@ def test_oauth_identity_reference_is_bounded_at_the_provider_boundary() -> None:
         FeishuOAuthIdentity(subject_ref="x" * 257)
 
 
+@pytest.mark.parametrize("control", ["\u0080", "\u0085", "\u009f"])
+def test_oauth_identity_reference_rejects_c1_controls(control: str) -> None:
+    with pytest.raises(ValidationError):
+        FeishuOAuthIdentity(subject_ref=f"subject{control}alice")
+
+
+def test_oauth_identity_reference_accepts_printable_non_ascii() -> None:
+    assert FeishuOAuthIdentity(subject_ref="飞书用户").subject_ref == "飞书用户"
+
+
 def _service(
     *,
     clock,
@@ -347,3 +357,38 @@ async def test_untrusted_authorization_redirect_is_rejected(clock, memory_state)
 
     with pytest.raises(WebOAuthCodeError):
         await service.start_login()
+
+
+async def test_printable_non_ascii_authorization_path_remains_supported(
+    clock, memory_state
+) -> None:
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth=_RecordingOAuth(
+            authorization_url="https://feishu.example.test/授权",
+        ),
+    )
+
+    start = await service.start_login()
+
+    assert start.authorization_url.startswith("https://feishu.example.test/授权?")
+
+
+async def test_printable_non_ascii_oauth_code_reaches_provider(
+    clock, memory_state
+) -> None:
+    service, oauth, _ = _service(clock=clock, memory_state=memory_state)
+    start = await service.start_login()
+
+    completed = await service.complete_login(
+        code="一次性授权码",
+        state=start.state_cookie,
+        state_cookie=start.state_cookie,
+        previous_session_cookie=None,
+    )
+
+    assert completed.principal.actor == "alice"
+    assert oauth.exchange_calls == [
+        ("一次性授权码", "https://ops.example.test/oauth/feishu/callback")
+    ]

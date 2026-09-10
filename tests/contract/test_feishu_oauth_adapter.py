@@ -24,6 +24,7 @@ _FAKE_APP_TOKEN = "app-unit-test-" + "token"
 _FAKE_USER_TOKEN = "user-unit-test-" + "token"
 _CALLBACK = "https://ops.example.test/oauth/feishu/callback"
 _TRACE_ID = "a" * 32
+_C1_CONTROLS = ("\u0080", "\u0085", "\u009f")
 
 
 def _secret_file(tmp_path: Path, value: str = _FAKE_SECRET) -> Path:
@@ -288,7 +289,10 @@ async def test_each_exchange_rereads_secret_and_never_reuses_tokens(
     assert calls[3]["headers"]["Authorization"] == "Bearer second-app-value"
 
 
-@pytest.mark.parametrize("code", ["", "bad\ncode", "x" * 2049])
+@pytest.mark.parametrize(
+    "code",
+    ["", "bad\ncode", "x" * 2049, *(f"bad{value}code" for value in _C1_CONTROLS)],
+)
 async def test_exchange_rejects_invalid_code_without_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
@@ -296,6 +300,33 @@ async def test_exchange_rejects_invalid_code_without_transport(
 
     with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthCodeError):
         await adapter.exchange_code(code=code, redirect_uri=_CALLBACK)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("control", _C1_CONTROLS)
+def test_authorization_url_rejects_c1_control_in_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control: str
+) -> None:
+    adapter, _ = _adapter(tmp_path, monkeypatch)
+    callback = f"https://ops.example.test{control}/oauth/feishu/callback"
+
+    with pytest.raises(FeishuOAuthCodeError):
+        adapter.authorization_url(
+            state="state_value_1234567890",
+            redirect_uri=callback,
+        )
+
+
+@pytest.mark.parametrize("control", _C1_CONTROLS)
+async def test_exchange_rejects_c1_control_in_callback_without_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control: str
+) -> None:
+    adapter, calls = _adapter(tmp_path, monkeypatch)
+    callback = f"https://ops.example.test{control}/oauth/feishu/callback"
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthCodeError):
+        await adapter.exchange_code(code="one-time-code", redirect_uri=callback)
 
     assert calls == []
 
@@ -428,6 +459,84 @@ async def test_identity_response_rejects_missing_control_unknown_and_invalid_typ
         await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
 
 
+@pytest.mark.parametrize("control", _C1_CONTROLS)
+@pytest.mark.parametrize(
+    "location",
+    ["app-message", "identity-message", "app-token", "user-token", "open-id"],
+)
+async def test_provider_c1_control_strings_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: str,
+    location: str,
+) -> None:
+    responses = _success_responses()
+    if location in {"app-message", "app-token"}:
+        payload = json.loads(responses[0].body)
+        field = "msg" if location == "app-message" else "app_access_token"
+        payload[field] = f"bad{control}value"
+        responses = [_json_response(payload)]
+    else:
+        payload = json.loads(responses[1].body)
+        if location == "identity-message":
+            payload["msg"] = f"bad{control}value"
+        else:
+            field = "access_token" if location == "user-token" else "open_id"
+            payload["data"][field] = f"bad{control}value"
+        responses[1] = _json_response(payload)
+    adapter, calls = _adapter(tmp_path, monkeypatch, responses)
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+
+    assert len(calls) == (1 if location in {"app-message", "app-token"} else 2)
+
+
+async def test_printable_non_ascii_oauth_values_remain_supported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = [
+        _json_response(
+            {
+                "code": 0,
+                "msg": "成功",
+                "app_access_token": "应用令牌",
+                "expire": 3600,
+            }
+        ),
+        _json_response(
+            {
+                "code": 0,
+                "msg": "成功",
+                "data": {
+                    "access_token": "用户令牌",
+                    "name": "测试用户",
+                    "open_id": "用户标识",
+                },
+            }
+        ),
+    ]
+    calls: list[dict[str, object]] = []
+
+    def post_json(**kwargs: object):
+        calls.append(kwargs)
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
+    adapter = FeishuOAuthAdapter(
+        app_id="cli_测试应用",
+        app_secret_file=str(_secret_file(tmp_path)),
+        timeout_seconds=1.0,
+    )
+
+    with bind_trace_id(_TRACE_ID):
+        identity = await adapter.exchange_code(code="一次性授权码", redirect_uri=_CALLBACK)
+
+    assert identity.subject_ref == "用户标识"
+    assert calls[0]["body"]["app_id"] == "cli_测试应用"
+    assert calls[1]["body"]["code"] == "一次性授权码"
+
+
 async def test_identity_top_level_rejects_duplicate_and_unknown_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,6 +640,18 @@ def test_constructor_maps_invalid_app_id_to_generic_value_error(
 
     assert str(caught.value) == "feishu oauth configuration invalid"
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("control", _C1_CONTROLS)
+def test_constructor_rejects_c1_control_in_app_id(
+    tmp_path: Path, control: str
+) -> None:
+    with pytest.raises(ValueError, match="feishu oauth configuration invalid"):
+        FeishuOAuthAdapter(
+            app_id=f"cli_test{control}app",
+            app_secret_file=str(_secret_file(tmp_path)),
+            timeout_seconds=1.0,
+        )
 
 
 def test_constructor_eagerly_rejects_unsafe_secret_and_exchange_rereads_it(

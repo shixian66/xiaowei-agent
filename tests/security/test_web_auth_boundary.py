@@ -38,6 +38,8 @@ from xiaowei_agent.trace import get_trace_id
 
 pytestmark = pytest.mark.security
 
+_C1_CONTROLS = ("\u0080", "\u0085", "\u009f")
+
 
 class _Probe:
     async def check(self) -> ReadinessReport:
@@ -401,6 +403,11 @@ async def test_unknown_identity_is_mapped_without_retaining_subject_context(
             "https://feishu.example.test/authorize?"
             "state=state_value_first_1234567890&state=duplicate-state-value-1234"
         ),
+        *(
+            f"https://feishu.example.test{control}/authorize?"
+            "state=state_value_first_1234567890"
+            for control in _C1_CONTROLS
+        ),
     ],
 )
 async def test_authorization_redirect_must_bind_the_exact_generated_state_once(
@@ -418,6 +425,36 @@ async def test_authorization_redirect_must_bind_the_exact_generated_state_once(
     assert memory_state.oauth_states == {}
 
 
+@pytest.mark.parametrize("control", _C1_CONTROLS)
+async def test_oauth_code_rejects_c1_control_before_provider_call(
+    clock, memory_state, control: str
+) -> None:
+    class _UnexpectedOAuth(_OAuth):
+        async def exchange_code(
+            self, *, code: str, redirect_uri: str
+        ) -> FeishuOAuthIdentity:
+            raise AssertionError((code, redirect_uri))
+
+    service = _service(clock, memory_state, oauth=_UnexpectedOAuth())
+    start = await service.start_login()
+
+    with pytest.raises(WebOAuthCodeError):
+        await service.complete_login(
+            code=f"provider{control}code",
+            state=start.state_cookie,
+            state_cookie=start.state_cookie,
+            previous_session_cookie=None,
+        )
+
+    with pytest.raises(WebOAuthStateError):
+        await service.complete_login(
+            code="valid-code",
+            state=start.state_cookie,
+            state_cookie=start.state_cookie,
+            previous_session_cookie=None,
+        )
+
+
 @pytest.mark.parametrize(
     "public_origin",
     [
@@ -426,6 +463,7 @@ async def test_authorization_redirect_must_bind_the_exact_generated_state_once(
         "https://ops.example.test/#fragment",
         "https://ops.example.test\n",
         "https://ops.example.test\t",
+        *(f"https://ops.example.test{control}" for control in _C1_CONTROLS),
     ],
 )
 def test_public_origin_is_an_origin_not_a_url_path(

@@ -4,13 +4,14 @@ import asyncio
 import hmac
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Protocol, TypeGuard
+from typing import Annotated, Protocol, TypeGuard
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
 from xiaowei_agent.contracts import AuthenticatedPrincipal, Contract, StrictStr
 from xiaowei_agent.interfaces.feishu_identity import (
@@ -30,6 +31,19 @@ from xiaowei_agent.persistence.web_session import (
 )
 
 _SECRET_RE = re.compile(r"[A-Za-z0-9_-]{16,512}")
+
+
+def _has_control(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _without_control(value: str) -> str:
+    if _has_control(value):
+        raise ValueError("must not contain control characters")
+    return value
+
+
+_OAuthSubjectRef = Annotated[StrictStr, AfterValidator(_without_control)]
 
 
 class WebAuthenticationError(RuntimeError):
@@ -85,7 +99,7 @@ class FeishuOAuthUnavailableError(RuntimeError):
 class FeishuOAuthIdentity(Contract):
     """OAuth provider 的 ``open_id`` 进入本地后使用统一主体引用名。"""
 
-    subject_ref: StrictStr = Field(max_length=256)
+    subject_ref: _OAuthSubjectRef = Field(max_length=256)
 
 
 class FeishuOAuthPort(Protocol):
@@ -144,7 +158,7 @@ def _digest(*, domain: str, secret: str) -> str:
 
 
 def _split_https_url(value: str) -> SplitResult | None:
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+    if _has_control(value):
         return None
     try:
         parsed = urlsplit(value)
@@ -289,7 +303,12 @@ class WebAuthService:
         if state_missing:
             raise WebOAuthStateError
 
-        if not isinstance(code, str) or not code or len(code) > 2048:
+        if (
+            not isinstance(code, str)
+            or not code
+            or _has_control(code)
+            or len(code) > 2048
+        ):
             raise WebOAuthCodeError
         identity: FeishuOAuthIdentity | None = None
         provider_error: RuntimeError | None = None

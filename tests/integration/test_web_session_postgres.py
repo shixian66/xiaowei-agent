@@ -30,6 +30,18 @@ def bounded_web_sessions(clock, clean_database):
     )
 
 
+@pytest.fixture
+def oauth_state_digests(clean_database):
+    async def load() -> set[str]:
+        async with clean_database.connect() as connection:
+            rows = await connection.execute(
+                sa.select(WEB_OAUTH_STATES.c.state_digest)
+            )
+        return set(rows.scalars())
+
+    return load
+
+
 bind(globals(), WEB_SESSION_STORE_CASES)
 
 

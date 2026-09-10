@@ -46,6 +46,14 @@ def bounded_web_sessions(clock, memory_state):
     )
 
 
+@pytest.fixture
+def oauth_state_digests(memory_state):
+    async def load() -> set[str]:
+        return set(memory_state.oauth_states)
+
+    return load
+
+
 bind(globals(), WEB_SESSION_STORE_CASES)
 
 _NOW = dt.datetime(2026, 9, 9, 9, 0, tzinfo=dt.UTC)

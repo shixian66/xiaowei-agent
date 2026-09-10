@@ -457,10 +457,10 @@ class InMemoryWebSessionStore:
             )
             for digest in stale_digests:
                 del self._state.oauth_states[digest]
-            if len(self._state.oauth_states) >= self._oauth_state_capacity:
-                raise OAuthStateCapacityError
             if command.state_digest in self._state.oauth_states:
                 raise WebSessionConflictError
+            if len(self._state.oauth_states) >= self._oauth_state_capacity:
+                raise OAuthStateCapacityError
             state = OAuthState(
                 state_digest=command.state_digest,
                 issued_at=now,

@@ -7,6 +7,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
@@ -105,7 +106,7 @@ def _post_json(
 
 
 def _has_control(value: str) -> bool:
-    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    return any(unicodedata.category(character) == "Cc" for character in value)
 
 
 def _bounded_string(value: object, *, max_bytes: int = _MAX_PROVIDER_STRING_BYTES) -> bool:

@@ -1,7 +1,7 @@
 """``WebSessionStore`` 的跨实现行为用例。"""
 
 import asyncio
-from collections.abc import Callable, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from typing import Any
 
 import pytest
@@ -107,6 +107,64 @@ async def test_oauth_state_capacity_rejects_the_first_issue_above_the_limit(
                 ttl_seconds=60,
             )
         )
+
+
+async def test_live_oauth_state_digest_conflicts_below_capacity(
+    bounded_web_sessions: Any,
+) -> None:
+    command = IssueOAuthStateCommand(state_digest="e" * 64, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_state(command=command)
+
+    with pytest.raises(WebSessionConflictError):
+        await bounded_web_sessions.issue_oauth_state(command=command)
+
+
+async def test_live_oauth_state_digest_conflict_precedes_capacity(
+    bounded_web_sessions: Any,
+) -> None:
+    command = IssueOAuthStateCommand(state_digest="e" * 64, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_state(command=command)
+    await bounded_web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(state_digest="f" * 64, ttl_seconds=60)
+    )
+
+    with pytest.raises(WebSessionConflictError):
+        await bounded_web_sessions.issue_oauth_state(command=command)
+
+
+async def test_live_digest_conflict_commits_consumed_and_expired_cleanup(
+    web_sessions: Any,
+    clock: Any,
+    oauth_state_digests: Callable[[], Awaitable[set[str]]],
+) -> None:
+    live_digest = "a" * 64
+    consumed_digest = "b" * 64
+    expired_digest = "c" * 64
+    for digest, ttl_seconds in (
+        (live_digest, 60),
+        (consumed_digest, 60),
+        (expired_digest, 1),
+    ):
+        await web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest=digest,
+                ttl_seconds=ttl_seconds,
+            )
+        )
+    await web_sessions.consume_oauth_state(
+        command=ConsumeOAuthStateCommand(state_digest=consumed_digest)
+    )
+    clock.advance(seconds=1)
+
+    with pytest.raises(WebSessionConflictError):
+        await web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest=live_digest,
+                ttl_seconds=60,
+            )
+        )
+
+    assert await oauth_state_digests() == {live_digest}
 
 
 async def test_consumed_and_expired_oauth_states_release_capacity(
@@ -294,6 +352,9 @@ WEB_SESSION_STORE_CASES = (
     test_concurrent_oauth_state_consumption_has_exactly_one_winner,
     test_unknown_oauth_state_is_indistinguishable_from_replay,
     test_oauth_state_capacity_rejects_the_first_issue_above_the_limit,
+    test_live_oauth_state_digest_conflicts_below_capacity,
+    test_live_oauth_state_digest_conflict_precedes_capacity,
+    test_live_digest_conflict_commits_consumed_and_expired_cleanup,
     test_consumed_and_expired_oauth_states_release_capacity,
     test_cleaned_oauth_state_digest_no_longer_collides,
     test_concurrent_oauth_state_issuance_cannot_cross_capacity,

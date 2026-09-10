@@ -853,6 +853,7 @@ class PostgresWebSessionStore:
     async def issue_oauth_state(
         self, *, command: IssueOAuthStateCommand
     ) -> OAuthState:
+        conflict_reached = False
         capacity_reached = False
         issued: OAuthState | None = None
         async with _write_transaction(self._engine) as connection:
@@ -866,38 +867,51 @@ class PostgresWebSessionStore:
                     )
                 )
             )
-            pending = await connection.scalar(
-                sa.select(sa.func.count())
-                .select_from(WEB_OAUTH_STATES)
-                .where(
+            live_digest = await connection.scalar(
+                sa.select(WEB_OAUTH_STATES.c.state_digest).where(
+                    WEB_OAUTH_STATES.c.state_digest == command.state_digest,
                     WEB_OAUTH_STATES.c.consumed_at.is_(None),
                     WEB_OAUTH_STATES.c.expires_at > now,
                 )
             )
-            if int(pending or 0) >= self._oauth_state_capacity:
-                capacity_reached = True
+            if live_digest is not None:
+                conflict_reached = True
             else:
-                candidate = OAuthState(
-                    state_digest=command.state_digest,
-                    issued_at=now,
-                    expires_at=now
-                    + _dt.timedelta(seconds=command.ttl_seconds),
-                )
-                row = (
-                    (
-                        await connection.execute(
-                            sa.dialects.postgresql.insert(WEB_OAUTH_STATES)
-                            .values(**oauth_state_to_row(candidate))
-                            .on_conflict_do_nothing()
-                            .returning(WEB_OAUTH_STATES)
-                        )
+                pending = await connection.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(WEB_OAUTH_STATES)
+                    .where(
+                        WEB_OAUTH_STATES.c.consumed_at.is_(None),
+                        WEB_OAUTH_STATES.c.expires_at > now,
                     )
-                    .mappings()
-                    .first()
                 )
-                if row is None:
-                    raise WebSessionConflictError
-                issued = row_to_oauth_state(row)
+                if int(pending or 0) >= self._oauth_state_capacity:
+                    capacity_reached = True
+                else:
+                    candidate = OAuthState(
+                        state_digest=command.state_digest,
+                        issued_at=now,
+                        expires_at=now
+                        + _dt.timedelta(seconds=command.ttl_seconds),
+                    )
+                    row = (
+                        (
+                            await connection.execute(
+                                sa.dialects.postgresql.insert(WEB_OAUTH_STATES)
+                                .values(**oauth_state_to_row(candidate))
+                                .on_conflict_do_nothing()
+                                .returning(WEB_OAUTH_STATES)
+                            )
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if row is None:
+                        conflict_reached = True
+                    else:
+                        issued = row_to_oauth_state(row)
+        if conflict_reached:
+            raise WebSessionConflictError
         if capacity_reached:
             raise OAuthStateCapacityError
         if issued is None:
