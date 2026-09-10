@@ -6,7 +6,6 @@ import logging
 import re
 import sys
 from importlib.resources import files
-from ipaddress import ip_address
 from typing import Annotated, Final, cast
 from urllib.parse import urlsplit
 
@@ -36,7 +35,12 @@ from xiaowei_agent.application.task_view_runtime import (
     ApplicationFailure,
     classify_application_exception,
 )
-from xiaowei_agent.config import ConfigError, Settings, load_settings
+from xiaowei_agent.config import (
+    ConfigError,
+    Settings,
+    canonical_non_ip_hostname,
+    load_settings,
+)
 from xiaowei_agent.contracts import ChannelKind, ReadinessProbe
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
@@ -97,6 +101,12 @@ _LOGGED_ROUTE_CLASSES: Final[frozenset[str]] = frozenset(
     }
 )
 _LOGGER = logging.getLogger(__name__)
+_UVICORN_LOGGER_NAMES: Final[tuple[str, ...]] = (
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "uvicorn.asgi",
+)
 
 
 class _WebConfigurationError(RuntimeError):
@@ -116,7 +126,19 @@ class _SecurityHeadersMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
+                security_header_names = {
+                    b"content-security-policy",
+                    b"cache-control",
+                    b"x-content-type-options",
+                    b"referrer-policy",
+                    b"permissions-policy",
+                    b"strict-transport-security",
+                }
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() not in security_header_names
+                ]
                 headers.extend(
                     (
                         (b"content-security-policy", _CSP.encode("ascii")),
@@ -127,36 +149,10 @@ class _SecurityHeadersMiddleware:
                         (b"strict-transport-security", _HSTS),
                     )
                 )
-                message["headers"] = headers
+                message = {**message, "headers": headers}
             await send(message)
 
         await self._app(scope, receive, send_with_headers)
-
-
-def _canonical_hostname(value: str) -> str | None:
-    try:
-        ip_address(value)
-    except ValueError:
-        pass
-    else:
-        return None
-    try:
-        hostname = value.encode("idna").decode("ascii").lower().removesuffix(".")
-    except UnicodeError:
-        return None
-    if not hostname or len(hostname) > 253:
-        return None
-    labels = hostname.split(".")
-    if not all(
-        label
-        and len(label) <= 63
-        and not label.startswith("-")
-        and not label.endswith("-")
-        and all(character.isalnum() or character == "-" for character in label)
-        for label in labels
-    ):
-        return None
-    return hostname
 
 
 def _canonical_host_header(value: str) -> str | None:
@@ -165,6 +161,7 @@ def _canonical_host_header(value: str) -> str | None:
         or not value.isascii()
         or value != value.strip()
         or value.endswith(":")
+        or any(delimiter in value for delimiter in "/?#")
         or any(
             ord(character) < 0x20
             or ord(character) == 0x7F
@@ -179,10 +176,13 @@ def _canonical_host_header(value: str) -> str | None:
     except ValueError:
         return None
     hostname = (
-        None if parsed.hostname is None else _canonical_hostname(parsed.hostname)
+        None
+        if parsed.hostname is None
+        else canonical_non_ip_hostname(parsed.hostname)
     )
     if (
         hostname is None
+        or (port is not None and not 1 <= port <= 65_535)
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path
@@ -203,20 +203,20 @@ def _header_values(scope: Scope, name: bytes) -> list[str]:
     ]
 
 
-def _route_class(method: str, path: str) -> str:
-    if method == "GET" and path == "/oauth/feishu/start":
+def _route_class(_: str, path: str) -> str:
+    if path == "/oauth/feishu/start":
         return "oauth_start"
-    if method == "GET" and path == "/oauth/feishu/callback":
+    if path == "/oauth/feishu/callback":
         return "oauth_callback"
-    if method == "GET" and path == "/app":
+    if path == "/app":
         return "web_shell"
-    if method == "GET" and path.startswith("/app/tasks/"):
+    if path.startswith("/app/tasks/"):
         return "task_shell"
     if path in {"/app/api/me", "/app/api/logout"}:
         return "account_api"
     if path == "/app/api/tasks" or path.startswith("/app/api/tasks/"):
         return "task_api"
-    if method == "GET" and path.startswith("/app/static/"):
+    if path.startswith("/app/static/"):
         return "static_asset"
     if path == "/healthz":
         return "health"
@@ -233,13 +233,27 @@ def _closed_outcome(status: int) -> str:
     return "failed"
 
 
-def _add_security_headers(response: Response) -> None:
-    response.headers["content-security-policy"] = _CSP
-    response.headers["cache-control"] = "no-store"
-    response.headers["x-content-type-options"] = "nosniff"
-    response.headers["referrer-policy"] = "no-referrer"
-    response.headers["permissions-policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["strict-transport-security"] = _HSTS.decode("ascii")
+def _best_effort_log_request(
+    *, route_class: str, outcome: str, trace_id: str
+) -> None:
+    """诊断日志不得改变请求响应或取消语义。"""
+    try:
+        _LOGGER.info(
+            "web request completed",
+            extra={
+                "route_class": route_class,
+                "outcome": outcome,
+                "trace_id": trace_id,
+            },
+        )
+    except BaseException:
+        return
+
+
+def _silence_uvicorn_loggers() -> None:
+    """Uvicorn 只能由 ``main`` 的固定退出行报告启动失败。"""
+    for name in _UVICORN_LOGGER_NAMES:
+        logging.getLogger(name).disabled = True
 
 
 class _WebRequestBoundaryMiddleware:
@@ -259,12 +273,20 @@ class _WebRequestBoundaryMiddleware:
         path = str(scope.get("path", ""))
         route_class = _route_class(method, path)
         status = 500
+        response_started = False
+        send_failed = False
+        request_failed = False
 
         async def capture_status(message: Message) -> None:
-            nonlocal status
+            nonlocal response_started, send_failed, status
             if message["type"] == "http.response.start":
+                response_started = True
                 status = int(message["status"])
-            await send(message)
+            try:
+                await send(message)
+            except BaseException:
+                send_failed = True
+                raise
 
         with bind_trace_id() as trace_id:
             try:
@@ -284,20 +306,34 @@ class _WebRequestBoundaryMiddleware:
                         )
                     )
                 if trusted:
-                    await self._app(scope, receive, capture_status)
+                    try:
+                        await self._app(scope, receive, capture_status)
+                    except Exception as exc:
+                        request_failed = True
+                        if send_failed:
+                            raise
+                        if not response_started:
+                            try:
+                                response = await _application_error(
+                                    Request(scope), exc
+                                )
+                            except Exception:
+                                response = _error(500, "internal_error")
+                            await response(scope, receive, capture_status)
                 else:
                     response = _error(403, "forbidden")
-                    _add_security_headers(response)
                     await response(scope, receive, capture_status)
             finally:
                 if route_class in _LOGGED_ROUTE_CLASSES:
-                    _LOGGER.info(
-                        "web request completed",
-                        extra={
-                            "route_class": route_class,
-                            "outcome": _closed_outcome(status),
-                            "trace_id": trace_id,
-                        },
+                    outcome = (
+                        "failed"
+                        if request_failed and status < 400
+                        else _closed_outcome(status)
+                    )
+                    _best_effort_log_request(
+                        route_class=route_class,
+                        outcome=outcome,
+                        trace_id=trace_id,
                     )
 
 
@@ -527,11 +563,6 @@ def create_app(
         limit=settings.api_request_body_limit_bytes,
         paths=frozenset({"/app/api/logout", "/app/api/tasks"}),
     )
-    app.add_middleware(_SecurityHeadersMiddleware)
-    app.add_middleware(
-        _WebRequestBoundaryMiddleware,
-        public_origin=cast(str, settings.web_detail_base_url),
-    )
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
@@ -710,6 +741,12 @@ def create_app(
             return _error(503, "unavailable")
         return JSONResponse(content=report.model_dump(mode="json"))
 
+    app.middleware_stack = _SecurityHeadersMiddleware(
+        _WebRequestBoundaryMiddleware(
+            app.build_middleware_stack(),
+            public_origin=cast(str, settings.web_detail_base_url),
+        )
+    )
     return app
 
 
@@ -718,6 +755,7 @@ async def serve_web(settings: Settings) -> int:
     if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
         raise _WebConfigurationError
     configure_logging(settings)
+    _silence_uvicorn_loggers()
 
     from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
     from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkMembershipAdapter

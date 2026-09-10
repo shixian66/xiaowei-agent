@@ -43,6 +43,10 @@ from xiaowei_agent.interfaces.web_auth import (
 )
 from xiaowei_agent.interfaces.web_models import WebTaskDetail, WebTaskSummary
 from xiaowei_agent.persistence import IdempotencyConflictError
+from xiaowei_agent.persistence.errors import (
+    PersistenceUnavailableCategory,
+    PersistenceUnavailableError,
+)
 from xiaowei_agent.trace import get_trace_id
 
 _COOKIE = "session_value_for_web_task_api"
@@ -200,6 +204,7 @@ def _client(
     principal: AuthenticatedPrincipal | None = None,
     access: _Access | None = None,
     submissions: _Submissions | None = None,
+    raise_app_exceptions: bool = False,
 ) -> tuple[httpx.AsyncClient, _Access, _Submissions]:
     access = access or _Access()
     submissions = submissions or _Submissions(_view())
@@ -215,7 +220,10 @@ def _client(
         policy_revision="policy-2026-09-01",
     )
     client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        transport=httpx.ASGITransport(
+            app=app,
+            raise_app_exceptions=raise_app_exceptions,
+        ),
         base_url="https://ops.example.test",
         cookies={SESSION_COOKIE_NAME: _COOKIE},
     )
@@ -437,6 +445,14 @@ async def test_task_errors_map_to_closed_http_semantics() -> None:
             409,
             "idempotency_conflict",
         ),
+        (
+            "detail",
+            PersistenceUnavailableError(
+                category=PersistenceUnavailableCategory.CONNECT
+            ),
+            503,
+            "unavailable",
+        ),
     )
     for target, error, status, code in cases:
         access = _Access()
@@ -445,7 +461,11 @@ async def test_task_errors_map_to_closed_http_semantics() -> None:
             access.detail_error = error
         else:
             submissions.error = error
-        client, _, _ = _client(access=access, submissions=submissions)
+        client, _, _ = _client(
+            access=access,
+            submissions=submissions,
+            raise_app_exceptions=True,
+        )
         async with client:
             if target == "detail":
                 response = await client.get("/app/api/tasks/hidden-task")

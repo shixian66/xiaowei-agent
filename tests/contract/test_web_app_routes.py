@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -613,6 +614,15 @@ async def test_health_readiness_and_framework_errors_use_closed_bodies(
         [(b"host", b"user@ops.example.test")],
         [(b"host", b"ops.example.test:")],
         [(b"host", b"ops.example.test:0443")],
+        [(b"host", b"ops.example.test:0")],
+        [(b"host", b"ops.example.test?")],
+        [(b"host", b"ops.example.test#")],
+        [(b"host", b"127.1")],
+        [(b"host", b"127.000.000.001")],
+        [(b"host", b"2130706433")],
+        [(b"host", b"0x7f000001")],
+        [(b"host", b"0177.0.0.1")],
+        [(b"host", b"0x7f.1")],
         [
             (b"host", b"ops.example.test"),
             (b"host", b"ops.example.test"),
@@ -626,6 +636,15 @@ async def test_health_readiness_and_framework_errors_use_closed_bodies(
         "userinfo",
         "empty-port",
         "noncanonical-port",
+        "zero-port",
+        "empty-query",
+        "empty-fragment",
+        "short-ipv4",
+        "zero-padded-ipv4",
+        "decimal-ipv4",
+        "hex-ipv4",
+        "octal-component-ipv4",
+        "hex-component-ipv4",
         "duplicate",
         "missing",
     ],
@@ -1060,6 +1079,87 @@ def test_main_maps_uvicorn_startup_exit_to_one_fixed_line(
     assert captured.out == ""
     assert captured.err == "xiaowei-web: startup_failed\n"
     assert "sensitive" not in captured.err
+
+
+def test_real_uvicorn_bind_failure_emits_only_the_fixed_main_error(
+    tmp_path: Path,
+) -> None:
+    postgres_secret = tmp_path / "postgres-credential"
+    postgres_secret.write_text("fixture-" + "password", encoding="utf-8")
+    feishu_secret = tmp_path / "feishu-credential"
+    feishu_secret.write_text("fixture-" + "secret", encoding="utf-8")
+    identities = tmp_path / "identities.json"
+    identities.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tenant_id": "dev-local",
+                "environment_id": "dev",
+                "entries": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handler_sentinel = tmp_path / "uvicorn-error-handler-called"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("XIAOWEI_")
+    }
+    env.update(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_POSTGRES_PASSWORD_FILE": str(postgres_secret),
+            "XIAOWEI_WEB_APP_ENABLED": "true",
+            "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
+            "XIAOWEI_FEISHU_APP_ID": "app",
+            "XIAOWEI_FEISHU_APP_SECRET_FILE": str(feishu_secret),
+            "XIAOWEI_FEISHU_IDENTITY_FILE": str(identities),
+            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+            "XIAOWEI_WEB_BIND_HOST": "192.0.2.1",
+            "XIAOWEI_WEB_BIND_PORT": "49152",
+            "TEST_UVICORN_HANDLER_SENTINEL": str(handler_sentinel),
+        }
+    )
+    script = """
+import logging
+import os
+import sys
+from pathlib import Path
+
+from xiaowei_agent.interfaces.web_app import main
+
+class FailingErrorHandler(logging.Handler):
+    def emit(self, record):
+        Path(os.environ["TEST_UVICORN_HANDLER_SENTINEL"]).write_text(
+            "called", encoding="utf-8"
+        )
+        raise RuntimeError("unsafe logging handler failed")
+
+logger = logging.getLogger("uvicorn.error")
+logger.handlers.clear()
+logger.propagate = False
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler(sys.stderr))
+failing = FailingErrorHandler()
+failing.setLevel(logging.ERROR)
+logger.addHandler(failing)
+raise SystemExit(main())
+"""
+
+    completed = subprocess.run(  # noqa: S603 - 固定解释器与本地常量脚本。
+        [sys.executable, "-c", script],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == "xiaowei-web: startup_failed\n"
+    assert not handler_sentinel.exists()
 
 
 @pytest.mark.parametrize("failure_point", ["app", "config", "server", "serve"])

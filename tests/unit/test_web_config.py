@@ -114,11 +114,53 @@ def test_web_and_oauth_activation_flags_must_move_together(
 
 @pytest.mark.parametrize(
     "origin",
-    ["https://127.0.0.1:8443", "https://[::1]:8443"],
-    ids=["ipv4", "ipv6"],
+    [
+        "https://127.0.0.1:8443",
+        "https://[::1]:8443",
+        "https://127.1",
+        "https://127.000.000.001",
+        "https://2130706433",
+        "https://0x7f000001",
+        "https://0177.0.0.1",
+        "https://0x7f.1",
+    ],
+    ids=[
+        "ipv4",
+        "ipv6",
+        "short-ipv4",
+        "zero-padded-ipv4",
+        "decimal-ipv4",
+        "hex-ipv4",
+        "octal-component-ipv4",
+        "hex-component-ipv4",
+    ],
 )
 def test_oauth_web_origin_requires_a_hostname(origin: str) -> None:
     with pytest.raises(ValueError, match="hostname"):
+        Settings(**_profile(web_detail_base_url=origin))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://ops.example.test:0",
+        "https://ops.example.test?",
+        "https://ops.example.test#",
+        "https://ops.\nexample.test",
+        "https://ops.\texample.test",
+        "https://ops.\rexample.test",
+    ],
+    ids=[
+        "port-zero",
+        "empty-query",
+        "empty-fragment",
+        "line-feed",
+        "tab",
+        "carriage-return",
+    ],
+)
+def test_web_origin_rejects_invalid_authority_syntax(origin: str) -> None:
+    with pytest.raises(ValueError, match="HTTPS origin"):
         Settings(**_profile(web_detail_base_url=origin))
 
 
