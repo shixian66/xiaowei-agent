@@ -5,12 +5,14 @@
 > 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
 > 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
-> `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机没有
-> Docker 或 PostgreSQL DSN，隔离 PostgreSQL/Compose 证据来自 GitHub CI。项目负责人已于
+> `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机有
+> Docker client 与 standalone Compose，但 Colima daemon 未运行，也未提供 PostgreSQL DSN，
+> 隔离 PostgreSQL/Compose 运行证据来自旧版 GitHub CI。项目负责人已于
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
-> PR 1–8 只获得离线开发口令，真实 OAuth port 仍未激活。
+> RI1 已在候选分支完成默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约，最高证据仍为
+> `tests`；它尚未合入、部署或连接真实飞书。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -201,26 +203,31 @@ export XIAOWEI_LOG_LEVEL=INFO
 `dev` 是当前确定性目标目录中已登记的本地 fake 环境；固定开发租户仍是
 `dev-local`。两者是不同的安全维度，不应复用同一个标识。
 
-M7 PR 4–6 增加的飞书 listener、projection worker 与 Web app 默认关闭：
+飞书 listener、projection worker、Web app 与 OAuth 默认全部关闭：
 
 ```bash
 export XIAOWEI_FEISHU_LISTENER_ENABLED=false
 export XIAOWEI_CHANNEL_WORKER_ENABLED=false
 export XIAOWEI_WEB_APP_ENABLED=false
+export XIAOWEI_FEISHU_OAUTH_ENABLED=false
 ```
 
 `docker-compose.yml` 以 `m7-channels` profile 声明 `feishu-listener`、`channel-worker` 与
-`web-app`，三个 flag 仍固定默认 `false`。它们与 API/Worker 共用同一镜像；listener/worker
-不发布宿主端口，Web 只发布 loopback `127.0.0.1:8080`。这只是离线装配资产，真实渠道门满足前
-不得注入真实配置或把任一 flag 改为 `true`；只允许以全关闭配置做离线装配验证。
+`web-app`，四个开关在基础文件中都固定为 `false`。它们与 API/Worker 共用同一镜像；
+listener/worker 不发布宿主端口。Web 容器内使用 HTTP `0.0.0.0:8080`，宿主只发布
+`127.0.0.1:8080`，因此基础 Compose 不能通过服务器或局域网 IP 访问。
+
+`http://127.0.0.1:8080/healthz` 和 `/readyz` 只供本机健康检查，不能用来完成浏览器登录。
+OAuth 浏览器入口仍必须使用已经备案的 HTTPS SSO 域名，并由 Compose 外部的 TLS/反向代理转发到
+Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没有证明真实 callback 可以从飞书到达。
 
 三个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
 `XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
 `XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_DETAIL_BASE_URL` 必须全部留空。listener 开启时
 前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
 Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
-`XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。Web 默认监听
-`127.0.0.1:8080`，OAuth state 默认 300 秒、session 默认 3600 秒，code exchange 复用
+`XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
+Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒，code exchange 复用
 `XIAOWEI_FEISHU_API_TIMEOUT_SECONDS` 的固定超时且不重试。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
 两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
@@ -243,11 +250,42 @@ Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信
 
 `operator`、`dba`、`oncall` 可查看安全任务并发起只读任务；`viewer`、`approver` 只可查看；
 `admin` 拥有当前渠道权限闭集。映射在 listener 或 Web app 装配时一次读取，修改后必须重启对应
-进程才生效。即使配置完整，仍须先满足 M7 真实渠道门并取得负责人明确口令，才允许把任一开关改为 `true` 并运行
-`python -m xiaowei_agent.interfaces.feishu_listener` 或
-`python -m xiaowei_agent.interfaces.feishu_worker`。PR 6 只提供 fake OAuth port 和离线认证边界；
-真实 OAuth port 未经单独审核与授权前，`python -m xiaowei_agent.interfaces.web_app` 固定退出，
-不启动网络监听。离线验证不构成真实渠道授权。
+进程才生效。
+
+Compose 启动 Web 前要准备三个已被 Git 忽略的本地文件：
+
+- `.secrets/postgres_password`
+- `.secrets/feishu_app_secret`
+- `.secrets/feishu-identities.json`
+
+`.secrets/` 保持 `0700`，三个文件写完后保持 `0444`。App secret 只能写入文件，不能放进环境变量、
+命令行、日志或已跟踪的 Compose 文件；请使用不会回显、不会进入 shell 历史的本地方式写入。
+
+基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，应把下面这种 override 存在已忽略的
+`.secrets/docker-compose.feishu-local.yml`，再替换本机的 App ID 与 HTTPS SSO origin；不要把真实值提交：
+
+```yaml
+services:
+  web-app:
+    environment:
+      XIAOWEI_WEB_APP_ENABLED: "true"
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
+      XIAOWEI_FEISHU_APP_ID: "example-app-id"
+      XIAOWEI_FEISHU_APP_SECRET_FILE: /run/secrets/feishu_app_secret
+      XIAOWEI_FEISHU_IDENTITY_FILE: /run/config/feishu-identities.json
+      XIAOWEI_WEB_DETAIL_BASE_URL: https://sso.example.invalid
+```
+
+数据库与 migration 就绪后，显式启用 profile 和 override：
+
+```bash
+docker compose -f docker-compose.yml -f .secrets/docker-compose.feishu-local.yml \
+  --profile m7-channels up -d --wait --no-deps web-app
+```
+
+如果本机只有 standalone CLI，把命令开头的 `docker compose` 换成 `docker-compose`。回滚时先停止
+`web-app`，并把私有 override 中的 Web/OAuth 两个开关都改回 `false`；再次创建容器前不得保留单边开启。
+listener 与 channel-worker 仍保持关闭，直到各自取得独立现场许可。离线验证不构成真实渠道授权。
 
 ### 集成测试（M4）
 
@@ -314,11 +352,15 @@ python -m scripts.compose_smoke
 ```
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
-fail-closed 或日志泄漏都会返回非零；脚本不允许 skip。渠道入口检查是在已构建并运行的同一 API
-镜像内执行三个 `python -m ...` 入口，要求全部返回 code 2 且无输出，不会连接飞书。当前开发机
-没有 Docker，因此本机只有静态契约与脚本测试证据；PR #27 run `34341819892` 与合入后 main run
-`34343986339` 已在 GitHub 隔离 runner 实跑并输出 `compose-smoke: passed`。这些 CI 不是本机、
-真实渠道或长期运行证据。
+fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本以 `O_EXCL` 创建
+三个 fake 输入，只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
+loopback，脚本只访问 `/healthz`、`/readyz`，不请求 OAuth start/callback，也不调用 provider。
+镜像 build 仍可能访问镜像仓库或依赖源，因此这不是“全程零外网”的证明。
+
+当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
+smoke 尚未在本机启动容器；目前只有脚本测试与 Compose 静态合并证据。PR #27 和旧 main 的
+`compose-smoke: passed` 只证明 M7 当时的版本，不能替代 RI1 新版容器验证，更不是飞书测试环境、
+部署、canary 或用户验收。
 
 ### 尚未完成与能力边界
 
