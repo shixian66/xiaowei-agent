@@ -1,6 +1,7 @@
 """Web OAuth 边界不泄漏外部错误，也不接受可漂移的 state/origin。"""
 
 import asyncio
+import logging
 import traceback
 from collections.abc import Iterator
 from dataclasses import fields
@@ -214,6 +215,7 @@ async def test_oauth_start_capacity_returns_503_without_cookie_body_or_log_leaka
     settings = Settings(
         environment_id="dev",
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
@@ -397,6 +399,7 @@ async def test_oversized_logout_is_rejected_before_auth_state_changes(
         environment_id="dev",
         api_request_body_limit_bytes=32,
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
@@ -452,6 +455,7 @@ async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
     settings = Settings(
         environment_id="dev",
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
@@ -490,6 +494,112 @@ async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
         assert rejected.status_code == 403
         assert rejected.json() == {"error": {"code": "forbidden"}}
         assert (await client.get("/app/api/me")).status_code == 200
+
+
+async def test_rejected_web_request_log_uses_only_closed_fields(
+    clock, memory_state, caplog: pytest.LogCaptureFixture
+) -> None:
+    oauth = _OAuth()
+    service = _service(clock, memory_state, oauth=oauth)
+    settings = Settings(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_oauth_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
+        feishu_identity_file="/run/config/feishu-identities.json",
+        web_detail_base_url="https://ops.example.test",
+    )
+    app = _auth_app(service=service, settings=settings, clock=clock)
+    code = "provider-" + "sensitive-code"
+    state = "state_" + "sensitive_value_1234567890"
+    cookie = "cookie_" + "sensitive_value_1234567890"
+    bad_host = "host-sensitive.example.test"
+    bad_origin = "https://origin-sensitive.example.test"
+    task_id = "task-sensitive-path-parameter"
+    with caplog.at_level(logging.INFO, logger="xiaowei_agent.interfaces.web_app"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="https://ops.example.test",
+            follow_redirects=False,
+        ) as client:
+            response = await client.get(
+                "/oauth/feishu/callback",
+                params={"code": code, "state": state},
+                headers={
+                    "host": bad_host,
+                    "origin": bad_origin,
+                    "cookie": f"__Host-xiaowei-oauth-state={cookie}",
+                    "x-trace-id": "e" * 32,
+                },
+            )
+            path_response = await client.get(f"/app/tasks/{task_id}")
+
+    assert response.status_code == 403
+    assert path_response.status_code == 401
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "xiaowei_agent.interfaces.web_app"
+    ]
+    assert [record.route_class for record in records] == [
+        "oauth_callback",
+        "task_shell",
+    ]
+    assert [record.outcome for record in records] == ["rejected", "rejected"]
+    rendered = caplog.text + repr([record.__dict__ for record in records])
+    for sensitive in (code, state, cookie, bad_host, bad_origin, task_id):
+        assert sensitive not in rendered
+
+
+async def test_provider_failure_log_omits_provider_body_and_opaque_identity(
+    clock, memory_state, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider_body = (
+        '{"open_id":"ou_sensitive","access_'
+        + 'token":"provider-sensitive-value"}'
+    )
+    oauth = _OAuth(exchange_error=RuntimeError(provider_body))
+    service = _service(clock, memory_state, oauth=oauth)
+    settings = Settings(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_oauth_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
+        feishu_identity_file="/run/config/feishu-identities.json",
+        web_detail_base_url="https://ops.example.test",
+    )
+    app = _auth_app(service=service, settings=settings, clock=clock)
+    code = "provider-" + "sensitive-code"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="https://ops.example.test",
+        follow_redirects=False,
+    ) as client:
+        assert (await client.get("/oauth/feishu/start")).status_code == 302
+        state = oauth.states[-1]
+        state_cookie = client.cookies.get("__Host-xiaowei-oauth-state")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="xiaowei_agent.interfaces.web_app"):
+            response = await client.get(
+                "/oauth/feishu/callback",
+                params={"code": code, "state": state},
+            )
+
+    assert response.status_code == 503
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "xiaowei_agent.interfaces.web_app"
+    ]
+    assert len(records) == 1
+    assert records[0].route_class == "oauth_callback"
+    assert records[0].outcome == "failed"
+    rendered = response.text + caplog.text + repr(records[0].__dict__)
+    assert state_cookie is not None
+    for sensitive in (provider_body, code, state, state_cookie, "ou_sensitive"):
+        assert sensitive not in rendered
 
 
 def test_web_stack_field_surface_has_no_execution_authority() -> None:
@@ -561,6 +671,7 @@ async def main():
                 environment_id="dev",
                 postgres_password_file=str(postgres),
                 web_app_enabled=True,
+                feishu_oauth_enabled=True,
                 feishu_app_id="app",
                 feishu_app_secret_file=str(root / "missing"),
                 feishu_identity_file=str(identity),

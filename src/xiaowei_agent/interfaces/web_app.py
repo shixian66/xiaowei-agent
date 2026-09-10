@@ -1,11 +1,16 @@
 """默认关闭、无执行权的飞书认证 Web 工作台。"""
 
+import asyncio
 import json
+import logging
 import re
 import sys
 from importlib.resources import files
-from typing import Annotated, Final
+from ipaddress import ip_address
+from typing import Annotated, Final, cast
+from urllib.parse import urlsplit
 
+import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -33,7 +38,7 @@ from xiaowei_agent.application.task_view_runtime import (
 )
 from xiaowei_agent.config import ConfigError, Settings, load_settings
 from xiaowei_agent.contracts import ChannelKind, ReadinessProbe
-from xiaowei_agent.interfaces.auth import Clock, trusted_trace_id
+from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
 from xiaowei_agent.interfaces.web_auth import (
@@ -54,7 +59,7 @@ from xiaowei_agent.interfaces.web_models import (
     WebTaskSubmitRequest,
 )
 from xiaowei_agent.log import configure_logging
-from xiaowei_agent.trace import bind_trace_id
+from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
 SESSION_COOKIE_NAME: Final[str] = "__Host-xiaowei-session"
 OAUTH_STATE_COOKIE_NAME: Final[str] = "__Host-xiaowei-oauth-state"
@@ -79,6 +84,23 @@ _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
     "app.js": "text/javascript",
     "detail.js": "text/javascript",
 }
+_HEALTH_PATHS: Final[frozenset[str]] = frozenset({"/healthz", "/readyz"})
+_LOGGED_ROUTE_CLASSES: Final[frozenset[str]] = frozenset(
+    {
+        "oauth_start",
+        "oauth_callback",
+        "web_shell",
+        "task_shell",
+        "account_api",
+        "task_api",
+        "static_asset",
+    }
+)
+_LOGGER = logging.getLogger(__name__)
+
+
+class _WebConfigurationError(RuntimeError):
+    """Web 真实装配所需的文件引用无效；不保留原始异常。"""
 
 
 class _WebInputError(ValueError):
@@ -109,6 +131,174 @@ class _SecurityHeadersMiddleware:
             await send(message)
 
         await self._app(scope, receive, send_with_headers)
+
+
+def _canonical_hostname(value: str) -> str | None:
+    try:
+        ip_address(value)
+    except ValueError:
+        pass
+    else:
+        return None
+    try:
+        hostname = value.encode("idna").decode("ascii").lower().removesuffix(".")
+    except UnicodeError:
+        return None
+    if not hostname or len(hostname) > 253:
+        return None
+    labels = hostname.split(".")
+    if not all(
+        label
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(character.isalnum() or character == "-" for character in label)
+        for label in labels
+    ):
+        return None
+    return hostname
+
+
+def _canonical_host_header(value: str) -> str | None:
+    if (
+        not value
+        or not value.isascii()
+        or value != value.strip()
+        or value.endswith(":")
+        or any(
+            ord(character) < 0x20
+            or ord(character) == 0x7F
+            or character.isspace()
+            for character in value
+        )
+    ):
+        return None
+    try:
+        parsed = urlsplit(f"//{value}")
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = (
+        None if parsed.hostname is None else _canonical_hostname(parsed.hostname)
+    )
+    if (
+        hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    if ":" in value and value.rsplit(":", maxsplit=1)[1] != str(port):
+        return None
+    return hostname if port in {None, 443} else f"{hostname}:{port}"
+
+
+def _header_values(scope: Scope, name: bytes) -> list[str]:
+    return [
+        value.decode("latin-1")
+        for key, value in scope.get("headers", [])
+        if key.lower() == name
+    ]
+
+
+def _route_class(method: str, path: str) -> str:
+    if method == "GET" and path == "/oauth/feishu/start":
+        return "oauth_start"
+    if method == "GET" and path == "/oauth/feishu/callback":
+        return "oauth_callback"
+    if method == "GET" and path == "/app":
+        return "web_shell"
+    if method == "GET" and path.startswith("/app/tasks/"):
+        return "task_shell"
+    if path in {"/app/api/me", "/app/api/logout"}:
+        return "account_api"
+    if path == "/app/api/tasks" or path.startswith("/app/api/tasks/"):
+        return "task_api"
+    if method == "GET" and path.startswith("/app/static/"):
+        return "static_asset"
+    if path == "/healthz":
+        return "health"
+    if path == "/readyz":
+        return "readiness"
+    return "other"
+
+
+def _closed_outcome(status: int) -> str:
+    if status < 400:
+        return "ok"
+    if status < 500:
+        return "rejected"
+    return "failed"
+
+
+def _add_security_headers(response: Response) -> None:
+    response.headers["content-security-policy"] = _CSP
+    response.headers["cache-control"] = "no-store"
+    response.headers["x-content-type-options"] = "nosniff"
+    response.headers["referrer-policy"] = "no-referrer"
+    response.headers["permissions-policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["strict-transport-security"] = _HSTS.decode("ascii")
+
+
+class _WebRequestBoundaryMiddleware:
+    """绑定服务端 trace，并只按固定 SSO authority/origin 接受 Web 请求。"""
+
+    def __init__(self, app: ASGIApp, *, public_origin: str) -> None:
+        self._app = app
+        parsed = urlsplit(public_origin)
+        self._public_origin = public_origin
+        self._authority = parsed.netloc
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        method = str(scope.get("method", ""))
+        path = str(scope.get("path", ""))
+        route_class = _route_class(method, path)
+        status = 500
+
+        async def capture_status(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = int(message["status"])
+            await send(message)
+
+        with bind_trace_id() as trace_id:
+            try:
+                trusted = path in _HEALTH_PATHS
+                if not trusted:
+                    hosts = _header_values(scope, b"host")
+                    origins = _header_values(scope, b"origin")
+                    trusted = (
+                        len(hosts) == 1
+                        and _canonical_host_header(hosts[0]) == self._authority
+                        and (
+                            not origins
+                            or (
+                                len(origins) == 1
+                                and origins[0] == self._public_origin
+                            )
+                        )
+                    )
+                if trusted:
+                    await self._app(scope, receive, capture_status)
+                else:
+                    response = _error(403, "forbidden")
+                    _add_security_headers(response)
+                    await response(scope, receive, capture_status)
+            finally:
+                if route_class in _LOGGED_ROUTE_CLASSES:
+                    _LOGGER.info(
+                        "web request completed",
+                        extra={
+                            "route_class": route_class,
+                            "outcome": _closed_outcome(status),
+                            "trace_id": trace_id,
+                        },
+                    )
 
 
 def _error(status: int, code: str) -> JSONResponse:
@@ -321,7 +511,7 @@ def create_app(
     policy_revision: str,
 ) -> FastAPI:
     """注册认证与薄任务投影路由，不装配执行 Runtime。"""
-    if not settings.web_app_enabled:
+    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
         raise ValueError("Web app is disabled")
     index_shell = _asset_text("index.html")
     detail_shell = _asset_text("detail.html")
@@ -338,6 +528,10 @@ def create_app(
         paths=frozenset({"/app/api/logout", "/app/api/tasks"}),
     )
     app.add_middleware(_SecurityHeadersMiddleware)
+    app.add_middleware(
+        _WebRequestBoundaryMiddleware,
+        public_origin=cast(str, settings.web_detail_base_url),
+    )
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
@@ -445,21 +639,22 @@ def create_app(
         session_cookie, session = await _authenticated(request, auth=auth)
         _validate_state_change(request, auth=auth, session_cookie=session_cookie)
         body = await _task_submit_body(request)
-        trace_id = trusted_trace_id()
-        with bind_trace_id(trace_id):
-            submitted = await submissions.submit(
-                command=ChannelSubmitCommand(
-                    principal=session.principal,
-                    channel=ChannelKind.WEB,
-                    request_id=f"web:{trace_id}",
-                    trace_id=trace_id,
-                    policy_revision=policy_revision,
-                    text=body.text,
-                    client_submission_ref=body.client_submission_id,
-                    conversation_ref=None,
-                    submitted_at=clock(),
-                )
+        trace_id = get_trace_id()
+        if trace_id is None:  # create_app 的外层 middleware 是唯一可信绑定入口。
+            raise RuntimeError("web request trace is unavailable")
+        submitted = await submissions.submit(
+            command=ChannelSubmitCommand(
+                principal=session.principal,
+                channel=ChannelKind.WEB,
+                request_id=f"web:{trace_id}",
+                trace_id=trace_id,
+                policy_revision=policy_revision,
+                text=body.text,
+                client_submission_ref=body.client_submission_id,
+                conversation_ref=None,
+                submitted_at=clock(),
             )
+        )
         return WebTaskAccepted.from_submission(submitted).model_dump(mode="json")
 
     @app.get("/app/api/tasks/{task_id}")
@@ -518,19 +713,96 @@ def create_app(
     return app
 
 
+async def serve_web(settings: Settings) -> int:
+    """装配真实、默认关闭的 OAuth Web 进程，并释放唯一数据库 Engine。"""
+    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
+        raise _WebConfigurationError
+    configure_logging(settings)
+
+    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+    from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkMembershipAdapter
+    from xiaowei_agent.interfaces.local_stack import (
+        WebStackConfigurationError,
+        build_postgres_web_stack,
+    )
+
+    oauth = None
+    credential_invalid = False
+    try:
+        oauth = FeishuOAuthAdapter(
+            app_id=cast(str, settings.feishu_app_id),
+            app_secret_file=cast(str, settings.feishu_app_secret_file),
+            timeout_seconds=5.0,
+        )
+    except ValueError:
+        credential_invalid = True
+    if credential_invalid or oauth is None:
+        raise _WebConfigurationError
+
+    membership = FeishuSdkMembershipAdapter(
+        tenant_id=settings.tenant_id,
+        app_id=cast(str, settings.feishu_app_id),
+        app_secret_file=cast(str, settings.feishu_app_secret_file),
+    )
+    stack = None
+    stack_configuration_invalid = False
+    try:
+        stack = await build_postgres_web_stack(
+            settings=settings,
+            oauth=oauth,
+            membership=membership,
+        )
+    except WebStackConfigurationError:
+        stack_configuration_invalid = True
+    if stack_configuration_invalid or stack is None:
+        raise _WebConfigurationError
+
+    try:
+        app = create_app(
+            auth=stack.auth,
+            settings=settings,
+            readiness=stack.readiness,
+            task_access=stack.task_access_service,
+            submissions=stack.submission_service,
+            clock=stack.clock,
+            policy_revision=stack.policy_revision,
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=settings.web_bind_host,
+                port=settings.web_bind_port,
+                proxy_headers=False,
+                access_log=False,
+                log_config=None,
+            )
+        )
+        await server.serve()
+        return 0
+    finally:
+        await stack.aclose()
+
+
 def main() -> int:
-    """默认关闭；真实 OAuth adapter 装配由后续激活门承重。"""
+    """加载默认关闭的 Web 配置，并用固定退出语义运行唯一装配根。"""
     try:
         settings = load_settings()
     except ConfigError:
         sys.stderr.write("xiaowei-web: configuration_error\n")
         return 2
-    if not settings.web_app_enabled:
+    if not settings.web_app_enabled and not settings.feishu_oauth_enabled:
         return 2
-    configure_logging(settings)
-    # PR 6 只授权 fake OAuth port；不得用占位实现伪装成可运行的真实登录。
-    sys.stderr.write("xiaowei-web: oauth_adapter_not_activated\n")
-    return 2
+    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
+        sys.stderr.write("xiaowei-web: configuration_error\n")
+        return 2
+    try:
+        return asyncio.run(serve_web(settings))
+    except _WebConfigurationError:
+        sys.stderr.write("xiaowei-web: configuration_error\n")
+        return 2
+    except (Exception, SystemExit):
+        sys.stderr.write("xiaowei-web: startup_failed\n")
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover - 由进程/Compose 调用
@@ -542,4 +814,5 @@ __all__ = [
     "SESSION_COOKIE_NAME",
     "create_app",
     "main",
+    "serve_web",
 ]

@@ -27,6 +27,7 @@ def test_feishu_listener_is_disabled_without_any_live_profile_by_default() -> No
 
     assert settings.feishu_listener_enabled is False
     assert settings.channel_worker_enabled is False
+    assert settings.feishu_oauth_enabled is False
     assert settings.feishu_app_id is None
     assert settings.feishu_app_secret_file is None
     assert settings.feishu_tenant_key is None

@@ -1,6 +1,7 @@
 """Web 任务 API 只传递可信身份并投影安全任务字段。"""
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,6 +43,7 @@ from xiaowei_agent.interfaces.web_auth import (
 )
 from xiaowei_agent.interfaces.web_models import WebTaskDetail, WebTaskSummary
 from xiaowei_agent.persistence import IdempotencyConflictError
+from xiaowei_agent.trace import get_trace_id
 
 _COOKIE = "session_value_for_web_task_api"
 _CSRF = "a" * 64
@@ -79,8 +81,10 @@ def _principal(
 class _Auth:
     def __init__(self, principal: AuthenticatedPrincipal) -> None:
         self.principal = principal
+        self.trace_ids: list[str | None] = []
 
     async def authenticate(self, *, session_cookie: str | None) -> AuthenticatedWebSession:
+        self.trace_ids.append(get_trace_id())
         if session_cookie != _COOKIE:
             raise WebAuthenticationError
         return AuthenticatedWebSession(principal=self.principal, csrf_token=_CSRF)
@@ -120,14 +124,17 @@ class _Access:
         self.detail_error: Exception | None = None
         self.list_calls: list[TaskListQuery] = []
         self.detail_calls: list[TaskAccessQuery] = []
+        self.trace_ids: list[str | None] = []
 
     async def list_tasks(self, *, query: TaskListQuery) -> TaskPage:
+        self.trace_ids.append(get_trace_id())
         self.list_calls.append(query)
         if self.list_error is not None:
             raise self.list_error
         return self.list_result
 
     async def get_task(self, *, query: TaskAccessQuery) -> AccessibleTask:
+        self.trace_ids.append(get_trace_id())
         self.detail_calls.append(query)
         if self.detail_error is not None:
             raise self.detail_error
@@ -141,8 +148,11 @@ class _Submissions:
         self.view = view
         self.error: Exception | None = None
         self.calls: list[ChannelSubmitCommand] = []
+        self.trace_ids: list[str | None] = []
+        self.authentication_trace_ids: list[str | None] = []
 
     async def submit(self, *, command: ChannelSubmitCommand) -> Any:
+        self.trace_ids.append(get_trace_id())
         self.calls.append(command)
         if self.error is not None:
             raise self.error
@@ -177,6 +187,7 @@ def _settings() -> Settings:
     return Settings(
         environment_id="dev",
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
@@ -192,8 +203,10 @@ def _client(
 ) -> tuple[httpx.AsyncClient, _Access, _Submissions]:
     access = access or _Access()
     submissions = submissions or _Submissions(_view())
+    auth = _Auth(principal or _principal())
+    submissions.authentication_trace_ids = auth.trace_ids
     app = create_app(
-        auth=_Auth(principal or _principal()),
+        auth=auth,
         settings=_settings(),
         readiness=_Probe(),
         task_access=access,
@@ -303,22 +316,24 @@ async def test_detail_preserves_complete_safe_render_without_internal_query_path
     assert "facts" not in response.text
 
 
-async def test_submit_constructs_web_command_from_server_authority() -> None:
+async def test_submit_constructs_web_command_from_server_authority(caplog) -> None:
     submissions = _Submissions(_view(TaskStatus.CREATED))
     client, _, _ = _client(submissions=submissions)
 
-    async with client:
-        response = await client.post(
-            "/app/api/tasks",
-            json={
-                "text": "检查最近三十分钟慢查询",
-                "client_submission_id": "browser-request-0001",
-            },
-            headers={
-                "origin": "https://ops.example.test",
-                "x-csrf-token": _CSRF,
-            },
-        )
+    with caplog.at_level(logging.INFO, logger="xiaowei_agent.interfaces.web_app"):
+        async with client:
+            response = await client.post(
+                "/app/api/tasks",
+                json={
+                    "text": "检查最近三十分钟慢查询",
+                    "client_submission_id": "browser-request-0001",
+                },
+                headers={
+                    "origin": "https://ops.example.test",
+                    "x-csrf-token": _CSRF,
+                    "x-trace-id": "f" * 32,
+                },
+            )
 
     assert response.status_code == 202
     assert response.json() == {
@@ -334,8 +349,20 @@ async def test_submit_constructs_web_command_from_server_authority() -> None:
     assert command.client_submission_ref == "browser-request-0001"
     assert command.conversation_ref is None
     assert command.request_id == f"web:{command.trace_id}"
+    assert submissions.trace_ids == [command.trace_id]
+    assert submissions.authentication_trace_ids == [command.trace_id]
+    assert command.trace_id != "f" * 32
     assert command.policy_revision == "policy-2026-09-01"
     assert command.submitted_at == _NOW
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "xiaowei_agent.interfaces.web_app"
+    ]
+    assert len(records) == 1
+    assert records[0].route_class == "task_api"
+    assert records[0].outcome == "ok"
+    assert records[0].trace_id == command.trace_id
 
 
 async def test_submit_rejects_non_json_media_type_before_submission() -> None:

@@ -195,6 +195,7 @@ class Settings(BaseModel):
     feishu_listener_enabled: bool = False
     channel_worker_enabled: bool = False
     web_app_enabled: bool = False
+    feishu_oauth_enabled: bool = False
     feishu_app_id: StrictStr | None = None
     feishu_app_secret_file: AbsolutePath | None = None
     feishu_tenant_key: StrictStr | None = None
@@ -333,6 +334,8 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
+        if self.web_app_enabled != self.feishu_oauth_enabled:
+            raise ValueError("Web app and Feishu OAuth must be enabled together")
         shared = (self.feishu_app_id, self.feishu_app_secret_file)
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
         identity = (self.feishu_identity_file,)
@@ -368,6 +371,13 @@ class Settings(BaseModel):
                 raise ValueError(
                     "enabled Web app requires the complete Web authentication profile"
                 )
+            origin_hostname = urlsplit(str(self.web_detail_base_url)).hostname
+            try:
+                ip_address(origin_hostname or "")
+            except ValueError:
+                pass
+            else:
+                raise ValueError("OAuth Web origin requires a hostname")
         if not self.feishu_listener_enabled and not self.web_app_enabled and any(
             value is not None for value in identity
         ):
@@ -477,6 +487,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "feishu_listener_enabled": "XIAOWEI_FEISHU_LISTENER_ENABLED",
     "channel_worker_enabled": "XIAOWEI_CHANNEL_WORKER_ENABLED",
     "web_app_enabled": "XIAOWEI_WEB_APP_ENABLED",
+    "feishu_oauth_enabled": "XIAOWEI_FEISHU_OAUTH_ENABLED",
     "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
     "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
