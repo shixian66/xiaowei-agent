@@ -31,6 +31,10 @@ class RecordingRunner:
         return subprocess.CompletedProcess(call, 0, stdout=output, stderr="")
 
 
+class CleanupBoundaryError(BaseException):
+    """代表不会被 ``except Exception`` 捕获的清理失败。"""
+
+
 def _mutating_commands(calls: list[tuple[str, ...]]) -> set[str]:
     return {token for call in calls for token in call if token in {"up", "down", "rm"}}
 
@@ -589,15 +593,18 @@ def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(
 
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError])
+@pytest.mark.parametrize("cleanup_error_type", [CleanupBoundaryError, RuntimeError])
 def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error_type: type[BaseException],
+    cleanup_error_type: type[BaseException],
 ) -> None:
     input_root = tmp_path / ".secrets"
     real_create = compose_smoke._create_input
     real_remove = compose_smoke._remove_private_input_namespace
     primary_error = error_type("private-primary-detail")
+    cleanup_error = cleanup_error_type("private-cleanup-detail")
     create_calls = 0
     cleanup_calls = 0
 
@@ -612,7 +619,7 @@ def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
         nonlocal cleanup_calls
         cleanup_calls += 1
         real_remove(*args, **kwargs)
-        raise RuntimeError("private-cleanup-detail")
+        raise cleanup_error
 
     monkeypatch.setattr(compose_smoke, "_create_input", fail_second_input)
     monkeypatch.setattr(
