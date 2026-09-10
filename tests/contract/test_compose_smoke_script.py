@@ -102,13 +102,30 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
     )
 
 
-@pytest.mark.parametrize("first_failure", ["workflow", "down"])
-def test_smoke_preserves_first_interrupt_while_all_later_cleanup_still_runs(
+@pytest.mark.parametrize(
+    ("first_failure", "reject_notes"),
+    [("workflow", False), ("down", False), ("workflow", True)],
+)
+def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     first_failure: str,
+    reject_notes: bool,
 ) -> None:
-    primary_error = KeyboardInterrupt("private-primary-detail")
+    class NoteRejectingError(BaseException):
+        def __init__(self) -> None:
+            super().__init__("private-primary-detail")
+            self.note_attempts = 0
+
+        def add_note(self, note: str) -> None:
+            self.note_attempts += 1
+            raise RuntimeError("private-note-detail")
+
+    primary_error: BaseException = (
+        NoteRejectingError()
+        if reject_notes
+        else KeyboardInterrupt("private-primary-detail")
+    )
 
     class DownFailingRunner(RecordingRunner):
         def __call__(
@@ -146,7 +163,7 @@ def test_smoke_preserves_first_interrupt_while_all_later_cleanup_still_runs(
         fail_after_input_cleanup,
     )
 
-    with pytest.raises(KeyboardInterrupt) as caught:
+    with pytest.raises(type(primary_error)) as caught:
         run_smoke(
             docker="/usr/bin/docker",
             compose_command=("/usr/bin/docker-compose",),
@@ -156,11 +173,16 @@ def test_smoke_preserves_first_interrupt_while_all_later_cleanup_still_runs(
         )
 
     assert caught.value is primary_error
-    assert caught.value.__notes__ == (
-        ["SMOKE_CLEANUP_COMMAND_FAILED", "SMOKE_INPUT_CLEANUP_FAILED"]
-        if first_failure == "workflow"
-        else ["SMOKE_INPUT_CLEANUP_FAILED"]
-    )
+    if reject_notes:
+        assert isinstance(primary_error, NoteRejectingError)
+        assert primary_error.note_attempts == 2
+        assert not hasattr(primary_error, "__notes__")
+    else:
+        assert caught.value.__notes__ == (
+            ["SMOKE_CLEANUP_COMMAND_FAILED", "SMOKE_INPUT_CLEANUP_FAILED"]
+            if first_failure == "workflow"
+            else ["SMOKE_INPUT_CLEANUP_FAILED"]
+        )
     assert len([call for call in runner.calls if "down" in call]) == 1
     assert input_cleanup_calls == 1
     assert list((tmp_path / ".secrets").iterdir()) == []
@@ -563,6 +585,48 @@ def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(
 
     assert caught.value is injected
     assert input_root.is_dir()
+    assert list(input_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError])
+def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    input_root = tmp_path / ".secrets"
+    real_create = compose_smoke._create_input
+    real_remove = compose_smoke._remove_private_input_namespace
+    primary_error = error_type("private-primary-detail")
+    create_calls = 0
+    cleanup_calls = 0
+
+    def fail_second_input(path: Path, content: str) -> Any:
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 2:
+            raise primary_error
+        return real_create(path, content)
+
+    def fail_after_cleanup(*args: Any, **kwargs: Any) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        real_remove(*args, **kwargs)
+        raise RuntimeError("private-cleanup-detail")
+
+    monkeypatch.setattr(compose_smoke, "_create_input", fail_second_input)
+    monkeypatch.setattr(
+        compose_smoke,
+        "_remove_private_input_namespace",
+        fail_after_cleanup,
+    )
+
+    with pytest.raises(error_type) as caught:
+        compose_smoke._create_smoke_inputs(input_root=input_root)
+
+    assert caught.value is primary_error
+    assert caught.value.__notes__ == ["SMOKE_INPUT_CLEANUP_FAILED"]
+    assert cleanup_calls == 1
     assert list(input_root.iterdir()) == []
 
 

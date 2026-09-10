@@ -52,6 +52,14 @@ class SmokeError(RuntimeError):
     """只携固定 smoke 错误码，不携带 Docker/API 输出。"""
 
 
+def _safe_add_fixed_note(error: BaseException, note: str) -> None:
+    """追加固定 note；异常对象拒绝记录时也绝不影响原始失败。"""
+    try:
+        error.add_note(note)
+    except BaseException:
+        return
+
+
 class CommandRunner(Protocol):
     def __call__(
         self, argv: Sequence[str], *, timeout: float
@@ -184,7 +192,7 @@ def _cleanup_unreturned_input(
         cleanup_failed = True
     if cleanup_failed:
         if primary_error is not None:
-            primary_error.add_note("SMOKE_INPUT_CLEANUP_FAILED")
+            _safe_add_fixed_note(primary_error, "SMOKE_INPUT_CLEANUP_FAILED")
             return
         raise SmokeError("SMOKE_INPUT_CLEANUP_FAILED") from None
 
@@ -489,8 +497,8 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     except BaseException as exc:
         try:
             _remove_private_input_namespace(namespace, created)
-        except SmokeError:
-            exc.add_note("SMOKE_INPUT_CLEANUP_FAILED")
+        except BaseException:
+            _safe_add_fixed_note(exc, "SMOKE_INPUT_CLEANUP_FAILED")
         raise
     return _SmokeInputs(
         namespace=namespace,
@@ -611,7 +619,10 @@ def run_smoke(
             if primary_error is None:
                 primary_error = exc
             else:
-                primary_error.add_note("SMOKE_CLEANUP_COMMAND_FAILED")
+                _safe_add_fixed_note(
+                    primary_error,
+                    "SMOKE_CLEANUP_COMMAND_FAILED",
+                )
     try:
         _remove_private_input_namespace(
             smoke_inputs.namespace,
@@ -621,7 +632,7 @@ def run_smoke(
         if primary_error is None:
             primary_error = exc
         else:
-            primary_error.add_note("SMOKE_INPUT_CLEANUP_FAILED")
+            _safe_add_fixed_note(primary_error, "SMOKE_INPUT_CLEANUP_FAILED")
     if primary_error is not None:
         raise primary_error
 
