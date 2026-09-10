@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import subprocess
+import traceback
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -33,6 +34,18 @@ class RecordingRunner:
 
 class CleanupBoundaryError(BaseException):
     """代表不会被 ``except Exception`` 捕获的清理失败。"""
+
+
+class NoteRejectingError(BaseException):
+    """模拟覆写 ``add_note`` 后拒绝记录的外部异常。"""
+
+    def __init__(self) -> None:
+        super().__init__("private-primary-detail")
+        self.attempted_notes: list[str] = []
+
+    def add_note(self, note: str) -> None:
+        self.attempted_notes.append(note)
+        raise RuntimeError("private-note-detail")
 
 
 def _mutating_commands(calls: list[tuple[str, ...]]) -> set[str]:
@@ -106,6 +119,49 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
     )
 
 
+def test_successful_workflow_reports_the_fixed_down_cleanup_code(
+    tmp_path: Path,
+) -> None:
+    class DownFailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if "down" in argv:
+                raise subprocess.CalledProcessError(
+                    1,
+                    argv,
+                    stderr="private-down-detail",
+                )
+            return result
+
+    runner = DownFailingRunner()
+
+    def workflow(session: ComposeSession) -> None:
+        session.up_started = True
+
+    with pytest.raises(
+        SmokeError,
+        match=r"^SMOKE_CLEANUP_COMMAND_FAILED$",
+    ) as caught:
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker-compose",),
+            runner=runner,
+            workflow=workflow,
+            input_root=tmp_path / ".secrets",
+        )
+
+    assert str(caught.value) == "SMOKE_CLEANUP_COMMAND_FAILED"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "private-down-detail" not in "".join(
+        traceback.format_exception(caught.value)
+    )
+    assert len([call for call in runner.calls if "down" in call]) == 1
+    assert list((tmp_path / ".secrets").iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("first_failure", "reject_notes"),
     [("workflow", False), ("down", False), ("workflow", True)],
@@ -116,15 +172,6 @@ def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
     first_failure: str,
     reject_notes: bool,
 ) -> None:
-    class NoteRejectingError(BaseException):
-        def __init__(self) -> None:
-            super().__init__("private-primary-detail")
-            self.note_attempts = 0
-
-        def add_note(self, note: str) -> None:
-            self.note_attempts += 1
-            raise RuntimeError("private-note-detail")
-
     primary_error: BaseException = (
         NoteRejectingError()
         if reject_notes
@@ -179,7 +226,10 @@ def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
     assert caught.value is primary_error
     if reject_notes:
         assert isinstance(primary_error, NoteRejectingError)
-        assert primary_error.note_attempts == 2
+        assert primary_error.attempted_notes == [
+            "SMOKE_CLEANUP_COMMAND_FAILED",
+            "SMOKE_INPUT_CLEANUP_FAILED",
+        ]
         assert not hasattr(primary_error, "__notes__")
     else:
         assert caught.value.__notes__ == (
@@ -190,6 +240,11 @@ def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
     assert len([call for call in runner.calls if "down" in call]) == 1
     assert input_cleanup_calls == 1
     assert list((tmp_path / ".secrets").iterdir()) == []
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "private-down-detail" not in rendered
+    assert "private-input-cleanup-detail" not in rendered
 
 
 def test_project_names_have_a_full_random_uuid_suffix() -> None:
@@ -637,6 +692,46 @@ def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
     assert list(input_root.iterdir()) == []
 
 
+def test_smoke_input_bundle_cleanup_preserves_a_note_rejecting_base_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_root = tmp_path / ".secrets"
+    real_create = compose_smoke._create_input
+    real_remove = compose_smoke._remove_private_input_namespace
+    primary_error = NoteRejectingError()
+    create_calls = 0
+    cleanup_calls = 0
+
+    def fail_second_input(path: Path, content: str) -> Any:
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 2:
+            raise primary_error
+        return real_create(path, content)
+
+    def fail_after_cleanup(*args: Any, **kwargs: Any) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        real_remove(*args, **kwargs)
+        raise RuntimeError("private-bundle-cleanup-detail")
+
+    monkeypatch.setattr(compose_smoke, "_create_input", fail_second_input)
+    monkeypatch.setattr(
+        compose_smoke,
+        "_remove_private_input_namespace",
+        fail_after_cleanup,
+    )
+
+    with pytest.raises(NoteRejectingError) as caught:
+        compose_smoke._create_smoke_inputs(input_root=input_root)
+
+    assert caught.value is primary_error
+    assert primary_error.attempted_notes == ["SMOKE_INPUT_CLEANUP_FAILED"]
+    assert cleanup_calls == 1
+    assert list(input_root.iterdir()) == []
+
+
 @pytest.mark.parametrize("existing_name", ["feishu_app_secret", "feishu-identities.json"])
 def test_private_input_namespace_preserves_fixed_user_files(
     tmp_path: Path, existing_name: str
@@ -765,6 +860,34 @@ def test_input_creation_cleans_its_file_without_masking_a_base_exception(
     assert created_descriptor is not None
     with pytest.raises(OSError):
         real_fstat(created_descriptor)
+
+
+def test_unreturned_input_cleanup_preserves_a_note_rejecting_base_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / ".secrets" / "feishu_app_secret"
+    primary_error = NoteRejectingError()
+    cleanup_attempts = 0
+
+    def fail_fchmod(_: int, __: int) -> None:
+        raise primary_error
+
+    def fail_unlink(*_: Any, **__: Any) -> None:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        raise RuntimeError("private-unreturned-cleanup-detail")
+
+    monkeypatch.setattr(compose_smoke.os, "fchmod", fail_fchmod)
+    monkeypatch.setattr(compose_smoke.os, "unlink", fail_unlink)
+
+    with pytest.raises(NoteRejectingError) as caught:
+        compose_smoke._create_input(path, "fake-value\n")
+
+    assert caught.value is primary_error
+    assert primary_error.attempted_notes == ["SMOKE_INPUT_CLEANUP_FAILED"]
+    assert cleanup_attempts == 1
+    assert path.exists()
 
 
 def test_failed_input_creation_does_not_delete_a_replacement_inode(
