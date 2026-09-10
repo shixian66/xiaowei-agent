@@ -1,8 +1,8 @@
 # ADR-007：首批能力、初始执行上下文与真实调用许可
 
-- 状态：Accepted
-- 日期：2026-09-01
-- 决策人：项目负责人
+- 状态：Proposed Revision（2026-09-01 Accepted 版本在本修订获批前继续有效）
+- 日期：2026-09-01；候选修订 2026-09-10
+- 决策人：项目负责人（候选修订待重新批准）
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)
 
 ## 背景
@@ -39,19 +39,38 @@
 
 全项目统一使用 `tenant_id`、`actor`、`environment_id`，消除 `tenant`、`env` 等别名。`target_fingerprint` 的既有 canonicalization 已使用该组名称，收敛后自动一致。
 
+### 本次候选修订的单独签认项
+
+2026-09-10 候选修订不是单纯编号整理：旧 E2 将“生产连接与生产写”一并默认禁止；本修订新增 H
+层，允许 RI6 在逐项授权后启用生产只读 provider/目标，同时 E2 继续禁止生产写。这是授权面的实质
+变化，必须由项目负责人明确知情并单独记录批准；合并文档、批准 RI1 或已有 test-env 证据都不能
+代替该签认。
+
+- [ ] 项目负责人明确批准：RI6 可按 H 层逐项目标开放生产只读网络调用；生产写仍由 E2 禁止。
+
+未勾选时，RI6 只允许部署所有真实 provider 默认关闭的制品，或继续使用已授权 test-env 目标并把
+证据严格保留为测试环境能力；不得建立新的生产只读连接。
+
 ### D4 真实调用许可分层
 
 | 层 | 范围 | 许可 |
 | --- | --- | --- |
 | A | 真实运维目标系统（StarRocks、Prometheus、资产系统、MySQL、Kafka、Kubernetes 等） | **M0-M6a 全程禁止**；领域 adapter 只允许 fake/recording |
 | B1 | 模型 provider adapter 的**实现与离线测试**（不发起任何网络调用） | 允许在其所属里程碑内实现，必须以 fake/recording 驱动测试；不得在 CI 或默认配置中启用真实调用。实现权**不等于**调用权 |
-| B2 | 真实模型 API 的**网络调用**（任何外部 LLM 供应商） | **M0-M6a 全程禁止**，且 M6a 结束后**不自动开放**：必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略后才允许。任何「M5 后单独决策」只指 B1 的实现决策，不授予 B2 的调用权限，也不得与本表 M0-M6a 的禁止期冲突 |
+| B2 | 真实模型 API 的**网络调用**（任何外部 LLM 供应商） | **M0-M6a 全程禁止**，且 M6a 结束后不自动开放。候选开放点为 RI3：必须单独批准唯一供应商/模型、固定 endpoint/API 形态、逻辑凭证名、发送字段白名单、区域与保留/训练策略、超时、输入输出上限、供应商项目硬预算和现场 GO；模型始终无执行权 |
 | C | 本地隔离基础设施（本地 PostgreSQL、本地 Docker Compose） | **M4 / M5 经各自里程碑批准后允许**；仅限本地隔离实例，不连共享或生产实例，不承载真实业务数据 |
-| D | 非生产真实只读（StarRocks 测试环境） | **M6b，仍需单独授权**：环境、只读账号的 secret reference、查询范围、调用时窗、脱敏方式、recording 删除方式和证据保留周期均须逐项确认 |
-| E1 | **任何可能修改被管运维目标状态的操作**（含非生产环境），与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；完整定义见 D7 | **M0-M7 全程禁止**。M8 才可开放一条低风险的测试环境受控写，且必须同时满足 D6 的三项条件，缺一即保持禁止 |
-| E2 | 生产连接与生产写 | **默认禁止**，不在本 ADR 授权范围内。生产写需要新的独立授权和独立验收计划，**不能由 M8 的测试环境结论推导得出** |
+| D | 非生产真实只读（StarRocks 测试环境） | **M6b/RI4，仍需同一套单独授权**：环境、只读账号的逻辑 credential reference、查询范围、调用时窗、脱敏方式、recording 删除方式和证据保留周期均须逐项确认；RI4 是完成 M6b 延期现场门，不建立第二套授权清单 |
+| F | 真实飞书 OAuth、长连接、消息与群成员网络调用 | RI1 只允许默认关闭的 adapter/装配与离线测试；RI2 必须逐项满足 M7 详细计划 §0.3.2 并取得现场 GO，最高证据为 `test-env verified` |
+| G | Web Admin 配置治理与连接测试 | RI5 的 Admin 权限只管理不可变配置、逻辑 target/credential 名、测试请求、发布/readback/回滚；不授予任意 endpoint、文件路径、Gateway 调用或 E1。StarRocks 测试请求必须由独立 worker 复用正常 Runtime/Runner/Admission/Gateway 链；只有 `interfaces/local_stack.py` 可 import tools。该候选进程边界须由 ADR-016 显式修订 M7 的单执行进程口径，并由 TaskStore 持久化 `configuration_test` dispatch lane、普通/候选窄方法、列表过滤及领取事务二次核对承重后方可实施；lane 不进入用户或入口 DTO |
+| H | 正式环境中的真实 provider 与生产只读目标网络调用 | RI6 可以先部署所有 provider 默认关闭的制品；启用任一 provider/只读目标还必须逐项批准精确 provider/目标、逻辑凭证名、tenant/environment/actor 范围、只读授权、数据处置/保留、变更窗口、canary 范围和现场 GO。test-env 证据只是进入条件，不自动授予生产网络调用权 |
+| E1 | **任何可能修改被管运维目标状态的操作**（含非生产环境），与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；完整定义见 D7 | **持续禁止，直到单独获批的受控写里程碑明确修订本 ADR。**RI1–RI6、只读接入、模型、渠道、Admin、部署或里程碑编号变化都不授予 E1；当前候选 M8 仍须同时满足 D6 三项条件 |
+| E2 | 生产写 | **默认禁止**，不在本 ADR 授权范围内。生产写需要新的独立授权和独立验收计划，**不能由 M8 的测试环境结论或 RI6 的生产只读授权推导得出** |
 
-CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、E 类调用。CI 对基础设施的写权限按 D8 的里程碑时点逐级开放：M1-M3 只允许写测试产物，M4/M5 各自批准后才允许对应 CI job 使用本地隔离 PostgreSQL / Compose。
+CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、F、H、E1、E2 类真实调用，也不执行 G 的真实 provider probe。CI 对基础设施的写权限按 D8 的里程碑时点逐级开放：M1-M3 只允许写测试产物，M4/M5 各自批准后才允许对应 CI job 使用本地隔离 PostgreSQL / Compose。
+
+RI6 的生产部署不会自动开放表中任一网络能力：即使已有 test-env 证据，也只有逐项满足 H 层并由
+负责人明确纳入本次部署范围的 provider/只读目标才能启用。生产 `IP:8080` 仅用于宿主端口发布；
+OAuth/session 仍必须通过已批准 HTTPS SSO Host/Origin，直接 HTTP IP 不具备登录或受保护 session 权限。
 
 ### D5 变更门
 
@@ -59,7 +78,8 @@ CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅�
 
 ### D6 写权限的开放条件
 
-E1 默认关闭。开放 M8 的**唯一一条**低风险测试环境受控 E1 能力，必须同时满足下列三项，缺一则 M8 保持阻塞：
+E1 默认关闭。任何候选受控写里程碑（当前名称为 M8）要开放**唯一一条**低风险测试环境受控 E1
+能力，必须同时满足下列三项，缺一则保持阻塞：
 
 1. **ADR-005 已定稿**：审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 绑定和应急关闭开关均已记录。
 2. **项目负责人已批准**该次 E1 能力的范围、环境和回滚方式。
@@ -105,7 +125,7 @@ E1 默认关闭。开放 M8 的**唯一一条**低风险测试环境受控 E1 �
 1. 已注册为写的 operation 若被伪标为 `side_effect=False`，`StepAdmission` 必须拒绝，且 **`ToolGateway` 调用次数与 adapter 调用次数均为 0**。
 2. 模型输出、用户输入或 adapter 尝试设置/覆盖/降级 `side_effect` 或 `effect_class` 时，必须拒绝并 fail-closed。
 3. `effect_class` 未知、未声明或与 CapabilitySpec 冲突时，必须拒绝而非按只读放行。
-4. 在 M0-M7 的任何路径上，对被管运维目标的 E1 调用次数为 0。
+4. 在本 ADR 尚未记录获批受控写例外时，任何里程碑和任何路径上对被管运维目标的 E1 调用次数为 0。
 
 ### D8 CI 基础设施授权时点
 
@@ -117,7 +137,7 @@ CI 使用基础设施的权限按里程碑逐级开放，不得提前：
 | M4 起（经 M4 批准） | 测试产物 + **本地隔离 PostgreSQL**（仅对应 CI job） | 共享或生产实例、真实业务数据 |
 | M5 起（经 M5 批准） | 上述 + **本地隔离 Compose**（仅对应 CI job） | 共享或生产实例、真实业务数据 |
 
-**所有阶段共同约束**：CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、E 类调用。
+**所有阶段共同约束**：CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、F、H、E1、E2 类真实调用，也不执行 G 的真实 provider probe。
 
 ## 后果
 
@@ -125,10 +145,15 @@ CI 使用基础设施的权限按里程碑逐级开放，不得提前：
 - M3 可以立项，且其外部依赖为零，不被外部许可反向阻塞。
 - M4/M5 的本地数据库与 Compose 集成测试有明确许可依据，消除了「禁止任何真实连接」与「真实 PostgreSQL 集成测试」之间的口径矛盾。
 - M6b 与 M6a 解耦：外部许可未获批不阻塞内部能力扩展。
-- 写权限在 M0-M7 全程关闭，M8 的开放条件是显式三项门而非默认演进；生产写与测试环境写是两次独立授权。
+- 写权限不再依赖“M0-M7”这种会被插入里程碑破坏的编号区间：在本 ADR 明确批准受控写例外前
+  持续关闭。RI1–RI6 不授予 E1；生产写与测试环境写仍是两次独立授权。
 - E1 按「是否可能修改被管运维目标」定义，因此绕过 `ToolGateway` 的直接客户端调用和内部持久化代理旁路都无法逃出 E1；同时 TaskStore 持久化、本地 migration 和测试产物本身不构成 E1，但其基础设施许可仍受 D8 的里程碑时点约束。
 - `side_effect` / `effect_class` 的确定性派生与 fail-closed 规则给了 M2/M3 四条可执行的承重断言，E1 边界不再只依赖文字约定。
 - 模型 provider adapter 的实现进度不再隐含真实调用许可，避免 M5 之后被解读为自动获得网络调用权。
+- 飞书、模型、StarRocks、Admin 和生产部署各自有独立许可层；任一 test-env 或部署证据都不能
+  替另一层授权。Admin 的 StarRocks 测试也不能产生第二条工具执行真源。
+- 正式制品可以在所有 provider 默认关闭时先部署；生产网络启用权由 H 层逐项授予，不从
+  `test-env verified`、配置发布、进程 readback 或 canary 计划自动推导。生产写仍由 E2 单独禁止。
 - `ARCHITECTURE.md` 核心契约表需同步收敛字段名，属本 ADR 的直接后果。
 
 ## 备选方案与否决理由
