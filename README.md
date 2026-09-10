@@ -11,8 +11,8 @@
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
-> RI1 已在候选分支完成默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约，最高证据仍为
-> `tests`；它尚未合入、部署或连接真实飞书。
+> RI1 已在候选分支完成默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约；PR #31 首个
+> 受审 head 的八项 CI 全绿，最高证据仍为 `tests`。它尚未合入、部署或连接真实飞书。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -366,9 +366,9 @@ loopback，脚本只访问 `/healthz`、`/readyz`，不请求 OAuth start/callba
 脚本会固定失败并保留现场，不会递归清理。
 
 当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
-smoke 尚未在本机启动容器；目前只有脚本测试与 Compose 静态合并证据。PR #27 和旧 main 的
-`compose-smoke: passed` 只证明 M7 当时的版本，不能替代 RI1 新版容器验证，更不是飞书测试环境、
-部署、canary 或用户验收。
+smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的首个受审 head
+已在 GitHub 隔离 runner 实际跑通新版 Compose smoke 与隔离 PostgreSQL integration；这仍只是
+`tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
 
 ### 尚未完成与能力边界
 
