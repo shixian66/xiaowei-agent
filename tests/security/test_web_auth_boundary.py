@@ -751,6 +751,79 @@ async def test_logging_failure_does_not_replace_request_cancellation(
             await client.get("/app/api/tasks")
 
 
+@pytest.mark.parametrize(
+    ("failure_message_type", "expected_attempts"),
+    [
+        ("http.response.start", ["http.response.start"]),
+        (
+            "http.response.body",
+            ["http.response.start", "http.response.body"],
+        ),
+    ],
+)
+async def test_logging_failure_cannot_replace_transport_send_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_message_type: str,
+    expected_attempts: list[str],
+) -> None:
+    transport_error = RuntimeError("transport-send-failed")
+    attempted_messages: list[str] = []
+    log_calls = 0
+    received = False
+
+    async def inner_app(scope: object, receive: object, send: Any) -> None:
+        response = web_app_module.Response(b"ok", status_code=200)
+        await response(scope, receive, send)
+
+    async def receive() -> dict[str, Any]:
+        nonlocal received
+        if received:
+            return {"type": "http.disconnect"}
+        received = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def transport_send(message: dict[str, Any]) -> None:
+        message_type = str(message["type"])
+        attempted_messages.append(message_type)
+        if message_type == failure_message_type:
+            raise transport_error
+
+    def fail_log(*args: object, **kwargs: object) -> None:
+        nonlocal log_calls
+        del args, kwargs
+        log_calls += 1
+        raise RuntimeError("logging-handler-failed")
+
+    monkeypatch.setattr(web_app_module._LOGGER, "info", fail_log)
+    app = web_app_module._SecurityHeadersMiddleware(
+        web_app_module._WebRequestBoundaryMiddleware(
+            inner_app,
+            public_origin="https://ops.example.test",
+        )
+    )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "https",
+        "path": "/app",
+        "raw_path": b"/app",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"ops.example.test")],
+        "client": ("127.0.0.1", 55000),
+        "server": ("127.0.0.1", 8080),
+    }
+
+    with pytest.raises(RuntimeError) as caught:
+        await app(scope, receive, transport_send)
+
+    assert caught.value is transport_error
+    assert attempted_messages == expected_attempts
+    assert log_calls == 1
+
+
 async def test_oversized_logout_is_rejected_before_auth_state_changes(
     clock, memory_state
 ) -> None:
