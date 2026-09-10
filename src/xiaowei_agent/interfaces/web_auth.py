@@ -20,6 +20,7 @@ from xiaowei_agent.interfaces.feishu_identity import (
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
+    OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
@@ -82,21 +83,21 @@ class FeishuOAuthUnavailableError(RuntimeError):
 
 
 class FeishuOAuthIdentity(Contract):
-    """OAuth provider 返回后立即收窄的唯一身份事实。"""
+    """OAuth provider 的 ``open_id`` 进入本地后使用统一主体引用名。"""
 
     subject_ref: StrictStr = Field(max_length=256)
 
 
 class FeishuOAuthPort(Protocol):
-    """飞书 OAuth 的窄端口；M7 PR 6 只允许 fake 离线实现。"""
+    """只接受受信 callback，并把官方闭集端点的结果收窄为 ``open_id``。"""
 
     def authorization_url(self, *, state: str, redirect_uri: str) -> str:
-        """返回携带给定 state 与固定 callback 的 HTTPS 授权 URL。"""
+        """用代码内固定官方端点返回携带 state 与 callback 的 HTTPS URL。"""
 
     async def exchange_code(
         self, *, code: str, redirect_uri: str
     ) -> FeishuOAuthIdentity:
-        """交换一次 code；不得返回 tenant、权限或 actor。"""
+        """交换一次 code；只返回映射为 subject_ref 的 ``open_id`` 身份事实。"""
 
 
 @dataclass(frozen=True)
@@ -243,12 +244,18 @@ class WebAuthService:
             expected_state=state,
         ):
             raise WebOAuthCodeError
-        await self._sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
-                state_digest=_digest(domain="oauth-state:v1", secret=state),
-                ttl_seconds=self._oauth_state_ttl_seconds,
+        capacity_reached = False
+        try:
+            await self._sessions.issue_oauth_state(
+                command=IssueOAuthStateCommand(
+                    state_digest=_digest(domain="oauth-state:v1", secret=state),
+                    ttl_seconds=self._oauth_state_ttl_seconds,
+                )
             )
-        )
+        except OAuthStateCapacityError:
+            capacity_reached = True
+        if capacity_reached:
+            raise WebOAuthUnavailableError
         return OAuthStart(
             authorization_url=authorization_url,
             state_cookie=state,

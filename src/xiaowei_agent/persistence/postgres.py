@@ -188,9 +188,11 @@ from xiaowei_agent.persistence.store import (
     validate_task_failure_limit,
 )
 from xiaowei_agent.persistence.web_session import (
+    DEFAULT_OAUTH_STATE_CAPACITY,
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
     OAuthState,
+    OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
@@ -198,9 +200,13 @@ from xiaowei_agent.persistence.web_session import (
     WebSessionConflictError,
     WebSessionLookup,
     WebSessionNotFoundError,
+    validate_oauth_state_capacity,
 )
 
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
+_OAUTH_STATE_CAPACITY_LOCK: Final = sa.text(
+    "SELECT pg_advisory_xact_lock(2026091001)"
+)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -830,36 +836,73 @@ class PostgresChannelStore:
 class PostgresWebSessionStore:
     """WebSessionStore 的 PostgreSQL 实现；消费与轮换均由事务裁决。"""
 
-    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        engine: AsyncEngine,
+        clock: Clock,
+        oauth_state_capacity: int = DEFAULT_OAUTH_STATE_CAPACITY,
+    ) -> None:
         self._engine = engine
         self._clock = clock
+        self._oauth_state_capacity = validate_oauth_state_capacity(
+            oauth_state_capacity
+        )
 
     @_persistence_boundary(write=True)
     async def issue_oauth_state(
         self, *, command: IssueOAuthStateCommand
     ) -> OAuthState:
-        now = self._clock()
-        candidate = OAuthState(
-            state_digest=command.state_digest,
-            issued_at=now,
-            expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
-        )
+        capacity_reached = False
+        issued: OAuthState | None = None
         async with _write_transaction(self._engine) as connection:
-            row = (
-                (
-                    await connection.execute(
-                        sa.dialects.postgresql.insert(WEB_OAUTH_STATES)
-                        .values(**oauth_state_to_row(candidate))
-                        .on_conflict_do_nothing()
-                        .returning(WEB_OAUTH_STATES)
+            await connection.execute(_OAUTH_STATE_CAPACITY_LOCK)
+            now = self._clock()
+            await connection.execute(
+                sa.delete(WEB_OAUTH_STATES).where(
+                    sa.or_(
+                        WEB_OAUTH_STATES.c.consumed_at.is_not(None),
+                        WEB_OAUTH_STATES.c.expires_at <= now,
                     )
                 )
-                .mappings()
-                .first()
             )
-            if row is None:
-                raise WebSessionConflictError
-            return row_to_oauth_state(row)
+            pending = await connection.scalar(
+                sa.select(sa.func.count())
+                .select_from(WEB_OAUTH_STATES)
+                .where(
+                    WEB_OAUTH_STATES.c.consumed_at.is_(None),
+                    WEB_OAUTH_STATES.c.expires_at > now,
+                )
+            )
+            if int(pending or 0) >= self._oauth_state_capacity:
+                capacity_reached = True
+            else:
+                candidate = OAuthState(
+                    state_digest=command.state_digest,
+                    issued_at=now,
+                    expires_at=now
+                    + _dt.timedelta(seconds=command.ttl_seconds),
+                )
+                row = (
+                    (
+                        await connection.execute(
+                            sa.dialects.postgresql.insert(WEB_OAUTH_STATES)
+                            .values(**oauth_state_to_row(candidate))
+                            .on_conflict_do_nothing()
+                            .returning(WEB_OAUTH_STATES)
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is None:
+                    raise WebSessionConflictError
+                issued = row_to_oauth_state(row)
+        if capacity_reached:
+            raise OAuthStateCapacityError
+        if issued is None:
+            raise RuntimeError("oauth state issue result missing")
+        return issued
 
     @_persistence_boundary(write=True)
     async def consume_oauth_state(

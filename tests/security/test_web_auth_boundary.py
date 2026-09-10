@@ -123,11 +123,21 @@ def _tokens() -> Iterator[str]:
     )
 
 
-def _service(clock, memory_state, *, oauth: _OAuth) -> WebAuthService:
+def _service(
+    clock,
+    memory_state,
+    *,
+    oauth: _OAuth,
+    oauth_state_capacity: int = 1024,
+) -> WebAuthService:
     principal = _principal()
     tokens = _tokens()
     return WebAuthService(
-        sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
+        sessions=InMemoryWebSessionStore(
+            clock=clock,
+            state=memory_state,
+            oauth_state_capacity=oauth_state_capacity,
+        ),
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal}
         ),
@@ -189,6 +199,50 @@ async def test_authorization_builder_exception_drops_sensitive_context(
         assert exc.__context__ is None
     else:
         pytest.fail("expected WebOAuthUnavailableError")
+
+
+async def test_oauth_start_capacity_returns_503_without_cookie_body_or_log_leakage(
+    clock, memory_state, caplog
+) -> None:
+    oauth = _OAuth()
+    service = _service(
+        clock,
+        memory_state,
+        oauth=oauth,
+        oauth_state_capacity=1,
+    )
+    settings = Settings(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_app_id="cli_test_app",
+        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
+        feishu_identity_file="/run/config/feishu-identities.json",
+        web_detail_base_url="https://ops.example.test",
+    )
+    app = _auth_app(service=service, settings=settings, clock=clock)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="https://ops.example.test",
+        follow_redirects=False,
+    ) as client:
+        first = await client.get("/oauth/feishu/start")
+        assert first.status_code == 302
+        first_state = oauth.states[-1]
+        first_cookie = client.cookies.get("__Host-xiaowei-oauth-state")
+
+        rejected = await client.get("/oauth/feishu/start")
+        rejected_state = oauth.states[-1]
+
+    assert rejected.status_code == 503
+    assert rejected.json() == {"error": {"code": "unavailable"}}
+    assert rejected.headers.get_list("set-cookie") == []
+    rendered = rejected.text + repr(dict(rejected.headers)) + caplog.text
+    assert first_state not in rendered
+    assert rejected_state not in rendered
+    assert first_cookie is not None
+    assert first_cookie not in rendered
+    assert "state_digest" not in rendered
+    assert "database" not in rendered.lower()
 
 
 async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(

@@ -20,6 +20,7 @@ from xiaowei_agent.interfaces.web_auth import (
     WebCsrfError,
     WebOAuthCodeError,
     WebOAuthStateError,
+    WebOAuthUnavailableError,
     WebOriginError,
 )
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
@@ -85,9 +86,14 @@ def _service(
     oauth: _RecordingOAuth | None = None,
     identities: StaticFeishuIdentityDirectory | None = None,
     tokens: tuple[str, ...] = ("state_value_1234567890", "session_value_1234567890"),
+    oauth_state_capacity: int = 1024,
 ) -> tuple[WebAuthService, _RecordingOAuth, InMemoryWebSessionStore]:
     oauth_port = _RecordingOAuth() if oauth is None else oauth
-    sessions = InMemoryWebSessionStore(clock=clock, state=memory_state)
+    sessions = InMemoryWebSessionStore(
+        clock=clock,
+        state=memory_state,
+        oauth_state_capacity=oauth_state_capacity,
+    )
     principal = _principal()
     directory = identities or StaticFeishuIdentityDirectory(
         principals={principal.subject_ref: principal}
@@ -128,6 +134,27 @@ async def test_login_start_persists_only_digest_and_uses_trusted_callback(
     assert len(memory_state.oauth_states) == 1
     digest = next(iter(memory_state.oauth_states))
     assert len(digest) == 64
+
+
+async def test_login_start_maps_state_capacity_to_closed_unavailable_error(
+    clock, memory_state
+) -> None:
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth_state_capacity=1,
+        tokens=("first_state_value_1234567890", "second_state_value_1234567890"),
+    )
+    await service.start_login()
+
+    try:
+        await service.start_login()
+    except WebOAuthUnavailableError as exc:
+        assert str(exc) == "oauth provider unavailable"
+        assert exc.__cause__ is None
+        assert exc.__context__ is None
+    else:
+        pytest.fail("expected WebOAuthUnavailableError")
 
 
 async def test_state_cookie_mismatch_does_not_burn_the_valid_state(

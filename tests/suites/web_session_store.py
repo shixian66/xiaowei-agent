@@ -9,6 +9,7 @@ import pytest
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
+    OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
@@ -87,6 +88,102 @@ async def test_unknown_oauth_state_is_indistinguishable_from_replay(
         await web_sessions.consume_oauth_state(
             command=ConsumeOAuthStateCommand(state_digest="d" * 64)
         )
+
+
+async def test_oauth_state_capacity_rejects_the_first_issue_above_the_limit(
+    bounded_web_sessions: Any,
+) -> None:
+    for digest in ("1" * 64, "2" * 64):
+        await bounded_web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+        )
+
+    with pytest.raises(
+        OAuthStateCapacityError, match=r"^oauth state capacity exhausted$"
+    ):
+        await bounded_web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest="3" * 64,
+                ttl_seconds=60,
+            )
+        )
+
+
+async def test_consumed_and_expired_oauth_states_release_capacity(
+    bounded_web_sessions: Any, clock: Any
+) -> None:
+    consumed_digest = "4" * 64
+    expired_digest = "5" * 64
+    await bounded_web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(
+            state_digest=consumed_digest,
+            ttl_seconds=60,
+        )
+    )
+    await bounded_web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(
+            state_digest=expired_digest,
+            ttl_seconds=1,
+        )
+    )
+    await bounded_web_sessions.consume_oauth_state(
+        command=ConsumeOAuthStateCommand(state_digest=consumed_digest)
+    )
+    clock.advance(seconds=1)
+
+    for digest in ("6" * 64, "7" * 64):
+        await bounded_web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+        )
+    with pytest.raises(OAuthStateCapacityError):
+        await bounded_web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest="8" * 64,
+                ttl_seconds=60,
+            )
+        )
+
+
+async def test_cleaned_oauth_state_digest_no_longer_collides(
+    bounded_web_sessions: Any, clock: Any
+) -> None:
+    digest = "9" * 64
+    command = IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_state(command=command)
+    await bounded_web_sessions.consume_oauth_state(
+        command=ConsumeOAuthStateCommand(state_digest=digest)
+    )
+
+    reissued = await bounded_web_sessions.issue_oauth_state(command=command)
+    assert reissued.state_digest == digest
+    clock.advance(seconds=60)
+    reissued_after_expiry = await bounded_web_sessions.issue_oauth_state(
+        command=command
+    )
+    assert reissued_after_expiry.state_digest == digest
+
+
+async def test_concurrent_oauth_state_issuance_cannot_cross_capacity(
+    bounded_web_sessions: Any,
+) -> None:
+    barrier = asyncio.Barrier(4)
+
+    async def issue(index: int) -> object:
+        await barrier.wait()
+        return await bounded_web_sessions.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest=f"{index + 10:064x}",
+                ttl_seconds=60,
+            )
+        )
+
+    results = await asyncio.gather(
+        *(issue(index) for index in range(4)),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(item, Exception) for item in results) == 2
+    assert sum(isinstance(item, OAuthStateCapacityError) for item in results) == 2
 
 
 async def test_session_rotation_revokes_the_previous_cookie_digest(
@@ -196,6 +293,10 @@ WEB_SESSION_STORE_CASES = (
     test_oauth_state_is_single_use_and_expiry_is_fail_closed,
     test_concurrent_oauth_state_consumption_has_exactly_one_winner,
     test_unknown_oauth_state_is_indistinguishable_from_replay,
+    test_oauth_state_capacity_rejects_the_first_issue_above_the_limit,
+    test_consumed_and_expired_oauth_states_release_capacity,
+    test_cleaned_oauth_state_digest_no_longer_collides,
+    test_concurrent_oauth_state_issuance_cannot_cross_capacity,
     test_session_rotation_revokes_the_previous_cookie_digest,
     test_rotation_collision_does_not_revoke_the_current_session,
     test_expired_and_revoked_sessions_share_the_hidden_not_found_result,

@@ -4,14 +4,17 @@ import contextlib
 import datetime as dt
 import io
 from pathlib import Path
+from typing import cast
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
 
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
+from xiaowei_agent.persistence.postgres import PostgresWebSessionStore
 from xiaowei_agent.persistence.rows import (
     oauth_state_to_row,
     row_to_oauth_state,
@@ -20,7 +23,10 @@ from xiaowei_agent.persistence.rows import (
 )
 from xiaowei_agent.persistence.schema import WEB_OAUTH_STATES, WEB_SESSIONS
 from xiaowei_agent.persistence.web_session import (
+    DEFAULT_OAUTH_STATE_CAPACITY,
+    IssueOAuthStateCommand,
     OAuthState,
+    OAuthStateCapacityError,
     RotateWebSessionCommand,
     WebSession,
 )
@@ -31,9 +37,67 @@ def web_sessions(clock, memory_state):
     return InMemoryWebSessionStore(clock=clock, state=memory_state)
 
 
+@pytest.fixture
+def bounded_web_sessions(clock, memory_state):
+    return InMemoryWebSessionStore(
+        clock=clock,
+        state=memory_state,
+        oauth_state_capacity=2,
+    )
+
+
 bind(globals(), WEB_SESSION_STORE_CASES)
 
 _NOW = dt.datetime(2026, 9, 9, 9, 0, tzinfo=dt.UTC)
+
+
+def test_oauth_state_capacity_contract_is_fixed_and_non_sensitive() -> None:
+    assert DEFAULT_OAUTH_STATE_CAPACITY == 1024
+    error = OAuthStateCapacityError()
+    assert str(error) == "oauth state capacity exhausted"
+    assert error.args == ("oauth state capacity exhausted",)
+
+
+@pytest.mark.parametrize("invalid", [True, 0, -1])
+def test_web_session_stores_reject_non_positive_or_boolean_capacity(
+    clock, memory_state, invalid: object
+) -> None:
+    factories = (
+        lambda: InMemoryWebSessionStore(
+            clock=clock,
+            state=memory_state,
+            oauth_state_capacity=cast(int, invalid),
+        ),
+        lambda: PostgresWebSessionStore(
+            engine=cast(AsyncEngine, object()),
+            clock=clock,
+            oauth_state_capacity=cast(int, invalid),
+        ),
+    )
+    for factory in factories:
+        with pytest.raises(ValueError, match="oauth state capacity must be positive"):
+            factory()
+
+
+async def test_default_capacity_rejects_the_1025th_pending_state(
+    clock, memory_state
+) -> None:
+    store = InMemoryWebSessionStore(clock=clock, state=memory_state)
+    for index in range(1024):
+        await store.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest=f"{index:064x}",
+                ttl_seconds=60,
+            )
+        )
+
+    with pytest.raises(OAuthStateCapacityError):
+        await store.issue_oauth_state(
+            command=IssueOAuthStateCommand(
+                state_digest=f"{1024:064x}",
+                ttl_seconds=60,
+            )
+        )
 
 
 def test_persisted_models_hold_only_digests_subject_and_time_facts() -> None:
