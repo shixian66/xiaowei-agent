@@ -7,9 +7,9 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 项目目录 | `/Users/kloenguyen/Desktop/agent` 主 checkout 仍停在旧计划分支并保留用户未跟踪文件，本轮未在其中开发；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
-| 截止时间 | 2026-09-09（Asia/Shanghai） |
-| 阶段 | **M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的真实只读 adapter 已完成离线实现、审查并合入 `main`；真实测试环境验证延期，证据等级仍为 `tests`。M7 PR 1–8 离线实现范围已由项目负责人验收并归档，最强证据仍为 `tests`；这不是 M7 完整退出或真实渠道验收，不解锁只读 V1 或 M8。真实 OAuth port、应用、凭据、网络、部署、canary 与产品用户验收继续使用独立硬门** |
-| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.3；V2 于 2026-09-01 获批，V2.2 于 2026-09-08 将 M7 离线窄例外扩至 PR 1–8，V2.3 于 2026-09-09 固化离线范围可单独归档但不满足完整退出门；真实渠道仍未授权 |
+| 截止时间 | 2026-09-10（Asia/Shanghai） |
+| 阶段 | **项目负责人已批准总体计划 V2.4、ADR-007 修订与 RI1 离线开工；RI1 从 `66864253e0c9c9a0c6ebda1eec3a25b8e06a8df2` 开始，只实现默认关闭的 OAuth/Web 代码门。没有真实应用、secret、网络调用、部署、canary 或用户验收许可。ADR-007 H 层生产只读授权仍未单独签认并保持关闭。** |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；项目负责人于 2026-09-10 批准 RI1 默认关闭、无真实调用的离线开工；该批准不包含 ADR-007 H 层生产只读授权 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
@@ -50,7 +50,7 @@
 | M6b 详细计划 | [docs/plans/M6b-starrocks-test-readonly.md](docs/plans/M6b-starrocks-test-readonly.md) V1.1；2026-09-07 经复审后获负责人批准离线开发 |
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
 | M7 状态 | **离线范围已验收并归档**。PR #20–#27 已合入最终代码/测试基线 `ba5ecfe5edffb408e20c4bb9cbf494bfbb035b82`；PR #28 以 `a5c88cbc285658f7f38355a9470bfdd725858ba5` 合入离线完成交接。归档见 [docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)，验收报告见 [docs/handoff/M7-acceptance-report.md](docs/handoff/M7-acceptance-report.md)。证据等级仍为 `tests`，真实渠道退出门未通过 |
-| 下一步 | **当前没有获批的 M7 真实渠道阶段或 M8 实现任务。** 若转入真实渠道验证，必须另行明确发出开工口令并重新核对 §0.3.2 的应用、凭据、网络、TLS/Ingress、部署、canary 与用户验收门；离线归档不解锁只读 V1 或 M8。M6b 真实验证继续独立延期，M7 离线证据不得提升 M6b 状态 |
+| 下一步 | **执行 RI1 默认关闭、离线实现。** 当前不读取真实 secret、不发起真实飞书或其他外部网络调用；RI2 现场门、M6b/RI4 真实验证、H 层生产只读、部署、canary、用户验收与 M8 均未解锁 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack 与 M6b 默认关闭的 target-bound StarRocks adapter 均已合入 `main`；真实激活保持 fail-closed。仍未连接任何真实运维目标 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -93,12 +93,13 @@
 
 | ADR | 主题 | 状态 |
 | --- | --- | --- |
-| [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) | 首批能力、初始执行上下文与真实调用许可 | Accepted 2026-09-01 |
+| [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md) | 首批能力、初始执行上下文与真实调用许可 | Accepted Revision 2026-09-10；H 层未签认 |
 | [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md) | 工程与测试基线：Python 3.11、pytest、security marker gate、Ruff、mypy | Accepted 2026-09-01 |
 | [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) | `plan_hash` 规范形状、审批绑定与工具准入 | Accepted 2026-09-02 |
 | [ADR-010](docs/adr/ADR-010-m5-durable-attempt-and-compose-boundary.md) | M5 持久执行尝试、事务审计、readiness 与本地 Compose 边界 | Accepted 2026-09-05 |
 | [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md) | 多能力 binding、operation gateway 与固定 PromQL 模板准入 | Accepted 2026-09-05 |
 | [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md) | M6b 精确目标绑定、固定 preflight 与测试环境只读激活边界 | Accepted 2026-09-07 |
+| [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md) | 真实飞书 OAuth 与 Web 激活安全契约 | Accepted 2026-09-10 |
 
 首批三个能力：`starrocks.slow_query.diagnose`（M3）、`prometheus.alert.evidence`（M6a）、`asset.inventory.lookup`（M6a），均先只读 fake/recording。
 
@@ -162,6 +163,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     项目负责人于 2026-09-09 明确按离线范围验收并授权归档。该结论只关闭离线实施任务；真实
     OAuth port、应用注册、凭据、网络、部署、canary 与产品用户验收仍保持独立硬门，M7 完整退出
     标准未通过。
+13. **RI1 已获离线开工许可**：从基线 `66864253e0c9c9a0c6ebda1eec3a25b8e06a8df2`
+    实现默认关闭的 OAuth/Web 代码门；不读取真实 secret、不发起真实网络调用，也不解锁 RI2、
+    H 层生产只读、部署、canary、用户验收或 M8。
 
 ## 6. 仍需拍板的事项
 
