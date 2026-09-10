@@ -1,9 +1,15 @@
 # 小维 Agent 2.0 总体开发计划
 
-> 状态：Approved V2.3。V2 于 2026-09-01 由项目负责人批准；V2.1 于 2026-09-07 为 M7 PR 1–3
+> 状态：Proposed V2.4，等待项目负责人和 Claude/Codex 审核；在明确批准前，V2.3 仍是当前有效版本。
+> V2 于 2026-09-01 由项目负责人批准；V2.1 于 2026-09-07 为 M7 PR 1–3
 > 增加离线窄例外；V2.2 于 2026-09-08 将该例外扩至 M7 PR 1–8，同时把真实应用、凭据、网络、
 > 部署与 canary 保留为独立硬门；V2.3 于 2026-09-09 固化“离线范围可单独验收归档，但不满足
-> M7 完整退出门、不解锁真实渠道、只读 V1 或 M8”。每个阶段仍需详细计划、文档基线与明确开工口令。
+> M7 完整退出门、不解锁真实渠道、只读 V1 或 M8”。V2.4 候选把六个真实接入阶段映射为
+> RI1–RI6，并修正真实调用许可与 E1 表述；本次纯文档变更本身不授权实现、联网或部署。
+> **单独签认项**：V2.4 把原 ADR-007 E2 的“生产连接与生产写均默认禁止”拆成 H 层“RI6
+> 可逐项目标授权生产只读连接”和 E2“生产写继续禁止”。项目负责人必须明确知情并单独批准这一
+> 授权面变化；普通的文档合并或 RI1 开工口令不能代替该签认。
+> 每个阶段仍需详细计划、文档基线与明确开工口令。
 
 ## 1. 文档定位
 
@@ -44,6 +50,7 @@
   → 第二、第三条能力（fake）
   → 测试环境真实只读验证
   → Web / 飞书渠道
+  → RI1–RI6 真实接入与发布证据
   → 受控写闭环
   → LangGraph 准入评估
 ```
@@ -60,6 +67,12 @@
 M7 的离线实现范围可以由项目负责人单独验收并归档，但该归档只关闭离线实施任务：不表示 M7
 最终退出标准已通过，不解锁真实渠道、只读 V1 候选发布点或 M8，也不改变
 [M7 详细计划](docs/plans/M7-web-feishu-channels.md) §0.3.2 对真实激活的硬门。
+
+**V2.4 候选真实接入路线**：RI1–RI6 是 M7/M6b 延期真实验证以及模型、Admin、部署的独立
+里程碑映射，不是把六类风险塞进一个 PR。RI1 完成 M7 的真实 OAuth/Web 激活代码门；RI2 按
+M7 §0.3.2 取得真实飞书测试环境证据；RI3 单独开放一个真实模型供应商；RI4 完成 M6b 延期的
+StarRocks 现场只读验证；RI5 在前三类配置契约稳定后实现最小 Admin；RI6 才处理正式部署、
+canary 和用户验收。详细文件与 PR 边界见第 7 节；V2.4 未批准前不得据此开工。
 
 ### 3.2 不采用的路线
 
@@ -92,13 +105,13 @@ M7 的离线实现范围可以由项目负责人单独验收并归档，但该�
 | 首个能力 | `starrocks.slow_query.diagnose`，只读、限定时间窗和字段白名单 | M0 已拍板（ADR-007） | 不进入 M3 |
 | 第二个能力 | `prometheus.alert.evidence`，只允许注册模板生成 PromQL | M0 已拍板（ADR-007） | 不创建 capability |
 | 第三个能力 | `asset.inventory.lookup`，仅精确资产标识查询 | M0 已拍板（ADR-007） | 不创建 capability |
-| 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许，CI 对应 job 同样在该时点之后才可使用（ADR-007 D8）；StarRocks 非生产只读需 M6b 单独授权 | M0 已拍板（ADR-007） | 禁止任何真实连接 |
-| 写操作许可（E1） | E1 = **任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关（ADR-007 D7）；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True`，绕过 Gateway 的直接调用与内部持久化旁路同属违规。**M0-M7 全程禁止 E1，含非生产环境**；M8 才可开放一条低风险测试环境受控写，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；**生产连接与生产写默认禁止**，需新的独立授权和独立验收计划，不能由 M8 结论推导。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1** | M0 已拍板（ADR-007 D6/D7）／M8 逐条复核 | 不开放任何环境的 E1 操作 |
+| 外部调用许可 | 真实运维目标系统与真实模型 API 的**网络调用**在 M0-M6a 全程禁止，领域 adapter 只用 fake/recording；本地隔离 PostgreSQL/Compose 经 M4/M5 各自里程碑批准后允许，CI 对应 job 同样在该时点之后才可使用（ADR-007 D8）。M6b/RI4 的 StarRocks、RI2 的飞书、RI3 的模型与 RI6 的生产连接必须分别满足 ADR-007 的独立授权门，不能相互推导 | M0 已拍板；V2.4 需同步修订 ADR-007 | 禁止任何未单独授权的真实连接 |
+| 写操作许可（E1） | E1 = **任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关（ADR-007 D7）；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True`，绕过 Gateway 的直接调用与内部持久化旁路同属违规。**E1 持续关闭，直到一个单独获批的受控写里程碑明确修订 ADR-007；RI1–RI6、只读接入、模型、渠道、Admin、部署或里程碑编号变化都不授予 E1。**当前候选仍是 M8，且须 ADR-005 定稿、项目负责人批准、ADR-007 记录明确例外或完成修订三者齐备；生产连接与生产写需新的独立授权和验收计划。TaskStore/approval/audit/evidence 的内部持久化、本地 migration 和测试 fixture/recording **不属于 E1** | M0 已拍板（ADR-007 D6/D7）／任何受控写里程碑逐条复核 | 不开放任何环境的 E1 操作 |
 | Git 与 CI | M0 已初始化本地 `main` 基线；远程与 CI 由 M1 单独拍板后绑定 | M1 | 不伪造远程、PR 或 CI |
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放 E1 |
-| 模型供应商 | 核心测试使用 fake interpreter；M5 后可单独决策是否**实现** provider adapter，但**实现权不等于调用权**；发起真实模型网络调用必须另设独立里程碑，并单独批准 ADR、凭证引用、数据范围和保留策略，且不得与 ADR-007 的 M0-M6a 禁止期冲突 | M5 仅限 adapter 实现决策；真实调用另设独立里程碑 | 不增加外部模型依赖，不发起任何真实模型调用 |
+| 模型供应商 | 核心测试使用 fake interpreter；RI3 只允许一个负责人明确选定的 provider/model，且必须先批准 ADR、逻辑凭证引用、输入数据边界、保留/训练策略、超时、错误和供应商项目硬预算；实现权不等于真实调用权，现场调用另需 RI3 GO | RI3 ADR/现场门 | 未拍板则停在文档，不增加外部模型依赖、不联网 |
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
 
@@ -117,10 +130,19 @@ M7 的离线实现范围可以由项目负责人单独验收并归档，但该�
 | M6a 第二、第三条 fake 能力 | Phase 5 | Prometheus、资产查询两个独立闭环验证扩展性并产生 DSL 决策数据 |
 | M6b StarRocks 测试环境真实只读 | Phase 5 | 在明确授权的非生产环境完成 StarRocks 真实 adapter 与只读运行验证 |
 | M7 Web / 飞书渠道 | Phase 5 | 多渠道只做协议与渲染，复用同一 Runtime 结果 |
+| RI1 飞书 OAuth / Web 激活 | Real Integration | 默认关闭地实现真实 OAuth adapter 与 Web composition root；基础 Compose 仍只绑 loopback |
+| RI2 飞书测试环境验证 | Real Integration | 直接满足 M7 §0.3.2，真实验证 OAuth、长连接、消息、群成员与身份，最高 `test-env verified` |
+| RI3 单一真实模型供应商 | Real Integration | 模型只产结构化草案/解释，数据、凭证、超时、成本与 fallback 有界，最高按实际证据标记 |
+| RI4 StarRocks 真实只读 | Real Integration | 完成 M6b 延期现场门；只验证已有 operation，最高 `test-env verified` |
+| RI5 最小 Web Admin | Real Integration | admin 只管理闭集逻辑目标/凭证引用；版本、测试请求、发布、readback、审计和回滚可证明 |
+| RI6 Compose 部署 / canary / UAT | Real Integration | 生产 override、部署 SHA、回滚、canary 与产品验收分级记录 |
 | M8 受控写闭环 | Phase 5 | 测试环境中一条低风险写能力完成审批、恢复、readback 和故障注入验收 |
 | M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter；**不授予 Multi-Agent 权限** |
 
-只读 V1 的候选发布点要求 M6a、M6b 和 M7 各自通过退出门；受控写 V1 的候选发布点是 M8。代码测试通过不等于发布，仍需按 `declared → configured → deployed SHA → tests → canary → user-accepted` 记录最强证据。
+原只读 V1 的候选发布点要求 M6a、M6b 和 M7 各自通过退出门；在 V2.4 真实接入路线中，RI2
+完成 M7 现场门、RI4 完成 M6b 现场门，RI6 才允许形成正式部署/canary/UAT 证据。受控写仍是
+另一个独立候选，不由 RI1–RI6 自动解锁。代码测试通过不等于发布，仍需按
+`declared → configured → deployed SHA → tests → canary → user-accepted` 记录最强证据。
 
 ## 7. 各里程碑实施与退出标准
 
@@ -228,7 +250,7 @@ CI 必须分别运行全量测试和 security marker，不用一次全量结果�
 - SQL 多语句、注释注入、写语句、未知方言、超范围时间窗和非白名单列必须 fail-closed。
 - Runtime 契约测试证明 `XiaoweiRuntime` 的调用不能跳过 Resolver、Planner、Admission 或 Gateway。
 - 合成副作用步骤证明：缺少有效审批时 Runner 持久化暂停/待审批状态，ToolGateway 调用次数为 0；恢复时重新解析 actor/tenant_id/environment_id/target/current state，重算 `plan_hash` 与 `target_fingerprint`，任一不匹配都拒绝且 Gateway 调用次数仍为 0。该测试只验证控制流，不代表 M8 的 E1 能力已实现。
-- **伪标拒绝测试**：把一个已注册为写的 operation 伪标为 `side_effect=False` 时，`StepAdmission` 必须拒绝，且 **`ToolGateway` 调用次数与 adapter 调用次数均为 0**；同时断言 M0-M7 的任何路径上对被管运维目标的 E1 调用次数为 0。
+- **伪标拒绝测试**：把一个已注册为写的 operation 伪标为 `side_effect=False` 时，`StepAdmission` 必须拒绝，且 **`ToolGateway` 调用次数与 adapter 调用次数均为 0**；同时断言在 ADR-007 尚未记录获批受控写例外时，任何里程碑和任何路径上对被管运维目标的 E1 调用次数均为 0。
 - **Reflection 越权拒绝测试**：Reflection 提出新增步骤、更换工具、扩大目标或把只读升级为写的建议时，该建议必须被丢弃，计划与终态不变，且 **`ToolGateway` 与 adapter 调用次数均为 0**；仅当 `ExecutionPlan` 中存在预编译的预算内只读分支时，才由 Runner 按确定性条件执行并照常经过 `StepAdmission`。
 - Runner/TaskStore 契约测试证明每次 CAS 状态变更携带 `expected_version`，每次 lease 内变更携带有效 fencing token，并始终采用存储层返回的 winner。
 - `python -m pytest -q` 与 `python -m pytest -m security -q` 全部通过；触及 planning/governance/tools 的 PR 必须附两条命令尾部输出。
@@ -333,11 +355,84 @@ readback 与回滚。但该控制面、真实模型调用、审批/重跑和 Jen
 
 **退出标准**：目标用户可在至少一个真实渠道完成只读提问、查看任务状态和引用证据；用户验收记录与代码/部署证据分开。
 
+### RI1：飞书 OAuth 与 Web 激活
+
+**目标**：在默认关闭且无真实调用的代码门内，实现真实 OAuth adapter 和 Web composition root。
+
+**进入条件**：V2.4 与 RI1 详细计划已批准；从最新 `main` 入职。基础 Compose 的 Web 宿主端口
+继续为 `127.0.0.1:8080`，真实 OAuth public origin 只允许已有 HTTPS SSO 域名。
+
+**退出标准**：离线契约、安全反证、Protocol conformance、`.env.example` 闭集和 Compose 静态
+契约通过；真实开关仍默认关闭，最高证据为 `tests`。
+
+### RI2：飞书测试环境真实验证
+
+**目标**：不新增业务能力，按 [M7 详细计划](docs/plans/M7-web-feishu-channels.md) §0.3.2 的
+唯一硬门取得 OAuth、长连接、消息发送/更新、群成员与身份权限的测试环境证据。
+
+**进入条件**：M7 §0.3.2 每一项已逐项满足并由负责人明确给出现场 GO；旧小维可在窗口内先停机。
+RI2 计划不得复制或另立一份较弱的授权清单。
+
+**退出标准**：成功、失败和回滚路径绑定精确 SHA/镜像 digest，最高只写
+`test-env verified`；不写 deployed、canary 或 user accepted。
+
+### RI3：单一真实模型供应商
+
+**目标**：接入一个明确选定的模型，使其只产生严格结构化 `IntentDraft` 与不改事实的解释建议。
+
+**进入条件**：负责人批准唯一供应商、模型、固定 endpoint/API 形态、逻辑凭证名、发送字段白名单、
+区域与保留/训练策略、15 秒超时、输入输出上限和供应商项目硬预算。未拍板时只允许文档工作。
+
+**退出标准**：所有现有同步解释器调用点完成一次性异步迁移；provider 实现有
+`src/xiaowei_agent/_conformance.py` 类型锚；越权字段整体拒绝并确定性 fallback。真实调用另需
+现场 GO；完成固定脱敏样本、成本/超时/fallback 和回滚场景后最高标记 `test-env verified`，且该
+证据不授予任何执行权限或生产网络调用权。
+
+### RI4：StarRocks 测试环境真实只读
+
+**目标**：完成 M6b 延期的现场门，不新增 capability、operation 或 SQL 面；允许 1–2 分钟的合法查询。
+
+**进入条件**：直接复用 M6b 详细计划、ADR-012 和当前 handoff 的未完成现场条件。唯一目标、带外
+digest、只读授权、逻辑凭证名、数据处置、窗口、actor 与现场 GO 缺一即停止。
+
+**退出标准**：server query 180 秒、driver read 190 秒、binding 正常调用 195 秒、Policy 硬上限
+200 秒和 policy revision 变更均有承重测试；真实证据最高为 `test-env verified`。超时后可能继续的
+PyMySQL worker thread/服务端会话作为残余风险记录，不新增 `KILL`。
+
+### RI5：最小 Web Admin 配置中心
+
+**目标**：只有独立 `manage_configuration` 权限可管理飞书、模型和 StarRocks 的不可变配置版本、
+逻辑凭证引用、测试请求、显式发布、readback、审计和回滚。
+
+**进入条件**：RI1/RI3/RI4 的配置契约已稳定。StarRocks draft 只能选择部署者预登记的
+`target_ref` 和 `credential_ref`，不能提交 host、port、任意 endpoint 或文件路径。
+
+**退出标准**：Admin application 不 import/调用 Gateway，也不构造准入/计划/工具 DTO；StarRocks
+测试请求由默认关闭的独立 worker 通过完整 Runtime/Runner/Admission/Gateway 执行，但只有
+`interfaces/local_stack.py` 可以 import tools，worker 入口只能消费其窄 stack。ADR-016 必须明确该
+进程是对 M7“只有 task-worker 装配完整执行 Runtime”口径的唯一例外，并记录不能让 active worker
+热切换候选凭证/目标的理由。测试请求有持久限流、审计和 draft digest 绑定；新增 Protocol 实现均
+有 conformance 锚。
+
+### RI6：Compose 正式部署、canary 与用户验收
+
+**目标**：用生产 override 发布已审查的不可变镜像，分开取得 deployed、canary 和 user accepted 证据。
+
+**进入条件**：前序必需 provider 达到各自退出门；项目负责人指定主机、窗口、canary 范围、
+验收人、旧小维恢复和回滚责任。生产 override 才可发布 `IP:8080`，而 OAuth/session 路由仍只接受
+已批准 HTTPS SSO Host/Origin；直接 HTTP IP 不能完成登录或受保护 session。StarRocks canary 若
+沿用 RI4 test-env 目标，仍不得宣称生产能力；若换成新的生产只读目标，必须重新完整执行 M6b §3.3
+与 ADR-012 的 canonical target、四类 digest、physical identity/DDL preflight、证据处置和现场 GO，
+不能只打开 H 层开关。
+
+**退出标准**：部署 SHA/image digest、active/loaded config readback、回滚演练、canary 窗口和 UAT
+逐级记录；基础 Compose 仍保持 loopback，不自行合并、归档或宣布全量上线。
+
 ### M8：第一条受控写闭环
 
 **目标**：只在 TaskStore、身份、渠道和 readback 已稳定后，开放一条低风险的测试环境受控 E1 能力。
 
-**进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。M0-M7 期间 E1 全程关闭，不得通过配置项、feature flag 或默认值静默开启；内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
+**进入条件**（三项须同时满足，缺一则 M8 保持阻塞）：① 审批主体、渠道、有效期、拒绝/过期/冲突语义、policy revision 和应急关闭开关均已拍板并写 ADR-005；② 项目负责人已批准该次写能力的范围、环境和回滚方式；③ ADR-007 已记录明确的写操作例外或完成修订。E1 在这三项完成前持续关闭；RI1–RI6、只读能力、模型、渠道、Admin、部署以及里程碑编号插入都不构成授权。不得通过配置项、feature flag 或默认值静默开启；内部持久化不得作为绕过 `ToolGateway` 修改运维目标的代理通道。
 
 **交付物**：precheck、ApprovalGate pause、持久化审批、恢复重解析、`plan_hash`/`target_fingerprint` 复核、one write admission、幂等键、fencing、readback 和 `indeterminate`。
 
