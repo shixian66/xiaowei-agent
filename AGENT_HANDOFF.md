@@ -84,7 +84,7 @@
 - **ADR-009 固化 hash 与准入形状**（M2）：`plan_hash` 规范输入集含 `effect_class`、`condition` 与 `budget`，`PLAN_SCHEMA_VERSION = 1`；`ExecutionPlan` 绑定**单一 capability**，步骤不携带 capability 标识；两个指纹**不作为 `ExecutionPlan` 字段**，绑定值存于 `ApprovalRequest`（含 `policy_revision`）；`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`。详见 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)。
 - **生产 policy snapshot 必须整体版本化**：M6a PR 1 新增 Prometheus 只读 profile 后，production revision 从 `policy-2026-09-01` 递增为 `policy-2026-09-05`；PR 2 新增资产只读 profile 后再次递增为 `policy-2026-09-05.2`。每次都与有序 profile ID 集合做成对 golden；测试 fake 的独立 revision 不随生产值机械迁移。
 - **覆盖完备性由机制承重，不由人记得**（M2）：凡"某 DTO 全部字段必须进入某 hash"一律用显式「字段 → 指纹键」映射表实现，安全测试断言映射表键集等于 `model_fields`；含嵌套 DTO（`PlanBudget`、`StepCondition`）。给 DTO 加字段却不更新映射表会立即转红。
-- **校验绕过面已封死**（M2）：`model_copy(update=...)` 与 `model_construct` 在 Pydantic v2 中完全不触发校验，均已在 `Contract` 基类封死/重新校验；未绑定的 `BaseModel.model_copy(obj, ...)` 由源码扫描禁止；不保留任何"未校验复制"的逃生口。需在校验期改写取值时一律用**字段级** `AfterValidator`——model 级 after-validator 返回非 `self` 的对象在 `__init__` 路径上会被 Pydantic 丢弃，规范化会静默失效。
+- **跨模块 `Contract` 的校验绕过面已封死**（M2）：`model_copy(update=...)` 与 `model_construct` 在 Pydantic v2 中完全不触发校验，均已在 `Contract` 基类封死/重新校验；未绑定的 `BaseModel.model_copy(obj, ...)` 由源码扫描禁止；跨模块 `Contract` 不保留任何"未校验复制"的逃生口。直接继承 `BaseModel` 的 `Settings` 不在这条保证内。需在校验期改写取值时一律用**字段级** `AfterValidator`——model 级 after-validator 返回非 `self` 的对象在 `__init__` 路径上会被 Pydantic 丢弃，规范化会静默失效。
 - **决策权责矩阵已显式化**（`ARCHITECTURE.md` §4.3）：LLM 只在意图提取、证据解释和澄清措辞上可建议；capability/目标/参数/步骤/SQL/工具顺序由 Resolver+PlanCompiler 决定；Policy、effect 分类、审批有效性由确定性治理组件决定；工具执行由 Runner 经 StepAdmission+ToolGateway 驱动；测试环境连接授权与 E1 审批属人工授权；生产连接与生产写当前不授权；`route_shadow` record-only。该表**不授予任何新权限、不放宽 ADR-007，也不引入 `autonomy_level` 运行字段**；自治程度提升必须有 eval、失败样本、明确授权和 ADR，**不因模型或框架升级自动提高**。
 - **错误分析闭环与 eval 边界**（`ARCHITECTURE.md` §13.1/§13.2）：闭环为「运行/eval → 阅读 trace → 错误归因 → 选择单一根因 → 修复 → 脱敏失败样本晋升为 regression/eval case → 复测」。职责时点：**M1 只建通用结构化日志、`trace_id` 传递与脱敏基础，不定义业务事件契约；M2 定义最小步骤级 trace/audit 事件契约；M3 建立首个完整闭环**。组件级与端到端 eval 分开记录；安全、权限、SQL、审批、终态由确定性断言验收，**LLM-as-judge 不得裁决安全正确性**；eval 与人工判断不一致时先校准 evaluator；离线 eval 不表述为部署、canary 或用户验收。
 - **Multi-Agent 独立延期**（`ARCHITECTURE.md` §12.1）：M9 只评估 `WorkflowRunner` 实现，**不授予 Multi-Agent 权限**；采用 LangGraph ≠ 采用 Multi-Agent；Multi-Agent 须在 M9 之后另设独立里程碑与独立 ADR，且永远不得绕过既有安全链或产生第二个状态、计划、审批、工具路由真源。
@@ -235,9 +235,14 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 ### 已验证
 
 - **RI1 合并前审查补修实现基线 `2d67b59e128c1c226fb062708edf10c9251a4b3e` 已通过本地深档验证，
-  证据等级仍为 `tests`**：审查提出的 I1/I2/M1–M3 均沿真实调用链修复；N1 经源码与既有对抗测试
-  证明不是不可达分支，因此保留。最终受影响模块 413 passed；四条规范门分别为 3101 passed /
-  195 skipped / 5 warnings、security 1240 passed / 79 skipped / 1977 deselected / 5 warnings、Ruff
+  证据等级仍为 `tests`**：审查提出的 I1/I2/M1–M3 均沿真实调用链修复。N1 的准确证据口径是：
+  经 `load_settings()` 的正常进程入口无法产生 Web/OAuth 半开状态，配置会先被 `Settings` 校验拒绝，
+  因而 `main()` 的第二个半开检查对该入口不可达；该检查只在 `Settings` 校验被绕过时可达，属于
+  纵深防御，因此保留。`test_real_module_entry_rejects_half_enabled_web_before_secret_access` 只证明
+  前述 `ConfigError` 路径；实际命中纵深防御的是使用 `Settings.model_construct(...)` 的
+  `test_main_rejects_bypassed_half_enabled_settings_before_serving`。最终受影响模块 413 passed；四条
+  规范门分别为 3101 passed / 195 skipped / 5 warnings、security 1240 passed / 79 skipped /
+  1977 deselected / 5 warnings、Ruff
   通过、mypy 153 个源文件通过。新增反例先在旧实现得到 OAuth deadline 1 failed，以及 OAuth start
   资源/cookie 边界 12 failed / 4 passed，修复后分别 3 passed 与 16 passed；全局 origin、OAuth start、
   timeout pairing 与 SDK domain 四个隔离变体也分别按预期转红。两轮独立复审确认 deadline 起点、
