@@ -13,6 +13,7 @@ from pydantic import Field, ValidationError
 
 from xiaowei_agent.contracts import Contract, FreeText, StrictStr
 from xiaowei_agent.contracts.enums import ProjectionErrorCode
+from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
 
 if TYPE_CHECKING:
     from xiaowei_agent.application.channel_projection import ChannelMessageError
@@ -163,16 +164,14 @@ def _convert_message_event(raw: object) -> FeishuMessageEvent:
 
 
 def _read_secret_file(path: str) -> str:
-    from xiaowei_agent.interfaces.secret_file import (
-        _read_secret_file as _read_shared_secret_file,
-    )
-    from xiaowei_agent.interfaces.secret_file import _SecretFileError
+    # listener/worker import SDK seam 时不加载 credential 边界；只在真实调用前加载公开 API。
+    from xiaowei_agent.interfaces.secret_file import SecretFileError, read_secret_file
 
     failed = False
     secret = ""
     try:
-        secret = _read_shared_secret_file(path)
-    except _SecretFileError:
+        secret = read_secret_file(path)
+    except SecretFileError:
         failed = True
     if failed:
         raise FeishuSdkError("feishu sdk unavailable")
@@ -231,6 +230,7 @@ class FeishuSdkInboundTransport:
             self._app_id,
             secret,
             event_handler=dispatcher,
+            domain=FEISHU_PROVIDER_ORIGIN,
         )
         _callable_attr(client, "start")()
 
@@ -241,6 +241,7 @@ def _build_client(*, app_id: str, secret: str, timeout_seconds: float) -> object
     builder = _callable_attr(_required_attr(sdk, "Client"), "builder")()
     builder = _callable_attr(builder, "app_id")(app_id)
     builder = _callable_attr(builder, "app_secret")(secret)
+    builder = _callable_attr(builder, "domain")(FEISHU_PROVIDER_ORIGIN)
     builder = _callable_attr(builder, "timeout")(timeout_seconds)
     return _callable_attr(builder, "build")()
 

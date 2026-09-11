@@ -14,8 +14,10 @@ from typing import Final
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from xiaowei_agent.interfaces.secret_file import _read_secret_file, _SecretFileError
+from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
+from xiaowei_agent.interfaces.secret_file import SecretFileError, read_secret_file
 from xiaowei_agent.interfaces.web_auth import (
+    FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     FeishuOAuthCodeError,
     FeishuOAuthIdentity,
     FeishuOAuthPort,
@@ -23,15 +25,12 @@ from xiaowei_agent.interfaces.web_auth import (
 )
 from xiaowei_agent.trace import get_trace_id
 
-__all__ = ["FeishuOAuthAdapter"]
-
-_AUTHORIZATION_URL: Final[str] = "https://open.feishu.cn/open-apis/authen/v1/index"
-_APP_TOKEN_URL: Final[str] = (
-    "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"  # noqa: S105
+FEISHU_OAUTH_ENDPOINT_URLS: Final[tuple[str, str, str]] = (
+    f"{FEISHU_PROVIDER_ORIGIN}/open-apis/authen/v1/index",
+    f"{FEISHU_PROVIDER_ORIGIN}/open-apis/auth/v3/app_access_token/internal",
+    f"{FEISHU_PROVIDER_ORIGIN}/open-apis/authen/v1/access_token",
 )
-_USER_TOKEN_URL: Final[str] = (
-    "https://open.feishu.cn/open-apis/authen/v1/access_token"  # noqa: S105
-)
+_AUTHORIZATION_URL, _APP_TOKEN_URL, _USER_TOKEN_URL = FEISHU_OAUTH_ENDPOINT_URLS
 _MAX_RESPONSE_BYTES: Final[int] = 32_768
 _MAX_PROVIDER_STRING_BYTES: Final[int] = 8192
 _MAX_CALLBACK_BYTES: Final[int] = 2048
@@ -236,13 +235,15 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
             or isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, int | float)
             or not math.isfinite(timeout_seconds)
-            or not 0 < timeout_seconds <= 5.0
+            or not 0
+            < timeout_seconds
+            <= FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS
         ):
             raise ValueError("feishu oauth configuration invalid")
         secret_failed = False
         try:
-            _read_secret_file(app_secret_file)
-        except _SecretFileError:
+            read_secret_file(app_secret_file)
+        except SecretFileError:
             secret_failed = True
         if secret_failed:
             raise ValueError("feishu oauth configuration invalid")
@@ -307,16 +308,16 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
             or not _callback_is_valid(redirect_uri)
         ):
             raise FeishuOAuthCodeError
+        deadline = time.monotonic() + self._timeout_seconds
         secret_failed = False
         app_secret = ""
         try:
-            app_secret = _read_secret_file(self._app_secret_file)
-        except _SecretFileError:
+            app_secret = read_secret_file(self._app_secret_file)
+        except SecretFileError:
             secret_failed = True
         if secret_failed:
             raise FeishuOAuthUnavailableError
 
-        deadline = time.monotonic() + self._timeout_seconds
         app_response = await self._request(
             url=_APP_TOKEN_URL,
             headers={"Content-Type": _JSON_CONTENT_TYPE},
@@ -344,3 +345,6 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
         if open_id is None:
             raise FeishuOAuthCodeError
         return FeishuOAuthIdentity(subject_ref=open_id)
+
+
+__all__ = ["FEISHU_OAUTH_ENDPOINT_URLS", "FeishuOAuthAdapter"]

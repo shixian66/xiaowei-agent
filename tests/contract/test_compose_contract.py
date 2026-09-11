@@ -2,10 +2,13 @@
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
+from xiaowei_agent import interfaces as interfaces_module
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
+from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROCESS_SERVICES = {
@@ -244,7 +247,43 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
         "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
         "XIAOWEI_WEB_DETAIL_BASE_URL": "https://sso.example.invalid",
     }
-    assert web["extra_hosts"] == ["open.feishu.cn:127.0.0.1"]
+    provider_origin = urlsplit(interfaces_module.FEISHU_PROVIDER_ORIGIN)
+    assert provider_origin.scheme == "https"
+    assert provider_origin.hostname == "open.feishu.cn"
+    assert provider_origin.netloc == provider_origin.hostname
+    assert provider_origin.port is None
+    assert provider_origin.username is None
+    assert provider_origin.password is None
+    assert not provider_origin.path
+    assert not provider_origin.query
+    assert not provider_origin.fragment
+
+    endpoints = feishu_oauth_module.FEISHU_OAUTH_ENDPOINT_URLS
+    assert len(endpoints) == 3
+    endpoint_hosts: set[str] = set()
+    for endpoint in endpoints:
+        parsed = urlsplit(endpoint)
+        assert f"{parsed.scheme}://{parsed.netloc}" == (
+            interfaces_module.FEISHU_PROVIDER_ORIGIN
+        )
+        assert parsed.hostname is not None
+        assert parsed.netloc == parsed.hostname
+        assert parsed.port is None
+        assert parsed.username is None
+        assert parsed.password is None
+        assert parsed.path.startswith("/open-apis/")
+        assert not parsed.query
+        assert not parsed.fragment
+        endpoint_hosts.add(parsed.hostname)
+    assert endpoint_hosts == {"open.feishu.cn"}
+
+    blackholed_hosts: set[str] = set()
+    for entry in web["extra_hosts"]:
+        host, separator, address = entry.partition(":")
+        assert separator
+        if address == "127.0.0.1":
+            blackholed_hosts.add(host)
+    assert endpoint_hosts <= blackholed_hosts
 
     for name in _NON_CHANNEL_APP_SERVICES | {"postgres"}:
         merged_environment = dict(base["services"][name].get("environment", {}))

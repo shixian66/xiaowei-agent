@@ -724,6 +724,41 @@ async def test_both_posts_share_one_total_deadline(
     assert timeouts == pytest.approx([0.1, 0.04])
 
 
+async def test_secret_reread_is_inside_total_deadline_and_cannot_start_http_late(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_file = _secret_file(tmp_path)
+    adapter = FeishuOAuthAdapter(
+        app_id="cli_test_app",
+        app_secret_file=str(secret_file),
+        timeout_seconds=0.05,
+    )
+    now = [100.0]
+    calls: list[dict[str, object]] = []
+
+    def delayed_secret_reader(path: str) -> str:
+        assert path == str(secret_file)
+        now[0] += 0.06
+        return _FAKE_SECRET
+
+    def post_json(**kwargs: object):
+        calls.append(kwargs)
+        return _success_responses()[0]
+
+    monkeypatch.setattr(feishu_oauth, "read_secret_file", delayed_secret_reader)
+    monkeypatch.setattr(
+        feishu_oauth,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0]),
+    )
+    monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+
+    assert calls == []
+
+
 async def test_late_first_response_cannot_trigger_a_second_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

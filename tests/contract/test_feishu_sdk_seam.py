@@ -10,9 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from xiaowei_agent import interfaces as interfaces_module
 from xiaowei_agent.application.channel_projection import ChannelMessageError
 from xiaowei_agent.contracts import FeishuProjectionInput, TaskStatus, TaskView, task_query_path
 from xiaowei_agent.interfaces import feishu_sdk
+from xiaowei_agent.interfaces import secret_file as secret_file_module
 from xiaowei_agent.interfaces.feishu_sdk import (
     FeishuMessageEvent,
     FeishuSdkError,
@@ -96,10 +98,17 @@ class _Dispatcher:
 
 
 class _WsClient:
-    created: tuple[str, str, object] | None = None
+    created: tuple[str, str, object, str] | None = None
 
-    def __init__(self, app_id: str, secret: str, *, event_handler: object) -> None:
-        self.created = (app_id, secret, event_handler)
+    def __init__(
+        self,
+        app_id: str,
+        secret: str,
+        *,
+        event_handler: object,
+        domain: str = "https://sdk-default.example.invalid",
+    ) -> None:
+        self.created = (app_id, secret, event_handler, domain)
         type(self).created = self.created
 
     def start(self) -> None:
@@ -136,6 +145,7 @@ def test_transport_is_lazy_and_converts_sdk_objects_before_callback(
     assert loads == 1
     assert _WsClient.created is not None
     assert _WsClient.created[:2] == ("cli_test_app", _FAKE_SECRET)
+    assert _WsClient.created[3] == interfaces_module.FEISHU_PROVIDER_ORIGIN
     assert received == [
         FeishuMessageEvent(
             schema="2.0",
@@ -178,6 +188,10 @@ def test_api_client_builder_sets_the_reviewed_five_second_timeout(
             calls.append(("timeout", value))
             return self
 
+        def domain(self, value: str) -> "Builder":
+            calls.append(("domain", value))
+            return self
+
         def build(self) -> object:
             return SimpleNamespace(
                 im=SimpleNamespace(
@@ -199,6 +213,7 @@ def test_api_client_builder_sets_the_reviewed_five_second_timeout(
     assert calls == [
         ("app_id", "cli_test_app"),
         ("app_secret", _FAKE_SECRET),
+        ("domain", interfaces_module.FEISHU_PROVIDER_ORIGIN),
         ("timeout", 5.0),
     ]
 
@@ -220,6 +235,10 @@ def test_message_client_builder_uses_the_explicit_worker_timeout(
 
         def timeout(self, value: float) -> "Builder":
             calls.append(("timeout", value))
+            return self
+
+        def domain(self, value: str) -> "Builder":
+            calls.append(("domain", value))
             return self
 
         def build(self) -> object:
@@ -244,6 +263,7 @@ def test_message_client_builder_uses_the_explicit_worker_timeout(
     assert calls == [
         ("app_id", "cli_test_app"),
         ("app_secret", _FAKE_SECRET),
+        ("domain", interfaces_module.FEISHU_PROVIDER_ORIGIN),
         ("timeout", 7.0),
     ]
 
@@ -776,6 +796,10 @@ def test_lark_logger_is_disabled_before_http_client_can_log_provider_data(
             del value
             return self
 
+        def domain(self, value: str) -> "Builder":
+            del value
+            return self
+
         def build(self) -> object:
             logging.getLogger("Lark").warning("provider request %s", shaped)
             return SimpleNamespace(
@@ -860,10 +884,10 @@ def test_secret_reader_rejects_fifo_without_blocking_on_missing_writer(
     fifo = tmp_path / "credential-fifo"
     os.mkfifo(fifo)
     script = f"""
-from xiaowei_agent.interfaces.secret_file import _read_secret_file, _SecretFileError
+from xiaowei_agent.interfaces.secret_file import read_secret_file, SecretFileError
 try:
-    _read_secret_file({str(fifo)!r})
-except _SecretFileError:
+    read_secret_file({str(fifo)!r})
+except SecretFileError:
     pass
 else:
     raise AssertionError('FIFO must be rejected')
@@ -883,15 +907,21 @@ else:
 
 def test_secret_reader_rejects_character_device() -> None:
     from xiaowei_agent.interfaces.secret_file import (
-        _read_secret_file,
-        _SecretFileError,
+        SecretFileError,
+        read_secret_file,
     )
 
-    with pytest.raises(_SecretFileError) as caught:
-        _read_secret_file("/dev/null")
+    with pytest.raises(SecretFileError) as caught:
+        read_secret_file("/dev/null")
 
     assert str(caught.value) == "secret file unavailable"
     assert caught.value.__context__ is None
+
+
+def test_secret_file_exposes_only_the_shared_public_reader_contract() -> None:
+    assert secret_file_module.__all__ == ["SecretFileError", "read_secret_file"]
+    assert secret_file_module.SecretFileError.__name__ == "SecretFileError"
+    assert callable(secret_file_module.read_secret_file)
 
 
 @pytest.mark.parametrize("value", ["contains\ttab", "contains\x1fcontrol", "double\n\n"])

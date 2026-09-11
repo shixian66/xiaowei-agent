@@ -11,8 +11,8 @@
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
-> RI1 已在候选分支完成默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约；PR #31 首个
-> 受审 head 的八项 CI 全绿，最高证据仍为 `tests`。它尚未合入、部署或连接真实飞书。
+> RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
+> `tests`。它没有部署或连接真实飞书。
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -228,7 +228,8 @@ Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没�
 Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
 `XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
 Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
-code exchange 使用代码固定的 5 秒总预算且不重试，并没有读取
+code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 使用严格更长的 6 秒外层
+watchdog，且不重试；两者都没有读取
 `XIAOWEI_FEISHU_API_TIMEOUT_SECONDS`；后者目前只装配给渠道消息发送路径。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
 两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
@@ -358,16 +359,19 @@ fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本�
 JSON Compose override；override 只把本次 secret/config 引用指向该私有目录，不读取或覆盖上文供
 人工启动使用的三个固定文件。清理时先原子隔离该目录，再核对目录与四个已知文件的 inode，且不递归
 删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
-loopback，脚本只访问 `/healthz`、`/readyz`，不请求 OAuth start/callback，也不调用 provider。
-镜像 build 仍可能访问镜像仓库或依赖源，因此这不是“全程零外网”的证明。
+loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地
+`HTTPConnection` 请求一次受信 Host 的 `/oauth/feishu/start`，核对 302、官方 Location、一次性
+state 和安全 cookie；随后用直接 IP Host 证明固定 403，并把 state 加入日志泄漏扫描。它不请求
+callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访问镜像仓库或依赖源，因此这不是
+“全程零外网”的证明。
 
 这条清理边界防止正常并发 smoke、其他 UID 进程或人工固定文件被误删；它不承诺对抗主动恶意的
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
 当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
-smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的首个受审 head
-已在 GitHub 隔离 runner 实际跑通新版 Compose smoke 与隔离 PostgreSQL integration；这仍只是
+smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的 GitHub 隔离
+runner 会实际执行 Compose smoke 与隔离 PostgreSQL integration；即使这些 gate 通过，也仍只是
 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
 
 ### 尚未完成与能力边界

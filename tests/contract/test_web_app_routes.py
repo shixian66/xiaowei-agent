@@ -25,6 +25,7 @@ from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
 from xiaowei_agent.interfaces import feishu_sdk as feishu_sdk_module
 from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces import web_app as web_app_module
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.api import create_app as create_internal_app
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.web_app import (
@@ -907,7 +908,7 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
     assert events["oauth"] == {
         "app_id": "cli_test_app",
         "app_secret_file": "/run/secrets/feishu_app_secret",
-        "timeout_seconds": 5.0,
+        "timeout_seconds": web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     }
     assert events["membership"] == {
         "tenant_id": "dev-local",

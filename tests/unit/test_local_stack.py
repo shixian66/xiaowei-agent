@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     TaskStatus,
     TaskSubmission,
 )
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
     ChannelWorkerStack,
@@ -693,7 +694,9 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     assert stack.web_session_store._engine is engine
     assert stack.task_access_service._runtime is stack.runtime
     assert stack.submission_service._runtime is stack.runtime
-    assert stack.auth._oauth_timeout_seconds == 5.0
+    assert stack.auth._oauth_timeout_seconds == (
+        web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+    )
     await stack.aclose()
     assert engine.disposed is True
 
@@ -725,7 +728,9 @@ async def test_web_stack_uses_fixed_oauth_deadline_not_channel_timeout(
         membership=_OfflineMembership(),
     )
     try:
-        assert stack.auth._oauth_timeout_seconds == 5.0
+        assert stack.auth._oauth_timeout_seconds == (
+            web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+        )
     finally:
         await stack.aclose()
 

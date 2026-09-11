@@ -46,6 +46,7 @@ from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
 from xiaowei_agent.interfaces.web_auth import (
+    FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     AuthenticatedWebSession,
     WebAuthenticationError,
     WebAuthService,
@@ -770,7 +771,7 @@ async def serve_web(settings: Settings) -> int:
         oauth = FeishuOAuthAdapter(
             app_id=cast(str, settings.feishu_app_id),
             app_secret_file=cast(str, settings.feishu_app_secret_file),
-            timeout_seconds=5.0,
+            timeout_seconds=FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
         )
     except ValueError:
         credential_invalid = True

@@ -19,9 +19,12 @@ HTTP 限流，provider 调用结果也不能把外部正文带回页面或日志
 
 ### D1 Provider 与身份契约保持闭集
 
-飞书授权和 token endpoint 是代码内的官方固定闭集，不接受环境变量、请求、Host、forwarded
-header、用户或模型提供任意 URL。App secret 只从受信 composition root 取得的绝对只读文件读取；
-不接受明文环境变量，不进入数据库、日志、trace、异常或页面。
+飞书 provider origin 是代码内唯一常量；OAuth 授权/token endpoint 必须由它派生，飞书 SDK 的
+REST 与长连接 client 也必须显式收到同一个 origin，不依赖 SDK 默认值。Compose 离线 smoke 的
+provider 黑洞 host 必须由契约测试机械核对为同一 endpoint host；锁定 SDK 的 REST/WS 路径仍为
+相对路径也由安全测试承重。origin 与 endpoint 不接受环境变量、请求、Host、forwarded header、
+用户或模型提供任意 URL。App secret 只从受信 composition root 取得的绝对只读文件读取；不接受
+明文环境变量，不进入数据库、日志、trace、异常或页面。
 
 `FeishuOAuthPort` 只接受由服务端生成的 `state` 和受信 public origin 推导的 `redirect_uri`。
 OAuth 返回身份只包含飞书 `open_id`；它不是本地 actor、tenant、environment 或权限。Web 服务必须
@@ -53,17 +56,20 @@ migration。state 只保存 SHA-256 digest、签发/过期/消费时效事实，
 `WebOAuthUnavailableError`，HTTP 路由继续返回 503。异常、响应和日志不得包含 state、cookie、
 digest、数据库异常正文或异常链。
 
-### D4 容量保护、provider 追踪与 HTTP 限流是三件事
+### D4 容量边界、provider 追踪与 HTTP 限流是三件事
 
-state 行清理和 1024 容量上限只限制数据库中的全局未完成 state，解决无界增长和最小应用级滥用
-保护；它不是按 IP、用户或租户的请求速率限制。
+state 行清理和 1024 容量上限只限制数据库中的全局未完成 state，解决数据库无界增长；它不是
+应用级滥用保护，更不是按 IP、用户或租户的请求速率限制。OAuth start 在登录前可匿名访问，攻击者
+可以在一个 state TTL 内填满这份全局额度，使所有正常登录持续收到 503；持续补位还能把拒绝维持
+下去。容量上限在这里是 fail-closed 的资源边界，同时也是明确的全局可用性 DoS 风险。
 
 未来真实 provider 调用必须使用受信 trace 关联和闭集 outcome，原始 provider 正文不能成为控制
 信号或用户可见错误。没有 task ID 的登录流程不伪造 task/audit 行；无任务 trace 仍走既有结构化
 日志边界。
 
-实际 HTTP 请求速率限制由已有 HTTPS SSO 边缘入口承担。RI2/RI6 激活门必须记录该设施的真实配置
-和运行证据；没有证据不得宣称已具备按 IP 限流，也不得用 state 容量测试代替。
+实际 HTTP 请求速率限制由已有 HTTPS SSO 边缘入口承担。RI2/RI6 激活门必须记录该设施的真实限流
+配置、监控/告警和运行反证；没有证据不得激活公网 OAuth、不得宣称已具备按 IP 限流，也不得用
+state 容量测试代替。
 
 ### D5 RI1 仍无真实调用许可
 
@@ -76,6 +82,7 @@ ADR-007 H 层生产只读授权尚未单独签认；生产连接与任何 E1/生
 - 并发 Web 进程共享同一个数据库容量裁决，不会各自越过 state 上限。
 - 已消费和已过期 state 会被物理清理，不长期占用额度或阻止同 digest 的安全再签发。
 - provider、origin、身份、容量与限流边界各有单一责任，离线测试不会被误写成公网防护或真实兼容证据。
+- 1024 全局额度只保证存储有界；边缘限流与监控证据缺失时，真实 OAuth 激活必须保持关闭。
 - 登录在 task 创建前失败时没有 task/audit 行；排障只依赖脱敏、无外部正文的结构化日志。
 
 ## 备选方案与否决理由
@@ -90,5 +97,5 @@ ADR-007 H 层生产只读授权尚未单独签认；生产连接与任何 E1/生
 ## 回滚与变更门
 
 关闭 Web feature flag 并停止 Web 进程即可回滚；既有 session/state schema 不变，不删除已持久化事实。
-若未来要修改默认容量、开放容量配置、增加 provider endpoint、信任代理 header、改变身份字段、
+若未来要修改默认容量、开放容量配置、改变 provider origin 或增加 endpoint、信任代理 header、改变身份字段、
 迁移 state/session 真源、在登录期创建 task/audit 行，或由应用承担 HTTP 请求限流，必须先修订本 ADR。

@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
 )
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.web_auth import (
     FeishuOAuthCodeError,
@@ -24,6 +25,16 @@ from xiaowei_agent.interfaces.web_auth import (
     WebOriginError,
 )
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
+
+
+def test_real_oauth_inner_deadline_is_strictly_inside_the_service_deadline() -> None:
+    assert web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS == 5.0
+    assert web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS == 6.0
+    assert (
+        0
+        < web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS
+        < web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+    )
 
 
 class _RecordingOAuth:

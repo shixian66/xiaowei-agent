@@ -781,7 +781,10 @@ async def build_postgres_web_stack(
         FeishuIdentityConfigurationError,
         load_feishu_identity_directory,
     )
-    from xiaowei_agent.interfaces.web_auth import WebAuthService
+    from xiaowei_agent.interfaces.web_auth import (
+        FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
+        WebAuthService,
+    )
 
     if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
         raise ValueError("Web app is disabled")
@@ -836,7 +839,7 @@ async def build_postgres_web_stack(
             public_origin=cast(str, settings.web_detail_base_url),
             oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
             session_ttl_seconds=settings.web_session_ttl_seconds,
-            oauth_timeout_seconds=5.0,
+            oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         )
         return WebStack(
             auth=auth,

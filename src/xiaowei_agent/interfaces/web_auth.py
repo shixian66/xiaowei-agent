@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Annotated, Protocol, TypeGuard
+from typing import Annotated, Final, Protocol, TypeGuard
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from pydantic import AfterValidator, Field
@@ -31,6 +31,8 @@ from xiaowei_agent.persistence.web_session import (
 )
 
 _SECRET_RE = re.compile(r"[A-Za-z0-9_-]{16,512}")
+FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS: Final[float] = 5.0
+FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS: Final[float] = 6.0
 
 
 def _has_control(value: str) -> bool:
@@ -210,7 +212,7 @@ class WebAuthService:
         public_origin: str,
         oauth_state_ttl_seconds: int,
         session_ttl_seconds: int,
-        oauth_timeout_seconds: float = 5.0,
+        oauth_timeout_seconds: float = FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         token_factory: Callable[[], str] = _random_secret,
     ) -> None:
         if not _public_origin_is_safe(public_origin):
@@ -413,6 +415,8 @@ class WebAuthService:
 
 
 __all__ = [
+    "FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS",
+    "FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS",
     "AuthenticatedWebSession",
     "FeishuOAuthCodeError",
     "FeishuOAuthIdentity",

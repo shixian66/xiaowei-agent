@@ -207,7 +207,7 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 
 | 边界 | 超时/限制 | 重试 | 失败语义 |
 | --- | --- | --- | --- |
-| 飞书 OAuth/API | 5 秒 | OAuth code 不重试；消息投递最多 3 次 | 安全错误，不回显 provider 正文 |
+| 飞书 OAuth/API | provider 总预算 5 秒；OAuth WebAuth 外层 watchdog 6 秒 | OAuth code 不重试；消息投递最多 3 次 | 安全错误，不回显 provider 正文；外层超时丢弃迟到结果 |
 | 模型 API | 15 秒 | 默认不做隐式重试；回退规则解释器 | 标记 fallback，不伪装模型成功 |
 | StarRocks connect | 5 秒 | 不自动重试 | 调用失败 |
 | StarRocks SQL | 180 秒 | 不自动重试 | TIMEOUT，不返回部分结果 |

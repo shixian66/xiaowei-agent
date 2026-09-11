@@ -1106,7 +1106,7 @@ def test_main_passes_the_resolved_compose_command_to_run_smoke(
     assert captured["workflow"] is compose_smoke._full_workflow
 
 
-def test_web_smoke_uses_profile_health_wait_and_only_the_readiness_route(
+def test_web_smoke_uses_profile_health_boundary_and_offline_oauth_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = RecordingRunner()
@@ -1117,17 +1117,24 @@ def test_web_smoke_uses_profile_health_wait_and_only_the_readiness_route(
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker-compose",),
     )
-    readiness: list[tuple[bool, float]] = []
+    events: list[object] = []
     monkeypatch.setattr(
         compose_smoke,
         "_wait_ready",
-        lambda *, web, timeout: readiness.append((web, timeout)),
+        lambda *, web, timeout: events.append(("ready", web, timeout)),
     )
     monkeypatch.setattr(
-        compose_smoke, "_require_web_container_boundary", lambda _: None
+        compose_smoke,
+        "_require_web_container_boundary",
+        lambda _: events.append("container-boundary"),
+    )
+    monkeypatch.setattr(
+        compose_smoke,
+        "_require_web_oauth_start",
+        lambda: events.append("oauth-start") or "state_value_1234567890",
     )
 
-    compose_smoke._start_web(session)
+    state = compose_smoke._start_web(session)
 
     assert runner.calls[0][:3] == (
         "/usr/bin/docker-compose",
@@ -1143,7 +1150,367 @@ def test_web_smoke_uses_profile_health_wait_and_only_the_readiness_route(
         "--no-deps",
         "web-app",
     )
-    assert readiness == [(True, 60.0)]
+    assert state == "state_value_1234567890"
+    assert events == [
+        ("ready", True, 60.0),
+        "container-boundary",
+        "oauth-start",
+    ]
+
+
+class _WebProbeResponse:
+    def __init__(
+        self,
+        *,
+        status: int,
+        headers: list[tuple[str, str]],
+        body: bytes = b"",
+        read_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self._headers = headers
+        self._body = body
+        self._read_error = read_error
+        self._close_error = close_error
+        self.close_calls = 0
+
+    def getheaders(self) -> list[tuple[str, str]]:
+        return list(self._headers)
+
+    def read(self, amount: int) -> bytes:
+        assert amount == 32_769
+        if self._read_error is not None:
+            raise self._read_error
+        return self._body
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self._close_error is not None:
+            raise self._close_error
+
+
+def _install_web_probe_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[_WebProbeResponse],
+) -> tuple[list[tuple[str, int, float]], list[tuple[str, str, dict[str, str]]], list[bool]]:
+    connections: list[tuple[str, int, float]] = []
+    requests: list[tuple[str, str, dict[str, str]]] = []
+    closed: list[bool] = []
+
+    class Connection:
+        def __init__(self, host: str, port: int, *, timeout: float) -> None:
+            connections.append((host, port, timeout))
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            headers: dict[str, str],
+        ) -> None:
+            requests.append((method, path, dict(headers)))
+
+        def getresponse(self) -> _WebProbeResponse:
+            return responses.pop(0)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(compose_smoke.http.client, "HTTPConnection", Connection)
+    return connections, requests, closed
+
+
+def _valid_oauth_start_response(
+    *, state: str = "state_value_1234567890"
+) -> _WebProbeResponse:
+    return _WebProbeResponse(
+        status=302,
+        headers=[
+            (
+                "Location",
+                "https://open.feishu.cn/open-apis/authen/v1/index"
+                "?app_id=cli_smoke_fake_app"
+                "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                f"&state={state}",
+            ),
+            (
+                "Set-Cookie",
+                f"__Host-xiaowei-oauth-state={state}; HttpOnly; Max-Age=300; "
+                "Path=/; SameSite=lax; Secure",
+            ),
+        ],
+    )
+
+
+def _valid_direct_host_rejection() -> _WebProbeResponse:
+    return _WebProbeResponse(
+        status=403,
+        headers=[("Content-Type", "application/json")],
+        body=b'{"error":{"code":"forbidden"}}',
+    )
+
+
+def test_web_oauth_start_probe_is_local_nonredirecting_and_binds_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = _valid_oauth_start_response()
+    direct = _valid_direct_host_rejection()
+    responses = [trusted, direct]
+    connections, requests, closed = _install_web_probe_connection(
+        monkeypatch, responses
+    )
+
+    state = compose_smoke._require_web_oauth_start()
+
+    assert state == "state_value_1234567890"
+    assert responses == []
+    assert connections == [
+        ("127.0.0.1", 8080, 2.0),
+        ("127.0.0.1", 8080, 2.0),
+    ]
+    assert requests == [
+        ("GET", "/oauth/feishu/start", {"Host": "sso.example.invalid"}),
+        ("GET", "/oauth/feishu/start", {"Host": "127.0.0.1:8080"}),
+    ]
+    assert closed == [True, True]
+    assert trusted.close_calls == 1
+    assert direct.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _WebProbeResponse(status=200, headers=[]),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                ("Location", "https://open.feishu.cn/first"),
+                ("Location", "https://open.feishu.cn/second"),
+                ("Set-Cookie", "__Host-xiaowei-oauth-state=state_value_1234567890"),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://open.feishu.cn/open-apis/authen/v1/index"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=url_state_value_1234567890",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=cookie_state_value_1234567890; "
+                    "HttpOnly; Max-Age=300; Path=/; SameSite=lax; Secure",
+                ),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://provider.example.invalid/authorize"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=state_value_1234567890",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=state_value_1234567890; "
+                    "HttpOnly; Path=/; SameSite=lax; Secure",
+                ),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://open.feishu.cn/open-apis/authen/v1/index"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=state_value_1234567890",
+                ),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://open.feishu.cn/open-apis/authen/v1/index"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=state_value_1234567890",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=state_value_1234567890; "
+                    "HttpOnly; Max-Age=300; Path=/; SameSite=lax; Secure",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=state_value_1234567890; "
+                    "HttpOnly; Max-Age=300; Path=/; SameSite=lax; Secure",
+                ),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://open.feishu.cn/open-apis/authen/v1/index"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=state_value_1234567890",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=state_value_1234567890; "
+                    "HttpOnly; Max-Age=300; Path=/; SameSite=lax; Secure; "
+                    "__Host-xiaowei-oauth-state=state_value_1234567890",
+                ),
+            ],
+        ),
+        _WebProbeResponse(
+            status=302,
+            headers=[
+                (
+                    "Location",
+                    "https://open.feishu.cn/open-apis/authen/v1/index"
+                    "?app_id=cli_smoke_fake_app"
+                    "&redirect_uri=https%3A%2F%2Fsso.example.invalid%2Foauth%2Ffeishu%2Fcallback"
+                    "&state=state_value_1234567890",
+                ),
+                (
+                    "Set-Cookie",
+                    "__Host-xiaowei-oauth-state=state_value_1234567890; "
+                    "Max-Age=300; Path=/; SameSite=lax; Secure",
+                ),
+            ],
+        ),
+    ],
+    ids=[
+        "not-redirect",
+        "duplicate-location",
+        "state-mismatch",
+        "wrong-provider",
+        "missing-cookie",
+        "duplicate-cookie-headers",
+        "duplicate-cookie-pair",
+        "missing-httponly",
+    ],
+)
+def test_web_oauth_start_probe_rejects_malformed_trusted_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    response: _WebProbeResponse,
+) -> None:
+    _install_web_probe_connection(
+        monkeypatch,
+        [response, _valid_direct_host_rejection()],
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_WEB_OAUTH_START_INVALID$"):
+        compose_smoke._require_web_oauth_start()
+
+    assert response.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _WebProbeResponse(status=200, headers=[], body=b"x" * 32_769),
+        _WebProbeResponse(
+            status=200,
+            headers=[],
+            read_error=OSError("private-read-detail"),
+        ),
+        _WebProbeResponse(
+            status=200,
+            headers=[],
+            close_error=OSError("private-close-detail"),
+        ),
+    ],
+    ids=["oversized-body", "read-error", "response-close-error"],
+)
+def test_web_oauth_start_request_closes_response_and_drops_failure_details(
+    monkeypatch: pytest.MonkeyPatch,
+    response: _WebProbeResponse,
+) -> None:
+    _, _, connection_closed = _install_web_probe_connection(
+        monkeypatch,
+        [response],
+    )
+
+    with pytest.raises(
+        SmokeError, match=r"^SMOKE_WEB_OAUTH_START_REQUEST_FAILED$"
+    ) as caught:
+        compose_smoke._request_web_oauth_start(host="sso.example.invalid")
+
+    assert caught.value.__context__ is None
+    assert response.close_calls == 1
+    assert connection_closed == [True]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _WebProbeResponse(status=302, headers=[]),
+        _WebProbeResponse(
+            status=403,
+            headers=[("Location", "https://open.feishu.cn/redirect")],
+            body=b'{"error":{"code":"forbidden"}}',
+        ),
+        _WebProbeResponse(status=403, headers=[], body=b"provider-private-body"),
+    ],
+    ids=["redirected", "location-leak", "wrong-body"],
+)
+def test_web_oauth_start_probe_rejects_a_weak_direct_host_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    response: _WebProbeResponse,
+) -> None:
+    _install_web_probe_connection(
+        monkeypatch,
+        [_valid_oauth_start_response(), response],
+    )
+
+    with pytest.raises(SmokeError, match=r"^SMOKE_WEB_HOST_BOUNDARY_INVALID$"):
+        compose_smoke._require_web_oauth_start()
+
+
+def test_web_oauth_start_probe_drops_local_transport_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+
+    class FailingConnection:
+        def __init__(self, *_: object, **__: object) -> None:
+            return None
+
+        def request(self, *_: object, **__: object) -> None:
+            raise OSError("private-cookie-and-provider-detail")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        compose_smoke.http.client,
+        "HTTPConnection",
+        FailingConnection,
+    )
+
+    with pytest.raises(
+        SmokeError, match=r"^SMOKE_WEB_OAUTH_START_REQUEST_FAILED$"
+    ) as caught:
+        compose_smoke._require_web_oauth_start()
+
+    assert caught.value.__context__ is None
+    assert "private-cookie" not in str(caught.value)
+    assert closed == [True]
 
 
 def test_web_readiness_requests_only_the_local_readyz_route(

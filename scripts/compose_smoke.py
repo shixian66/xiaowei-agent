@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import concurrent.futures
+import http.client
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -15,13 +17,30 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import parse_qs, urlsplit
+
+from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SMOKE_INPUT_ROOT = _ROOT / ".secrets"
 _API_READY_URL = "http://127.0.0.1:8000/readyz"
 _WEB_READY_URL = "http://127.0.0.1:8080/readyz"
+_WEB_OAUTH_START_PATH = "/oauth/feishu/start"
+_WEB_PUBLIC_HOST = "sso.example.invalid"
+_WEB_DIRECT_HOST = "127.0.0.1:8080"
+_WEB_APP_ID = "cli_smoke_fake_app"
+_WEB_CALLBACK_URL = f"https://{_WEB_PUBLIC_HOST}/oauth/feishu/callback"
+_WEB_AUTHORIZATION_PATH = "/open-apis/authen/v1/index"
+_WEB_FORBIDDEN_BODY = b'{"error":{"code":"forbidden"}}'
+_MAX_WEB_RESPONSE_BYTES = 32_768
+_OAUTH_STATE_RE = re.compile(r"[A-Za-z0-9_-]{16,512}")
+_OAUTH_STATE_COOKIE_NAME = "__Host-xiaowei-oauth-state"
+_OAUTH_STATE_COOKIE_PAIR_RE = re.compile(
+    rf"(?:^|[;,]\s*){re.escape(_OAUTH_STATE_COOKIE_NAME)}\s*="
+)
 _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
@@ -839,8 +858,140 @@ def _require_web_container_boundary(session: ComposeSession) -> None:
         raise SmokeError("SMOKE_WEB_CONTAINER_BOUNDARY_INVALID")
 
 
-def _start_web(session: ComposeSession) -> None:
-    """只启动 Web 并检查健康、ready 与容器边界，不触发 OAuth 路由。"""
+@dataclass(frozen=True)
+class _WebProbeResponse:
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+
+def _request_web_oauth_start(*, host: str) -> _WebProbeResponse:
+    """只直连本机固定路径；不读取代理，也不具备跟随重定向的能力。"""
+    connection: http.client.HTTPConnection | None = None
+    response_handle: http.client.HTTPResponse | None = None
+    failed = False
+    status: object = None
+    headers: object = None
+    body: object = None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=2.0)
+        connection.request("GET", _WEB_OAUTH_START_PATH, headers={"Host": host})
+        response_handle = connection.getresponse()
+        status = response_handle.status
+        headers = response_handle.getheaders()
+        body = response_handle.read(_MAX_WEB_RESPONSE_BYTES + 1)
+    except Exception:
+        failed = True
+    finally:
+        if response_handle is not None:
+            try:
+                response_handle.close()
+            except Exception:
+                failed = True
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                failed = True
+    if (
+        failed
+        or type(status) is not int
+        or not isinstance(headers, list | tuple)
+        or not all(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and all(isinstance(value, str) for value in item)
+            for item in headers
+        )
+        or not isinstance(body, bytes)
+        or len(body) > _MAX_WEB_RESPONSE_BYTES
+    ):
+        raise SmokeError("SMOKE_WEB_OAUTH_START_REQUEST_FAILED")
+    return _WebProbeResponse(
+        status=status,
+        headers=tuple(headers),
+        body=body,
+    )
+
+
+def _header_values(response: _WebProbeResponse, name: str) -> list[str]:
+    return [
+        value
+        for candidate, value in response.headers
+        if candidate.lower() == name
+    ]
+
+
+def _trusted_oauth_state(response: _WebProbeResponse) -> str:
+    locations = _header_values(response, "location")
+    cookies = _header_values(response, "set-cookie")
+    if response.status != 302 or len(locations) != 1 or len(cookies) != 1:
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    location = locations[0]
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in location):
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    try:
+        parsed = urlsplit(location)
+        query = parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+            max_num_fields=4,
+        )
+    except (TypeError, ValueError):
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID") from None
+    state_values = query.get("state", [])
+    if (
+        f"{parsed.scheme}://{parsed.netloc}" != FEISHU_PROVIDER_ORIGIN
+        or parsed.path != _WEB_AUTHORIZATION_PATH
+        or parsed.fragment
+        or set(query) != {"app_id", "redirect_uri", "state"}
+        or query.get("app_id") != [_WEB_APP_ID]
+        or query.get("redirect_uri") != [_WEB_CALLBACK_URL]
+        or len(state_values) != 1
+        or _OAUTH_STATE_RE.fullmatch(state_values[0]) is None
+    ):
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    cookie_header = cookies[0]
+    if len(_OAUTH_STATE_COOKIE_PAIR_RE.findall(cookie_header)) != 1:
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    cookie = SimpleCookie()
+    try:
+        cookie.load(cookie_header)
+    except CookieError:
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID") from None
+    if set(cookie) != {_OAUTH_STATE_COOKIE_NAME}:
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    morsel = cookie[_OAUTH_STATE_COOKIE_NAME]
+    if (
+        morsel.value != state_values[0]
+        or morsel["secure"] is not True
+        or morsel["httponly"] is not True
+        or morsel["samesite"].lower() != "lax"
+        or morsel["path"] != "/"
+        or morsel["domain"]
+        or morsel["max-age"] != "300"
+    ):
+        raise SmokeError("SMOKE_WEB_OAUTH_START_INVALID")
+    return state_values[0]
+
+
+def _require_web_oauth_start() -> str:
+    state = _trusted_oauth_state(
+        _request_web_oauth_start(host=_WEB_PUBLIC_HOST)
+    )
+    direct = _request_web_oauth_start(host=_WEB_DIRECT_HOST)
+    if (
+        direct.status != 403
+        or direct.body != _WEB_FORBIDDEN_BODY
+        or _header_values(direct, "location")
+        or _header_values(direct, "set-cookie")
+    ):
+        raise SmokeError("SMOKE_WEB_HOST_BOUNDARY_INVALID")
+    return state
+
+
+def _start_web(session: ComposeSession) -> str:
+    """启动 Web，检查容器边界并走不调用 provider 的 OAuth start。"""
     session.failure_code = "SMOKE_WEB_COMMAND_FAILED"
     session.run(
         "up",
@@ -854,6 +1005,7 @@ def _start_web(session: ComposeSession) -> None:
     )
     _wait_ready(web=True, timeout=60.0)
     _require_web_container_boundary(session)
+    return _require_web_oauth_start()
 
 
 def _require_worker_scale(session: ComposeSession) -> None:
@@ -1078,7 +1230,7 @@ def _full_workflow(session: ComposeSession) -> None:
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)
     _require_disabled_channel_entrypoints(session)
-    _start_web(session)
+    oauth_state = _start_web(session)
 
     session.failure_code = "SMOKE_BASELINE_COMMAND_FAILED"
     session.run(
@@ -1239,7 +1391,7 @@ def _full_workflow(session: ComposeSession) -> None:
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)
-    _require_logs_clean(session, sensitive_canary)
+    _require_logs_clean(session, sensitive_canary, oauth_state)
 
 
 def main() -> int:
