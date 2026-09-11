@@ -370,9 +370,9 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 脚本会固定失败并保留现场，不会递归清理。
 
 当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
-smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的 GitHub 隔离
-runner 会实际执行 Compose smoke 与隔离 PostgreSQL integration；即使这些 gate 通过，也仍只是
-`tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
+smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
+`2d67b59` 已在 GitHub 隔离 runner 实际执行 Compose smoke 与隔离 PostgreSQL integration，八项
+CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
 
 ### 尚未完成与能力边界
 
