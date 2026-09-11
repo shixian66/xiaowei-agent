@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
 )
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.web_auth import (
     FeishuOAuthCodeError,
@@ -20,9 +21,20 @@ from xiaowei_agent.interfaces.web_auth import (
     WebCsrfError,
     WebOAuthCodeError,
     WebOAuthStateError,
+    WebOAuthUnavailableError,
     WebOriginError,
 )
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
+
+
+def test_real_oauth_inner_deadline_is_strictly_inside_the_service_deadline() -> None:
+    assert web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS == 5.0
+    assert web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS == 6.0
+    assert (
+        0
+        < web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS
+        < web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+    )
 
 
 class _RecordingOAuth:
@@ -78,6 +90,16 @@ def test_oauth_identity_reference_is_bounded_at_the_provider_boundary() -> None:
         FeishuOAuthIdentity(subject_ref="x" * 257)
 
 
+@pytest.mark.parametrize("control", ["\u0080", "\u0085", "\u009f"])
+def test_oauth_identity_reference_rejects_c1_controls(control: str) -> None:
+    with pytest.raises(ValidationError):
+        FeishuOAuthIdentity(subject_ref=f"subject{control}alice")
+
+
+def test_oauth_identity_reference_accepts_printable_non_ascii() -> None:
+    assert FeishuOAuthIdentity(subject_ref="飞书用户").subject_ref == "飞书用户"
+
+
 def _service(
     *,
     clock,
@@ -85,9 +107,14 @@ def _service(
     oauth: _RecordingOAuth | None = None,
     identities: StaticFeishuIdentityDirectory | None = None,
     tokens: tuple[str, ...] = ("state_value_1234567890", "session_value_1234567890"),
+    oauth_state_capacity: int = 1024,
 ) -> tuple[WebAuthService, _RecordingOAuth, InMemoryWebSessionStore]:
     oauth_port = _RecordingOAuth() if oauth is None else oauth
-    sessions = InMemoryWebSessionStore(clock=clock, state=memory_state)
+    sessions = InMemoryWebSessionStore(
+        clock=clock,
+        state=memory_state,
+        oauth_state_capacity=oauth_state_capacity,
+    )
     principal = _principal()
     directory = identities or StaticFeishuIdentityDirectory(
         principals={principal.subject_ref: principal}
@@ -128,6 +155,27 @@ async def test_login_start_persists_only_digest_and_uses_trusted_callback(
     assert len(memory_state.oauth_states) == 1
     digest = next(iter(memory_state.oauth_states))
     assert len(digest) == 64
+
+
+async def test_login_start_maps_state_capacity_to_closed_unavailable_error(
+    clock, memory_state
+) -> None:
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth_state_capacity=1,
+        tokens=("first_state_value_1234567890", "second_state_value_1234567890"),
+    )
+    await service.start_login()
+
+    try:
+        await service.start_login()
+    except WebOAuthUnavailableError as exc:
+        assert str(exc) == "oauth provider unavailable"
+        assert exc.__cause__ is None
+        assert exc.__context__ is None
+    else:
+        pytest.fail("expected WebOAuthUnavailableError")
 
 
 async def test_state_cookie_mismatch_does_not_burn_the_valid_state(
@@ -320,3 +368,38 @@ async def test_untrusted_authorization_redirect_is_rejected(clock, memory_state)
 
     with pytest.raises(WebOAuthCodeError):
         await service.start_login()
+
+
+async def test_printable_non_ascii_authorization_path_remains_supported(
+    clock, memory_state
+) -> None:
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth=_RecordingOAuth(
+            authorization_url="https://feishu.example.test/授权",
+        ),
+    )
+
+    start = await service.start_login()
+
+    assert start.authorization_url.startswith("https://feishu.example.test/授权?")
+
+
+async def test_printable_non_ascii_oauth_code_reaches_provider(
+    clock, memory_state
+) -> None:
+    service, oauth, _ = _service(clock=clock, memory_state=memory_state)
+    start = await service.start_login()
+
+    completed = await service.complete_login(
+        code="一次性授权码",
+        state=start.state_cookie,
+        state_cookie=start.state_cookie,
+        previous_session_cookie=None,
+    )
+
+    assert completed.principal.actor == "alice"
+    assert oauth.exchange_calls == [
+        ("一次性授权码", "https://ops.example.test/oauth/feishu/callback")
+    ]

@@ -19,6 +19,7 @@ from xiaowei_agent.persistence.channel import BindTaskCommand
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
+from xiaowei_agent.trace import get_trace_id
 
 pytestmark = pytest.mark.security
 
@@ -257,9 +258,11 @@ async def test_group_membership_is_rechecked_and_revocation_becomes_404(
         def __init__(self) -> None:
             self.results = iter((True, False))
             self.calls = 0
+            self.trace_ids: list[str | None] = []
 
         async def is_current_group_member(self, **_: str) -> bool:
             self.calls += 1
+            self.trace_ids.append(get_trace_id())
             return next(self.results)
 
     membership = Membership()
@@ -281,10 +284,17 @@ async def test_group_membership_is_rechecked_and_revocation_becomes_404(
     client, _, _ = _client(principal=bob, access=access)
 
     async with client:
-        first = await client.get(f"/app/api/tasks/{task.task_id}")
-        revoked = await client.get(f"/app/api/tasks/{task.task_id}")
+        first = await client.get(
+            f"/app/api/tasks/{task.task_id}", headers={"x-trace-id": "e" * 32}
+        )
+        revoked = await client.get(
+            f"/app/api/tasks/{task.task_id}", headers={"x-trace-id": "e" * 32}
+        )
 
     assert first.status_code == 200
     assert revoked.status_code == 404
     assert revoked.json() == {"error": {"code": "not_found"}}
     assert membership.calls == 2
+    assert all(trace_id is not None for trace_id in membership.trace_ids)
+    assert len(set(membership.trace_ids)) == 2
+    assert "e" * 32 not in membership.trace_ids

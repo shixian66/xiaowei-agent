@@ -130,12 +130,17 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.persistence",
         "xiaowei_agent.trace",
     },
+    "interfaces/feishu_oauth.py": {
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.trace",
+    },
     "interfaces/feishu_sdk.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.rendering",
     },
+    "interfaces/secret_file.py": set(),
     "interfaces/feishu_worker.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.config",

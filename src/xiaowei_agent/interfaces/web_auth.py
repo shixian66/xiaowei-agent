@@ -4,13 +4,14 @@ import asyncio
 import hmac
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Protocol, TypeGuard
+from typing import Annotated, Final, Protocol, TypeGuard
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
 from xiaowei_agent.contracts import AuthenticatedPrincipal, Contract, StrictStr
 from xiaowei_agent.interfaces.feishu_identity import (
@@ -20,6 +21,7 @@ from xiaowei_agent.interfaces.feishu_identity import (
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
+    OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
@@ -29,6 +31,21 @@ from xiaowei_agent.persistence.web_session import (
 )
 
 _SECRET_RE = re.compile(r"[A-Za-z0-9_-]{16,512}")
+FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS: Final[float] = 5.0
+FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS: Final[float] = 6.0
+
+
+def _has_control(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _without_control(value: str) -> str:
+    if _has_control(value):
+        raise ValueError("must not contain control characters")
+    return value
+
+
+_OAuthSubjectRef = Annotated[StrictStr, AfterValidator(_without_control)]
 
 
 class WebAuthenticationError(RuntimeError):
@@ -82,21 +99,21 @@ class FeishuOAuthUnavailableError(RuntimeError):
 
 
 class FeishuOAuthIdentity(Contract):
-    """OAuth provider 返回后立即收窄的唯一身份事实。"""
+    """OAuth provider 的 ``open_id`` 进入本地后使用统一主体引用名。"""
 
-    subject_ref: StrictStr = Field(max_length=256)
+    subject_ref: _OAuthSubjectRef = Field(max_length=256)
 
 
 class FeishuOAuthPort(Protocol):
-    """飞书 OAuth 的窄端口；M7 PR 6 只允许 fake 离线实现。"""
+    """只接受受信 callback，并把官方闭集端点的结果收窄为 ``open_id``。"""
 
     def authorization_url(self, *, state: str, redirect_uri: str) -> str:
-        """返回携带给定 state 与固定 callback 的 HTTPS 授权 URL。"""
+        """用代码内固定官方端点返回携带 state 与 callback 的 HTTPS URL。"""
 
     async def exchange_code(
         self, *, code: str, redirect_uri: str
     ) -> FeishuOAuthIdentity:
-        """交换一次 code；不得返回 tenant、权限或 actor。"""
+        """交换一次 code；只返回映射为 subject_ref 的 ``open_id`` 身份事实。"""
 
 
 @dataclass(frozen=True)
@@ -143,7 +160,7 @@ def _digest(*, domain: str, secret: str) -> str:
 
 
 def _split_https_url(value: str) -> SplitResult | None:
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+    if _has_control(value):
         return None
     try:
         parsed = urlsplit(value)
@@ -195,7 +212,7 @@ class WebAuthService:
         public_origin: str,
         oauth_state_ttl_seconds: int,
         session_ttl_seconds: int,
-        oauth_timeout_seconds: float = 5.0,
+        oauth_timeout_seconds: float = FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         token_factory: Callable[[], str] = _random_secret,
     ) -> None:
         if not _public_origin_is_safe(public_origin):
@@ -243,12 +260,18 @@ class WebAuthService:
             expected_state=state,
         ):
             raise WebOAuthCodeError
-        await self._sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
-                state_digest=_digest(domain="oauth-state:v1", secret=state),
-                ttl_seconds=self._oauth_state_ttl_seconds,
+        capacity_reached = False
+        try:
+            await self._sessions.issue_oauth_state(
+                command=IssueOAuthStateCommand(
+                    state_digest=_digest(domain="oauth-state:v1", secret=state),
+                    ttl_seconds=self._oauth_state_ttl_seconds,
+                )
             )
-        )
+        except OAuthStateCapacityError:
+            capacity_reached = True
+        if capacity_reached:
+            raise WebOAuthUnavailableError
         return OAuthStart(
             authorization_url=authorization_url,
             state_cookie=state,
@@ -282,7 +305,12 @@ class WebAuthService:
         if state_missing:
             raise WebOAuthStateError
 
-        if not isinstance(code, str) or not code or len(code) > 2048:
+        if (
+            not isinstance(code, str)
+            or not code
+            or _has_control(code)
+            or len(code) > 2048
+        ):
             raise WebOAuthCodeError
         identity: FeishuOAuthIdentity | None = None
         provider_error: RuntimeError | None = None
@@ -387,6 +415,8 @@ class WebAuthService:
 
 
 __all__ = [
+    "FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS",
+    "FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS",
     "AuthenticatedWebSession",
     "FeishuOAuthCodeError",
     "FeishuOAuthIdentity",

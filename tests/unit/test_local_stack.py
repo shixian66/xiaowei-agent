@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     TaskStatus,
     TaskSubmission,
 )
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
     ChannelWorkerStack,
@@ -35,6 +36,7 @@ from xiaowei_agent.interfaces.local_stack import (
     StarRocksLiveAssembly,
     TaskViewStack,
     WebStack,
+    WebStackConfigurationError,
     build_in_memory_local_stack,
     build_postgres_channel_worker_stack,
     build_postgres_feishu_listener_stack,
@@ -43,6 +45,7 @@ from xiaowei_agent.interfaces.local_stack import (
     build_postgres_web_stack,
 )
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
+from xiaowei_agent.persistence.database import DatabaseConfigurationError
 from xiaowei_agent.persistence.postgres import (
     PostgresChannelStore,
     PostgresTaskStore,
@@ -625,6 +628,7 @@ def _web_settings(identity_file: Path) -> Settings:
     return Settings(
         environment_id="dev",
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file=str(identity_file),
@@ -690,8 +694,45 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     assert stack.web_session_store._engine is engine
     assert stack.task_access_service._runtime is stack.runtime
     assert stack.submission_service._runtime is stack.runtime
+    assert stack.auth._oauth_timeout_seconds == (
+        web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+    )
     await stack.aclose()
     assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_web_stack_uses_fixed_oauth_deadline_not_channel_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    identity_file = tmp_path / "identities.json"
+    _write_identity(identity_file)
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: FakeEngine(),
+    )
+    settings = Settings(
+        **(
+            _web_settings(identity_file).model_dump()
+            | {"feishu_api_timeout_seconds": 10.0}
+        )
+    )
+
+    stack = await build_postgres_web_stack(
+        settings=settings,
+        oauth=_OfflineOAuth(),
+        membership=_OfflineMembership(),
+    )
+    try:
+        assert stack.auth._oauth_timeout_seconds == (
+            web_auth_module.FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS
+        )
+    finally:
+        await stack.aclose()
 
 
 @pytest.mark.asyncio
@@ -714,6 +755,29 @@ async def test_disabled_web_stack_does_not_create_an_engine(
 
 
 @pytest.mark.asyncio
+async def test_web_stack_maps_database_credential_failure_to_its_narrow_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_engine(_: object) -> object:
+        raise DatabaseConfigurationError("database-sensitive-reference")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        fail_engine,
+    )
+
+    with pytest.raises(WebStackConfigurationError) as caught:
+        await build_postgres_web_stack(
+            settings=_web_settings(tmp_path / "unused-identities.json"),
+            oauth=_OfflineOAuth(),
+            membership=_OfflineMembership(),
+        )
+
+    assert str(caught.value) == "web stack configuration invalid"
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
 async def test_web_stack_disposes_engine_when_identity_loading_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -729,13 +793,17 @@ async def test_web_stack_disposes_engine_when_identity_loading_fails(
         lambda _: engine,
     )
 
-    with pytest.raises(Exception, match="identity configuration invalid"):
+    with pytest.raises(
+        WebStackConfigurationError,
+        match="web stack configuration invalid",
+    ) as caught:
         await build_postgres_web_stack(
             settings=_web_settings(tmp_path / "missing-identities.json"),
             oauth=_OfflineOAuth(),
             membership=_OfflineMembership(),
         )
     assert engine.disposed is True
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,9 @@
 """静态飞书身份目录：显式 allowlist、标签映射和 scope 拒绝。"""
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -167,3 +170,37 @@ def test_identity_file_symlink_is_not_followed(tmp_path: Path) -> None:
         load_feishu_identity_directory(
             path=str(link), tenant_id="dev-local", environment_id="dev"
         )
+
+
+def test_identity_fifo_without_a_writer_fails_closed_without_blocking(
+    tmp_path: Path,
+) -> None:
+    fifo = tmp_path / "identities.pipe"
+    os.mkfifo(fifo)
+    script = """
+import sys
+
+from xiaowei_agent.interfaces.feishu_identity import (
+    FeishuIdentityConfigurationError,
+    load_feishu_identity_directory,
+)
+
+try:
+    load_feishu_identity_directory(
+        path=sys.argv[1], tenant_id="dev-local", environment_id="dev"
+    )
+except FeishuIdentityConfigurationError as error:
+    assert str(error) == "feishu identity configuration invalid"
+else:
+    raise AssertionError("FIFO must be rejected")
+"""
+
+    completed = subprocess.run(  # noqa: S603 -- fixed interpreter and local FIFO path
+        [sys.executable, "-c", script, str(fifo)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr

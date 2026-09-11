@@ -1,12 +1,18 @@
 """隔离 Web app 的 OAuth、Cookie、安全头与路由闭集。"""
 
+import json
+import logging
 import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
+import uvicorn
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -15,6 +21,11 @@ from xiaowei_agent.contracts import (
     IdentitySource,
     ReadinessReport,
 )
+from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
+from xiaowei_agent.interfaces import feishu_sdk as feishu_sdk_module
+from xiaowei_agent.interfaces import local_stack as local_stack_module
+from xiaowei_agent.interfaces import web_app as web_app_module
+from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.api import create_app as create_internal_app
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.web_app import (
@@ -24,6 +35,7 @@ from xiaowei_agent.interfaces.web_app import (
 )
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
+from xiaowei_agent.trace import get_trace_id
 
 
 class _Probe:
@@ -39,23 +51,51 @@ class _Probe:
 
 
 class _OAuth:
-    def __init__(self, subject_ref: str = "subject-alice") -> None:
+    def __init__(
+        self,
+        subject_ref: str = "subject-alice",
+        *,
+        public_origin: str = "https://ops.example.test",
+    ) -> None:
         self.subject_ref = subject_ref
+        self.redirect_uri = f"{public_origin}/oauth/feishu/callback"
         self.states: list[str] = []
         self.exchange_calls = 0
+        self.authorization_trace_ids: list[str | None] = []
+        self.exchange_trace_ids: list[str | None] = []
+        self.identity_trace_ids: list[str | None] = []
 
     def authorization_url(self, *, state: str, redirect_uri: str) -> str:
+        self.authorization_trace_ids.append(get_trace_id())
         self.states.append(state)
-        assert redirect_uri == "https://ops.example.test/oauth/feishu/callback"
+        assert redirect_uri == self.redirect_uri
         return f"https://feishu.example.test/authorize?state={state}"
 
     async def exchange_code(
         self, *, code: str, redirect_uri: str
     ) -> FeishuOAuthIdentity:
+        self.exchange_trace_ids.append(get_trace_id())
         assert code == "valid-code"
-        assert redirect_uri == "https://ops.example.test/oauth/feishu/callback"
+        assert redirect_uri == self.redirect_uri
         self.exchange_calls += 1
         return FeishuOAuthIdentity(subject_ref=self.subject_ref)
+
+
+class _TracingIdentityDirectory:
+    def __init__(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        trace_ids: list[str | None],
+    ) -> None:
+        self._delegate = StaticFeishuIdentityDirectory(
+            principals={principal.subject_ref: principal}
+        )
+        self._trace_ids = trace_ids
+
+    def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+        self._trace_ids.append(get_trace_id())
+        return self._delegate.resolve(subject_ref=subject_ref)
 
 
 def _principal() -> AuthenticatedPrincipal:
@@ -74,14 +114,15 @@ def _principal() -> AuthenticatedPrincipal:
     )
 
 
-def _settings() -> Settings:
+def _settings(*, public_origin: str = "https://ops.example.test") -> Settings:
     return Settings(
         environment_id="dev",
         web_app_enabled=True,
+        feishu_oauth_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_detail_base_url=public_origin,
     )
 
 
@@ -94,17 +135,24 @@ def _tokens() -> Iterator[str]:
     )
 
 
-def _web_app(clock, memory_state, *, subject_ref: str = "subject-alice") -> Any:
-    oauth = _OAuth(subject_ref=subject_ref)
+def _web_app(
+    clock,
+    memory_state,
+    *,
+    subject_ref: str = "subject-alice",
+    public_origin: str = "https://ops.example.test",
+) -> Any:
+    oauth = _OAuth(subject_ref=subject_ref, public_origin=public_origin)
     token_values = _tokens()
     principal = _principal()
     auth = WebAuthService(
         sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
-        identities=StaticFeishuIdentityDirectory(
-            principals={principal.subject_ref: principal}
+        identities=_TracingIdentityDirectory(
+            principal=principal,
+            trace_ids=oauth.identity_trace_ids,
         ),
         oauth=oauth,
-        public_origin="https://ops.example.test",
+        public_origin=public_origin,
         oauth_state_ttl_seconds=300,
         session_ttl_seconds=3600,
         token_factory=lambda: next(token_values),
@@ -123,7 +171,7 @@ def _web_app(clock, memory_state, *, subject_ref: str = "subject-alice") -> Any:
     return (
         create_app(
             auth=auth,
-            settings=_settings(),
+            settings=_settings(public_origin=public_origin),
             readiness=_Probe(),
             task_access=TaskAccess(),
             submissions=Submissions(),
@@ -134,12 +182,57 @@ def _web_app(clock, memory_state, *, subject_ref: str = "subject-alice") -> Any:
     )
 
 
-def _client(app: Any) -> httpx.AsyncClient:
+def _client(
+    app: Any, *, base_url: str = "https://ops.example.test"
+) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
-        base_url="https://ops.example.test",
+        base_url=base_url,
         follow_redirects=False,
     )
+
+
+async def _raw_get(
+    app: Any, *, path: str, headers: list[tuple[bytes, bytes]]
+) -> tuple[int, dict[str, object], list[tuple[bytes, bytes]]]:
+    sent: list[dict[str, object]] = []
+    received = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal received
+        if received:
+            return {"type": "http.disconnect"}
+        received = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await app(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "root_path": "",
+            "headers": headers,
+            "client": ("127.0.0.1", 55000),
+            "server": ("127.0.0.1", 8080),
+        },
+        receive,
+        send,
+    )
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    return int(start["status"]), json.loads(body), list(start["headers"])
 
 
 async def _login(client: httpx.AsyncClient, oauth: _OAuth) -> httpx.Response:
@@ -513,28 +606,332 @@ async def test_health_readiness_and_framework_errors_use_closed_bodies(
             assert (await client.get(path)).status_code == 404
 
 
-def test_real_module_entry_is_silent_and_closed_with_default_profile() -> None:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith("XIAOWEI_")
-    }
-    env["XIAOWEI_ENVIRONMENT_ID"] = "dev"
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"host", b"127.0.0.1:8080")],
+        [(b"host", b"evil.example.test")],
+        [(b"host", b"ops.example.test:8443")],
+        [(b"host", b"user@ops.example.test")],
+        [(b"host", b"ops.example.test:")],
+        [(b"host", b"ops.example.test:0443")],
+        [(b"host", b"ops.example.test:0")],
+        [(b"host", b"ops.example.test?")],
+        [(b"host", b"ops.example.test#")],
+        [(b"host", b"127.1")],
+        [(b"host", b"127.000.000.001")],
+        [(b"host", b"2130706433")],
+        [(b"host", b"0x7f000001")],
+        [(b"host", b"0177.0.0.1")],
+        [(b"host", b"0x7f.1")],
+        [
+            (b"host", b"ops.example.test"),
+            (b"host", b"ops.example.test"),
+        ],
+        [],
+    ],
+    ids=[
+        "direct-ip",
+        "wrong-domain",
+        "wrong-port",
+        "userinfo",
+        "empty-port",
+        "noncanonical-port",
+        "zero-port",
+        "empty-query",
+        "empty-fragment",
+        "short-ipv4",
+        "zero-padded-ipv4",
+        "decimal-ipv4",
+        "hex-ipv4",
+        "octal-component-ipv4",
+        "hex-component-ipv4",
+        "duplicate",
+        "missing",
+    ],
+)
+async def test_non_health_routes_reject_untrusted_direct_authority_before_oauth(
+    clock, memory_state, headers: list[tuple[bytes, bytes]]
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
 
-    completed = subprocess.run(
-        [sys.executable, "-m", "xiaowei_agent.interfaces.web_app"],
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
+    status, body, response_headers = await _raw_get(
+        app, path="/oauth/feishu/start", headers=headers
     )
 
-    assert completed.returncode == 2
-    assert completed.stdout == ""
-    assert completed.stderr == ""
+    assert status == 403
+    assert body == {"error": {"code": "forbidden"}}
+    assert oauth.states == []
+    assert (b"cache-control", b"no-store") in response_headers
 
 
-def test_enabled_module_entry_does_not_activate_real_oauth_or_read_secrets() -> None:
+async def test_direct_host_is_authoritative_and_forwarded_headers_are_ignored(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    async with _client(app) as client:
+        accepted = await client.get(
+            "/oauth/feishu/start",
+            headers={
+                "host": "OPS.EXAMPLE.TEST:443",
+                "forwarded": "host=evil.example.test;proto=http",
+                "x-forwarded-host": "evil.example.test",
+                "x-forwarded-proto": "http",
+            },
+        )
+        rejected = await client.get(
+            "/oauth/feishu/start",
+            headers={
+                "host": "evil.example.test",
+                "forwarded": "host=ops.example.test;proto=https",
+                "x-forwarded-host": "ops.example.test",
+                "x-forwarded-proto": "https",
+            },
+        )
+
+    assert accepted.status_code == 302
+    assert rejected.status_code == 403
+    assert rejected.json() == {"error": {"code": "forbidden"}}
+    assert len(oauth.states) == 1
+
+
+async def test_configured_custom_https_authority_requires_its_exact_port(
+    clock, memory_state
+) -> None:
+    public_origin = "https://ops.example.test:8443"
+    app, oauth = _web_app(
+        clock,
+        memory_state,
+        public_origin=public_origin,
+    )
+    async with _client(app, base_url=public_origin) as client:
+        accepted = await client.get("/oauth/feishu/start")
+        missing_port = await client.get(
+            "/oauth/feishu/start", headers={"host": "ops.example.test"}
+        )
+        default_port = await client.get(
+            "/oauth/feishu/start", headers={"host": "ops.example.test:443"}
+        )
+
+    assert accepted.status_code == 302
+    assert missing_port.status_code == 403
+    assert default_port.status_code == 403
+    assert len(oauth.states) == 1
+
+
+async def test_non_ascii_raw_host_cannot_alias_a_canonical_idna_authority(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(
+        clock,
+        memory_state,
+        public_origin="https://xn--wda.example.test",
+    )
+
+    status, body, _ = await _raw_get(
+        app,
+        path="/oauth/feishu/start",
+        headers=[(b"host", b"\xff.example.test")],
+    )
+
+    assert status == 403
+    assert body == {"error": {"code": "forbidden"}}
+    assert oauth.states == []
+
+
+async def test_loopback_http_scheme_is_allowed_only_with_the_sso_host(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://127.0.0.1:8080",
+        follow_redirects=False,
+    ) as client:
+        proxied = await client.get(
+            "/oauth/feishu/start", headers={"host": "ops.example.test"}
+        )
+        direct = await client.get(
+            "/oauth/feishu/start", headers={"host": "127.0.0.1:8080"}
+        )
+
+    assert proxied.status_code == 302
+    assert direct.status_code == 403
+    assert len(oauth.states) == 1
+
+
+async def test_non_health_get_origin_is_optional_but_strict_when_present(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    async with _client(app) as client:
+        rejected = await client.get(
+            "/oauth/feishu/start",
+            headers={"origin": "https://evil.example.test"},
+        )
+        duplicate = await client.get(
+            "/oauth/feishu/start",
+            headers=[
+                ("origin", "https://ops.example.test"),
+                ("origin", "https://ops.example.test"),
+            ],
+        )
+        accepted = await client.get(
+            "/oauth/feishu/start",
+            headers={"origin": "https://ops.example.test"},
+        )
+
+    assert rejected.status_code == 403
+    assert duplicate.status_code == 403
+    assert accepted.status_code == 302
+    assert len(oauth.states) == 1
+
+
+async def test_health_routes_are_the_only_direct_ip_host_exceptions(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    async with _client(app) as client:
+        health = await client.get("/healthz", headers={"host": "127.0.0.1:8080"})
+        ready = await client.get("/readyz", headers={"host": "127.0.0.1:8080"})
+        protected = await client.get("/app", headers={"host": "127.0.0.1:8080"})
+
+    assert health.status_code == 200
+    assert ready.status_code == 200
+    assert protected.status_code == 403
+    assert oauth.states == []
+
+
+async def test_oauth_request_trace_is_server_generated_bound_and_logged_once(
+    clock, memory_state, caplog: pytest.LogCaptureFixture
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    incoming = "f" * 32
+    with caplog.at_level(logging.INFO, logger="xiaowei_agent.interfaces.web_app"):
+        async with _client(app) as client:
+            started = await client.get(
+                "/oauth/feishu/start", headers={"x-trace-id": incoming}
+            )
+            callback = await client.get(
+                "/oauth/feishu/callback",
+                params={"code": "valid-code", "state": oauth.states[-1]},
+                headers={"x-trace-id": incoming},
+            )
+
+    assert started.status_code == 302
+    assert callback.status_code == 302
+    assert len(oauth.authorization_trace_ids) == 1
+    start_trace_id = oauth.authorization_trace_ids[0]
+    assert len(oauth.exchange_trace_ids) == 1
+    callback_trace_id = oauth.exchange_trace_ids[0]
+    assert oauth.identity_trace_ids == [callback_trace_id]
+    assert start_trace_id is not None
+    assert callback_trace_id is not None
+    assert start_trace_id != callback_trace_id
+    assert incoming not in {start_trace_id, callback_trace_id}
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "xiaowei_agent.interfaces.web_app"
+    ]
+    assert [record.route_class for record in records] == [
+        "oauth_start",
+        "oauth_callback",
+    ]
+    assert [record.outcome for record in records] == ["ok", "ok"]
+    assert [record.trace_id for record in records] == [
+        start_trace_id,
+        callback_trace_id,
+    ]
+
+
+async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: dict[str, object] = {}
+
+    class OAuth:
+        def __init__(self, **kwargs: object) -> None:
+            events["oauth"] = kwargs
+            events["oauth_instance"] = self
+
+    class Membership:
+        def __init__(self, **kwargs: object) -> None:
+            events["membership"] = kwargs
+            events["membership_instance"] = self
+
+    class Stack:
+        auth = object()
+        readiness = _Probe()
+        task_access_service = object()
+        submission_service = object()
+        clock = object()
+        policy_revision = "policy-1"
+        close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    stack = Stack()
+
+    async def build(**kwargs: object) -> Stack:
+        events["build"] = kwargs
+        return stack
+
+    def app_factory(**kwargs: object) -> object:
+        events["app"] = kwargs
+        return SimpleNamespace()
+
+    class Server:
+        def __init__(self, config: uvicorn.Config) -> None:
+            events["server_config"] = config
+
+        async def serve(self) -> None:
+            events["served"] = True
+
+    monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
+    monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
+    monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", build)
+    monkeypatch.setattr(web_app_module, "create_app", app_factory)
+    monkeypatch.setattr(web_app_module, "configure_logging", lambda _: None)
+    monkeypatch.setattr(web_app_module.uvicorn, "Server", Server)
+    settings = Settings(
+        **(
+            _settings().model_dump()
+            | {"feishu_api_timeout_seconds": 10.0}
+        )
+    )
+
+    result = await web_app_module.serve_web(settings)
+
+    assert result == 0
+    assert events["oauth"] == {
+        "app_id": "cli_test_app",
+        "app_secret_file": "/run/secrets/feishu_app_secret",
+        "timeout_seconds": web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
+    }
+    assert events["membership"] == {
+        "tenant_id": "dev-local",
+        "app_id": "cli_test_app",
+        "app_secret_file": "/run/secrets/feishu_app_secret",
+    }
+    assert events["build"] == {
+        "settings": settings,
+        "oauth": events["oauth_instance"],
+        "membership": events["membership_instance"],
+    }
+    config = events["server_config"]
+    assert isinstance(config, uvicorn.Config)
+    assert config.host == "127.0.0.1"
+    assert config.port == 8080
+    assert config.proxy_headers is False
+    assert config.access_log is False
+    assert config.log_config is None
+    assert events["served"] is True
+    assert stack.close_calls == 1
+
+
+def test_real_module_entry_rejects_half_enabled_web_before_secret_access() -> None:
     env = {
         key: value
         for key, value in os.environ.items()
@@ -561,4 +958,322 @@ def test_enabled_module_entry_does_not_activate_real_oauth_or_read_secrets() -> 
 
     assert completed.returncode == 2
     assert completed.stdout == ""
-    assert completed.stderr == "xiaowei-web: oauth_adapter_not_activated\n"
+    assert completed.stderr == "xiaowei-web: configuration_error\n"
+
+
+def test_main_maps_identity_configuration_to_one_fixed_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class OAuth:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    class Membership:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    async def fail_identity(**_: object) -> object:
+        raise local_stack_module.WebStackConfigurationError(
+            "identity-sensitive-detail"
+        )
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
+    monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
+    monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", fail_identity)
+    monkeypatch.setattr(web_app_module, "configure_logging", lambda _: None)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "xiaowei-web: configuration_error\n"
+    assert "sensitive" not in captured.err
+
+
+def test_main_maps_database_credential_configuration_to_one_fixed_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class OAuth:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    class Membership:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    async def fail_database(**_: object) -> object:
+        raise local_stack_module.WebStackConfigurationError(
+            "database-sensitive-reference"
+        )
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
+    monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
+    monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", fail_database)
+    monkeypatch.setattr(web_app_module, "configure_logging", lambda _: None)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "xiaowei-web: configuration_error\n"
+    assert "sensitive" not in captured.err
+
+
+def test_main_rejects_bypassed_half_enabled_settings_before_serving(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    half_enabled = Settings.model_construct(
+        environment_id="dev",
+        web_app_enabled=True,
+        feishu_oauth_enabled=False,
+    )
+
+    async def must_not_serve(_: Settings) -> int:
+        raise AssertionError("half-enabled Web must not assemble or call a provider")
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: half_enabled)
+    monkeypatch.setattr(web_app_module, "serve_web", must_not_serve, raising=False)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "xiaowei-web: configuration_error\n"
+
+
+def test_main_maps_nonconfiguration_failure_to_one_fixed_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def fail_runtime(_: Settings) -> int:
+        raise RuntimeError("provider-sensitive-detail")
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    monkeypatch.setattr(web_app_module, "serve_web", fail_runtime, raising=False)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "xiaowei-web: startup_failed\n"
+    assert "sensitive" not in captured.err
+
+
+def test_main_maps_uvicorn_startup_exit_to_one_fixed_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def fail_startup(_: Settings) -> int:
+        raise SystemExit("provider-sensitive-detail")
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    monkeypatch.setattr(web_app_module, "serve_web", fail_startup, raising=False)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "xiaowei-web: startup_failed\n"
+    assert "sensitive" not in captured.err
+
+
+def test_real_uvicorn_bind_failure_emits_only_the_fixed_main_error(
+    tmp_path: Path,
+) -> None:
+    postgres_secret = tmp_path / "postgres-credential"
+    postgres_secret.write_text("fixture-" + "password", encoding="utf-8")
+    feishu_secret = tmp_path / "feishu-credential"
+    feishu_secret.write_text("fixture-" + "secret", encoding="utf-8")
+    identities = tmp_path / "identities.json"
+    identities.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tenant_id": "dev-local",
+                "environment_id": "dev",
+                "entries": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handler_sentinel = tmp_path / "uvicorn-error-handler-called"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("XIAOWEI_")
+    }
+    env.update(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_POSTGRES_PASSWORD_FILE": str(postgres_secret),
+            "XIAOWEI_WEB_APP_ENABLED": "true",
+            "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
+            "XIAOWEI_FEISHU_APP_ID": "app",
+            "XIAOWEI_FEISHU_APP_SECRET_FILE": str(feishu_secret),
+            "XIAOWEI_FEISHU_IDENTITY_FILE": str(identities),
+            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+            "XIAOWEI_WEB_BIND_HOST": "192.0.2.1",
+            "XIAOWEI_WEB_BIND_PORT": "49152",
+            "TEST_UVICORN_HANDLER_SENTINEL": str(handler_sentinel),
+        }
+    )
+    script = """
+import logging
+import os
+import sys
+from pathlib import Path
+
+from xiaowei_agent.interfaces.web_app import main
+
+class FailingErrorHandler(logging.Handler):
+    def emit(self, record):
+        Path(os.environ["TEST_UVICORN_HANDLER_SENTINEL"]).write_text(
+            "called", encoding="utf-8"
+        )
+        raise RuntimeError("unsafe logging handler failed")
+
+logger = logging.getLogger("uvicorn.error")
+logger.handlers.clear()
+logger.propagate = False
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler(sys.stderr))
+failing = FailingErrorHandler()
+failing.setLevel(logging.ERROR)
+logger.addHandler(failing)
+raise SystemExit(main())
+"""
+
+    completed = subprocess.run(  # noqa: S603 - 固定解释器与本地常量脚本。
+        [sys.executable, "-c", script],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == "xiaowei-web: startup_failed\n"
+    assert not handler_sentinel.exists()
+
+
+@pytest.mark.parametrize("failure_point", ["app", "config", "server", "serve"])
+async def test_serve_web_closes_stack_at_every_post_assembly_failure(
+    monkeypatch: pytest.MonkeyPatch, failure_point: str
+) -> None:
+    class OAuth:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    class Membership:
+        def __init__(self, **_: object) -> None:
+            return None
+
+    class Stack:
+        auth = object()
+        readiness = _Probe()
+        task_access_service = object()
+        submission_service = object()
+        clock = object()
+        policy_revision = "policy-1"
+        close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    stack = Stack()
+
+    async def build(**_: object) -> Stack:
+        return stack
+
+    def app_factory(**_: object) -> object:
+        if failure_point == "app":
+            raise RuntimeError("app failed")
+        return SimpleNamespace()
+
+    real_config = uvicorn.Config
+
+    def config_factory(*args: object, **kwargs: object) -> uvicorn.Config:
+        if failure_point == "config":
+            raise RuntimeError("config failed")
+        return real_config(*args, **kwargs)
+
+    class Server:
+        def __init__(self, _: uvicorn.Config) -> None:
+            if failure_point == "server":
+                raise RuntimeError("server failed")
+
+        async def serve(self) -> None:
+            if failure_point == "serve":
+                raise RuntimeError("serve failed")
+
+    monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
+    monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
+    monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", build)
+    monkeypatch.setattr(web_app_module, "create_app", app_factory)
+    monkeypatch.setattr(web_app_module, "configure_logging", lambda _: None)
+    monkeypatch.setattr(web_app_module.uvicorn, "Config", config_factory)
+    monkeypatch.setattr(web_app_module.uvicorn, "Server", Server)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await web_app_module.serve_web(_settings())
+
+    assert stack.close_calls == 1
+
+
+def test_real_module_entry_is_silent_and_closed_with_default_profile() -> None:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("XIAOWEI_")
+    }
+    env["XIAOWEI_ENVIRONMENT_ID"] = "dev"
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "xiaowei_agent.interfaces.web_app"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+def test_enabled_module_entry_maps_bad_secret_reference_to_configuration_error() -> None:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("XIAOWEI_")
+    }
+    env.update(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_WEB_APP_ENABLED": "true",
+            "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
+            "XIAOWEI_FEISHU_APP_ID": "app",
+            "XIAOWEI_FEISHU_APP_SECRET_FILE": "/missing/secret-reference",
+            "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
+            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "xiaowei_agent.interfaces.web_app"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == "xiaowei-web: configuration_error\n"

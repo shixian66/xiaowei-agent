@@ -194,6 +194,51 @@ def _class_method_kinds(path: Path, class_name: str) -> dict[str, type[ast.AST]]
     }
 
 
+def _class_method_node(
+    path: Path, class_name: str, method_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    methods = [
+        node
+        for candidate in tree.body
+        if isinstance(candidate, ast.ClassDef) and candidate.name == class_name
+        for node in candidate.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == method_name
+    ]
+    assert len(methods) == 1
+    return methods[0]
+
+
+def _attribute_string_assignments(path: Path, attribute: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == attribute
+            for target in node.targets
+        )
+    }
+
+
+def _module_string_assignment(path: Path, name: str) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values = [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    ]
+    assert len(values) == 1
+    return values[0]
+
+
 def test_lark_oapi_reviewed_license_and_async_surface_still_match() -> None:
     """不用 import SDK（其 ws import 会建事件循环），直接核对锁定 wheel 源码。"""
     assert metadata("lark-oapi")["License"] == "MIT"
@@ -218,6 +263,46 @@ def test_lark_oapi_reviewed_license_and_async_surface_still_match() -> None:
     assert members["aget"] is ast.AsyncFunctionDef
     assert websocket["start"] is ast.FunctionDef
     assert "register_p2_im_message_receive_v1" in dispatcher
+
+
+def test_lark_oapi_provider_domain_and_relative_uri_seams_still_match() -> None:
+    """显式 project origin 必须仍控制 SDK 的 REST 与 WS 首跳。"""
+    spec = find_spec("lark_oapi")
+    assert spec is not None and spec.origin is not None
+    root = Path(spec.origin).parent
+
+    assert "domain" in _class_method_kinds(root / "client.py", "ClientBuilder")
+    ws_init = _class_method_node(root / "ws/client.py", "Client", "__init__")
+    ws_parameters = {
+        argument.arg
+        for argument in (
+            *ws_init.args.posonlyargs,
+            *ws_init.args.args,
+            *ws_init.args.kwonlyargs,
+        )
+    }
+    assert "domain" in ws_parameters
+
+    expected_uris = {
+        root / "core/token/create_self_tenant_token_request.py": (
+            "/open-apis/auth/v3/tenant_access_token/internal"
+        ),
+        root / "api/im/v1/model/get_chat_members_request.py": (
+            "/open-apis/im/v1/chats/:chat_id/members"
+        ),
+        root / "api/im/v1/model/create_message_request.py": (
+            "/open-apis/im/v1/messages"
+        ),
+        root / "api/im/v1/model/patch_message_request.py": (
+            "/open-apis/im/v1/messages/:message_id"
+        ),
+    }
+    for path, expected in expected_uris.items():
+        assert _attribute_string_assignments(path, "uri") == {expected}
+        assert expected.startswith("/") and "://" not in expected
+    websocket_uri = _module_string_assignment(root / "ws/const.py", "GEN_ENDPOINT_URI")
+    assert websocket_uri == "/callback/ws/endpoint"
+    assert "://" not in websocket_uri
 
 
 def test_lark_oapi_message_builder_surface_still_matches_the_typed_seam() -> None:

@@ -23,6 +23,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
 from xiaowei_agent.persistence.database import (
+    DatabaseConfigurationError,
     PostgresReadinessProbe,
     create_database_engine,
 )
@@ -186,6 +187,10 @@ class WebStack:
     readiness: ReadinessProbe
     aclose: AsyncClose
     policy_revision: str
+
+
+class WebStackConfigurationError(RuntimeError):
+    """Web 窄栈的 credential 或身份文件配置不可用。"""
 
 
 @dataclass(frozen=True)
@@ -773,13 +778,24 @@ async def build_postgres_web_stack(
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.interfaces.feishu_identity import (
+        FeishuIdentityConfigurationError,
         load_feishu_identity_directory,
     )
-    from xiaowei_agent.interfaces.web_auth import WebAuthService
+    from xiaowei_agent.interfaces.web_auth import (
+        FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
+        WebAuthService,
+    )
 
-    if not settings.web_app_enabled:
+    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
         raise ValueError("Web app is disabled")
-    engine = create_database_engine(settings)
+    engine = None
+    database_invalid = False
+    try:
+        engine = create_database_engine(settings)
+    except DatabaseConfigurationError:
+        database_invalid = True
+    if database_invalid or engine is None:
+        raise WebStackConfigurationError("web stack configuration invalid")
 
     async def close() -> None:
         await engine.dispose()
@@ -823,7 +839,7 @@ async def build_postgres_web_stack(
             public_origin=cast(str, settings.web_detail_base_url),
             oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
             session_ttl_seconds=settings.web_session_ttl_seconds,
-            oauth_timeout_seconds=settings.feishu_api_timeout_seconds,
+            oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         )
         return WebStack(
             auth=auth,
@@ -842,9 +858,12 @@ async def build_postgres_web_stack(
             aclose=close,
             policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
         )
+    except FeishuIdentityConfigurationError:
+        await engine.dispose()
     except Exception:
         await engine.dispose()
         raise
+    raise WebStackConfigurationError("web stack configuration invalid")
 
 
 async def build_postgres_local_stack(

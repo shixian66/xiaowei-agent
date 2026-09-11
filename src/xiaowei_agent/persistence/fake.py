@@ -118,9 +118,11 @@ from xiaowei_agent.persistence.store import (
     validate_task_failure_limit,
 )
 from xiaowei_agent.persistence.web_session import (
+    DEFAULT_OAUTH_STATE_CAPACITY,
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
     OAuthState,
+    OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
@@ -128,6 +130,7 @@ from xiaowei_agent.persistence.web_session import (
     WebSessionConflictError,
     WebSessionLookup,
     WebSessionNotFoundError,
+    validate_oauth_state_capacity,
 )
 
 _EntryT = TypeVar("_EntryT")
@@ -428,8 +431,17 @@ class InMemoryChannelStore:
 class InMemoryWebSessionStore:
     """与其他内存存储共锁的 OAuth state 和浏览器 session 实现。"""
 
-    def __init__(self, *, clock: Clock, state: InMemoryPersistenceState | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+        oauth_state_capacity: int = DEFAULT_OAUTH_STATE_CAPACITY,
+    ) -> None:
         self._clock = clock
+        self._oauth_state_capacity = validate_oauth_state_capacity(
+            oauth_state_capacity
+        )
         self._state = InMemoryPersistenceState() if state is None else state
         self._lock = self._state.lock
 
@@ -437,9 +449,18 @@ class InMemoryWebSessionStore:
         self, *, command: IssueOAuthStateCommand
     ) -> OAuthState:
         async with self._lock:
+            now = self._clock()
+            stale_digests = tuple(
+                digest
+                for digest, state in self._state.oauth_states.items()
+                if state.consumed_at is not None or now >= state.expires_at
+            )
+            for digest in stale_digests:
+                del self._state.oauth_states[digest]
             if command.state_digest in self._state.oauth_states:
                 raise WebSessionConflictError
-            now = self._clock()
+            if len(self._state.oauth_states) >= self._oauth_state_capacity:
+                raise OAuthStateCapacityError
             state = OAuthState(
                 state_digest=command.state_digest,
                 issued_at=now,

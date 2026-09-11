@@ -60,7 +60,8 @@ provider 原始正文和 secret 不进入日志、错误或测试夹具。基础
 
 测试必须先证明：
 
-- OAuth state 有过期清理与全局未完成数量上限；超限时拒绝签发，不靠无界表增长承受滥用。
+- OAuth state 有过期清理与全局未完成数量上限；超限时拒绝签发，保证数据库有界，但不把它称为
+  滥用保护或请求限流。
 - fake 与 PostgreSQL 在并发签发时都不能越过同一个上限；已消费或已过期 state 不占额度。
 - 拒绝结果是闭集错误，日志不出现 state 原文、cookie 或数据库异常正文。
 
@@ -98,8 +99,10 @@ Expected: 现有 state 一次消费、cookie 绑定、session 轮换和撤权测
 digest；超限只返回闭集错误。仅有事务还不足以阻止 `count → insert` 竞态：PostgreSQL 必须用固定、
 不含用户输入的 transaction advisory lock 或锁定的配额行，把清理/计数/插入串行化；不得依赖单
 进程 Python lock。fake/PostgreSQL 共用同一 contract suite，并发屏障测试必须证明签发不能越过上限。
-这解决数据库无界增长和最小应用级滥用保护；公网请求速率仍由已有 SSO 入口负责，RI2/RI6
-runbook 必须记录该设施的实际限流证据，不能把 state 数量上限冒充按 IP 限流。
+这只解决数据库无界增长。由于匿名 OAuth start 可在一个 TTL 内填满 1024 个全局 pending state，
+并通过持续补位让全部正常登录保持 503，这个上限本身形成明确的全局可用性 DoS 风险。公网请求
+速率仍由已有 SSO 入口负责；RI2/RI6 runbook 必须记录该设施的真实限流配置、监控/告警和运行反证，
+缺少这些证据时不得激活公网 OAuth，不能把 state 数量上限冒充按 IP 限流。
 
 Run: `python -m pytest tests/contract/test_web_session_store.py tests/contract/test_web_auth.py tests/integration/test_web_session_postgres.py tests/security/test_web_auth_boundary.py -q`
 
@@ -118,9 +121,13 @@ git commit -m "feat(web): bound oauth activation state"
 
 - Create: `src/xiaowei_agent/interfaces/feishu_oauth.py`
 - Modify: `src/xiaowei_agent/interfaces/__init__.py`
+- Modify: `src/xiaowei_agent/interfaces/feishu_sdk.py`
+- Modify: `src/xiaowei_agent/interfaces/secret_file.py`
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Create: `tests/contract/test_feishu_oauth_adapter.py`
+- Modify: `tests/contract/test_feishu_sdk_seam.py`
 - Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/security/test_dependency_baseline.py`
 - Modify: `tests/security/test_module_layering.py`
 
 - [ ] **Step 1: 写 RED adapter 契约测试**
@@ -149,14 +156,17 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
     ) -> None: ...
 ```
 
-secret reader 必须拒绝 symlink、非普通文件、空文件和超限文件，且不在 `repr` 中保存 secret。底层
-socket timeout 必须短于外层 5 秒 deadline；取消外层 coroutine 只会丢弃晚到结果，不能宣称已杀死
-`to_thread` 内的阻塞调用。进程关闭和重试不得复用该晚到结果。
+secret reader 是 `interfaces.secret_file` 的公开窄 API，必须拒绝 symlink、非普通文件、空文件和
+超限文件，且不在 `repr` 中保存 secret。provider adapter 的固定总预算为 5 秒；底层 socket 使用
+剩余预算的更短切片，`WebAuthService` 的外层 watchdog 固定为 6 秒并严格大于 provider 预算。取消
+外层 coroutine 只会丢弃晚到结果，不能宣称已杀死 `to_thread` 内的阻塞调用。进程关闭和重试不得
+复用该晚到结果。
 
 - [ ] **Step 3: 实现最小 GREEN**
 
 - URL 构造使用固定官方 host 和 `urllib.parse.urlencode`；
-- code exchange 设置 5 秒上限，限制响应字节数并严格校验 JSON；
+- code exchange 的 provider 总预算设置为 5 秒，WebAuth 外层 watchdog 设置为 6 秒；限制响应
+  字节数并严格校验 JSON；
 - 成功后只保留 `open_id`；access token 和原始响应在局部变量范围内消失；
 - 所有错误转成既有安全异常，不记录 provider body。
 - 外层取消、底层 socket 超时和晚到响应分别测试；任何晚到响应都不得进入身份映射或 session。
@@ -180,7 +190,7 @@ Expected: 恢复后通过。
 - [ ] **Step 5: 提交 adapter**
 
 ```bash
-git add src/xiaowei_agent/interfaces/feishu_oauth.py src/xiaowei_agent/interfaces/__init__.py src/xiaowei_agent/_conformance.py tests/contract/test_feishu_oauth_adapter.py tests/contract/test_protocol_conformance.py tests/security/test_module_layering.py
+git add src/xiaowei_agent/interfaces/feishu_oauth.py src/xiaowei_agent/interfaces/feishu_sdk.py src/xiaowei_agent/interfaces/secret_file.py src/xiaowei_agent/interfaces/__init__.py src/xiaowei_agent/_conformance.py tests/contract/test_feishu_oauth_adapter.py tests/contract/test_feishu_sdk_seam.py tests/contract/test_protocol_conformance.py tests/security/test_dependency_baseline.py tests/security/test_module_layering.py
 git commit -m "feat(feishu): add bounded oauth adapter"
 ```
 
@@ -247,6 +257,8 @@ git commit -m "feat(web): activate real oauth composition root"
 **Files:**
 
 - Modify: `docker-compose.yml`
+- Modify: `docker-compose.smoke.yml`
+- Modify: `scripts/compose_smoke.py`
 - Modify: `tests/contract/test_compose_contract.py`
 - Modify: `tests/contract/test_compose_smoke_script.py`
 - Modify: `README.md`
@@ -262,6 +274,11 @@ git commit -m "feat(web): activate real oauth composition root"
 - 所有真实飞书开关默认关闭；
 - API 端口不因 Web 开放而自动暴露；
 - image tag 可由非秘密环境变量选择，但默认值仍可本地启动。
+- OAuth endpoint、SDK REST/WS 显式 origin 与 Compose smoke 的 provider 黑洞 host 由同一项目
+  origin 契约机械绑定，不能靠三处恰好相同的字符串。
+- canonical Compose smoke 在 Web ready 后，以本地 `HTTPConnection` 访问一次受信 Host 的
+  `/oauth/feishu/start`，核对 302、官方 Location、一次性 state 与安全 cookie；再以直接 IP Host
+  证明固定 403。客户端不使用代理、不跟随 Location、不请求 callback，也不触发 provider。
 
 Run: `python -m pytest tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py -q`
 
@@ -269,7 +286,9 @@ Expected: 新契约先失败。
 
 - [ ] **Step 2: 最小修改 Compose 和 README**
 
-只增加渠道 profile 所需的环境变量、只读挂载和 Web 端口发布；不加入 nginx、Traefik、证书容器或第二套部署编排。README 只说明配置字段、开关和现有 SSO 前提，不写真实值。
+只增加渠道 profile 所需的环境变量、只读挂载和 Web 端口发布；不加入 nginx、Traefik、证书容器或第二套部署编排。README 只说明配置字段、开关和现有 SSO 前提，不写真实值。smoke 的 OAuth
+start 只证明本地真实进程、Host 边界、PostgreSQL state 持久化和响应契约，不升级为 provider 或
+测试环境证据。
 
 - [ ] **Step 3: 更新 handoff 证据口径**
 
@@ -278,7 +297,7 @@ Expected: 新契约先失败。
 - [ ] **Step 4: 提交 Compose 契约**
 
 ```bash
-git add docker-compose.yml tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py README.md AGENT_HANDOFF.md
+git add docker-compose.yml docker-compose.smoke.yml scripts/compose_smoke.py tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py README.md AGENT_HANDOFF.md
 git commit -m "chore(compose): wire disabled feishu web profile"
 ```
 

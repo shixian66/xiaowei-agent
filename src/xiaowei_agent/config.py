@@ -19,6 +19,7 @@ from datetime import datetime
 from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
+from socket import inet_aton
 from typing import Annotated, Final, Literal
 from urllib.parse import urlsplit
 
@@ -72,12 +73,18 @@ def _absolute_path(value: str) -> str:
 AbsolutePath = Annotated[StrictStr, AfterValidator(_absolute_path)]
 
 
-def _canonical_origin_hostname(value: str) -> str | None:
+def _canonical_ip_literal(value: str) -> str | None:
     try:
         address = ip_address(value)
-        return f"[{address.compressed}]" if address.version == 6 else address.compressed
     except ValueError:
-        pass
+        try:
+            address = ip_address(inet_aton(value))
+        except (OSError, UnicodeError, ValueError):
+            return None
+    return f"[{address.compressed}]" if address.version == 6 else address.compressed
+
+
+def _canonical_dns_hostname(value: str) -> str | None:
     try:
         hostname = value.encode("idna").decode("ascii").lower().removesuffix(".")
     except UnicodeError:
@@ -97,7 +104,26 @@ def _canonical_origin_hostname(value: str) -> str | None:
     return hostname
 
 
+def canonical_non_ip_hostname(value: str) -> str | None:
+    """规范化 DNS 主机名；标准及 legacy IP 文本一律返回 ``None``。"""
+    if _canonical_ip_literal(value) is not None:
+        return None
+    return _canonical_dns_hostname(value)
+
+
+def _canonical_origin_hostname(value: str) -> str | None:
+    address = _canonical_ip_literal(value)
+    return address if address is not None else _canonical_dns_hostname(value)
+
+
 def _https_origin(value: str) -> str:
+    if any(
+        ord(character) < 0x20
+        or ord(character) == 0x7F
+        or character.isspace()
+        for character in value
+    ):
+        raise ValueError("must be an HTTPS origin")
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -112,11 +138,14 @@ def _https_origin(value: str) -> str:
         parsed.scheme != "https"
         or not parsed.netloc
         or hostname is None
+        or (port is not None and not 1 <= port <= 65_535)
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
+        or "?" in value
+        or "#" in value
     ):
         raise ValueError("must be an HTTPS origin")
     authority = hostname if port in {None, 443} else f"{hostname}:{port}"
@@ -195,6 +224,7 @@ class Settings(BaseModel):
     feishu_listener_enabled: bool = False
     channel_worker_enabled: bool = False
     web_app_enabled: bool = False
+    feishu_oauth_enabled: bool = False
     feishu_app_id: StrictStr | None = None
     feishu_app_secret_file: AbsolutePath | None = None
     feishu_tenant_key: StrictStr | None = None
@@ -333,6 +363,8 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
+        if self.web_app_enabled != self.feishu_oauth_enabled:
+            raise ValueError("Web app and Feishu OAuth must be enabled together")
         shared = (self.feishu_app_id, self.feishu_app_secret_file)
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
         identity = (self.feishu_identity_file,)
@@ -368,6 +400,9 @@ class Settings(BaseModel):
                 raise ValueError(
                     "enabled Web app requires the complete Web authentication profile"
                 )
+            origin_hostname = urlsplit(str(self.web_detail_base_url)).hostname
+            if canonical_non_ip_hostname(origin_hostname or "") is None:
+                raise ValueError("OAuth Web origin requires a hostname")
         if not self.feishu_listener_enabled and not self.web_app_enabled and any(
             value is not None for value in identity
         ):
@@ -477,6 +512,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "feishu_listener_enabled": "XIAOWEI_FEISHU_LISTENER_ENABLED",
     "channel_worker_enabled": "XIAOWEI_CHANNEL_WORKER_ENABLED",
     "web_app_enabled": "XIAOWEI_WEB_APP_ENABLED",
+    "feishu_oauth_enabled": "XIAOWEI_FEISHU_OAUTH_ENABLED",
     "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
     "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
