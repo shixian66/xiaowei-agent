@@ -1,7 +1,7 @@
 # ADR-007：首批能力、初始执行上下文与真实调用许可
 
-- 状态：Accepted Revision（2026-09-10；H 层生产只读授权仍未单独签认）
-- 日期：2026-09-01；候选修订 2026-09-10
+- 状态：Accepted Revision（2026-09-10）+ Accepted RI3 Amendment（2026-09-12；H 层仍未单独签认）
+- 日期：2026-09-01；候选修订 2026-09-10、2026-09-12
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)
 
@@ -57,16 +57,27 @@
 | --- | --- | --- |
 | A | 真实运维目标系统（StarRocks、Prometheus、资产系统、MySQL、Kafka、Kubernetes 等） | **M0-M6a 全程禁止**；领域 adapter 只允许 fake/recording |
 | B1 | 模型 provider adapter 的**实现与离线测试**（不发起任何网络调用） | 允许在其所属里程碑内实现，必须以 fake/recording 驱动测试；不得在 CI 或默认配置中启用真实调用。实现权**不等于**调用权 |
-| B2 | 真实模型 API 的**网络调用**（任何外部 LLM 供应商） | **M0-M6a 全程禁止**，且 M6a 结束后不自动开放。候选开放点为 RI3：必须单独批准唯一供应商/模型、固定 endpoint/API 形态、逻辑凭证名、发送字段白名单、区域与保留/训练策略、超时、输入输出上限、供应商项目硬预算和现场 GO；模型始终无执行权 |
+| B2 | 真实模型 API 的**网络调用**（任何外部 LLM 供应商） | **M0-M6a 全程禁止**，且 M6a 结束后不自动开放。RI3 候选仅限 Gemini Developer API `v1beta` + canonical origin `https://generativelanguage.googleapis.com` + `gemini-3-flash-preview` + 官方 `google-genai` structured-output API、worker-only secret、ADR-015 发送字段/历史闭集、意图 60 秒/最多两次 request、诊断 180 秒/一次 request、区域与保留/训练确认和现场 GO。用户选择不设本地费用硬上限，但必须保留调用次数闭集、usage 与供应商账户告警；该账户告警由 RI3 PR 3E 的现场进入条件和 runbook 核验，缺少非敏感 readback 证据时不得下达 GO。模型始终无执行权 |
 | C | 本地隔离基础设施（本地 PostgreSQL、本地 Docker Compose） | **M4 / M5 经各自里程碑批准后允许**；仅限本地隔离实例，不连共享或生产实例，不承载真实业务数据 |
 | D | 非生产真实只读（StarRocks 测试环境） | **M6b/RI4，仍需同一套单独授权**：环境、只读账号的逻辑 credential reference、查询范围、调用时窗、脱敏方式、recording 删除方式和证据保留周期均须逐项确认；RI4 是完成 M6b 延期现场门，不建立第二套授权清单 |
 | F | 真实飞书 OAuth、长连接、消息与群成员网络调用 | RI1 只允许默认关闭的 adapter/装配与离线测试；RI2 必须逐项满足 M7 详细计划 §0.3.2 并取得现场 GO，最高证据为 `test-env verified` |
-| G | Web Admin 配置治理与连接测试 | RI5 的 Admin 权限只管理不可变配置、逻辑 target/credential 名、测试请求、发布/readback/回滚；不授予任意 endpoint、文件路径、Gateway 调用或 E1。StarRocks 测试请求必须由独立 worker 复用正常 Runtime/Runner/Admission/Gateway 链；只有 `interfaces/local_stack.py` 可 import tools。该候选进程边界须由 ADR-016 显式修订 M7 的单执行进程口径，并由 TaskStore 持久化 `configuration_test` dispatch lane、普通/候选窄方法、列表过滤及领取事务二次核对承重后方可实施；lane 不进入用户或入口 DTO |
+| G | Web Admin 配置治理与连接测试 | RI5 的 Admin 权限只管理不可变配置、逻辑 target/credential 名、测试请求、发布/readback/回滚；不授予任意 endpoint、文件路径、Gateway 调用或 E1。StarRocks 测试请求必须由独立 worker 复用正常 Runtime/Runner/Admission/Gateway 链；只有 `interfaces/local_stack.py` 可 import tools。该候选进程边界须由 ADR-016 显式修订 M7 的单执行进程口径，并由 TaskStore 持久化 `configuration_test` dispatch lane、普通/候选窄方法、列表过滤及领取事务二次核对承重后方可实施；lane 不进入用户或入口 DTO。独立 worker 不取得 Gemini key；固定无用户数据 Gemini probe 只由既有 task-worker 的窄 control port 执行 |
 | H | 正式环境中的真实 provider 与生产只读目标网络调用 | RI6 可以先部署所有 provider 默认关闭的制品；启用任一 provider/只读目标还必须逐项批准精确 provider/目标、逻辑凭证名、tenant/environment/actor 范围、只读授权、数据处置/保留、变更窗口、canary 范围和现场 GO。test-env 证据只是进入条件，不自动授予生产网络调用权 |
 | E1 | **任何可能修改被管运维目标状态的操作**（含非生产环境），与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；完整定义见 D7 | **持续禁止，直到单独获批的受控写里程碑明确修订本 ADR。**RI1–RI6、只读接入、模型、渠道、Admin、部署或里程碑编号变化都不授予 E1；当前候选 M8 仍须同时满足 D6 三项条件 |
 | E2 | 生产写 | **默认禁止**，不在本 ADR 授权范围内。生产写需要新的独立授权和独立验收计划，**不能由 M8 的测试环境结论或 RI6 的生产只读授权推导得出** |
 
 CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、F、H、E1、E2 类真实调用，也不执行 G 的真实 provider probe。CI 对基础设施的写权限按 D8 的里程碑时点逐级开放：M1-M3 只允许写测试产物，M4/M5 各自批准后才允许对应 CI job 使用本地隔离 PostgreSQL / Compose。
+
+B2 的 RI3 边界不因写进本表或取得离线开工许可而获得真实调用许可。项目负责人已批准
+ADR-015/详细计划并于 2026-09-12 下达“开始 RI3”，当前只开放 default-off adapter 与
+fake/recording 离线实现；首次 Gemini 网络调用仍须另给现场 GO。
+Gemini 只能接收统一脱敏后的当前用户文本、explicit parent 中再次脱敏的用户文本/最终安全展示文本，
+以及 `starrocks.slow_query.diagnose` 最多 20 行的独立字段投影；它不能接收 SQL、secret、连接/目标配置、
+完整 Evidence/RenderPayload 对象或 provider 原始错误。模型或规则输出经本地复验后，作为 task 级
+insert-once accepted intent 保存并重走 Resolver/Planner；
+合法 advisory 另作 task 级 insert-once 展示事实，只有原任务终态后可见。已保存事实在恢复时复用；
+provider 已收到但保存前崩溃时允许再次调用，这是模型无执行副作用下明确接受的 at-least-once 语义。
+模型始终不能决定执行。
 
 RI6 的生产部署不会自动开放表中任一网络能力：即使已有 test-env 证据，也只有逐项满足 H 层并由
 负责人明确纳入本次部署范围的 provider/只读目标才能启用。生产 `IP:8080` 仅用于宿主端口发布；

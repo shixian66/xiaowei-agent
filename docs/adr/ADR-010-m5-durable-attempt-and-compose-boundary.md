@@ -3,7 +3,7 @@
 - 状态：Accepted
 - 日期：2026-09-05
 - 决策人：项目负责人
-- 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §5.6/§7.3/§11、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[M5 实施计划](../plans/M5-api-worker-compose.md)
+- 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §5.6/§7.3/§11、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[M5 实施计划](../plans/M5-api-worker-compose.md)
 
 ## 背景
 
@@ -33,6 +33,17 @@ API/CLI 只构造受信 `RequestContext`、解析协议并投影 `TaskView`。`s
 `WorkflowRunner.start()` 与 `resume()` 都显式接收 `TaskAttemptGrant`。Runner 不再自行
 调用 `acquire_lease()`；进入执行后先用 grant 的 owner/token 续租验证，再启动 heartbeat。
 任何续租失败都取消执行分支，loser 不得再提交步骤、Evidence 或终态。
+
+> **RI3 已批准修订：** 上述文字记录的是 M5 已验收实现。ADR-015 已获批准；当 PR 3C 实施时，现有 heartbeat
+> helper moves completely to application scope: Worker covers `execute_task()` plus
+> retry scheduling, while `handle()` starts it only after its existing grant. Runner
+> keeps `DEFAULT_LEASE_TTL_SECONDS`, `lease_ttl_seconds`, `_require_current_grant()` and
+> all grant/fencing write checks. It drops only `heartbeat_interval_seconds`, the
+> heartbeat-only sleep injection/state, `_heartbeat()` and `_run_with_heartbeat()`.
+> The retained start/resume renewal is a one-shot grant validation, not a second periodic
+> heartbeat owner. Exactly one periodic owner exists per attempt; no supervisor,
+> task deadline or second state machine is added. 在 PR 3C 合入前，这仍是已批准的拟议行为，
+> 不是当前源码事实。
 
 领取意图分为 `DISPATCH` 与 `APPROVAL_RESUME`。前者只接受
 `CREATED/PLANNING/RUNNING`，后者只接受 `AWAITING_APPROVAL`。M5 没有生产审批消费方，
@@ -95,9 +106,11 @@ M5 没有审批消费端和可恢复 pending approval 引用，入口层不得�
 
 ### D9 同步 facade 保留既有提交顺序
 
-`handle()` 保留 M3 已被 eval gate 固定的「确定性前置拒绝先于 create_task」顺序，只与
-异步路径共享终态投影函数和 Runner 调用形状。统一两条提交顺序会改变既有发布门的观测
-值，须作为带 eval 基线重录的独立变更处理。
+`handle()` preserves M3's eval-gated deterministic rejection before `create_task`.
+It shares terminal projection and Runner call shapes with async execution, but never
+loads/saves model artifacts or calls the real provider. Durable `execute_task()` is the
+only model path. Changing this order remains a separate behavior change requiring eval
+re-recording.
 
 ### D10 幂等索引使用定长摘要
 

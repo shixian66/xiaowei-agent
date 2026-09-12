@@ -10,6 +10,8 @@
 > 可逐项目标授权生产只读连接”和 E2“生产写继续禁止”。项目负责人必须明确知情并单独批准这一
 > 授权面变化；本次 V2.4/RI1 批准不包含该签认。H 层保持关闭，不允许建立生产只读连接。
 > 每个阶段仍需详细计划、文档基线与明确开工口令。
+> 2026-09-12 项目负责人在独立复审问题完成根因修订后批准 ADR-015 与 RI3 V7 详细计划，并明确
+> 下达“开始 RI3”。该口令只授权按 5 个 PR 顺序离线实现；首次读取真实 key 或联网仍需独立现场 GO。
 
 ## 1. 文档定位
 
@@ -112,7 +114,7 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放 E1 |
-| 模型供应商 | 核心测试使用 fake interpreter；RI3 只允许一个负责人明确选定的 provider/model，且必须先批准 ADR、逻辑凭证引用、输入数据边界、保留/训练策略、超时、错误和供应商项目硬预算；实现权不等于真实调用权，现场调用另需 RI3 GO | RI3 ADR/现场门 | 未拍板则停在文档，不增加外部模型依赖、不联网 |
+| 模型供应商 | 核心测试继续使用 fake interpreter；RI3 固定 Google Gemini Developer API `v1beta`、canonical origin `https://generativelanguage.googleapis.com`、`gemini-3-flash-preview` 和官方 `google-genai==2.23.0` 的异步 `models.generate_content`；实现 PR 必须独立审计精确 wheel，任何身份或元数据不匹配都停下复审。`GEMINI_API_KEY` 只来自宿主 `.env`，经 Compose secret 只挂给 worker。不设本地费用硬封顶，但保留调用次数、输入/输出边界和 usage 观测；实现权不等于真实调用权，现场调用另需 RI3 GO | ADR-015/V7 计划已批准离线实现；真实调用现场门未开放 | 无现场 GO 不读取真实 key、不联网 |
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
 
@@ -133,7 +135,7 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 | M7 Web / 飞书渠道 | Phase 5 | 多渠道只做协议与渲染，复用同一 Runtime 结果 |
 | RI1 飞书 OAuth / Web 激活 | Real Integration | 默认关闭地实现真实 OAuth adapter 与 Web composition root；基础 Compose 仍只绑 loopback |
 | RI2 飞书测试环境验证 | Real Integration | 直接满足 M7 §0.3.2，真实验证 OAuth、长连接、消息、群成员与身份，最高 `test-env verified` |
-| RI3 单一真实模型供应商 | Real Integration | 模型只产结构化草案/解释，数据、凭证、超时、成本与 fallback 有界，最高按实际证据标记 |
+| RI3 Gemini 真实模型供应商 | Real Integration | 模型只产严格结构化草案/解释；数据、凭证、超时、重试、usage 与 fallback 有界，最高按实际证据标记 |
 | RI4 StarRocks 真实只读 | Real Integration | 完成 M6b 延期现场门；只验证已有 operation，最高 `test-env verified` |
 | RI5 最小 Web Admin | Real Integration | admin 只管理闭集逻辑目标/凭证引用；版本、测试请求、发布、readback、审计和回滚可证明 |
 | RI6 Compose 部署 / canary / UAT | Real Integration | 生产 override、部署 SHA、回滚、canary 与产品验收分级记录 |
@@ -377,17 +379,101 @@ RI2 计划不得复制或另立一份较弱的授权清单。
 **退出标准**：成功、失败和回滚路径绑定精确 SHA/镜像 digest，最高只写
 `test-env verified`；不写 `deployed SHA`、`canary` 或 `user-accepted`。
 
-### RI3：单一真实模型供应商
+### RI3：Gemini 真实模型供应商
 
-**目标**：接入一个明确选定的模型，使其只产生严格结构化 `IntentDraft` 与不改事实的解释建议。
+**目标**：接入固定的 Google Gemini Developer API，用于结构化理解用户意图和解释已取得的脱敏
+证据，并支持 Web 用户显式继续自己的终态任务。模型只提建议；最终 capability、目标、SQL、执行、
+事实、证据引用、动作和终态仍由确定性链路决定。
 
-**进入条件**：负责人批准唯一供应商、模型、固定 endpoint/API 形态、逻辑凭证名、发送字段白名单、
-区域与保留/训练策略、15 秒超时、输入输出上限和供应商项目硬预算。未拍板时只允许文档工作。
+**精简设计**：首版只提供 `IntentModelPort` 和 `SlowQueryAdvisoryPort`，固定
+`gemini-3-flash-preview`、Developer API `v1beta`、canonical origin
+`https://generativelanguage.googleapis.com` 与官方 SDK 的异步 structured-output 接口，不建通用
+provider registry。
+意图理解使用 low thinking、60 秒总预算、最多 2 次 request；证据解释使用 high thinking、180 秒
+总预算、1 次 request，沿用 slow-query 现有 4000 output-token 上限。模型失败自动回到规则解释器或
+省略 advisory，不让确定性任务失败。
 
-**退出标准**：所有现有同步解释器调用点完成一次性异步迁移；provider 实现有
-`src/xiaowei_agent/_conformance.py` 类型锚；越权字段整体拒绝并确定性 fallback。真实调用另需
-现场 GO；完成固定脱敏样本、成本/超时/fallback 和回滚场景后最高标记 `test-env verified`，且该
-证据不授予任何执行权限或生产网络调用权。
+RI3 does not add a whole-task deadline. It preserves the current 25-second StarRocks
+query-timeout upper bound and 30-second read-only policy maximum; RI4 separately proposes and tests
+the future 180/190/195/200-second StarRocks-specific layers. The existing Runner
+heartbeat moves completely to one small application helper: Worker covers
+`execute_task()` plus retry scheduling, and `handle()` covers only its post-grant
+attempt. Runner drops only `heartbeat_interval_seconds`, heartbeat-only sleep state,
+`_heartbeat()` and `_run_with_heartbeat()`; it retains `DEFAULT_LEASE_TTL_SECONDS`,
+`lease_ttl_seconds` and `_require_current_grant()` for the one-shot start/resume grant
+renewal. That check is not a second periodic owner; no supervisor or state machine remains.
+
+**持久化与恢复**：一次 migration 建 `task_accepted_intents` 和 `task_model_advisories` 两张小表，均为
+task 级 insert-once、grant/fencing 保护。恢复先复用已接受事实。provider 已收到请求但保存前进程崩溃
+时允许再次调用；这是模型无执行副作用下的明确 at-least-once 取舍，不建设 reservation/transport
+attempt/统一终态平台。现有 `XiaoweiRuntime.handle()` 保留作离线测试便利入口，真实模型只装配到
+durable worker。
+Only durable `execute_task()` loads/saves accepted intent or calls the provider.
+`handle()` preserves deterministic interpretation/planning before task creation and
+makes zero model/artifact calls. Advisory is saved before the existing terminal
+transition, so RUNNING may last up to 180 seconds longer; committed StarRocks steps are
+adopted from the journal after a crash without Gateway replay.
+The closed trace contract gains `PipelineStage.MODEL` plus typed aggregate model
+metadata (call kind, elapsed milliseconds, request count, nullable usage and closed
+fallback code); numeric values are strict/non-negative/signed-64-bit bounded, intent has
+at most two requests and advisory at most one. Free-form model detail, prompt, response
+and raw error text stay absent.
+
+**数据与记忆**：
+No provider chat/session, tools, function calling, search, code execution, files or MCP.
+Raw typed limits run before total `redaction.scrub_text()`: current text and each history
+text field allow at most 8,192 characters/32 KiB UTF-8; selected
+history allows 20 complete parents, 64,000 characters/256 KiB UTF-8. After scrubbing,
+the complete typed request is serialized again and must fit 512 KiB; whole old rounds are
+dropped first, and an oversized current request yields zero calls. There is no artificial
+redaction-failure path.
+
+Slow-query advisory takes at most 20 successful Evidence rows and derives its exact
+column names/order from `SLOW_QUERY_SURFACE.allowed_columns`; it does not copy a
+13-name tuple. SQL/stmt, client IP, query digest, full Evidence, secrets and target/config
+metadata remain excluded. RI4 schema corrections must update surface, projector schema,
+digest revision and pairing tests together.
+The typed projector lives in `application/model_advisory.py`, where capability surfaces
+are an allowed dependency. `rendering/` only consumes its validated display result and
+does not import `capabilities` or read the surface.
+
+The second migration adds explicit `parent_task_id`; Web validates ownership and Worker
+revalidates each hop. Null-parent request/submission/scope digest bytes stay frozen.
+Non-null parent enters the semantic request digest and stored submission digest, not the
+scope digest, so any semantic difference (including a different parent) conflicts while
+the same semantic request and normal request_id/trace_id/`as_of` retry changes still reuse.
+Feishu context waits for RI2 evidence.
+RI3 Web parent context does not depend on RI2 live OAuth evidence and does not rewrite
+the existing channel aggregation transaction.
+
+**凭证与配置**：唯一明文来源是宿主 `.env` 的 `GEMINI_API_KEY`，经 Compose secret 只挂载给 worker。
+`GEMINI_API_KEY` is host-side Compose input, not a Settings key.
+It is absent from `.env.example`, which stays exactly aligned with `_FIELD_TO_ENV`.
+The only new application setting is default-false `XIAOWEI_GEMINI_ENABLED`; provider,
+model, Developer API `v1beta`, canonical origin
+`https://generativelanguage.googleapis.com`, budgets and secret path stay fixed in code.
+The model override uses an environment-backed secret granted only to worker while
+retaining `postgres_password`; `XIAOWEI_GEMINI_ENABLED=true` is likewise declared only
+under the worker service environment, never the shared application environment anchor.
+README/runbook documents setup. Require Docker Compose
+2.24.4+ (the project support floor shared with RI6's `!override` deployment path) and
+Linux containers. Version/config checks are necessary but insufficient; a
+split-fake functional mount preflight must pass without exposing the value.
+`docker stack deploy` is out of scope.
+默认 Compose 关闭模型，显式 model override 才启用；关闭 override 并重建 worker 即回到规则解释器。
+Web/Admin 不保存、读取、回显或回滚 key。RI3 复用现有 `interfaces.secret_file`，不统一重构其他系统
+credential reader，也不实现 worker generation/readback。
+
+**进入条件**：[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与
+[RI3 实施计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已经用户和 Claude/Codex
+审核；实现者已从最新 `main` 重新入职，项目负责人于 2026-09-12 下达“开始 RI3”。该条件只开放
+顺序离线实现；首次真实网络调用仍需独立现场 GO。
+
+**退出标准**：5 个独立 PR、2 次 migration 完成；窄模型端口、entry-scoped heartbeat、insert-once
+accepted intent/advisory、surface-derived 20-row data boundary、Web 显式父任务和 worker-only secret
+都有单元、契约、安全、integration 与 eval 证据。越权输出整体拒绝并确定性 fallback。真实调用只能在现场 GO 后使用固定
+synthetic 样本；成功、usage、日志扫描和关闭回滚齐备后最高标记 `test-env verified`。它不授予模型
+执行权、生产网络调用权、部署、canary 或用户验收结论。
 
 ### RI4：StarRocks 测试环境真实只读
 

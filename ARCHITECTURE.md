@@ -92,27 +92,51 @@
 ```text
 RequestEnvelope
   → AgentGateway
-  → XiaoweiRuntime
-  → ContextAssembler
-  → IntentInterpreter
-  → CapabilityResolver
-  → PlanCompiler
-  → WorkflowRunner
-       → StepAdmission
-            → ToolPolicy
-            → SQLGuard (需要 SQL 时)
-            → ApprovalGate (副作用步骤才调用)
-       → ToolGateway
-       → Readback (需要时)
-  → EvidenceBuilder
-  → Reflection / Answerability
-  → RenderPayload
+  → TaskStore.submit
+  → Worker.begin_task_attempt
+  → Worker heartbeat（覆盖本次 execute_task 与 retry scheduling）
+       → XiaoweiRuntime
+            → ContextAssembler（只有显式 parent 时）
+            → load accepted IntentDraft
+            → absent 时 IntentModelPort / deterministic fallback
+            → insert-once accepted IntentDraft
+            → CapabilityResolver
+            → PlanCompiler
+            → WorkflowRunner
+                 → StepAdmission
+                      → ToolPolicy
+                      → SQLGuard (需要 SQL 时)
+                      → ApprovalGate (副作用步骤才调用)
+                 → ToolGateway
+                 → Readback (需要时)
+            → EvidenceBuilder
+            → Reflection / Answerability
+            → optional SlowQueryAdvisoryPort（仅获批脱敏投影）
+            → insert-once advisory（有合法结果时）
+            → 现有 TaskStore 终态提交
   → TaskOutcome
+  → TaskView/handle terminal read
+  → RenderPayload (exactly once)
 ```
 
 ### 4.1 模型边界
 
-`IntentInterpreter` 可以使用模型，但模型输出必须解析为带 schema 的 `IntentDraft`。模型输出的意图、目标线索、自然语言参数和置信信息都属于不可信输入；Resolver 必须重新从已注册能力、租户上下文、环境目录和确定性规则得到最终候选。Runtime 可以用显式 capability binding 组合 planner、执行元数据、Evidence builder、Answerability 与 renderer，但 binding 只能精确消费 Resolver 的候选，不能再次生成、评分或回退候选。
+Only the granted durable Runtime path may call `IntentModelPort`; the existing
+`IntentInterpreter` remains the deterministic fallback and does not own provider access.
+Model output passes strict schema and local semantic validation before becoming an
+insert-once `AcceptedIntentDraft`; it means only that this task accepted an untrusted
+draft, never that the model gained execution authority. 任务重试必须先读回并复用已接受草稿。若 provider 已收到请求但本地还没保存就崩溃，恢复后
+允许重复一次模型调用；模型无工具和执行副作用，因此 RI3 明确接受这一 at-least-once 取舍，不为此
+建设调用 reservation 平台。Resolver 仍须重新从当前注册能力、租户上下文、环境目录和确定性规则
+得到最终候选。模型响应只有 intent/slots/missing/confidence；
+confidence 复用现有有限 float `[0,1]` 语义（JSON 数字 `0/1` 可归一，bool/字符串/NaN/Inf 拒绝），
+但 RI3 不用它绕过 Resolver、直接选 capability 或扩大参数。
+
+证据解释只能通过独立的 `SlowQueryAdvisoryPort`。它只接收 capability 专属、字段闭集、限量且脱敏的
+投影，输出只能进入无证据引用的建议展示槽。Runtime 可以用显式 capability binding 组合 planner、
+执行元数据、Evidence builder、Answerability、advisory projector 与 renderer，但 binding 只能精确
+消费 Resolver 的候选，不能再次生成、评分或回退候选。不建通用 `generate()` 或 provider registry，
+首个真实模型的固定边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。
 
 模型允许：
 
@@ -126,6 +150,8 @@ RequestEnvelope
 - 直接决定 capability、资源 ID、环境、SQL、命令、审批结果或写入动作。
 - 修改 policy、system prompt、TaskStore 状态或安全配置。
 - 把外部文本中的指令当成系统指令。
+- 使用 provider chat/session 作为任务事实或上下文真源。
+- 生成或改写事实引用、任务状态、`next_steps` 或确定性结论。
 
 ### 4.2 Reflection 的位置
 
@@ -182,11 +208,58 @@ Reflection 不是第二条执行链，也不是模型拥有的“自我授权”
 
 ### 5.2 XiaoweiRuntime
 
-应用层唯一编排入口，负责组装依赖、创建或恢复任务、调用 Runner、汇总 evidence 和生成 `RenderPayload`。它通过显式、版本化 key 的 capability binding 选择领域 planner、Answerability 与 renderer；binding 不拥有候选生成权。Runtime 保持轻薄，不承载具体数据库、Prometheus 或 Jenkins 业务分支。
+应用层唯一编排入口，负责组装依赖、创建或恢复任务、接受或读回已持久化的意图草稿、调用 Runner、
+汇总 evidence 和生成 `RenderPayload`。它通过显式、版本化 key 的 capability binding 选择领域 planner、
+Answerability、可选 advisory projector 与 renderer；binding 不拥有候选生成权。模型建议先以 task 级
+insert-once 事实保存，TaskView 只在任务终态后展示。Runtime 保持轻薄，不承载具体数据库、Prometheus
+或 Jenkins 业务分支。
+
+Only the granted durable `execute_task()` path loads/saves accepted intent and calls
+the provider. Its only production caller under `src/` remains
+`application/worker.py`. The compatibility `XiaoweiRuntime.handle()` path stays as an
+offline-test convenience, preserves deterministic interpret/resolve/prepare before
+task creation, and makes zero model/artifact-store calls. RI3 moves heartbeat ownership
+to one small application helper: Worker wraps execute/retry, while `handle()` wraps only
+its post-grant attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
 ### 5.3 ContextAssembler
 
-只向模型和 planner 提供本轮必要上下文：租户、actor、环境、已确认槽位、摘要化历史、能力摘要和脱敏证据。上下文按 token 预算截断，固定 system/policy/capability 前缀可缓存，变量证据单独拼接；完整 rows、secret、连接串和原始大对象不进入模型上下文。
+向 planner 只提供本轮可信执行上下文、已确认槽位和能力摘要；模型可额外接收显式授权的历史摘要与
+获批脱敏证据投影。连续对话只能由 PostgreSQL 中的显式 `parent_task_id` 建链；不按“最近一条”、
+飞书群 ID、root ref 或 provider chat/session 自动串联。父链必须同 actor、tenant、environment、channel
+和 Web binding owner；重新登录不因 session ID 变化丢失上下文。最多 20 个父任务、64,000 字符；
+超出按确定性规则截断。
+
+`parent_task_id` 是不可信 selector。Web 入口先做 scoped lookup，Worker 的 `ContextAssembler` 再从
+持久化 submission/binding 逐跳验证终态和完整作用域，避免只靠入口判断。RI3 只增加必要的窄读取和
+校验，不顺带重写当前 task/submission/binding/projection 的提交事务。飞书 reply/thread 上下文等待
+RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
+
+Model context is bounded by field count, row count, Unicode character count and
+serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
+constants; RI3 does not enable provider caching or sessions. Variable evidence is
+projected separately. Typed builders apply raw per-field and aggregate limits
+before the total `redaction.scrub_text()` function; there is no redaction-exception
+branch. Model ports never receive `RequestEnvelope`. Current text and each history text
+field are capped at 8,192 characters/32 KiB UTF-8, and
+selected history at 20 complete tasks/64,000 characters/256 KiB UTF-8. After scrubbing,
+the complete typed request is serialized again and must fit 512 KiB; otherwise whole old
+rounds are dropped or, if the current request alone cannot fit, the call is rejected.
+
+The StarRocks advisory projector derives names and order directly from
+`SLOW_QUERY_SURFACE.allowed_columns`, takes at most 20 rows, and applies closed type
+rules to every derived field. Missing, extra or invalid columns reject the whole batch.
+`stmt`, `clientIp`, `digest`, target/config internals, full rows, secrets, connections
+and raw objects never enter model context. History and advisory evidence remain
+understanding/explanation input; they are not a side channel into planner arguments.
+The projector runs only after successful deterministic execution and a sufficient
+Answerability verdict. Rendering includes a stored advisory only for a `SUCCEEDED` task
+whose rebuilt typed input digest still matches.
+
+RI3 places that typed projector in `application/model_advisory.py`: application is the
+layer allowed to consume both capability surfaces and Evidence. `rendering/` receives
+only already-validated display data, does not import `capabilities` or read
+`SLOW_QUERY_SURFACE`, and retains its existing narrow module-layer allowlist.
 
 ### 5.4 CapabilityRegistry / CapabilityResolver
 
@@ -200,7 +273,14 @@ Registry 是声明和版本索引，不是“关键词总表”，也不是执�
 
 ### 5.6 WorkflowRunner
 
-Runner 是任务生命周期的宿主，不拥有领域安全规则。它按计划步骤推进、持久化游标、处理暂停/恢复、租约、重试和终态。
+Runner 是已编译工作流步骤的执行宿主，不拥有领域安全规则。它按计划步骤推进、持久化游标并处理
+暂停/恢复。RI3 将现有 heartbeat 提成 application helper；Worker 用它覆盖完整 `execute_task()` 与
+retry scheduling，兼容 `handle()` 用它覆盖自己的 attempt。Runner 只移除周期心跳所需的
+`heartbeat_interval_seconds`、sleep 注入、`_heartbeat()` 与 `_run_with_heartbeat()`；保留
+`DEFAULT_LEASE_TTL_SECONDS`、`lease_ttl_seconds` 与 `_require_current_grant()`，使 start/resume
+仍在执行前做一次 grant 续租校验。该一次性校验不是第二个周期心跳 owner。所有持久写仍校验
+grant/fencing。阶段 timeout 由各 service 管理，不新增 task deadline、
+`TaskAttemptSupervisor` 或第二套生命周期。
 
 稳定接口：
 
@@ -226,7 +306,14 @@ class WorkflowRunner(Protocol):
     ) -> TaskOutcome: ...
 ```
 
-`grant` 是 Worker 通过 TaskStore 唯一领取点取得的当前执行权；Runner 不再自行领取 lease，进入后先用 grant 的 owner/token 续租验证，再启动 heartbeat。`plan`、`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要活的对照物**：调用方必须以持久化 submission 重新解释、解析并编译，再把当前计划、目标与 policy revision 交给 Runner，与 `PlanStore` 中最初保存的事实逐项比较。若两边都从存储读，比较的是同一个值，检查恒真——安全检查会静默退化成空操作。恢复通过后仍执行存储中的原计划；当前计划只用于验证。Runner 不拥有领域安全规则，因此不能自行重算这些值。
+`grant` 是 Worker 通过 TaskStore 唯一领取点取得的当前执行权；Worker 进入整个 attempt 前先用 grant 的
+owner/token 续租验证，再启动唯一 heartbeat。Runner 仍在具体持久化写入前校验 grant/fencing，但不
+自建 heartbeat。`plan`、`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要活的
+对照物**：调用方必须以持久化 submission 重新解析并编译，再把当前计划、目标与 policy revision 交给
+Runner，与 `PlanStore` 中最初保存的事实逐项比较。这里的“重新解析”只消费已持久化的
+`AcceptedIntentDraft`，不重新调模型。若两边都从存储读最初计划，比较的是同一个值，检查恒真——
+安全检查会静默退化成空操作。恢复通过后仍执行存储中的原计划；当前计划只用于验证。Runner 不拥有
+领域安全规则，因此不能自行重算这些值。
 
 M2 曾把接口写成 `start(task_id)` / `resume(task_id, external_input)`。那个形状隐含"只要 task_id 就能推进任务"，与上一段的职责不相容；M3 落地真实 Runner 时据此修正了契约。**不要把它改回窄签名**：唯一能让窄签名成立的写法，是调用方绕过 Protocol 直接调具体类，那会让 Runtime→Runner 这条边在类型层完全失去契约。
 
@@ -274,9 +361,13 @@ preflight 闭合逻辑目标和物理集群；完整决策见
   与 preflight verdict；Evidence builder 逐项比对获批策略。失败结果只允许记为
   `preflight=unverified`，不能借 adapter payload 或 limitations 把失败伪装成已验证。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
-- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。
+- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。连续对话为显式父任务链，无 `parent_task_id` 时不自动推断历史。
+- `AcceptedIntentDraft` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
-- `Advisory` 只能填展示槽，失败时回退确定性文案。
+- `ModelAdvisory` 是 task 级 insert-once 的可选展示事实；失败时不保存并保留确定性答案。TaskView 只在
+  原任务已终态时附加它，它不能修改事实、限制、状态、证据引用或 `next_steps`，也不能触发新模型调用。
+- 终态继续由现有 TaskStore transition 和 `TaskViewRuntime` 的 plan/evidence 重建语义负责；RI3 不为
+  模型接入引入统一终态表或新的进度状态机。
 - `RenderPayload` 是跨渠道的统一回答投影，Web、飞书和 CLI 只选择展示方式，不重算业务结果。
 
 ## 6. 核心契约
@@ -285,9 +376,14 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段 |
+| `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段；Web 的 parent selector 不成为执行字段 |
+| `TaskSubmission` | envelope、context、as_of、parent_task_id（可选） | parent 由 Web scoped lookup 与 Worker 逐跳复核；无父链时旧 request/submission/idempotency digest 字节不漂移 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
+| `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
+| `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
+| `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
+| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者只再增 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
 | `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
@@ -304,7 +400,9 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `TaskOutcome` | status、terminal_reason、evidence_refs、render_ref | 终态语义封闭，indeterminate 一等公民 |
 | `RenderPayload` | answer、sections、next_steps、status、refs | 只负责展示投影，不承载执行决策 |
 
-上表的字段是**初始集合**，精确类型与最终字段在 M2 详细计划中审定；但契约的**名称与职责边界**在此冻结，各模块不得另造同义 DTO。
+上表是按里程碑演进的稳定契约摘要：原始内核 DTO 的精确类型由 M2 审定，RI3 新增模型事实
+契约的精确字段与类型以已接受的 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 为准。
+契约的**名称与职责边界**在各自 ADR 获批后冻结，各模块不得另造同义 DTO。
 
 执行上下文的字段名在全项目统一为 `tenant_id`、`actor` 和 `environment_id`，不使用 `tenant`、`env` 等别名。`RequestEnvelope.environment_id` 可选，表示渠道显式指定；`RequestContext` 的三项均必填，由 Gateway 解析后产生，环境无法解析出唯一值时 fail-closed。模块边界显式传递 `RequestContext`；其他 DTO 不机械复制这三项，各契约的精确字段归属由其自身语义决定。详见 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)。
 
@@ -335,6 +433,11 @@ sha256(canonical_json({
 
 `effect_class`、`condition` 与 `budget` 进入规范输入集的理由见 ADR-009 D1：分类漂移、可选分支条件变化和预算被放大，都必须被 `plan_hash` 检出，否则一份已批准的计划可在恢复时执行不同的动作。
 
+`PlanBudget.max_model_tokens` 表示 plan 形成后模型调用可请求的最大 provider-generated token 数，
+provider 的 `max_output_tokens` 不得超过它；模型输入另受字段/字符/行数闭集限制。plan 形成前的意图
+解释无法由尚不存在的 plan 管理，必须使用版本化的固定 intent call budget。RI3 首版 advisory 沿用
+slow-query 现有 4000 token 上限，不为展示增强升级 capability 或 Registry snapshot。
+
 `canonical_json` 使用固定字段顺序、UTF-8、无空白、稳定数字和字符串规范化；不包含 request_id、trace_id、时间戳、模型原文、日志、secret、token 或显示文案。计划字段新增或语义变化必须递增 schema version，并同步更新实现中的「字段 → 指纹键」映射表——该映射表由安全测试断言其键集等于对应 DTO 的字段集，因此漏加字段会立即失败。
 
 ### 7.2 `target_fingerprint`
@@ -357,6 +460,50 @@ sha256(canonical_json({
 ### 7.3 TaskStore 语义
 
 TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移、worker lease、heartbeat、fencing token、stale recovery、终态保护、审批记录和审计事件。所有写入都必须采纳存储层返回的 winner；调用方不能用本地旧对象覆盖 winner。
+
+After real-model integration, TaskStore additionally carries only insert-once
+`AcceptedIntentDraft` and `ModelAdvisory` artifacts. Both writes bind the current
+grant/lease/fencing state. Exact digest replay returns the winner; different content,
+an expired lease or stale fencing is rejected. Recovery reads accepted artifacts first.
+If the provider received a call before local save, only that unsaved model call may
+repeat under ADR-015's no-execution-side-effect at-least-once rule.
+Model call count, latency, usage and fallback enter the existing safe trace/audit path.
+The trace contract adds `PipelineStage.MODEL` plus typed `ModelCallObservation` (call
+kind, total elapsed milliseconds, request count, nullable input/output usage and a
+closed fallback code). Model-stage free-form detail remains empty. Prompt, response,
+provider error text and credentials are neither trace fields nor persisted artifacts.
+Observation numbers are strict, non-negative and signed-64-bit bounded; total request
+count is 0–2 and advisory is further limited to 0–1.
+
+Parent-aware idempotency changes only the semantic request digest: a non-null
+`parent_task_id` is included in `request_dedup_digest` and the stored
+`submission_digest`, never in `idempotency_scope_digest`. The first digest decides
+same-key semantic conflicts; the full submission digest remains a stored-row
+consistency checksum. Null-parent canonical bytes are frozen unchanged.
+Every create path and the shared submission-integrity readback recompute that semantic
+digest with the persisted parent; creation and later integrity checks cannot use different inputs.
+
+Worker 复用现有 heartbeat，覆盖整个 `execute_task()` 与 retry scheduling；Runner 不启动第二份。
+RI3 does not add a whole-task deadline. It preserves the current 25-second StarRocks
+query-timeout upper bound and 30-second read-only policy maximum. The proposed
+180/190/195/200-second StarRocks-specific layers belong to RI4 and are not current
+source facts. Model intent/advisory use independent 60/180-second stage budgets.
+不能在 RI3 现场临时扩容后冒充已验证架构。
+
+RI3 的 advisory 在原任务终态提交前保存，但 TaskView 只有看到终态才展示；这允许恢复重用，又不要求
+把全项目终态统一迁入新表。保存失败按数据库故障处理，不能先把任务标成成功再补写展示。
+A task can therefore remain RUNNING for up to 180 extra seconds. On recovery, committed
+steps are adopted from the step journal without Gateway replay; only an advisory not
+yet saved may be requested again.
+
+渠道 ingress 当前仍是 task submission 后写 binding/projection 的既有路径。RI3 的 Web parent 只增加
+scoped lookup 与 Worker 二次核验，不把渠道原子性债务混入模型接入。若后续要修半聚合窗口，应单独
+立项并覆盖 Web/飞书全部失败和幂等路径。
+
+`CANCELED` 只是终态闭集成员，不等于本阶段已有用户取消命令。RI3 不新增取消 API；进程级
+`CancelledError`/SIGTERM 取消并等待正在运行的模型 coroutine，随后依赖现有 lease/stale recovery，
+不能把基础设施取消伪装成用户取消。任何迟到 SDK 结果都必须丢弃且不得落库；本地取消不构成
+provider 远端已经停止处理或停止计费的证据。
 
 M5 在同一个 aggregate 事务端口内增加 submission、dispatch/attempt、step execution journal 与 retry handoff。发现候选仍是只读查询；唯一领取点 `begin_task_attempt()` 在行锁内返回当前 winner、grant 与本次提交的不可变 submission，拒绝分支不泄漏用户原文。步骤调用只有 `begin_step_attempt()` 返回 `PROCEED` 后才能进入 ToolGateway；步骤终局、Evidence 与 audit 原子提交，确认丢失后以持久化 digest 重放收敛。
 
@@ -462,17 +609,48 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 
 `ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于
 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，入口不直接
-依赖 Engine。secret 只通过文件引用挂载；API 与 Web 只向宿主 loopback 发布端口，PostgreSQL、
-task worker、listener 与 channel worker 不发布宿主端口。三个渠道进程在 Compose 中属于
-`m7-channels` profile，且各自 feature flag 默认 `false`；离线 smoke 只证明默认关闭入口在同一
-镜像内静默 fail-closed。真实应用、凭据、网络、部署和 canary 未获独立授权前，不得把该拓扑写成
-已激活渠道。
+依赖 Engine。RI3 的 Gemini adapter 复用现有 `interfaces.secret_file.read_secret_file()`，不借模型
+接入重构飞书、StarRocks 或 PostgreSQL 的凭证读取。共同的 owner/mode/中间目录 symlink hardening 若
+确有必要，应在对应真实接入阶段按真实调用方范围单独实施。
+
+Secrets are mounted only through fixed file references resolved by a trusted composition
+root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
+worker, listener and channel worker publish no host ports. Gemini plaintext originates
+only from host-side `.env` key `GEMINI_API_KEY`. The model override converts it to the
+top-level `gemini_api_key: {environment: GEMINI_API_KEY}` secret and appends that secret
+only to task worker while retaining its existing `postgres_password` mount. All other
+services keep their current secret lists. Worker sees a fixed
+`/run/secrets/gemini_api_key` path.
+The override declares `XIAOWEI_GEMINI_ENABLED=true` only under
+`services.worker.environment`; the shared `x-app-environment` anchor and all non-worker
+services remain free of both the flag and the Gemini secret.
+
+`GEMINI_API_KEY` is not a Settings/`_FIELD_TO_ENV` key and never appears in
+`.env.example`; the only application setting is default-false
+`XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits/secret path are versioned constants;
+RI3 fixes Developer API `v1beta` and canonical origin
+`https://generativelanguage.googleapis.com`.
+README/runbook alone explain host-side key setup. This path requires Docker
+Compose 2.24.4+ (the project support floor shared with RI6's `!override` deployment
+path) and Linux containers. The version floor and rendered-config check are
+necessary but insufficient: a split-fake environment secret must pass a functional mount
+preflight without printing its value before model activation. This is not a
+`docker stack deploy` contract. The three channel processes remain in the `m7-channels`
+profile with their feature flags defaulting to false; no offline result proves activation.
+Offline smoke proves only default-off behavior in the shared image. Until separate
+real-application, credential, network, deployment and canary authorization exists,
+this topology must not be described as an activated channel or model.
+
+`.dockerignore` 必须排除 `.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
+`docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
+结果。
 
 `/healthz` 只回答对应 HTTP 进程是否存活，不触碰 TaskStore；`/readyz` 才检查数据库连接、
 migration head 与装配状态。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过
 带 lease/fencing 的唯一领取事务取得执行权。channel worker 只从 ChannelStore 领取投影订阅并回读
 同一 TaskView；渠道投递状态不改写任务真相。migration 是一次性前置服务，失败时应用进程不得启动。
-M5/M7 离线栈只装配确定性无模型 interpreter、fake/recording ToolGateway 与 fake 渠道 port；
+M5/M7 基础栈只装配确定性无模型 interpreter、fake/recording ToolGateway 与 fake 渠道 port；
+真实模型要由独立 Compose override 显式开启，且只在 task worker 装配固定 provider/model 和窄口。
 Compose 可运行不等于获得真实模型、真实渠道或真实运维目标的调用许可。
 
 初始不强制 Redis。只有出现可测的队列吞吐、分布式租约或缓存需求时，才增加服务，并先更新契约、迁移和运维文档。PostgreSQL 的全文检索先满足知识/证据索引；只有 eval 和查询指标证明不足时才引入 pgvector。
@@ -533,7 +711,11 @@ Multi-Agent 必须在 Runner 准入结论之后**另设独立里程碑和独立 
   → 复测
 ```
 
-支撑该闭环的 trace 必须能把一次失败定位到具体阶段：Intent、Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3。
+支撑该闭环的 trace 必须能把一次失败定位到具体阶段。截至当前 `main`，M2/M3 已建立 Intent、
+Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 九个阶段；RI3
+获批并实现后才新增 Model，形成十个阶段。Model 只描述 provider/结构化复验；Intent 仍描述最终被
+接受的 model/rule draft。模型失败并成功 fallback 时 Model 为失败、Intent 为成功，根因不会被重复
+记到两个阶段。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3 与 RI3。
 
 ### 13.2 eval 的边界
 
@@ -612,5 +794,9 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-009：`plan_hash` 规范形状、审批绑定与工具准入（已记录：[docs/adr/ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)）。
 - ADR-010：M5 持久执行尝试与本地 Compose 边界（已记录：[docs/adr/ADR-010](docs/adr/ADR-010-m5-durable-attempt-and-compose-boundary.md)）。
 - ADR-011：M6a capability binding、operation gateway 与 PromQL 固定模板准入（已记录：[docs/adr/ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)）。
+- ADR-012：M6b StarRocks 真实只读 adapter 的精确目标绑定（已记录：[docs/adr/ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)）。
+- ADR-013：M7 Web/飞书薄渠道与身份投影边界（已记录：[docs/adr/ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)）。
+- ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)）。
+- ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。
