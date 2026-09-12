@@ -52,7 +52,7 @@
 | M7 状态 | **离线范围已验收并归档**。PR #20–#27 已合入最终代码/测试基线 `ba5ecfe5edffb408e20c4bb9cbf494bfbb035b82`；PR #28 以 `a5c88cbc285658f7f38355a9470bfdd725858ba5` 合入离线完成交接。归档见 [docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)，验收报告见 [docs/handoff/M7-acceptance-report.md](docs/handoff/M7-acceptance-report.md)。证据等级仍为 `tests`，真实渠道退出门未通过 |
 | RI1 离线交付 | 起点 `66864253e0c9c9a0c6ebda1eec3a25b8e06a8df2`；Task 1：`040daf7c7e22e278eef0496f3e69ee380077245c`、`b117493000895661f949ba14edf159512b4c9454`、`4db90a5982549837630c90388fe4fc89a7046cd4`；Task 2：`390720dfc6d9c16b6d49f9fa61288a4f2d592eca`、`36f010d0d9db40713952f50cbcb9662151a91833`；Task 3：`2fa0177ee33b6135015303344f791287f485280d`、`33fcbbc16d5a329877a6481d89d2e3cb64d6fa32`、`f1b03557dd62b4fbe070385529062330a39affb1`；跨任务审查补修：`5428cea403599e41414f7445644ffd0afcfb1013`；Task 4：`a85e9b9eae7f3f6ed3ac7d08e1f3595348235a50`、`3c53b4aa7254adc00c3473ee41354f67152bd4be`、`0f095774f32bd31cb0e78f0532b39abd08301a27`、`18a0c78a72696982be9d298b7c01e7ae1b46d4cc`、`e678c673cb1594fc97f9a14ce197b4b11c47163f`、`e1f1b45def5537d94d3503ef4d60b450af5266db`、`167af47352e42e025fce84753bc34160c1064944`；首个全分支受审与 CI head：`d4f48e8800a033bf01560d006c984cfbde514b5f`；提交前终审 head：`eb26975a1e07424d69b978f532da3c304d5f260d`；根因补修实现基线：`2d67b59e128c1c226fb062708edf10c9251a4b3e`。交付 PR：[#31](https://github.com/shixian66/xiaowei-agent/pull/31) |
 | RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7.1 已获批准。该行只记录规划批准，不是源码或运行证据 |
-| RI3 PR 3B 复审补修 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 等待该补修 head 的独立审查与 CI，不得用旧 head 的绿灯代替 |
+| RI3 PR 3B 复审补修 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，证据 head `1f339c8f9c7611491143ee2ef052720e0fc55c08`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703470947`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703470947) 精确绑定该证据 head，八项全绿；仍等待独立合并前审查 |
 | 下一步 | **对 PR 3B 精确 SHA 做合并前审查；审查合入前不开始 PR 3C durable Runtime/MODEL trace。首次 Gemini 网络调用仍需独立现场 GO。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack、M6b 默认关闭的 target-bound StarRocks adapter，以及 RI1 默认关闭的真实 OAuth adapter/Web/Compose 装配均已通过 `main` 交付；RI1 未作真实调用。仍未连接任何真实运维目标或模型服务 |
@@ -306,8 +306,11 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   close-side cancellation/BaseException 与 hostile Compose env 边界。两个隔离源码变体均确认从临时路径
   加载：删 UTF-8 合法性校验后 surrogate 用例转红，删 512 KiB 校验后 `+1` 用例转红。最终本地四门为
   3268 passed / 195 skipped / 5 个预期 socket-block warnings、security 1255 passed / 79 skipped /
-  2129 deselected / 同 5 warnings、Ruff 通过、mypy 156 个源码文件通过。以上仍只到 `tests`，没有读取
-  真实 key、调用 Gemini、部署、canary 或用户验收。
+  2129 deselected / 同 5 warnings、Ruff 通过、mypy 156 个源码文件通过。证据 head
+  `1f339c8f9c7611491143ee2ef052720e0fc55c08` 的 PR run
+  [`34703470947`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703470947) 已由 GitHub 回读确认
+  tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项 success。
+  以上仍只到 `tests`，没有读取真实 key、调用 Gemini、部署、canary 或用户验收。
 
 - **RI3 PR 3B 的 Compose secret 首轮失败此前已沿真实容器路径定位并按根因修复**：首轮 PR #34 CI 的
   `tests`/`integration` 失败来自契约测试只查找旧版独立 `docker-compose`，没有复用 smoke 已有的
