@@ -62,11 +62,10 @@ raise SystemExit(1 if 'google.genai' in sys.modules else 0)
     assert result.returncode == 0, result.stderr
 
 
-def test_sdk_seam_contains_no_retry_or_timeout_or_caller_endpoint_surface() -> None:
+def test_sdk_seam_limits_timeout_to_bounded_client_close() -> None:
     tree = ast.parse(_SEAM.read_text(encoding="utf-8"))
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-    assert "timeout" not in names
     assert "sleep" not in names
     assert "retry" not in names
     assert "base_url" not in {
@@ -76,3 +75,14 @@ def test_sdk_seam_contains_no_retry_or_timeout_or_caller_endpoint_surface() -> N
         for arg in (*node.args.args, *node.args.kwonlyargs)
     }
     assert "generate_content" in attributes
+    timeout_owners = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and any(
+            isinstance(child, ast.Attribute) and child.attr == "timeout"
+            for child in ast.walk(node)
+        )
+    }
+    assert timeout_owners == {"_close_client"}
+    assert "timeout" not in names

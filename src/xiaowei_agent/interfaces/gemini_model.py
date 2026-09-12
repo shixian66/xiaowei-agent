@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Callable
 from typing import Any, Final, cast
@@ -30,6 +31,7 @@ GEMINI_MODEL: Final[str] = "gemini-3-flash-preview"
 GEMINI_API_VERSION: Final[str] = "v1beta"
 GEMINI_SECRET_FILE: Final[str] = "/run/secrets/gemini_api_" + "key"
 INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = 2_048
+_CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 0.05
 
 _PROXY_ENVIRONMENT: Final[tuple[str, ...]] = (
     "HTTP_PROXY",
@@ -83,6 +85,19 @@ def _map_error(error: BaseException) -> GeminiModelError:
         if error.code == 429:
             return GeminiModelError(ModelErrorCode.RATE_LIMITED)
     return GeminiModelError(ModelErrorCode.UNAVAILABLE)
+
+
+async def _close_client(
+    client: genai.Client, *, primary_error: BaseException | None
+) -> None:
+    """有界关闭 client；清理失败不遮蔽已在传播的主异常。"""
+    try:
+        async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
+            await client.aio.aclose()
+    except Exception as error:
+        if primary_error is None:
+            mapped = _map_error(error)
+            raise mapped from None
 
 
 class GeminiModelAdapter:
@@ -163,12 +178,7 @@ class GeminiModelAdapter:
             primary_error = error
             raise
         finally:
-            try:
-                await client.aio.aclose()
-            except Exception as error:
-                if primary_error is None:
-                    mapped = _map_error(error)
-                    raise mapped from None
+            await _close_client(client, primary_error=primary_error)
 
     async def generate_intent(self, request: ModelIntentRequest) -> IntentDraft:
         """请求一次严格意图 JSON，并由本地代码补可信来源。"""

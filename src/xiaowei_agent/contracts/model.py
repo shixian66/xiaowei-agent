@@ -14,26 +14,45 @@ from xiaowei_agent.contracts.base import (
     NonEmptyText,
     StrictStr,
 )
+from xiaowei_agent.contracts.intent import (
+    INTENT_MISSING_ALLOWLISTS,
+    INTENT_SLOT_ALLOWLISTS,
+)
 
 MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
 MAX_MODEL_TEXT_BYTES: Final[int] = 32 * 1_024
 MAX_MODEL_HISTORY_ITEMS: Final[int] = 20
+MAX_MODEL_HISTORY_CHARACTERS: Final[int] = 64_000
+MAX_MODEL_HISTORY_BYTES: Final[int] = 256 * 1_024
+MAX_MODEL_REQUEST_BYTES: Final[int] = 512 * 1_024
 MAX_ADVISORY_ROWS: Final[int] = 20
 MAX_INTENT_ITEMS: Final[int] = 20
 MAX_ADVISORY_ITEMS: Final[int] = 20
 MAX_ADVISORY_TEXT_CHARACTERS: Final[int] = 16_384
 
 
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("model text is not valid UTF-8") from None
+
+
 def _bounded_utf8(value: str) -> str:
-    if len(value.encode("utf-8")) > MAX_MODEL_TEXT_BYTES:
+    if _utf8_size(value) > MAX_MODEL_TEXT_BYTES:
         raise ValueError("model text exceeds the UTF-8 byte limit")
     return value
 
 
 def _bounded_advisory_text(value: str) -> str:
-    if len(value.encode("utf-8")) > MAX_ADVISORY_TEXT_CHARACTERS * 4:
+    if _utf8_size(value) > MAX_ADVISORY_TEXT_CHARACTERS * 4:
         raise ValueError("model advisory exceeds the UTF-8 byte limit")
     return value
+
+
+def _require_request_size(value: Contract) -> None:
+    if _utf8_size(value.model_dump_json()) > MAX_MODEL_REQUEST_BYTES:
+        raise ValueError("model request exceeds the serialized byte limit")
 
 
 ModelText = Annotated[
@@ -55,9 +74,18 @@ class ModelIntentRequest(Contract):
     history: tuple[ModelText, ...] = Field(max_length=MAX_MODEL_HISTORY_ITEMS)
     context_truncated: bool
 
+    @model_validator(mode="after")
+    def _history_and_request_are_bounded(self) -> "ModelIntentRequest":
+        if sum(map(len, self.history)) > MAX_MODEL_HISTORY_CHARACTERS:
+            raise ValueError("model history exceeds the character limit")
+        if sum(_utf8_size(item) for item in self.history) > MAX_MODEL_HISTORY_BYTES:
+            raise ValueError("model history exceeds the UTF-8 byte limit")
+        _require_request_size(self)
+        return self
 
-class SlowQueryAdvisoryRequest(ModelIntentRequest):
-    """只比意图请求增加慢查询白名单行与抽样标志。"""
+
+class SlowQueryAdvisoryRequest(Contract):
+    """仅含慢查询白名单行与抽样标志。"""
 
     rows: tuple[FrozenMap, ...] = Field(min_length=1, max_length=MAX_ADVISORY_ROWS)
     sampled: bool
@@ -67,12 +95,18 @@ class SlowQueryAdvisoryRequest(ModelIntentRequest):
         for row in self.rows:
             if len(row) > 64:
                 raise ValueError("model row has too many fields")
-            for value in row.values():
+            for key, value in row.items():
+                if (
+                    len(key) > MAX_MODEL_TEXT_CHARACTERS
+                    or _utf8_size(key) > MAX_MODEL_TEXT_BYTES
+                ):
+                    raise ValueError("model row key exceeds its limit")
                 if isinstance(value, str) and (
                     len(value) > MAX_MODEL_TEXT_CHARACTERS
-                    or len(value.encode("utf-8")) > MAX_MODEL_TEXT_BYTES
+                    or _utf8_size(value) > MAX_MODEL_TEXT_BYTES
                 ):
                     raise ValueError("model row text exceeds its limit")
+        _require_request_size(self)
         return self
 
 
@@ -88,8 +122,13 @@ class ProviderIntentResponse(Contract):
     def _intent_collections_are_bounded(self) -> "ProviderIntentResponse":
         if len(self.slots) > MAX_INTENT_ITEMS:
             raise ValueError("too many intent slots")
+        allowed_slots = INTENT_SLOT_ALLOWLISTS.get(self.intent)
+        if allowed_slots is None or not self.slots.keys() <= allowed_slots:
+            raise ValueError("intent slot key is not allowed")
         if any(len(key) > 128 or len(value) > 1_024 for key, value in self.slots.items()):
             raise ValueError("intent slot exceeds its text limit")
+        if not set(self.missing) <= INTENT_MISSING_ALLOWLISTS[self.intent]:
+            raise ValueError("missing intent field is not allowed")
         if any(len(item) > 128 for item in self.missing):
             raise ValueError("missing item exceeds its text limit")
         return self
@@ -125,7 +164,10 @@ def model_text_values(value: Contract) -> tuple[str, ...]:
 
 __all__ = [
     "MAX_ADVISORY_ROWS",
+    "MAX_MODEL_HISTORY_BYTES",
+    "MAX_MODEL_HISTORY_CHARACTERS",
     "MAX_MODEL_HISTORY_ITEMS",
+    "MAX_MODEL_REQUEST_BYTES",
     "MAX_MODEL_TEXT_BYTES",
     "MAX_MODEL_TEXT_CHARACTERS",
     "ModelAdvisory",

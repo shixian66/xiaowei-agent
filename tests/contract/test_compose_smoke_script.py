@@ -119,6 +119,36 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
     )
 
 
+def test_create_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> None:
+    class FailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if "create" in argv:
+                raise subprocess.CalledProcessError(1, argv)
+            return result
+
+    runner = FailingRunner()
+
+    def workflow(session: ComposeSession) -> None:
+        session.run("create", "--force-recreate", "worker")
+
+    with pytest.raises(SmokeError, match="SMOKE_COMPOSE_COMMAND_FAILED"):
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker", "compose"),
+            runner=runner,
+            workflow=workflow,
+            input_root=tmp_path / ".secrets",
+        )
+
+    down = [call for call in runner.calls if "down" in call]
+    assert len(down) == 1
+    assert "--volumes" in down[0]
+    assert "--remove-orphans" in down[0]
+
+
 def test_successful_workflow_reports_the_fixed_down_cleanup_code(
     tmp_path: Path,
 ) -> None:
@@ -324,10 +354,24 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
             call = tuple(argv)
             if call[-3:] == ("ps", "--all", "--quiet"):
                 return subprocess.CompletedProcess(
-                    argv, 0, stdout="worker-id\napi-id\n", stderr=""
+                    argv,
+                    0,
+                    stdout="".join(
+                        f"{service}-id\n"
+                        for service in (
+                            "postgres",
+                            "migrate",
+                            "api",
+                            "worker",
+                            "feishu-listener",
+                            "channel-worker",
+                            "web-app",
+                        )
+                    ),
+                    stderr="",
                 )
             if call[:2] == ("/usr/bin/docker", "inspect"):
-                service = "worker" if call[-1] == "worker-id" else "api"
+                service = call[-1].removesuffix("-id")
                 mounts: list[dict[str, object]] = []
                 environment: list[str] = []
                 if service == "worker" or leak_to_api:
@@ -338,6 +382,12 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
                         }
                     ]
                 if service == "worker":
+                    mounts.append(
+                        {
+                            "Destination": "/run/secrets/postgres_password",
+                            "RW": False,
+                        }
+                    )
                     environment = ["XIAOWEI_GEMINI_ENABLED=true"]
                 payload = [
                     {"com.docker.compose.service": service},
@@ -370,6 +420,17 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         str(compose_smoke._ROOT / "docker-compose.model.yml") in call
         for call in runner.calls
     )
+    create = next(call for call in runner.calls if "create" in call)
+    assert "--force-recreate" in create
+    assert set(create[create.index("--force-recreate") + 1 :]) == {
+        "postgres",
+        "migrate",
+        "api",
+        "worker",
+        "feishu-listener",
+        "channel-worker",
+        "web-app",
+    }
     assert not any("cat" in call or "exec" in call for call in runner.calls)
 
 

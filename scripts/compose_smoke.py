@@ -45,6 +45,16 @@ _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
 _MINIMUM_COMPOSE_VERSION = (2, 24, 4)
 _GEMINI_SECRET_DESTINATION = "/run/secrets/gemini_api_" + "key"
+_POSTGRES_SECRET_DESTINATION = "/run/secrets/postgres_" + "password"
+_MODEL_AUDIT_SERVICES = (
+    "postgres",
+    "migrate",
+    "api",
+    "worker",
+    "feishu-listener",
+    "channel-worker",
+    "web-app",
+)
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _NON_SUCCESS_CODES = {
     "failed": "SMOKE_TASK_FAILED",
@@ -588,7 +598,7 @@ class ComposeSession:
         timeout: float = _COMMAND_TIMEOUT,
         failure_code: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        if "up" in arguments:
+        if "up" in arguments or "create" in arguments:
             self.up_started = True
         return self.run_docker(
             self.argv(*arguments),
@@ -803,11 +813,9 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
         failure_code="SMOKE_MODEL_SECRET_COMMAND_FAILED",
     )
     model.run(
-        "up",
-        "-d",
+        "create",
         "--force-recreate",
-        "--no-deps",
-        "worker",
+        *_MODEL_AUDIT_SERVICES,
         timeout=60.0,
     )
     result = model.run("ps", "--all", "--quiet", timeout=15.0)
@@ -854,6 +862,12 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             if isinstance(mount, dict)
             and mount.get("Destination") == _GEMINI_SECRET_DESTINATION
         ]
+        postgres_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict)
+            and mount.get("Destination") == _POSTGRES_SECRET_DESTINATION
+        ]
         enabled = [
             item
             for item in environment
@@ -865,6 +879,8 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
                 enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
                 or len(secret_mounts) != 1
                 or secret_mounts[0].get("RW") is not False
+                or len(postgres_mounts) != 1
+                or postgres_mounts[0].get("RW") is not False
             ):
                 raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
         elif enabled or secret_mounts:
@@ -1493,11 +1509,11 @@ def _full_workflow(session: ComposeSession) -> None:
     _require_same_asset_render(asset_before, asset_after)
 
     session.failure_code = "SMOKE_FINAL_AUDIT_COMMAND_FAILED"
-    _require_model_secret_boundary(session)
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)
     _require_logs_clean(session, sensitive_canary, oauth_state)
+    _require_model_secret_boundary(session)
 
 
 def main() -> int:

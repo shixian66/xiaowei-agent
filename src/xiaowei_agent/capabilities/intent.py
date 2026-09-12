@@ -17,11 +17,13 @@ from types import MappingProxyType
 from typing import Final, Protocol
 
 from xiaowei_agent.contracts import IntentDraft, IntentSource, RequestContext
-
-SLOW_QUERY_INTENT: Final[str] = "starrocks.slow_query.diagnose"
-PROMETHEUS_ALERT_INTENT: Final[str] = "prometheus.alert.evidence"
-ASSET_INVENTORY_INTENT: Final[str] = "asset.inventory.lookup"
-UNKNOWN_INTENT: Final[str] = "unknown"
+from xiaowei_agent.contracts.intent import (
+    ASSET_INVENTORY_INTENT,
+    INTENT_SLOT_ALLOWLISTS,
+    PROMETHEUS_ALERT_INTENT,
+    SLOW_QUERY_INTENT,
+    UNKNOWN_INTENT,
+)
 
 _IDENTIFIER: Final[str] = r"[A-Za-z0-9_][A-Za-z0-9_$-]{0,63}"
 """槽位取值的形状：朴素标识符。
@@ -82,9 +84,9 @@ _PROMETHEUS_WRITE_PREFIXES: Final[tuple[str, ...]] = (
     "删除",
     "修改",
 )
-_ASSET_SELECTOR_SLOTS: Final[frozenset[str]] = frozenset(
-    {"asset_id", "hostname", "ip"}
-)
+_ASSET_SELECTOR_SLOTS: Final[frozenset[str]] = INTENT_SLOT_ALLOWLISTS[
+    ASSET_INVENTORY_INTENT
+]
 _ASSET_EXCLUDED_MARKERS: Final[tuple[str, ...]] = (
     "全部",
     "列出",
@@ -115,24 +117,7 @@ class RuleBasedIntentInterpreter:
     在链路最上游的前提。
     """
 
-    SLOT_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
-        {
-            SLOW_QUERY_INTENT: frozenset(
-                {
-                    "environment_id",
-                    "database",
-                    "user_name",
-                    "query_id",
-                    "window_minutes",
-                }
-            ),
-            PROMETHEUS_ALERT_INTENT: frozenset(
-                {"alert_name", "instance", "fingerprint", "window_minutes"}
-            ),
-            ASSET_INVENTORY_INTENT: _ASSET_SELECTOR_SLOTS,
-            UNKNOWN_INTENT: frozenset(),
-        }
-    )
+    SLOT_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = INTENT_SLOT_ALLOWLISTS
     """每个意图各自的槽位闭集。
 
     先判唯一意图，再只运行该意图的提取器。这样资产或 SQL 槽位不会因为全局扫描

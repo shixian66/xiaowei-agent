@@ -1,6 +1,8 @@
 """Gemini SDK 只经一个异步、固定 profile 的 adapter seam 使用。"""
 
+import asyncio
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,6 +12,7 @@ from xiaowei_agent.contracts import (
     IntentDraft,
     IntentSource,
     ModelAdvisory,
+    ModelErrorCode,
     ModelIntentRequest,
     ProviderIntentResponse,
     SlowQueryAdvisoryRequest,
@@ -19,6 +22,7 @@ from xiaowei_agent.interfaces.gemini_model import (
     GEMINI_MODEL,
     GEMINI_PROVIDER_ORIGIN,
     GeminiModelAdapter,
+    GeminiModelError,
 )
 
 
@@ -61,8 +65,8 @@ class RecordingClientFactory:
 
 def _intent_json(**updates: object) -> str:
     payload: dict[str, object] = {
-        "intent": "slow_query",
-        "slots": {"window": "30m"},
+        "intent": "starrocks.slow_query.diagnose",
+        "slots": {"window_minutes": "30"},
         "missing": [],
         "confidence": 0.8,
     }
@@ -87,8 +91,8 @@ async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
     )
 
     assert result == IntentDraft(
-        intent="slow_query",
-        slots={"window": "30m"},
+        intent="starrocks.slow_query.diagnose",
+        slots={"window_minutes": "30"},
         missing=(),
         confidence=0.8,
         source=IntentSource.MODEL,
@@ -127,9 +131,6 @@ async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
         secret_reader=lambda path: "AIza" + "y" * 35,
     )
     request = SlowQueryAdvisoryRequest(
-        user_text="解释慢查询",
-        history=(),
-        context_truncated=False,
         rows=({"queryId": "q-1", "scanRows": 10},),
         sampled=False,
     )
@@ -141,7 +142,11 @@ async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
         suggestions=("检查分区裁剪",),
         uncertainties=(),
     )
-    config = factory.clients[0].aio.models.calls[0]["config"]
+    call = factory.clients[0].aio.models.calls[0]
+    assert call["contents"] == (
+        '{"rows":[{"queryId":"q-1","scanRows":10}],"sampled":false}'
+    )
+    config = call["config"]
     assert config.response_schema is ModelAdvisory
     assert config.max_output_tokens == 1_234
     assert config.thinking_config.thinking_level.value == "HIGH"
@@ -159,9 +164,6 @@ async def test_advisory_rejects_invalid_output_budget_before_client_construction
         secret_reader=lambda path: "AIza" + "z" * 35,
     )
     request = SlowQueryAdvisoryRequest(
-        user_text="解释",
-        history=(),
-        context_truncated=False,
         rows=({"queryId": "q"},),
         sampled=False,
     )
@@ -196,3 +198,122 @@ async def test_client_is_closed_when_generation_raises() -> None:
         )
     assert "private provider detail" not in str(caught.value)
     assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hung_close_is_bounded_after_success() -> None:
+    close_started = asyncio.Event()
+
+    class HungAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            close_started.set()
+            await asyncio.Event().wait()
+
+    client = RecordingClient(_intent_json())
+    client.aio = HungAsyncClient(RecordingModels(_intent_json()))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "h" * 35,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(GeminiModelError) as caught:
+        await asyncio.wait_for(
+            adapter.generate_intent(
+                ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+            ),
+            timeout=0.3,
+        )
+
+    assert close_started.is_set()
+    assert caught.value.code is ModelErrorCode.TIMEOUT
+    assert time.monotonic() - started < 0.3
+
+
+@pytest.mark.asyncio
+async def test_close_error_does_not_mask_provider_error() -> None:
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise TimeoutError("private-provider-detail")
+
+    class FailingCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("private-close-detail")
+
+    client = RecordingClient("{}")
+    client.aio = FailingCloseAsyncClient(FailingModels("{}"))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "e" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.TIMEOUT
+    assert str(caught.value) == "model_timeout"
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_error_does_not_mask_schema_error() -> None:
+    class FailingCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("private-close-detail")
+
+    client = RecordingClient("not-json")
+    client.aio = FailingCloseAsyncClient(RecordingModels("not-json"))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "s" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
+    assert str(caught.value) == "model_invalid_response"
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_propagates_after_bounded_close() -> None:
+    generation_started = asyncio.Event()
+
+    class WaitingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            generation_started.set()
+            await asyncio.Event().wait()
+
+    class SlowCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            await asyncio.sleep(0.5)
+
+    client = RecordingClient("{}")
+    client.aio = SlowCloseAsyncClient(WaitingModels("{}"))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "c" * 35,
+    )
+    task = asyncio.create_task(
+        adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+    )
+    await generation_started.wait()
+
+    started = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.aio.close_calls == 1
+    assert time.monotonic() - started < 0.3

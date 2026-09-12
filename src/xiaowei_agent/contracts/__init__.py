@@ -79,7 +79,10 @@ from xiaowei_agent.contracts.external_input import ExternalInput
 from xiaowei_agent.contracts.intent import IntentDraft
 from xiaowei_agent.contracts.model import (
     MAX_ADVISORY_ROWS,
+    MAX_MODEL_HISTORY_BYTES,
+    MAX_MODEL_HISTORY_CHARACTERS,
     MAX_MODEL_HISTORY_ITEMS,
+    MAX_MODEL_REQUEST_BYTES,
     MAX_MODEL_TEXT_BYTES,
     MAX_MODEL_TEXT_CHARACTERS,
     ModelAdvisory,
@@ -132,7 +135,10 @@ from xiaowei_agent.contracts.trace_events import TraceEvent
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "MAX_ADVISORY_ROWS",
+    "MAX_MODEL_HISTORY_BYTES",
+    "MAX_MODEL_HISTORY_CHARACTERS",
     "MAX_MODEL_HISTORY_ITEMS",
+    "MAX_MODEL_REQUEST_BYTES",
     "MAX_MODEL_TEXT_BYTES",
     "MAX_MODEL_TEXT_CHARACTERS",
     "MAX_PROMQL_POINTS_PER_SERIES",
