@@ -22,10 +22,15 @@ from xiaowei_agent.contracts.intent import (
 )
 
 MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
-MAX_MODEL_TEXT_BYTES: Final[int] = 32 * 1_024
+_MAX_UTF8_BYTES_PER_CODE_POINT: Final[int] = 4
+MAX_MODEL_TEXT_BYTES: Final[int] = (
+    MAX_MODEL_TEXT_CHARACTERS * _MAX_UTF8_BYTES_PER_CODE_POINT
+)
 MAX_MODEL_HISTORY_ITEMS: Final[int] = 20
 MAX_MODEL_HISTORY_CHARACTERS: Final[int] = 64_000
-MAX_MODEL_HISTORY_BYTES: Final[int] = 256 * 1_024
+MAX_MODEL_HISTORY_BYTES: Final[int] = (
+    MAX_MODEL_HISTORY_CHARACTERS * _MAX_UTF8_BYTES_PER_CODE_POINT
+)
 MAX_MODEL_REQUEST_BYTES: Final[int] = 512 * 1_024
 MAX_ADVISORY_ROWS: Final[int] = 20
 MAX_INTENT_ITEMS: Final[int] = 20
@@ -41,15 +46,8 @@ def _utf8_size(value: str) -> int:
         raise ValueError("model text is not valid UTF-8") from None
 
 
-def _bounded_utf8(value: str) -> str:
-    if _utf8_size(value) > MAX_MODEL_TEXT_BYTES:
-        raise ValueError("model text exceeds the UTF-8 byte limit")
-    return value
-
-
-def _bounded_advisory_text(value: str) -> str:
-    if _utf8_size(value) > MAX_ADVISORY_TEXT_CHARACTERS * 4:
-        raise ValueError("model advisory exceeds the UTF-8 byte limit")
+def _valid_utf8(value: str) -> str:
+    _utf8_size(value)
     return value
 
 
@@ -61,12 +59,12 @@ def _require_request_size(value: Contract) -> None:
 ModelText = Annotated[
     FreeText,
     Field(max_length=MAX_MODEL_TEXT_CHARACTERS),
-    AfterValidator(_bounded_utf8),
+    AfterValidator(_valid_utf8),
 ]
 AdvisoryText = Annotated[
     NonEmptyText,
     Field(max_length=MAX_ADVISORY_TEXT_CHARACTERS),
-    AfterValidator(_bounded_advisory_text),
+    AfterValidator(_valid_utf8),
 ]
 
 
@@ -81,8 +79,6 @@ class ModelIntentRequest(Contract):
     def _history_and_request_are_bounded(self) -> "ModelIntentRequest":
         if sum(map(len, self.history)) > MAX_MODEL_HISTORY_CHARACTERS:
             raise ValueError("model history exceeds the character limit")
-        if sum(_utf8_size(item) for item in self.history) > MAX_MODEL_HISTORY_BYTES:
-            raise ValueError("model history exceeds the UTF-8 byte limit")
         _require_request_size(self)
         return self
 
@@ -99,16 +95,13 @@ class SlowQueryAdvisoryRequest(Contract):
             if len(row) > 64:
                 raise ValueError("model row has too many fields")
             for key, value in row.items():
-                if (
-                    len(key) > MAX_MODEL_TEXT_CHARACTERS
-                    or _utf8_size(key) > MAX_MODEL_TEXT_BYTES
-                ):
+                if len(key) > MAX_MODEL_TEXT_CHARACTERS:
                     raise ValueError("model row key exceeds its limit")
-                if isinstance(value, str) and (
-                    len(value) > MAX_MODEL_TEXT_CHARACTERS
-                    or _utf8_size(value) > MAX_MODEL_TEXT_BYTES
-                ):
-                    raise ValueError("model row text exceeds its limit")
+                _utf8_size(key)
+                if isinstance(value, str):
+                    if len(value) > MAX_MODEL_TEXT_CHARACTERS:
+                        raise ValueError("model row text exceeds its limit")
+                    _utf8_size(value)
         _require_request_size(self)
         return self
 

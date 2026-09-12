@@ -82,24 +82,37 @@ def test_intent_request_rejects_more_than_twenty_history_items_and_bool_flag_spo
 
 
 def test_intent_request_enforces_history_aggregate_character_boundary() -> None:
+    from xiaowei_agent.contracts.model import (
+        MAX_MODEL_HISTORY_BYTES,
+        MAX_MODEL_HISTORY_CHARACTERS,
+    )
+
     model_intent_request, _, _, _ = _model_types()
-    exact_history = ("x" * 8_000,) * 8
+    exact_history = ("\U0001f600" * 8_000,) * 8
     request = model_intent_request(
         user_text="x", history=exact_history, context_truncated=False
     )
 
-    assert sum(map(len, request.history)) == 64_000
+    assert sum(map(len, request.history)) == MAX_MODEL_HISTORY_CHARACTERS
+    assert sum(len(item.encode("utf-8")) for item in request.history) == (
+        MAX_MODEL_HISTORY_BYTES
+    )
+    assert MAX_MODEL_HISTORY_BYTES == MAX_MODEL_HISTORY_CHARACTERS * 4
     with pytest.raises(ValidationError):
         model_intent_request(
-            user_text="x",
-            history=(*exact_history, "x"),
+            user_text="x", history=(*exact_history, "\U0001f600"),
             context_truncated=False,
         )
 
 
-def test_model_text_accepts_exact_multibyte_boundary_and_rejects_excess() -> None:
+def test_model_text_character_limit_implies_the_declared_utf8_ceiling() -> None:
+    from xiaowei_agent.contracts.model import (
+        MAX_MODEL_TEXT_BYTES,
+        MAX_MODEL_TEXT_CHARACTERS,
+    )
+
     model_intent_request, _, _, _ = _model_types()
-    exact = "\U0001f600" * 8_192
+    exact = "\U0001f600" * MAX_MODEL_TEXT_CHARACTERS
 
     request = model_intent_request(
         user_text=exact,
@@ -107,12 +120,32 @@ def test_model_text_accepts_exact_multibyte_boundary_and_rejects_excess() -> Non
         context_truncated=False,
     )
 
-    assert len(request.user_text.encode("utf-8")) == 32 * 1_024
+    assert len(request.user_text.encode("utf-8")) == MAX_MODEL_TEXT_BYTES
+    assert MAX_MODEL_TEXT_BYTES == MAX_MODEL_TEXT_CHARACTERS * 4
     with pytest.raises(ValidationError):
         model_intent_request(
             user_text=exact + "\U0001f600",
             history=(),
             context_truncated=False,
+        )
+
+
+def test_advisory_text_character_limit_implies_its_utf8_ceiling() -> None:
+    _, _, _, model_advisory = _model_types()
+    exact = "\U0001f600" * 16_384
+
+    advisory = model_advisory(
+        analysis=exact,
+        suggestions=(),
+        uncertainties=(),
+    )
+
+    assert len(advisory.analysis.encode("utf-8")) == 64 * 1_024
+    with pytest.raises(ValidationError):
+        model_advisory(
+            analysis=exact + "\U0001f600",
+            suggestions=(),
+            uncertainties=(),
         )
 
 
@@ -124,6 +157,40 @@ def test_model_text_rejects_unpaired_unicode_surrogate_as_validation_error() -> 
             user_text="\ud800",
             history=(),
             context_truncated=False,
+        )
+
+
+def test_advisory_and_row_text_reject_unpaired_unicode_surrogates() -> None:
+    _, slow_query_advisory_request, _, model_advisory = _model_types()
+
+    with pytest.raises(ValidationError):
+        model_advisory(
+            analysis="\ud800",
+            suggestions=(),
+            uncertainties=(),
+        )
+    for row in ({"\ud800": "x"}, {"queryId": "\ud800"}):
+        with pytest.raises(ValidationError):
+            slow_query_advisory_request(rows=(row,), sampled=False)
+
+
+def test_advisory_row_text_uses_the_same_character_derived_utf8_ceiling() -> None:
+    _, slow_query_advisory_request, _, _ = _model_types()
+    exact = "\U0001f600" * 8_192
+
+    request = slow_query_advisory_request(rows=({exact: exact},), sampled=False)
+
+    key, value = next(iter(request.rows[0].items()))
+    assert len(key.encode("utf-8")) == 32 * 1_024
+    assert isinstance(value, str)
+    assert len(value.encode("utf-8")) == 32 * 1_024
+    with pytest.raises(ValidationError):
+        slow_query_advisory_request(
+            rows=({exact + "\U0001f600": "x"},), sampled=False
+        )
+    with pytest.raises(ValidationError):
+        slow_query_advisory_request(
+            rows=({"queryId": exact + "\U0001f600"},), sampled=False
         )
 
 

@@ -241,12 +241,14 @@ RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
 Model context is bounded by field count, row count, Unicode character count and
 serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
 constants; RI3 does not enable provider caching or sessions. Variable evidence is
-projected separately. Typed builders apply raw per-field and aggregate limits
-before the total `redaction.scrub_text()` function; there is no redaction-exception
-branch. Model ports never receive `RequestEnvelope`. Current text and each history text
-field are capped at 8,192 characters/32 KiB UTF-8, and
-selected history at 20 complete tasks/64,000 characters/256 KiB UTF-8. After scrubbing,
-the complete typed request is serialized again and must fit 512 KiB; otherwise whole old
+projected separately. Typed builders apply raw per-field character/UTF-8-validity checks
+and aggregate character/count limits before the total `redaction.scrub_text()` function;
+there is no redaction-exception branch. Model ports never receive `RequestEnvelope`.
+The 8,192-character current/history field limit itself implies a 32 KiB UTF-8 ceiling;
+it is not duplicated as an unreachable second guard. The 64,000-character history limit
+likewise implies at most 256,000 UTF-8 bytes (less than 256 KiB), so there is no duplicate
+history-byte branch. After scrubbing, the complete typed request is serialized again and
+must fit the independent 512 KiB cap; otherwise whole old
 rounds are dropped or, if the current request alone cannot fit, the call is rejected.
 
 The StarRocks advisory projector derives names and order directly from
@@ -636,9 +638,10 @@ The override declares `XIAOWEI_GEMINI_ENABLED=true` only under
 `services.worker.environment`; the shared `x-app-environment` anchor and all non-worker
 services remain free of both the flag and the Gemini secret.
 
-`GEMINI_API_KEY_FILE` is an optional host-side Compose path reference defaulting to
-`./.secrets/gemini_api_key`; it is not passed to a container. Neither it nor
-`GEMINI_API_KEY` is a Settings/`_FIELD_TO_ENV` key or appears in `.env.example`; the only
+The host source path is fixed to `./.secrets/gemini_api_key`; an environment variable
+cannot replace it, so rendered Compose evidence is stable across ambient host settings.
+Neither `GEMINI_API_KEY_FILE` nor `GEMINI_API_KEY` is a Settings/`_FIELD_TO_ENV` key,
+container environment value or `.env.example` entry; the only
 application setting is default-false
 `XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits/secret path are versioned constants;
 RI3 fixes Developer API `v1beta` and canonical origin

@@ -258,34 +258,23 @@ def _read_password_file(path: str) -> str:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
-    payload = b""
-    failed = False
     try:
         descriptor = os.open(path, flags)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("credential reference is not a regular file")
         payload = os.read(descriptor, _MAX_PASSWORD_BYTES + 1)
-    except (OSError, ValueError):
-        failed = True
+    except (OSError, ValueError) as exc:
+        raise ValueError("credential file is unavailable or invalid") from exc
     finally:
         if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                failed = True
-    if failed:
-        raise ValueError("credential file is unavailable or invalid")
+            os.close(descriptor)
     if not payload or len(payload) > _MAX_PASSWORD_BYTES:
         raise ValueError("credential file is unavailable or invalid")
-    decode_failed = False
     try:
         value = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        decode_failed = True
-        value = ""
-    if decode_failed:
-        raise ValueError("credential file is unavailable or invalid")
+    except UnicodeDecodeError as exc:
+        raise ValueError("credential file is unavailable or invalid") from exc
     if value.endswith("\n"):
         value = value[:-1]
     if not value or "\n" in value or "\r" in value or "\x00" in value:
@@ -433,7 +422,6 @@ class StarRocksReadonlyAdapter:
     ) -> AdapterResponse:
         password = _read_password_file(self._config.password_file)
         connection = self._connection_factory(password)
-        primary_error: BaseException | None = None
         try:
             self._preflight(connection)
             if call.operation == self._config.list_operation:
@@ -462,17 +450,8 @@ class StarRocksReadonlyAdapter:
                 error=None,
                 elapsed_ms=self._elapsed_ms(started),
             )
-        except BaseException as error:
-            primary_error = error
-            raise
         finally:
-            close_failed = False
-            try:
-                connection.close()
-            except Exception:
-                close_failed = True
-            if close_failed and primary_error is None:
-                raise RuntimeError("StarRocks connection close failed")
+            connection.close()
 
     def _preflight(self, connection: StarRocksConnection) -> None:
         connection.execute(f"SET query_timeout = {self._config.query_timeout_seconds}")

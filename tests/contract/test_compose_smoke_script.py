@@ -505,9 +505,7 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
         sensitive_values=("AIza" + "fake-smoke-value",),
-        environment=(
-            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
-        ),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
     )
 
     if leak_to_api:
@@ -556,9 +554,7 @@ def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        environment=(
-            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
-        ),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -574,9 +570,7 @@ def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        environment=(
-            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
-        ),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
     )
 
     compose_smoke._require_model_secret_boundary(session)
@@ -592,9 +586,7 @@ def test_model_secret_smoke_rejects_an_unexpected_host_source() -> None:
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        environment=(
-            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
-        ),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -623,9 +615,7 @@ def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        environment=(
-            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
-        ),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -820,10 +810,8 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         identities = Path(
             override["services"]["web-app"]["volumes"][0]["source"]
         )
-        assert tuple(name for name, _ in session.environment) == (
-            "GEMINI_API_KEY_FILE",
-        )
-        gemini = Path(session.environment[0][1])
+        gemini = Path(override["secrets"]["gemini_api_key"]["file"])
+        assert session.model_secret_source == gemini
         observed_paths = (postgres, feishu, identities, gemini)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert all(
@@ -875,8 +863,8 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         feishu = Path(document["secrets"]["feishu_app_secret"]["file"])
         identity_mount = document["services"]["web-app"]["volumes"][0]
         identity = Path(identity_mount["source"])
-        assert session.environment[0][0] == "GEMINI_API_KEY_FILE"
-        gemini = Path(session.environment[0][1])
+        gemini = Path(document["secrets"]["gemini_api_key"]["file"])
+        assert session.model_secret_source == gemini
         assert {path.parent for path in (postgres, feishu, identity, gemini)} == {
             override.parent
         }
@@ -893,7 +881,7 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         ]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
-        assert str(gemini) not in override_text
+        assert str(gemini) in override_text
 
     run_smoke(
         docker="/usr/bin/docker",

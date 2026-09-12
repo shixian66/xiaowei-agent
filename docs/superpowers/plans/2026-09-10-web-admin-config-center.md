@@ -6,8 +6,8 @@
 
 **Architecture:** PostgreSQL 保存不可变配置版本、active pointer、测试请求/摘要和审计；secret 仍是
 容器只读文件；其中 Gemini key 只从宿主 Git-ignored 文件进入 file-backed Compose secret，再以
-固定路径只挂给 task worker。可选的 `GEMINI_API_KEY_FILE` 只引用宿主路径；它不进入
-PostgreSQL 配置版本，也不能由 Admin 创建、
+固定路径只挂给 task worker；不提供宿主环境变量路径覆盖。该路径不进入 PostgreSQL 配置版本，
+也不能由 Admin 创建、
 更新、查看或回滚。Web 只是受 CSRF 保护的薄 API/静态页面，业务规则位于
 `application/configuration.py`。该 application service 只写测试请求，永不 import/调用 Gateway。
 默认关闭的 configuration-test worker 只调用 `interfaces/local_stack.py` 返回的窄
@@ -530,7 +530,7 @@ loaded；disabled/missing/failed 也必须写成**最新 current generation** �
 readback 只能反映 configured/loaded/tested，不能包含 key、文件路径或可逆摘要。
 同时断言 `.env.example` 与 `_FIELD_TO_ENV` 精确同键，逻辑 registry 配置只给安全空值/默认值。
 Here `.env.example` contains only actual application `XIAOWEI_*` settings and explicitly
-excludes host-only `GEMINI_API_KEY` and `GEMINI_API_KEY_FILE`. Model-enabled merged Compose must keep
+excludes `GEMINI_API_KEY` and `GEMINI_API_KEY_FILE`. Model-enabled merged Compose must keep
 worker's `postgres_password` plus `gemini_api_key`, leave every other service's
 secret list unchanged, keep `XIAOWEI_GEMINI_ENABLED` only in the worker service
 environment rather than the shared application anchor, and pass the RI3 Docker Compose

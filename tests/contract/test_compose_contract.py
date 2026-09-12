@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import pytest
 import yaml
 from scripts.compose_smoke import _default_runner, _resolve_compose_command
 
@@ -90,7 +91,7 @@ def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
         },
         "secrets": {
             "gemini_api_key": {
-                "file": "${GEMINI_API_KEY_FILE:-./.secrets/gemini_api_key}"
+                "file": "./.secrets/gemini_api_key"
             }
         },
     }
@@ -98,12 +99,14 @@ def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
 
 def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
     docker = shutil.which("docker")
-    assert docker is not None
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable; compose-smoke remains the no-skip gate")
     command = _resolve_compose_command(docker=docker, runner=_default_runner)
-    key_file = _ROOT / ".secrets" / "rendered-gemini-key-does-not-exist"
     environment = dict(os.environ)
     environment.pop("GEMINI_API_KEY", None)
-    environment["GEMINI_API_KEY_FILE"] = str(key_file)
+    environment["GEMINI_API_KEY_FILE"] = str(
+        _ROOT / ".secrets" / "must-not-override-gemini-path"
+    )
     result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
         [
             *command,
@@ -123,7 +126,7 @@ def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_moun
     )
     rendered = json.loads(result.stdout)
     secret = rendered["secrets"]["gemini_api_key"]
-    assert secret["file"] == str(key_file)
+    assert secret["file"] == str(_ROOT / ".secrets" / "gemini_api_key")
     assert "environment" not in secret
     services = rendered["services"]
     assert services["worker"]["environment"]["XIAOWEI_GEMINI_ENABLED"] == "true"

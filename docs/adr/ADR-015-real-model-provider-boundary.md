@@ -1,6 +1,7 @@
 # ADR-015：RI3 Gemini 理解、诊断与上下文边界
 
-- 状态：Accepted（2026-09-12；仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
+- 状态：Accepted（2026-09-12；PR 3B 复审澄清独立 nullable usage、派生字段字节上限与固定宿主路径；
+  仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
 - 日期：2026-09-12
 - 适用阶段：RI3
 - 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)
@@ -58,9 +59,10 @@ metadata and `google/genai/py.typed` marker, and stop for plan re-review on any 
 
 `ModelUsage` 只接收锁定 SDK `usage_metadata` 的 nullable `prompt_token_count` 与
 `candidates_token_count`，分别映射为 input/output tokens；不保存 total 或原始 metadata。metadata
-整体缺失时两项均为 `None`；metadata 已出现时，以 SDK type 的 `model_fields_set` 要求两字段都实际
-出现，再按本地 strict non-negative signed-64-bit 边界收窄，缺字段、负数或溢出按
-`INVALID_RESPONSE` 拒绝。`google-genai==2.23.0` 会在 adapter 收到对象前把可强制转换的
+整体缺失时两项均为 `None`；metadata 已出现时，两字段仍按 SDK 的独立 optional 语义处理，省略或
+显式 null 均映射为对应的 `None`，不能因另一项存在就丢弃合法回答。实际出现的非 null 值再按本地
+strict non-negative signed-64-bit 边界收窄，负数或溢出按 `INVALID_RESPONSE` 拒绝。
+`google-genai==2.23.0` 会在 adapter 收到对象前把可强制转换的
 integer-like raw 值（`bool`、整数形状 float、`"1"`/`"1.0"` 等数字字符串）归一为 `int`，本地不能
 声称恢复并拒绝这些原始类型；这项 raw-envelope 风险由锁版事实测试与
 供应商账户 usage/费用告警及现场 readback 兜底。usage 不进入 provider response schema，模型不能
@@ -91,14 +93,20 @@ IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner
 
 ### D3 出站数据使用两个固定白名单
 
-Typed builders enforce raw character and UTF-8 byte limits before calling the total
-`redaction.scrub_text()` function. After scrubbing, they reserialize the complete typed
-request and recheck the final byte cap. Oversize or invalid input prevents a model call;
+Typed builders enforce raw character limits and UTF-8 encodability before calling the
+total `redaction.scrub_text()` function. A valid Unicode code point occupies at most four
+UTF-8 bytes, so the 8,192-character field limit itself proves the stated 32 KiB per-field
+ceiling; this is a derived guarantee, not a second independently reachable rejection
+branch. The 64,000-character history limit similarly proves at most 256,000 UTF-8 bytes
+(less than 256 KiB), so a separate 256 KiB history check would also be unreachable. After
+scrubbing, builders reserialize the complete typed request and enforce the independently
+reachable 512 KiB final cap. Oversize or invalid input prevents a model call;
 there is no fictional redaction-exception branch.
 
 For the intent request, the current user text and each retained history text field are
-each capped at 8,192 characters and 32 KiB of UTF-8 before scrubbing. Selected history is
-capped at 20 complete parent tasks, 64,000 characters and 256 KiB of UTF-8. After all
+each capped at 8,192 characters, which implies at most 32 KiB of UTF-8 before scrubbing.
+Selected history is capped at 20 complete parent tasks and 64,000 characters, which
+implies at most 256,000 UTF-8 bytes (less than 256 KiB). After all
 retained strings have been scrubbed, the complete typed request is serialized again and
 must fit 512 KiB. Old history is omitted only as complete rounds; if the current request
 alone cannot satisfy its field limits or the final serialized cap, the provider call count
@@ -120,7 +128,7 @@ The projector belongs to `application/model_advisory.py`, because application ma
 the capability surface and Evidence contracts. `rendering/model_advisory.py` and
 `rendering/slow_query.py` consume only already-validated display data and must not import
 `xiaowei_agent.capabilities`; the existing rendering-layer allowlist remains unchanged.
-Per-field and aggregate character/UTF-8 limits are checked before redaction; an
+Per-field character/UTF-8-validity plus aggregate row/field/count limits are checked before redaction; an
 oversized advisory batch is rejected as a whole before any provider call. A later RI4
 live schema correction must update the surface, typed projector, digest revision and
 pairing tests together, and requires explicit outbound-data review under this ADR's
@@ -150,6 +158,12 @@ SDK 隐式重试必须关闭或纳入上述次数，不能与应用层重试叠�
 鉴权错误、限流耗尽和 provider 故障都回退：意图使用现有规则解释器，分析段省略；确定性查询和回答
 不因此失败。外层 `CancelledError`/SIGTERM 不属于 provider fallback：在 bounded close 后继续传播，
 不保存模型事实、不进入 Resolver/Planner，也不伪造任务终态，由既有 lease/stale recovery 接管。
+Client close runs as one separately tracked task: cancellation arriving during cleanup is
+remembered and propagated only after close completes or the close deadline cancels and
+settles that task. No detached close task may remain; a close-side `CancelledError` must
+not replace an already propagating provider/schema/cancellation error, and after a
+successful provider response it is normalized as a close failure rather than forged into
+an outer cancellation.
 The provider budget starts before fixed-secret read/client construction and includes all
 allowed requests, backoff, response validation and client close. Each SDK call receives
 only the remaining budget. Artifact lookup/save stays outside this timeout and keeps the
@@ -242,9 +256,10 @@ artifact is hidden if recovery later ends failed/rejected/indeterminate or detec
 - parent 必须存在且已经终态；
 - actor、tenant、environment、channel 与 Web binding owner 必须一致；重新登录不会仅因 session ID
   变化而丢失上下文；
-- 最多追溯 20 个完整父任务；每个历史文本字段最多 8,192 字符/32 KiB UTF-8；
+- 最多追溯 20 个完整父任务；每个历史文本字段最多 8,192 字符，由此保证不超过 32 KiB UTF-8；
 - 只读取持久化用户文本和确定性渲染结果/已保存 advisory；
-- 脱敏前选中的历史总量最多 64,000 字符/256 KiB UTF-8；超量按确定性规则从旧到新整轮丢弃；
+- 脱敏前选中的历史总量最多 64,000 字符，由此保证最多 256,000 UTF-8 字节（小于 256 KiB）；
+  超量按确定性规则从旧到新整轮丢弃；
 - 脱敏后连同当前请求和固定 schema 重新序列化，完整 typed request 最多 512 KiB；
 - 循环、越权、损坏或非终态 parent 一律拒绝，不退回“猜最近消息”。
 
@@ -277,10 +292,11 @@ secret lists. `XIAOWEI_GEMINI_ENABLED=true` is declared only under
 `services.worker.environment`, never in the shared `x-app-environment` anchor or another
 service.
 
-`GEMINI_API_KEY_FILE` is an optional host-side Compose path reference, not a Settings key
-or container environment value. It defaults to `./.secrets/gemini_api_key`; `.env` may
-override only that path, never carry the plaintext key. Neither `GEMINI_API_KEY` nor
-`GEMINI_API_KEY_FILE` appears in `.env.example`, which remains exactly aligned with
+The host source is the fixed repository-relative path `./.secrets/gemini_api_key`.
+There is no host path environment-variable override: this keeps rendered Compose evidence
+independent of ambient shell state and matches the existing PostgreSQL/Feishu secret
+shape. Neither `GEMINI_API_KEY` nor `GEMINI_API_KEY_FILE` is a Settings key, container
+environment value or `.env.example` entry; `.env.example` remains exactly aligned with
 `_FIELD_TO_ENV`. README/runbook documents the host-only file. The supported path requires
 Docker Compose 2.24.4 or newer
 (the project support floor shared with RI6's `!override` deployment path) and Linux

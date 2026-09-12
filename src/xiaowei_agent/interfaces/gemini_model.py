@@ -38,7 +38,7 @@ GEMINI_MODEL_PROFILE: Final[ModelInvocationProfile] = ModelInvocationProfile()
 GEMINI_MODEL: Final[str] = GEMINI_MODEL_PROFILE.model
 GEMINI_API_VERSION: Final[str] = GEMINI_MODEL_PROFILE.api_version
 GEMINI_PROVIDER_ORIGIN: Final[str] = GEMINI_MODEL_PROFILE.origin
-GEMINI_SECRET_FILE: Final[str] = "/run/secrets/gemini_api_" + "key"
+GEMINI_SECRET_FILE: Final[str] = "/run/secrets/gemini_api_key"  # noqa: S105 -- path
 INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = GEMINI_MODEL_PROFILE.intent_output_tokens
 _CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 1.0
 
@@ -100,11 +100,6 @@ def _model_usage(response: types.GenerateContentResponse) -> ModelUsage:
     metadata = response.usage_metadata
     if metadata is None:
         return ModelUsage()
-    if not {
-        "prompt_token_count",
-        "candidates_token_count",
-    } <= metadata.model_fields_set:
-        raise ModelPortError(ModelErrorCode.INVALID_RESPONSE)
     invalid_usage = False
     try:
         usage = ModelUsage(
@@ -123,15 +118,58 @@ async def _close_client(
     client: genai.Client, *, primary_error: BaseException | None
 ) -> None:
     """有界关闭 client；清理失败不遮蔽已在传播的主异常。"""
-    mapped: ModelPortError | None = None
+    close_task = asyncio.create_task(client.aio.aclose())
+    deadline = asyncio.get_running_loop().time() + _CLIENT_CLOSE_TIMEOUT_SECONDS
+    pending_cancellation: asyncio.CancelledError | None = None
+    close_error: BaseException | None = None
     try:
-        async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
-            await client.aio.aclose()
-    except Exception as error:
-        if primary_error is None:
-            mapped = _map_error(error)
-    if mapped is not None:
-        raise mapped
+        while not close_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                close_error = TimeoutError("Gemini client close timed out")
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    await asyncio.shield(close_task)
+            except asyncio.CancelledError as error:
+                if close_task.cancelled():
+                    close_error = error
+                    break
+                pending_cancellation = error
+            except BaseException as error:
+                close_error = error
+                break
+        if close_error is None and close_task.done():
+            try:
+                close_task.result()
+            except BaseException as error:
+                close_error = error
+    finally:
+        if not close_task.done():
+            close_task.cancel()
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError as error:
+                    if close_task.done():
+                        break
+                    pending_cancellation = error
+                except BaseException as error:
+                    if close_error is None:
+                        close_error = error
+                    break
+            try:
+                close_task.result()
+            except BaseException as error:
+                if close_error is None:
+                    close_error = error
+    if pending_cancellation is not None:
+        raise pending_cancellation
+    if close_error is None or primary_error is not None:
+        return
+    if isinstance(close_error, TimeoutError | httpx.TimeoutException):
+        raise ModelPortError(ModelErrorCode.TIMEOUT)
+    raise ModelPortError(ModelErrorCode.UNAVAILABLE)
 
 
 class GeminiModelAdapter:
@@ -144,6 +182,8 @@ class GeminiModelAdapter:
         client_factory: Callable[..., Any] = genai.Client,
         secret_reader: Callable[[str], str] = read_secret_file,
     ) -> None:
+        # 正常 Pydantic 构造只能得到这一组 Literal；这里还拒绝 Python 层可造出的
+        # object.__setattr__ 变体，避免 profile 注入口绕过固定 origin/model 边界。
         if profile != GEMINI_MODEL_PROFILE:
             raise ValueError("Gemini adapter requires the fixed RI3 profile")
         self.profile = profile

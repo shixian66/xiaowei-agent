@@ -22,6 +22,7 @@ from xiaowei_agent.contracts import (
     ModelAdvisory,
     ModelErrorCode,
     ModelIntentRequest,
+    ModelInvocationProfile,
     ModelUsage,
     ProviderIntentResponse,
     SlowQueryAdvisoryRequest,
@@ -332,29 +333,59 @@ async def test_valid_usage_metadata_is_returned_with_the_typed_result() -> None:
     assert result.usage == ModelUsage(input_tokens=123, output_tokens=45)
 
 
-@pytest.mark.parametrize("missing", ["prompt", "candidates"])
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            types.GenerateContentResponseUsageMetadata(
+                candidates_token_count=1
+            ),
+            ModelUsage(input_tokens=None, output_tokens=1),
+        ),
+        (
+            types.GenerateContentResponseUsageMetadata(prompt_token_count=1),
+            ModelUsage(input_tokens=1, output_tokens=None),
+        ),
+    ],
+)
+@pytest.mark.parametrize("call_kind", ["intent", "advisory"])
 @pytest.mark.asyncio
-async def test_usage_metadata_requires_both_fields_to_have_appeared(
-    missing: str,
+async def test_usage_metadata_accepts_each_independently_missing_count(
+    metadata: types.GenerateContentResponseUsageMetadata,
+    expected: ModelUsage,
+    call_kind: str,
 ) -> None:
-    metadata = types.GenerateContentResponseUsageMetadata(
-        **(
-            {"candidates_token_count": 1}
-            if missing == "prompt"
-            else {"prompt_token_count": 1}
+    response = (
+        _intent_json()
+        if call_kind == "intent"
+        else json.dumps(
+            {"analysis": "分析", "suggestions": [], "uncertainties": []}
         )
     )
     adapter = GeminiModelAdapter(
-        client_factory=RecordingClientFactory(_intent_json(), metadata),
+        client_factory=RecordingClientFactory(response, metadata),
         secret_reader=lambda path: "AIza" + "u" * 35,
     )
 
-    with pytest.raises(ModelPortError) as caught:
-        await adapter.generate_intent(
+    if call_kind == "intent":
+        result = await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
+    else:
+        result = await adapter.generate_advisory(
+            SlowQueryAdvisoryRequest(rows=({"queryId": "q"},), sampled=False),
+            max_output_tokens=100,
+        )
 
-    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
+    assert result.usage == expected
+
+
+def test_adapter_rejects_an_object_mutated_profile() -> None:
+    profile = ModelInvocationProfile()
+    object.__setattr__(profile, "origin", "https://redirect.invalid")
+
+    with pytest.raises(ValueError, match="fixed RI3 profile"):
+        GeminiModelAdapter(profile=profile)
 
 
 @pytest.mark.parametrize("value", [-1, 2**63])
@@ -460,8 +491,12 @@ async def test_hung_close_is_bounded_after_success(
         async def aclose(self) -> None:
             self.close_calls += 1
             close_started.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                close_finished.set()
 
+    close_finished = asyncio.Event()
     client = RecordingClient(_intent_json())
     client.aio = HungAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
@@ -479,6 +514,7 @@ async def test_hung_close_is_bounded_after_success(
         )
 
     assert close_started.is_set()
+    assert close_finished.is_set()
     assert_safe_model_port_error(caught.value, ModelErrorCode.TIMEOUT)
     assert time.monotonic() - started < 0.3
 
@@ -593,6 +629,126 @@ async def test_outer_cancellation_propagates_after_bounded_close(
 
     assert client.aio.close_calls == 1
     assert time.monotonic() - started < 0.3
+
+
+@pytest.mark.asyncio
+async def test_repeated_outer_cancellation_waits_for_close_completion() -> None:
+    generation_started = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    close_completed = asyncio.Event()
+
+    class WaitingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            generation_started.set()
+            await asyncio.Event().wait()
+
+    class ObservableCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            close_started.set()
+            await allow_close.wait()
+            close_completed.set()
+
+    client = RecordingClient("{}")
+    client.aio = ObservableCloseAsyncClient(WaitingModels("{}"))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "c" * 35,
+    )
+    task = asyncio.create_task(
+        adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+    )
+    await generation_started.wait()
+
+    task.cancel()
+    await close_started.wait()
+    task.cancel()
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.3)
+
+    assert close_completed.is_set()
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_cancelled_error_does_not_mask_provider_error() -> None:
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise TimeoutError("private-provider-detail")
+
+    class CancelledCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise asyncio.CancelledError
+
+    client = RecordingClient("{}")
+    client.aio = CancelledCloseAsyncClient(FailingModels("{}"))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "c" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.TIMEOUT)
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_cancelled_error_after_success_is_a_safe_close_failure() -> None:
+    class CancelledCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise asyncio.CancelledError
+
+    client = RecordingClient(_intent_json())
+    client.aio = CancelledCloseAsyncClient(RecordingModels(_intent_json()))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "c" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.UNAVAILABLE)
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_base_exception_after_success_is_safely_normalized() -> None:
+    class UnsafeCloseError(BaseException):
+        pass
+
+    class FailingCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise UnsafeCloseError("private-close-boundary-detail")
+
+    client = RecordingClient(_intent_json())
+    client.aio = FailingCloseAsyncClient(RecordingModels(_intent_json()))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "b" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.UNAVAILABLE)
+    assert "private-close-boundary-detail" not in str(caught.value)
+    assert client.aio.close_calls == 1
 
 
 @pytest.mark.parametrize(

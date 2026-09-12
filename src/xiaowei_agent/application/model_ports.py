@@ -13,7 +13,7 @@ from xiaowei_agent.contracts import (
     StrictInt,
 )
 
-ADVISORY_OUTPUT_TOKEN_LIMIT = 4_000
+ADVISORY_OUTPUT_TOKEN_LIMIT: Final[int] = 4_000
 INTENT_RETRYABLE_ERROR_CODES: Final[frozenset[ModelErrorCode]] = frozenset(
     {
         ModelErrorCode.RATE_LIMITED,

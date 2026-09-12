@@ -1,10 +1,8 @@
 """M6b StarRocks 真实只读 adapter 的无网络单元测试。"""
 
 import datetime as dt
-import stat
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +10,6 @@ from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST, SLOW_QUERY_SURFA
 from xiaowei_agent.contracts import AdapterStatus, RequestContext, ToolCall
 from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1, compile_sql
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
-from xiaowei_agent.tools import starrocks as starrocks_module
 from xiaowei_agent.tools.starrocks import (
     NORMALIZER_VERSION,
     PhysicalIdentityProbe,
@@ -104,35 +101,6 @@ class _Factory:
 
 def _write_password(path: Path, content: str = "fixture-credential") -> None:
     path.write_text(content + "\n", encoding="utf-8")
-
-
-def _install_password_file_ops(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    read_error: OSError | None = None,
-    close_error: OSError | None = None,
-) -> list[int]:
-    closed: list[int] = []
-    monkeypatch.setattr(starrocks_module.os, "open", lambda path, flags: 23)
-    monkeypatch.setattr(
-        starrocks_module.os,
-        "fstat",
-        lambda descriptor: SimpleNamespace(st_mode=stat.S_IFREG),
-    )
-
-    def read(descriptor: int, limit: int) -> bytes:
-        if read_error is not None:
-            raise read_error
-        return b"fixture-credential\n"
-
-    def close(descriptor: int) -> None:
-        closed.append(descriptor)
-        if close_error is not None:
-            raise close_error
-
-    monkeypatch.setattr(starrocks_module.os, "read", read)
-    monkeypatch.setattr(starrocks_module.os, "close", close)
-    return closed
 
 
 def _config(password_file: Path, **overrides: object) -> StarRocksReadonlyAdapterConfig:
@@ -546,45 +514,6 @@ async def test_password_file_symlink_is_rejected_without_connect(tmp_path: Path)
     assert factory.calls == []
 
 
-def test_password_reader_closes_descriptor_after_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed = _install_password_file_ops(monkeypatch)
-
-    assert starrocks_module._read_password_file("/run/secrets/fake") == (
-        "fixture-credential"
-    )
-    assert closed == [23]
-
-
-@pytest.mark.parametrize(
-    ("read_error", "close_error"),
-    [
-        (OSError("private-read-detail"), None),
-        (None, OSError("private-close-detail")),
-        (OSError("private-read-detail"), OSError("private-close-detail")),
-    ],
-)
-def test_password_reader_normalizes_read_and_close_failures_without_leaking_chain(
-    monkeypatch: pytest.MonkeyPatch,
-    read_error: OSError | None,
-    close_error: OSError | None,
-) -> None:
-    closed = _install_password_file_ops(
-        monkeypatch,
-        read_error=read_error,
-        close_error=close_error,
-    )
-
-    with pytest.raises(ValueError) as caught:
-        starrocks_module._read_password_file("/run/secrets/fake")
-
-    assert str(caught.value) == "credential file is unavailable or invalid"
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
-    assert closed == [23]
-
-
 @pytest.mark.parametrize(
     ("override", "main_sql_runs"),
     [
@@ -667,101 +596,6 @@ async def test_connection_is_closed_when_query_raises(tmp_path: Path) -> None:
     response = await adapter.execute(_call(), context=_CONTEXT)
 
     assert response.status is AdapterStatus.ERROR
-    assert connection.closed is True
-
-
-async def test_close_failure_does_not_replace_query_timeout(tmp_path: Path) -> None:
-    close_marker = "private-close-marker"
-    password_file = tmp_path / "database-credential"
-    _write_password(password_file)
-
-    class _TimeoutThenCloseFailure(_Connection):
-        def query(self, statement: str, *, max_rows: int) -> StarRocksQueryBatch:
-            if statement == _call().typed_args["sql"]:
-                raise TimeoutError("private-query-timeout")
-            return super().query(statement, max_rows=max_rows)
-
-        def close(self) -> None:
-            self.closed = True
-            raise RuntimeError(close_marker)
-
-    connection = _TimeoutThenCloseFailure(
-        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
-    )
-    adapter = StarRocksReadonlyAdapter(
-        config=_config(password_file),
-        connection_factory=_Factory(connection),
-        monotonic=_TickingMonotonic(),
-    )
-
-    response = await adapter.execute(_call(), context=_CONTEXT)
-
-    assert response.status is AdapterStatus.TIMEOUT
-    assert response.payload == ()
-    assert close_marker not in response.model_dump_json()
-    assert connection.closed is True
-
-
-async def test_close_failure_after_success_is_safe_error(tmp_path: Path) -> None:
-    close_marker = "private-close-marker"
-    password_file = tmp_path / "database-credential"
-    _write_password(password_file)
-
-    class _SuccessfulThenCloseFailure(_Connection):
-        def close(self) -> None:
-            self.closed = True
-            raise RuntimeError(close_marker)
-
-    connection = _SuccessfulThenCloseFailure(
-        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
-    )
-    adapter = StarRocksReadonlyAdapter(
-        config=_config(password_file),
-        connection_factory=_Factory(connection),
-        monotonic=_TickingMonotonic(),
-    )
-
-    response = await adapter.execute(_call(), context=_CONTEXT)
-
-    assert response.status is AdapterStatus.ERROR
-    assert response.payload == ()
-    assert close_marker not in response.model_dump_json()
-    assert connection.closed is True
-
-
-async def test_close_exception_does_not_replace_query_base_exception(
-    tmp_path: Path,
-) -> None:
-    class StopQuery(BaseException):
-        pass
-
-    sentinel = StopQuery()
-    password_file = tmp_path / "database-credential"
-    _write_password(password_file)
-
-    class _StoppedThenCloseFailure(_Connection):
-        def query(self, statement: str, *, max_rows: int) -> StarRocksQueryBatch:
-            if statement == _call().typed_args["sql"]:
-                raise sentinel
-            return super().query(statement, max_rows=max_rows)
-
-        def close(self) -> None:
-            self.closed = True
-            raise RuntimeError("private-close-marker")
-
-    connection = _StoppedThenCloseFailure(
-        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
-    )
-    adapter = StarRocksReadonlyAdapter(
-        config=_config(password_file),
-        connection_factory=_Factory(connection),
-        monotonic=_TickingMonotonic(),
-    )
-
-    with pytest.raises(StopQuery) as caught:
-        await adapter.execute(_call(), context=_CONTEXT)
-
-    assert caught.value is sentinel
     assert connection.closed is True
 
 

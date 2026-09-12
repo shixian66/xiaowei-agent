@@ -156,8 +156,11 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 
 ### 6.3 模型
 
-1. Typed builders enforce explicit raw character and UTF-8 byte limits before the total
-   `redaction.scrub_text()`, then reserialize and recheck the final byte cap; invalid or
+1. Typed builders enforce raw character limits and UTF-8 validity before the total
+   `redaction.scrub_text()`. Per-field byte ceilings are mathematically derived from the
+   character limits; the aggregate history byte ceiling is likewise derived from its
+   64,000-character limit. Builders then
+   reserialize and recheck the final byte cap; invalid or
    oversized input yields zero model calls.
    Model ports receive only closed `user_text/history/context_truncated` or
    `rows/sampled` DTOs, never `RequestEnvelope` or arbitrary context dictionaries.
@@ -176,8 +179,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    environment, channel and Web binding ownership; a new session ID does not break
    ownership. Recent-message guesses, root refs and provider chat state are forbidden.
    Before scrubbing, current text and each history text field are capped at 8,192
-   characters/32 KiB UTF-8; selected complete history is capped
-   at 20 parent tasks, 64,000 characters/256 KiB UTF-8. After scrubbing, the complete
+   characters, which implies at most 32 KiB UTF-8; selected complete history is capped
+   at 20 parent tasks and 64,000 characters, which implies at most 256,000 UTF-8 bytes
+   (less than 256 KiB). After scrubbing, the complete
    typed request is serialized again and must fit 512 KiB; oldest rounds are omitted
    whole, while an oversized current request yields zero calls. `scrub_text()` is total
    for typed strings, so no fake redaction-error path exists. Feishu reply/thread context waits
@@ -270,9 +274,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 3. admin 显式发布后生成不可变版本和审计记录。
 4. composition root 读取 active version，校验 readback 后才激活对应 provider。
 5. 回滚指向上一已发布版本；旧版本和审计保留，secret 始终由只读文件挂载提供。
-6. Gemini key 是例外的 bootstrap secret：用户在部署主机受限 key 文件中修改它，模型开启命令
-   显式叠加 model override，转成只挂 task-worker 的 file-backed secret。非默认宿主路径可由
-   `.env` 中的 `GEMINI_API_KEY_FILE` 引用。Admin 只能显示 safe
+6. Gemini key 是例外的 bootstrap secret：用户只在部署主机固定受限文件
+   `.secrets/gemini_api_key` 中修改它，模型开启命令显式叠加 model override，转成只挂
+   task-worker 的 file-backed secret；不提供 `.env` 路径覆盖。Admin 只能显示 safe
    readback，不能保存、读取或一键回滚 key；现场禁用会打印环境内容的 `config --environment`。
 
 ## 7. 配置与 secret
@@ -282,10 +286,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 - 普通配置使用 `XIAOWEI_*` 环境变量，并继续 `extra=forbid`、半配置拒绝和默认关闭。
 - secret 只通过容器只读文件引用，例如 Docker Compose secret；只有受信 composition root 接收
   绝对挂载路径，不接收明文环境变量。
-- Gemini plaintext may exist only in a Git-ignored host key file, defaulting to
-  `.secrets/gemini_api_key`. `GEMINI_API_KEY_FILE` is only an optional host-side Compose
-  path reference; `.env` may contain that path but never the key. Neither host-only name
-  is a Settings/`_FIELD_TO_ENV` key or belongs in `.env.example`.
+- Gemini plaintext may exist only in the fixed Git-ignored host key file
+  `.secrets/gemini_api_key`. Neither `GEMINI_API_KEY` nor `GEMINI_API_KEY_FILE` is a
+  Settings/`_FIELD_TO_ENV` key, container environment value or `.env.example` entry.
 - The only new application setting is default-false `XIAOWEI_GEMINI_ENABLED`; provider,
   model, API, budgets, proxy policy and secret path are fixed in versioned code.
 - The model override declares a file-backed `gemini_api_key` and

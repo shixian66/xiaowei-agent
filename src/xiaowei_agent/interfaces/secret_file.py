@@ -25,7 +25,6 @@ def read_secret_file(path: str) -> str:
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
     failed = False
-    close_failed = False
     payload = b""
     try:
         descriptor = os.open(path, flags)
@@ -37,11 +36,8 @@ def read_secret_file(path: str) -> str:
         failed = True
     finally:
         if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                close_failed = True
-    if failed or close_failed or not payload or len(payload) > _MAX_SECRET_BYTES:
+            os.close(descriptor)
+    if failed or not payload or len(payload) > _MAX_SECRET_BYTES:
         raise SecretFileError("secret file unavailable")
     try:
         value = payload.decode("utf-8")

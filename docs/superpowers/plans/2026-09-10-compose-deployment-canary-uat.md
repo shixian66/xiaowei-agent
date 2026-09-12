@@ -287,9 +287,9 @@ git diff origin/main...HEAD --check
 ```
 
 上面的命令验证模型关闭组合；Gemini 获生产 GO 时，还必须在现场 Git-ignored key 文件已安全就绪后
-对同一条命令显式追加 `-f docker-compose.model.yml` 并记录脱敏结果。若使用非默认路径，`.env` 只
-提供 `GEMINI_API_KEY_FILE` 路径引用并显式追加 `--env-file .env`。继续启用模型的版本回滚也
-使用该三文件组合；
+对同一条命令显式追加 `-f docker-compose.model.yml` 并记录脱敏结果。系统不提供 `.env` 路径覆盖；
+部署者必须把 key 安全放入固定 `.secrets/gemini_api_key`。继续启用模型的版本
+回滚也使用该三文件组合；
 只有紧急关闭模型才切回两文件，并强制重建 worker 后验证 mount/readback。PR 6A 的离线契约测试用
 拆分构造的 fake key 文件渲染三文件组合，不读取真实 key。
 Before any model-enabled render/start, verify Docker Compose is at least 2.24.4 (the

@@ -15,7 +15,7 @@ import sys
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
@@ -102,11 +102,7 @@ def _default_runner(
     argv: Sequence[str],
     *,
     timeout: float,
-    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    process_environment = None
-    if environment is not None:
-        process_environment = {**os.environ, **environment}
     return subprocess.run(  # noqa: S603 -- argv[0] 由 shutil.which 解析为绝对路径
         list(argv),
         shell=False,
@@ -114,7 +110,6 @@ def _default_runner(
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=process_environment,
     )
 
 
@@ -194,7 +189,7 @@ class _SmokeInputs:
     sensitive_values: tuple[str, ...]
     owned_inputs: tuple[_OwnedInput, ...]
     override_path: Path
-    environment: tuple[tuple[str, str], ...]
+    model_secret_source: Path
 
 
 def _cleanup_unreturned_input(
@@ -395,7 +390,7 @@ def _create_private_input_namespace(root: Path) -> _PrivateInputNamespace:
 
 
 def _input_override_document(
-    *, postgres: Path, feishu: Path, identity: Path
+    *, postgres: Path, feishu: Path, gemini: Path, identity: Path
 ) -> str:
     identity_mount = {
         "type": "bind",
@@ -410,6 +405,7 @@ def _input_override_document(
                 "secrets": {
                     "postgres_password": {"file": str(postgres)},
                     "feishu_app_secret": {"file": str(feishu)},
+                    "gemini_api_key": {"file": str(gemini)},
                 },
                 "services": {
                     "feishu-listener": {"volumes": [identity_mount]},
@@ -541,6 +537,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
             _input_override_document(
                 postgres=postgres_secret,
                 feishu=feishu_secret,
+                gemini=gemini_secret,
                 identity=identity,
             ),
         )
@@ -556,7 +553,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         sensitive_values=(postgres_value, feishu_value, gemini_value),
         owned_inputs=tuple(created),
         override_path=override,
-        environment=((_GEMINI_HOST_SECRET_FILE_ENV, str(gemini_secret)),),
+        model_secret_source=gemini_secret,
     )
 
 
@@ -568,7 +565,7 @@ class ComposeSession:
     files: tuple[Path, ...]
     compose_command: tuple[str, ...]
     sensitive_values: tuple[str, ...] = ()
-    environment: tuple[tuple[str, str], ...] = ()
+    model_secret_source: Path | None = None
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
     _resource_owner: ComposeSession | None = None
@@ -592,7 +589,7 @@ class ComposeSession:
             files=files,
             compose_command=self.compose_command,
             sensitive_values=self.sensitive_values,
-            environment=self.environment,
+            model_secret_source=self.model_secret_source,
             up_started=self.up_started,
             failure_code=failure_code,
             _resource_owner=self._resource_owner or self,
@@ -624,12 +621,6 @@ class ComposeSession:
         """运行 Docker argv；只把当前固定阶段码带过脱敏边界。"""
         failure: SmokeError | None = None
         try:
-            if self.runner is _default_runner and self.environment:
-                return _default_runner(
-                    argv,
-                    timeout=timeout,
-                    environment=dict(self.environment),
-                )
             return self.runner(argv, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
             failure = SmokeError(failure_code or self.failure_code)
@@ -664,7 +655,7 @@ def run_smoke(
         ),
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
-        environment=smoke_inputs.environment,
+        model_secret_source=smoke_inputs.model_secret_source,
     )
     primary_error: BaseException | None = None
     try:
@@ -816,16 +807,18 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
 
 def _require_model_secret_boundary(session: ComposeSession) -> None:
     """叠加模型 override 后只检查容器元数据，绝不打开 secret 文件。"""
-    expected_sources = [
-        value
-        for name, value in session.environment
-        if name == _GEMINI_HOST_SECRET_FILE_ENV
-    ]
-    if len(expected_sources) != 1 or not os.path.isabs(expected_sources[0]):
+    if session.model_secret_source is None or not session.model_secret_source.is_absolute():
         raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
-    expected_source = os.path.normcase(os.path.normpath(expected_sources[0]))
+    expected_source = os.path.normcase(os.path.normpath(session.model_secret_source))
+    model_files = (*session.files, _ROOT / "docker-compose.model.yml")
+    if session.files and session.files[-1].name == "compose-smoke-inputs.json":
+        model_files = (
+            *session.files[:-1],
+            _ROOT / "docker-compose.model.yml",
+            session.files[-1],
+        )
     model = session.derive(
-        files=(*session.files, _ROOT / "docker-compose.model.yml"),
+        files=model_files,
         failure_code="SMOKE_MODEL_SECRET_COMMAND_FAILED",
     )
     model.run(

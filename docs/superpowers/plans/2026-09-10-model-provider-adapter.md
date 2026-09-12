@@ -19,7 +19,7 @@
 
 ## 状态与授权
 
-- 状态：Approved V7（2026-09-12；第二轮独立审查根因修订后获批）。
+- 状态：Approved V7.1（2026-09-12；PR 3B 复审澄清独立 nullable usage、派生字段字节上限与固定宿主路径）。
 - PR 3A 只收口计划文档，没有源码实现、依赖安装、真实 key、网络调用、部署或测试环境证据。
 - 项目负责人已下达“开始 RI3”；该口令只授权按本计划顺序离线实现，不授权真实网络调用。
 - PR 3B–3D 只做离线实现；真实 Gemini 调用必须等 PR 3E 的独立现场 GO。
@@ -31,7 +31,7 @@
 | ---: | --- | --- | --- |
 | 1 | The draft confused RI4's proposed query budgets with current source facts. | It would change timeout assumptions before RI4 and make RI3 evidence false. | Preserve the current 25-second query-timeout upper bound and 30-second read-only policy cap; test those bounds remain unchanged. |
 | 2 | The draft treated the full stored-submission checksum as the same-key conflict predicate. | Parent-aware retries could be specified against the wrong digest and silently break idempotency or later fail row-integrity readback. | Add non-null parent only to the semantic request digest and stored submission checksum, never the scope digest; update every create/readback recomputation site, freeze null-parent bytes and test same/different parent cases. |
-| 3 | The host Compose key was mistaken for a Settings environment key. | Adding it to `.env.example` breaks the exact Settings-key contract and risks broader container exposure. | Keep plaintext only in a Git-ignored host file; pass it through a file-backed Compose secret mounted only on worker; assert key and host path reference are absent from Settings, `.env.example` and container environments. |
+| 3 | The host Compose key was mistaken for a Settings environment key. | Adding it to `.env.example` breaks the exact Settings-key contract and risks broader container exposure. | Keep plaintext only in the fixed Git-ignored host file; pass it through a file-backed Compose secret mounted only on worker; assert host-only key names are absent from Settings, `.env.example` and container environments. |
 | 4 | Persistence work listed contracts but not every backend and row mapping. | One backend could pass while another loses artifacts or parent context. | PR 3C covers fake/PostgreSQL/memory artifact paths and mappings; PR 3D covers fake/PostgreSQL plus a memory-backend no-change inspection; bind shared backend suites. |
 | 5 | New Protocols had no static/runtime conformance anchors. | Implementations could drift while tests exercised only one concrete object. | Add `_conformance.py` assignments and exact protocol-conformance tests for every new port/store. |
 | 6 | The dependency plan named an SDK without the repository's exact-set baseline. | The lock, wheel identity, license, or typing marker could drift unnoticed. | Pin `google-genai==2.23.0`, audit the exact wheel/hash/license/`py.typed`, and extend dependency-baseline tests. |
@@ -286,8 +286,9 @@ and use deterministic fallback instead of persisting or resolving it.
 The two ports return concrete `IntentModelResult` / `AdvisoryModelResult` wrappers. Each
 contains the accepted DTO plus trusted `ModelUsage`; the latter maps only nullable SDK
 `prompt_token_count` / `candidates_token_count` to input/output tokens. Missing metadata
-maps to two nulls. When metadata appears, both fields must be present in the locked SDK
-type's `model_fields_set`, then pass local non-negative signed-64-bit bounds. The locked SDK
+maps to two nulls. When metadata appears, each field remains independently optional:
+omitted or explicit-null values map to the corresponding local null, while present
+non-null values must pass local non-negative signed-64-bit bounds. The locked SDK
 normalizes coercible integer-like raw values—bool, integral floats and numeric strings such
 as `"1"` / `"1.0"`—to `int` before the adapter; tests characterize that fact rather than
 claiming local raw-type rejection. Negative or overflow metadata
@@ -316,6 +317,9 @@ carried through `last_usage`, a tuple, global state or callback.
 - SDK 自身不额外重试；
 - 显式 `AutomaticFunctionCallingConfig(disable=True)`，不产生 AFC warning；
 - async client 正确关闭；
+- 重复取消也只能延后传播到 tracked close task 已完成或被 close deadline 取消并收口之后；不得遗留
+  detached close task；close 自身的 `CancelledError` 不能遮蔽既有 provider/schema 错误，也不能在
+  provider 成功后伪装成外层取消；
 - SDK/API 错误只映射为闭集本地错误码，不暴露原始正文。
 
 实现前阅读精确 wheel 的 client、timeout、retry、structured response、usage 和 close 代码；结果写入 PR
@@ -369,10 +373,12 @@ The enable flag is declared only under `services.worker.environment`; it must no
 added to the shared `x-app-environment` anchor or any non-worker service. Rendered-config
 tests assert that non-worker services have neither the flag nor the Gemini secret.
 
-The default plaintext source is `.secrets/gemini_api_key`. `GEMINI_API_KEY_FILE` is an
-optional host-side Compose path reference, not an application setting or container
-environment value; `.env` may contain only that path, never the key. `.env.example` must
-remain exactly equal to `_FIELD_TO_ENV` and contain neither host-only name. Setup is
+The only plaintext source is the fixed repository-relative path
+`.secrets/gemini_api_key`. There is no host path environment-variable override, so
+rendered Compose evidence cannot drift with ambient shell state. Neither
+`GEMINI_API_KEY` nor `GEMINI_API_KEY_FILE` is an application setting, container
+environment value or `.env.example` entry; `.env.example` must remain exactly equal to
+`_FIELD_TO_ENV`. Setup is
 documented only in README/runbook. Require Docker Compose
 2.24.4 or newer (the project support floor shared with RI6's `!override` deployment
 path), but treat the version floor as necessary and insufficient. Extend the
@@ -399,8 +405,8 @@ runtime and worker does not load the SDK. The two model ports and every real/fak
 implementation are assigned in `_conformance.py`; the protocol-conformance registry
 and keyword-only signature checks must cover both ports.
 
-`tests/security/test_gemini_credential_boundary.py` proves the host key and its optional
-path reference are never Settings fields or container environment values, only worker
+`tests/security/test_gemini_credential_boundary.py` proves the host key names are never
+Settings fields or container environment values, only worker
 receives the fixed secret file, missing/invalid credential causes zero client/network
 calls, and key-shaped values never enter errors, logs, traces or persisted model
 artifacts. It also freezes the existing `.gitignore`/`.dockerignore` exclusion of
@@ -559,7 +565,7 @@ shared `_interpret()` method, because `handle()` invokes that method before task
 and grant acquisition.
 
 1. 模型关闭/不可用，直接运行规则解释器；
-2. 模型开启，typed builder 先做原始字符/UTF-8 边界检查，再执行 `scrub_text()`，在共享 60 秒内
+2. 模型开启，typed builder 先做原始字符边界与 UTF-8 有效性检查，再执行 `scrub_text()`，在共享 60 秒内
    最多两次 SDK request；
 3. 模型输出严格复验，失败走规则解释器；
 4. 将最终 model/rule draft insert-once 保存；
@@ -573,16 +579,19 @@ propagates with zero post-cancel artifact/downstream calls. Model failures do no
 draft yields zero provider calls on recovery. `handle()` must produce zero model and
 artifact-store calls and preserve its current pre-create deterministic rejection order.
 
-Before `scrub_text()`, typed builders enforce concrete work limits: current text keeps
-the existing 8,192-character contract and is at most 32 KiB UTF-8; each history text
-field has those same two limits; selected history is at most 20 complete tasks, 64,000
-characters and 256 KiB UTF-8. Oversized rounds are omitted whole and marked truncated,
+Before `scrub_text()`, typed builders enforce concrete work limits and UTF-8 validity:
+the existing 8,192-character limit mathematically implies at most 32 KiB UTF-8 for the
+current text and each history field; selected history is at most 20 complete tasks, 64,000
+characters, which implies at most 256,000 UTF-8 bytes (less than 256 KiB). Oversized rounds are omitted whole and marked truncated,
 never sliced through a possible secret. The final serialized model request is capped at
 512 KiB only after every retained string has been scrubbed and the complete typed request
 has been serialized again. The builder drops oldest complete rounds until that scrubbed
 serialization fits; if the current request alone cannot fit, it rejects with zero provider
 calls. `scrub_text()` is total for typed strings; there is no invented "redaction failure"
-branch. Boundary tests cover exact limit, one-character/one-byte excess and pathological
+branch. The per-field byte ceiling is a derived guarantee, not a duplicate unreachable
+validator; the history byte ceiling is derived for the same reason, while the 512 KiB
+serialized-request guard remains independently reachable. Boundary tests cover
+the exact character-derived byte ceiling, one-character excess and pathological
 Unicode before proving provider calls stay zero.
 
 - [ ] **Step 4: RED surface-derived 20-row projector**
@@ -614,8 +623,9 @@ this ownership boundary is crossed.
 
 反例覆盖缺列、额外列、第二至二十行才出现坏类型、bool、NaN/Inf、date/datetime、指数/带空白数字、
 错误 source，以及 `stmt`/SQL/clientIp/digest 泄漏。任一失败都返回 None 且模型调用为 0；0 行同样不调。
-Text values and the raw typed advisory request have explicit character/UTF-8 limits
-before scrubbing; an oversized batch is rejected as a whole before scrubbing and before a
+Text values have explicit character limits and UTF-8 validity checks; their byte ceiling
+is derived from UTF-8's four-byte maximum. The raw typed advisory request has independent
+aggregate limits before scrubbing; an oversized batch is rejected as a whole before a
 provider call. After scrubbing, the complete typed request is serialized again and must
 remain within its final byte cap; otherwise it is rejected with zero provider calls.
 
@@ -829,8 +839,10 @@ binding，验证终态、actor、tenant、environment、channel 和 Web binding 
 Worker revalidates the persisted parent chain and never trusts the Web pre-check.
 It loads at most 20 parents and only persisted user text plus the existing terminal
 safe projection; SQL, full Evidence, identity details and configuration are excluded.
-It applies the same per-field character/UTF-8 limits before `scrub_text()`, then
-selects complete newest-to-oldest rounds within 64,000 characters and 256 KiB and
+It applies the same per-field character limit and UTF-8 validity check before
+`scrub_text()`; the 32 KiB field ceiling remains derived from the character limit. It then
+selects complete newest-to-oldest rounds within 64,000 characters (therefore no more than
+256,000 UTF-8 bytes, less than 256 KiB) and
 reverses them for model order. It never cuts a round or an individual string.
 
 超过容量只确定性截断并标记 `truncated`；越权、循环、损坏或非终态则拒绝，不退回最近消息。model

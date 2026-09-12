@@ -23,6 +23,7 @@ from importlib.metadata import metadata
 from importlib.util import find_spec
 from pathlib import Path
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.security
@@ -189,6 +190,14 @@ def test_google_genai_exact_wheel_license_and_typing_marker_are_locked() -> None
     spec = find_spec("google.genai")
     assert spec is not None and spec.origin is not None
     assert (Path(spec.origin).parent / "py.typed").is_file()
+
+
+def test_httpx_error_hierarchy_matches_the_adapter_classification() -> None:
+    """上游异常层级漂移时必须重新审核 Gemini 的闭集错误映射。"""
+    assert issubclass(httpx.TimeoutException, httpx.TransportError)
+    assert issubclass(httpx.ConnectError, httpx.TransportError)
+    assert issubclass(httpx.RemoteProtocolError, httpx.TransportError)
+    assert not issubclass(httpx.HTTPStatusError, httpx.TransportError)
 
 
 def test_lark_oapi_wheel_digest_is_locked_to_the_reviewed_artifact() -> None:

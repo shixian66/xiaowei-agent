@@ -83,6 +83,7 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "ModelErrorCode.AMBIENT_PROXY",
         "ModelErrorCode.CREDENTIAL_UNAVAILABLE",
         "ModelErrorCode.INVALID_RESPONSE",
+        "ModelErrorCode.TIMEOUT",
         "ModelErrorCode.UNAVAILABLE",
         # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
         # 被拒的环境标识来自调用方，不进消息；由

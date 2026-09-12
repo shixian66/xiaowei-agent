@@ -155,7 +155,7 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
 
 
 def test_key_is_not_a_setting_and_ignore_files_cover_host_secret_sources() -> None:
-    assert GEMINI_SECRET_FILE == "/run/secrets/gemini_api_" + "key"
+    assert GEMINI_SECRET_FILE == "/run/secrets/gemini_api_key"  # noqa: S105 -- path
     assert "GEMINI_API_KEY" not in _FIELD_TO_ENV.values()
     assert "GEMINI_API_KEY_FILE" not in _FIELD_TO_ENV.values()
     assert not any(

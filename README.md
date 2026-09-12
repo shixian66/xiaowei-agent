@@ -13,7 +13,7 @@
 > 真实渠道退出标准已经通过。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
-> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7 详细实施计划已于
+> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
 > 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3B 已离线实现严格 DTO、两个窄
 > port、固定 Gemini SDK adapter、默认关闭装配与 worker-only Compose secret；durable Runtime
 > 尚未接入，真实 key 读取与 Gemini 网络调用均为 0。
@@ -275,10 +275,9 @@ Compose 启动 Web 前要准备三个已被 Git 忽略的本地文件：
 `.secrets/` 保持 `0700`，三个文件写完后保持 `0444`。App secret 只能写入文件，不能放进环境变量、
 命令行、日志或已跟踪的 Compose 文件；请使用不会回显、不会进入 shell 历史的本地方式写入。
 
-启用 Gemini model override 时，再准备 `.secrets/gemini_api_key`，同样保持 `0444`。这是默认且唯一
-包含 key 明文的宿主文件；不要把 key 写进 `.env`。如必须使用其他受限路径，可在宿主 `.env` 中只写
-`GEMINI_API_KEY_FILE=/absolute/path/to/key-file`，该变量只是 Compose 的宿主文件引用，不会进入
-Settings 或容器环境。模型名、endpoint、timeout 等仍是代码固定值，不需要填写。
+启用 Gemini model override 时，再准备固定文件 `.secrets/gemini_api_key`，同样保持 `0444`。
+这是唯一包含 key 明文的宿主文件；不要把 key 或文件路径写进 `.env`。模型名、endpoint、timeout
+等仍是代码固定值，不需要填写。
 
 基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，应把下面这种 override 存在已忽略的
 `.secrets/docker-compose.feishu-local.yml`，再替换本机的 App ID 与 HTTPS SSO origin；不要把真实值提交：
@@ -378,8 +377,8 @@ inspect 的 label/environment/mount 元数据证明 worker 获得固定只读 mo
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
 下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入四个 fake 输入和一个不含 secret 值的
-JSON Compose override；宿主 `GEMINI_API_KEY_FILE` 只指向其中的 fake key 文件，override 只把其余
-secret/config 引用指向该私有目录，不读取或覆盖上文供人工启动使用的固定文件。清理时先原子隔离该
+JSON Compose override；override 把全部 fake secret/config（含 Gemini key 文件）引用指向该私有
+目录，不读取或覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离该
 目录，再核对目录与五个已知文件的 inode，且不递归
 删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地
