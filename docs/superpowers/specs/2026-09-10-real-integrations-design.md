@@ -48,8 +48,8 @@ canary。
   用户验收证据。
 - 飞书长连接、消息发送/更新和群成员 adapter 已有 default-off 离线实现，但没有真实飞书环境证据。
 - M6b 的 StarRocks target-bound readonly adapter 已合并离线代码和测试；真实目标、授权和现场验证仍缺失。
-- 当前仍只有规则式 `IntentInterpreter`，没有 Gemini dependency、adapter、真实调用或模型运行证据；
-  ADR-015 与 RI3 详细计划已经批准，但 PR 3A 只收口文档，不能据此声称源码已经实现。
+- 规则式 `IntentInterpreter` 仍是 Runtime 当前唯一路径；PR 3B 已离线实现固定 Gemini dependency、
+  严格 DTO/窄 port 与 adapter seam，但尚未接入 durable Runtime，也没有真实调用或模型运行证据。
 - 当前没有 Admin 配置中心；配置来自进程环境和只读文件引用。
 - M6b/M7 的现有最强证据是离线测试，不是部署、canary 或用户验收。
 

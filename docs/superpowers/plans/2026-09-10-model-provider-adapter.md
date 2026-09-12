@@ -280,6 +280,13 @@ The provider-response schema excludes `source`; the adapter stamps accepted outp
 failure. If any returned text changes under shared redaction, reject the whole response
 and use deterministic fallback instead of persisting or resolving it.
 
+The two ports return concrete `IntentModelResult` / `AdvisoryModelResult` wrappers. Each
+contains the accepted DTO plus trusted `ModelUsage`; the latter maps only nullable SDK
+`prompt_token_count` / `candidates_token_count` to input/output tokens. Missing metadata
+maps to two nulls, while present-but-malformed, negative or signed-64-bit-overflow metadata
+rejects the response. Usage is not part of the provider response schema and is never
+carried through `last_usage`, a tuple, global state or callback.
+
 - [ ] **Step 2: RED SDK seam，不发真实网络**
 
 用 fake SDK client 验证：
@@ -311,6 +318,9 @@ global mypy strictness unchanged. Any artifact mismatch stops the PR for re-revi
 - [ ] **Step 3: 最小 adapter**
 
 adapter 只做 SDK DTO 转换和错误归一，不包含 Resolver、Planner、fallback、数据库或渠道逻辑。
+The composition root injects one immutable, fixed `ModelInvocationProfile` into the
+adapter and retains that same typed value for PR 3C's application service/artifact path;
+application code must not import interface constants or inspect the concrete adapter.
 `asyncio.timeout()` 在 application service 控制 60/180 秒 provider 总预算，adapter 不偷偷另建更长
 timeout。预算从读取固定 secret、构造 client 之前开始，覆盖请求、允许的 backoff、本地响应复验与
 client close；每次 SDK timeout 只能使用当时剩余预算。Artifact load/save 在该 timeout 外按现有
@@ -470,7 +480,8 @@ worker 取得固定 secret。还没有 Runtime 调用模型，更没有真实网
 - [ ] **Step 1: RED migration 与 store 契约**
 
 `rev_0008` 只创建 `task_accepted_intents` 和 `task_model_advisories`。两表以 `task_id` 唯一，保存 version、
-严格 JSON、origin、provider/model（可空）、input digest、result digest、安全 usage、created_at 和写入
+严格 JSON、origin、provider/model（可空）、input digest、result digest、端口 wrapper 返回的安全
+usage、created_at 和写入
 时 fencing token；禁止 prompt、原始 response、key、path、provider error 正文或完整 Evidence。
 
 The intent input digest covers scrubbed current text, scrubbed explicit-parent context,
@@ -939,7 +950,8 @@ tests 证据，不算真实 provider、部署或用户验收。
 
 ## RI3 总体退出标准
 
-- [ ] Gemini 只通过两个窄端口输出严格 `IntentDraft`/`ModelAdvisory`。
+- [ ] Gemini 只通过两个窄端口输出具体 typed result（严格 `IntentDraft`/`ModelAdvisory` + nullable
+  bounded `ModelUsage`）；usage 不进入模型生成 schema。
 - [ ] 模型不能影响 capability、target、SQL、approval、tool、plan、evidence、状态或动作。
 - [ ] intent 60 秒/最多两次 request，advisory 180 秒/一次 request；StarRocks timeout 不变。
 - [ ] plan-bound advisory 的 provider `max_output_tokens` 不超过当前 plan 的

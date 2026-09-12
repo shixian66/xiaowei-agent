@@ -13,25 +13,30 @@ from pydantic import ValidationError
 
 from xiaowei_agent.application.model_ports import validate_advisory_output_tokens
 from xiaowei_agent.contracts import (
+    AdvisoryModelResult,
     IntentDraft,
+    IntentModelResult,
     IntentSource,
     ModelAdvisory,
     ModelErrorCode,
     ModelIntentRequest,
+    ModelInvocationProfile,
+    ModelUsage,
     ProviderIntentResponse,
     SlowQueryAdvisoryRequest,
     StrictInt,
 )
 from xiaowei_agent.contracts.model import model_text_values
-from xiaowei_agent.interfaces import GEMINI_PROVIDER_ORIGIN
 from xiaowei_agent.interfaces.secret_file import SecretFileError, read_secret_file
 from xiaowei_agent.redaction import scrub_text
 
-GEMINI_MODEL: Final[str] = "gemini-3-flash-preview"
-GEMINI_API_VERSION: Final[str] = "v1beta"
+GEMINI_MODEL_PROFILE: Final[ModelInvocationProfile] = ModelInvocationProfile()
+GEMINI_MODEL: Final[str] = GEMINI_MODEL_PROFILE.model
+GEMINI_API_VERSION: Final[str] = GEMINI_MODEL_PROFILE.api_version
+GEMINI_PROVIDER_ORIGIN: Final[str] = GEMINI_MODEL_PROFILE.origin
 GEMINI_SECRET_FILE: Final[str] = "/run/secrets/gemini_api_" + "key"
-INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = 2_048
-_CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 0.05
+INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = GEMINI_MODEL_PROFILE.intent_output_tokens
+_CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _PROXY_ENVIRONMENT: Final[tuple[str, ...]] = (
     "HTTP_PROXY",
@@ -87,17 +92,54 @@ def _map_error(error: BaseException) -> GeminiModelError:
     return GeminiModelError(ModelErrorCode.UNAVAILABLE)
 
 
+def _model_usage(response: types.GenerateContentResponse) -> ModelUsage:
+    missing_metadata = False
+    try:
+        metadata = response.usage_metadata
+    except AttributeError:
+        missing_metadata = True
+        metadata = None
+    if missing_metadata:
+        raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
+    if metadata is None:
+        return ModelUsage()
+    missing_count = False
+    try:
+        input_tokens = metadata.prompt_token_count
+        output_tokens = metadata.candidates_token_count
+    except AttributeError:
+        missing_count = True
+        input_tokens = None
+        output_tokens = None
+    if missing_count:
+        raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
+    invalid_usage = False
+    try:
+        usage = ModelUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    except ValidationError:
+        invalid_usage = True
+        usage = ModelUsage()
+    if invalid_usage:
+        raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
+    return usage
+
+
 async def _close_client(
     client: genai.Client, *, primary_error: BaseException | None
 ) -> None:
     """有界关闭 client；清理失败不遮蔽已在传播的主异常。"""
+    mapped: GeminiModelError | None = None
     try:
         async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
             await client.aio.aclose()
     except Exception as error:
         if primary_error is None:
             mapped = _map_error(error)
-            raise mapped from None
+    if mapped is not None:
+        raise mapped
 
 
 class GeminiModelAdapter:
@@ -106,35 +148,47 @@ class GeminiModelAdapter:
     def __init__(
         self,
         *,
+        profile: ModelInvocationProfile = GEMINI_MODEL_PROFILE,
         client_factory: Callable[..., Any] = genai.Client,
         secret_reader: Callable[[str], str] = read_secret_file,
     ) -> None:
+        if profile != GEMINI_MODEL_PROFILE:
+            raise ValueError("Gemini adapter requires the fixed RI3 profile")
+        self.profile = profile
         self._client_factory = client_factory
         self._secret_reader = secret_reader
 
     def _client(self) -> genai.Client:
         if any(os.environ.get(name) for name in _PROXY_ENVIRONMENT):
             raise GeminiModelError(ModelErrorCode.AMBIENT_PROXY)
+        credential_error: GeminiModelError | None = None
         try:
             credential = _validate_credential(self._secret_reader(GEMINI_SECRET_FILE))
         except SecretFileError:
-            raise GeminiModelError(ModelErrorCode.CREDENTIAL_UNAVAILABLE) from None
+            credential_error = GeminiModelError(
+                ModelErrorCode.CREDENTIAL_UNAVAILABLE
+            )
+        if credential_error is not None:
+            raise credential_error
+        construction_error: GeminiModelError | None = None
         try:
-            return cast(
+            client = cast(
                 genai.Client,
                 self._client_factory(
                     vertexai=False,
                     api_key=credential,
                     http_options=types.HttpOptions(
-                        base_url=GEMINI_PROVIDER_ORIGIN,
-                        api_version=GEMINI_API_VERSION,
+                        base_url=self.profile.origin,
+                        api_version=self.profile.api_version,
                         retry_options=None,
                     ),
                 ),
             )
         except Exception as error:
-            mapped = _map_error(error)
-            raise mapped from None
+            construction_error = _map_error(error)
+        if construction_error is not None:
+            raise construction_error
+        return client
 
     async def _generate(
         self,
@@ -144,12 +198,14 @@ class GeminiModelAdapter:
         system_instruction: str,
         thinking_level: types.ThinkingLevel,
         max_output_tokens: int,
-    ) -> ProviderIntentResponse | ModelAdvisory:
+    ) -> IntentModelResult | AdvisoryModelResult:
         client = self._client()
         primary_error: BaseException | None = None
+        mapped_error: GeminiModelError | None = None
+        result: IntentModelResult | AdvisoryModelResult | None = None
         try:
             response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
+                model=self.profile.model,
                 contents=request.model_dump_json(),
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
@@ -166,55 +222,66 @@ class GeminiModelAdapter:
                 raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
             parsed = response_schema.model_validate_json(text)
             _require_clean_texts(parsed)
-            return parsed
+            usage = _model_usage(response)
+            if isinstance(parsed, ProviderIntentResponse):
+                result = IntentModelResult(
+                    draft=IntentDraft(
+                        intent=parsed.intent,
+                        slots=parsed.slots,
+                        missing=parsed.missing,
+                        confidence=parsed.confidence,
+                        source=IntentSource.MODEL,
+                    ),
+                    usage=usage,
+                )
+            else:
+                result = AdvisoryModelResult(advisory=parsed, usage=usage)
         except ValidationError as error:
             primary_error = error
-            raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE) from None
+            mapped_error = GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
         except Exception as error:
             primary_error = error
-            mapped = _map_error(error)
-            raise mapped from None
+            mapped_error = _map_error(error)
         except BaseException as error:
             primary_error = error
             raise
         finally:
             await _close_client(client, primary_error=primary_error)
+        if mapped_error is not None:
+            raise mapped_error
+        if result is None:
+            raise RuntimeError("unreachable Gemini response outcome")
+        return result
 
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentDraft:
+    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
         """请求一次严格意图 JSON，并由本地代码补可信来源。"""
         parsed = await self._generate(
             request=request,
             response_schema=ProviderIntentResponse,
             system_instruction=_SYSTEM_INTENT,
-            thinking_level=types.ThinkingLevel.LOW,
-            max_output_tokens=INTENT_OUTPUT_TOKEN_LIMIT,
+            thinking_level=types.ThinkingLevel[self.profile.intent_thinking_level],
+            max_output_tokens=self.profile.intent_output_tokens,
         )
-        if not isinstance(parsed, ProviderIntentResponse):
+        if not isinstance(parsed, IntentModelResult):
             raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
-        return IntentDraft(
-            intent=parsed.intent,
-            slots=parsed.slots,
-            missing=parsed.missing,
-            confidence=parsed.confidence,
-            source=IntentSource.MODEL,
-        )
+        return parsed
 
     async def generate_advisory(
         self,
         request: SlowQueryAdvisoryRequest,
         *,
         max_output_tokens: StrictInt,
-    ) -> ModelAdvisory:
+    ) -> AdvisoryModelResult:
         """请求一次慢查询建议；token budget 必须由 application 先收窄。"""
         limit = validate_advisory_output_tokens(max_output_tokens)
         parsed = await self._generate(
             request=request,
             response_schema=ModelAdvisory,
             system_instruction=_SYSTEM_ADVISORY,
-            thinking_level=types.ThinkingLevel.HIGH,
+            thinking_level=types.ThinkingLevel[self.profile.advisory_thinking_level],
             max_output_tokens=limit,
         )
-        if not isinstance(parsed, ModelAdvisory):
+        if not isinstance(parsed, AdvisoryModelResult):
             raise GeminiModelError(ModelErrorCode.INVALID_RESPONSE)
         return parsed
 
@@ -222,6 +289,7 @@ class GeminiModelAdapter:
 __all__ = [
     "GEMINI_API_VERSION",
     "GEMINI_MODEL",
+    "GEMINI_MODEL_PROFILE",
     "GEMINI_PROVIDER_ORIGIN",
     "GEMINI_SECRET_FILE",
     "GeminiModelAdapter",

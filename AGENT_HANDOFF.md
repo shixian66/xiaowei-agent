@@ -384,13 +384,14 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **RI3 尚未实现或运行**：没有安装 `google-genai`，没有创建 migration/adapter/model DTO，未读取
-  `GEMINI_API_KEY`，未渲染 model Compose override，未调用 Google API，也没有模型质量、test-env、
-  部署、canary 或用户验收证据。ADR-015/计划中的命令与阈值都是未来验收要求，不是已通过结果。
+- **RI3 PR 3B 仅完成离线 SDK 边界**：已锁定 `google-genai` 并实现严格 model DTO、两个窄 port、
+  固定 Gemini adapter、默认关闭装配与 model Compose override；durable Runtime、migration、artifact、
+  MODEL trace 与 fallback/retry service 仍未实现。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0，也
+  没有模型质量、test-env、部署、canary 或用户验收证据。
 
-- **RI1 新版 Compose smoke 未在本机启动容器**：`docker context show` 返回 `colima`，
-  `/opt/homebrew/bin/colima status` 以 exit 1 报告 daemon 未运行，`docker info` 也无法连接该
-  socket；因此没有在本机执行 `.venv/bin/python -m scripts.compose_smoke`。PR #31 的 GitHub 隔离
+- **PR 3B 完整 Compose/model mount audit 尚未在本机取得**：当前 Colima daemon 可用，但 Docker
+  credential helper 缺失，且用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器。
+  因此本机没有完成 base+model merged containers 的 worker-only mount 实证。PR #31 的 GitHub 隔离
   runner 执行 Compose smoke 和隔离 PostgreSQL integration，但这仍只是一次性的 `tests` 证据，
   不能声称本机或测试企业的 Web/OAuth 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke
   会请求本机 Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider
@@ -410,8 +411,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   范围验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- 当前开发机未提供 `PYTEST_POSTGRES_DSN`，且 Docker client 所指向的 Colima daemon 未运行，
-  因此本机资产 PostgreSQL integration 是受控 skip、RI1 Compose 未实跑；最终 PR #14 run
+- 当前开发机未提供 `PYTEST_POSTGRES_DSN`；Colima daemon 当前可用，但上述 credential helper 与
+  `127.0.0.1:8000` 冲突仍阻止本轮完整 PR 3B mount audit。本机资产 PostgreSQL integration 仍是
+  受控 skip；最终 PR #14 run
   `33975532006` 与 main run `33976421909` 只补得当时版本的 GitHub 隔离 runner 证据。单次 CI
   仍不能外推到 RI1 新版、其他 PostgreSQL/Docker/Compose 版本或长期运行。
 - 主 `main` checkout 的旧 M6a 同路径计划稿已在 PR 1 合入前移到临时目录备份；当前仍保留三份与

@@ -47,12 +47,24 @@ metadata and `google/genai/py.typed` marker, and stop for plan re-review on any 
 
 模型边界只有：
 
-1. `IntentModelPort`：安全文本输入，输出严格 `IntentDraft`；
-2. `SlowQueryAdvisoryPort`：固定的慢查询样本输入，输出严格 `ModelAdvisory`。
+1. `IntentModelPort`：安全文本输入，输出 `IntentModelResult`（严格 `IntentDraft` + 同次可信
+   `ModelUsage`）；
+2. `SlowQueryAdvisoryPort`：固定的慢查询样本输入，输出 `AdvisoryModelResult`（严格
+   `ModelAdvisory` + 同次可信 `ModelUsage`）。
 
 两个端口都不接受自由 prompt 或 provider 配置。`SlowQueryAdvisoryPort` 只额外接受一个必填、仅限
 1–4,000 的 keyword-only `max_output_tokens` 控制值，用来承接 D4 的当前 plan budget；它不是模型
 内容，不能由用户、模型或环境变量提供。
+
+`ModelUsage` 只接收 SDK `usage_metadata` 的 nullable `prompt_token_count` 与
+`candidates_token_count`，分别映射为 input/output tokens；不保存 total 或原始 metadata。metadata
+整体缺失时两项均为 `None`；metadata 已出现但字段缺失、bool/float/负数或超过 signed-64-bit 时，
+整次响应按 `INVALID_RESPONSE` 拒绝。usage 不进入 provider response schema，模型不能生成或修改它。
+
+composition root 将同一个不可变 `ModelInvocationProfile` 同时交给 adapter，并保留给 PR 3C 的
+application service。profile 固定 provider/model/origin/API version、prompt/schema revision、
+thinking、60/180 秒 stage budget 与 2048/4000 output ceiling；application 不反向 import adapter 常量，
+也不靠窥探 concrete adapter 生成 artifact metadata/digest。
 
 模型响应采用 `extra="forbid"`。出现未知字段、错类型、超长、非法枚举或解析失败时，整体拒绝，不能
 删除越权字段后继续使用。即使模型返回合法 `IntentDraft`，仍必须经过现有：
@@ -168,10 +180,11 @@ sequence remains deterministic.
 新增一次 migration，建立两张小表：
 
 1. `task_accepted_intents`：每个 task 最多一条，保存首次被本地复验接受的 model/rule `IntentDraft`、
-   `intent_input_digest`、来源和安全 metadata/result digest；进入 Resolver 前落库；
+   `intent_input_digest`、来源和安全 metadata/result digest，以及端口返回的 nullable usage；进入
+   Resolver 前落库；
 2. `task_model_advisories`：每个 task 最多一条，保存被本地复验接受的 advisory、
-   `advisory_input_digest` 和安全 metadata/result digest；终态提交前落库，TaskView 只在任务已终态时
-   展示。
+   `advisory_input_digest`、安全 metadata/result digest 和端口返回的 nullable usage；终态提交前
+   落库，TaskView 只在任务已终态时展示。
 The durable worker never renders before this call. Advisory input binds the typed
 projection plus capability/surface/evidence/profile/schema revisions and sampled flag,
 not `RenderPayload` or display prose. TaskView/`handle()` render once after terminal

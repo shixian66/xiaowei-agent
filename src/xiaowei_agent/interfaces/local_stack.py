@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.contracts import (
         AdmissionCertificate,
+        ModelInvocationProfile,
         RequestContext,
         ToolCall,
         ToolResult,
@@ -123,6 +124,7 @@ class LocalStack:
     policy_revision: str
     intent_model: IntentModelPort | None
     slow_query_advisory: SlowQueryAdvisoryPort | None
+    model_profile: ModelInvocationProfile | None
 
 
 @dataclass(frozen=True)
@@ -438,10 +440,15 @@ def _assemble_local_stack(
     from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
 
     model_adapter = None
+    model_profile = None
     if settings.gemini_enabled:
-        from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
+        from xiaowei_agent.interfaces.gemini_model import (
+            GEMINI_MODEL_PROFILE,
+            GeminiModelAdapter,
+        )
 
-        model_adapter = GeminiModelAdapter()
+        model_profile = GEMINI_MODEL_PROFILE
+        model_adapter = GeminiModelAdapter(profile=model_profile)
 
     starrocks_adapters, target_adapters, slow_query_live_policy = (
         _starrocks_gateway_registration(
@@ -549,6 +556,7 @@ def _assemble_local_stack(
         policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
         intent_model=model_adapter,
         slow_query_advisory=model_adapter,
+        model_profile=model_profile,
     )
 
 

@@ -55,3 +55,22 @@ assert stack.slow_query_advisory is None
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_import_gemini_sdk_seam_is_zero_network() -> None:
+    code = """
+import sys
+def fail_network(event, args):
+    if event.startswith('socket.'):
+        raise AssertionError('network attempted')
+sys.addaudithook(fail_network)
+import xiaowei_agent.interfaces.gemini_model
+"""
+    result = subprocess.run(  # noqa: S603 -- 当前解释器固定执行内联审计脚本
+        [sys.executable, "-c", code],
+        cwd=_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

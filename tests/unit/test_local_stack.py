@@ -20,6 +20,7 @@ from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ModelInvocationProfile,
     ReadinessReport,
     RequestContext,
     RequestEnvelope,
@@ -70,6 +71,7 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
     assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
     assert stack.intent_model is None
     assert stack.slow_query_advisory is None
+    assert stack.model_profile is None
     assert stack.runtime._runner._bindings is stack.runtime._bindings
     assert await stack.readiness.check() == ReadinessReport(
         database_ok=True,
@@ -98,6 +100,8 @@ def test_enabled_gemini_is_lazily_assembled_without_reading_the_key(
     )
     assert stack.intent_model is not None
     assert stack.intent_model is stack.slow_query_advisory
+    assert isinstance(stack.model_profile, ModelInvocationProfile)
+    assert stack.intent_model.profile is stack.model_profile
     assert calls == 0
 
 

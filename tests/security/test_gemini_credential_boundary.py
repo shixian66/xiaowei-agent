@@ -43,6 +43,7 @@ async def test_missing_or_invalid_key_never_constructs_a_client() -> None:
         with pytest.raises(GeminiModelError) as caught:
             await adapter.generate_intent(request)
         assert caught.value.code is ModelErrorCode.CREDENTIAL_UNAVAILABLE
+        assert caught.value.__context__ is None
         assert factory.calls == 0
 
 
@@ -75,12 +76,19 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
 ) -> None:
     secret = "sk-" + "x" * 24
     response = json.dumps(
-        {"intent": secret, "slots": {}, "missing": [], "confidence": 0.5}
+        {
+            "intent": "starrocks.slow_query.diagnose",
+            "slots": {"window_minutes": secret},
+            "missing": [],
+            "confidence": 0.5,
+        }
     )
 
     class Models:
         async def generate_content(self, **kwargs: Any) -> object:
-            return type("Response", (), {"text": response})()
+            return type(
+                "Response", (), {"text": response, "usage_metadata": None}
+            )()
 
     class Aio:
         models = Models()
@@ -100,6 +108,7 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
             ModelIntentRequest(user_text="检查", history=(), context_truncated=False)
         )
     assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
+    assert caught.value.__context__ is None
     assert secret not in str(caught.value)
     assert secret not in caplog.text
 

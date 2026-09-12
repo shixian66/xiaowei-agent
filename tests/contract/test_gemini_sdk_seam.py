@@ -7,16 +7,21 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from google.genai import errors
 
 from xiaowei_agent.contracts import (
+    AdvisoryModelResult,
     IntentDraft,
+    IntentModelResult,
     IntentSource,
     ModelAdvisory,
     ModelErrorCode,
     ModelIntentRequest,
+    ModelUsage,
     ProviderIntentResponse,
     SlowQueryAdvisoryRequest,
 )
+from xiaowei_agent.interfaces import gemini_model
 from xiaowei_agent.interfaces.gemini_model import (
     GEMINI_API_VERSION,
     GEMINI_MODEL,
@@ -27,13 +32,17 @@ from xiaowei_agent.interfaces.gemini_model import (
 
 
 class RecordingModels:
-    def __init__(self, response_text: str) -> None:
+    def __init__(self, response_text: object, usage_metadata: object = None) -> None:
         self.response_text = response_text
+        self.usage_metadata = usage_metadata
         self.calls: list[dict[str, Any]] = []
 
     async def generate_content(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
-        return SimpleNamespace(text=self.response_text, usage_metadata=None)
+        return SimpleNamespace(
+            text=self.response_text,
+            usage_metadata=self.usage_metadata,
+        )
 
 
 class RecordingAsyncClient:
@@ -46,19 +55,20 @@ class RecordingAsyncClient:
 
 
 class RecordingClient:
-    def __init__(self, response_text: str) -> None:
-        self.aio = RecordingAsyncClient(RecordingModels(response_text))
+    def __init__(self, response_text: object, usage_metadata: object = None) -> None:
+        self.aio = RecordingAsyncClient(RecordingModels(response_text, usage_metadata))
 
 
 class RecordingClientFactory:
-    def __init__(self, response_text: str) -> None:
+    def __init__(self, response_text: object, usage_metadata: object = None) -> None:
         self.response_text = response_text
+        self.usage_metadata = usage_metadata
         self.calls: list[dict[str, Any]] = []
         self.clients: list[RecordingClient] = []
 
     def __call__(self, **kwargs: Any) -> RecordingClient:
         self.calls.append(kwargs)
-        client = RecordingClient(self.response_text)
+        client = RecordingClient(self.response_text, self.usage_metadata)
         self.clients.append(client)
         return client
 
@@ -90,12 +100,15 @@ async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
         )
     )
 
-    assert result == IntentDraft(
-        intent="starrocks.slow_query.diagnose",
-        slots={"window_minutes": "30"},
-        missing=(),
-        confidence=0.8,
-        source=IntentSource.MODEL,
+    assert result == IntentModelResult(
+        draft=IntentDraft(
+            intent="starrocks.slow_query.diagnose",
+            slots={"window_minutes": "30"},
+            missing=(),
+            confidence=0.8,
+            source=IntentSource.MODEL,
+        ),
+        usage=ModelUsage(input_tokens=None, output_tokens=None),
     )
     assert GEMINI_MODEL == "gemini-3-flash-preview"
     assert GEMINI_API_VERSION == "v1beta"
@@ -137,10 +150,13 @@ async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
 
     result = await adapter.generate_advisory(request, max_output_tokens=1_234)
 
-    assert result == ModelAdvisory(
-        analysis="存在扫描放大",
-        suggestions=("检查分区裁剪",),
-        uncertainties=(),
+    assert result == AdvisoryModelResult(
+        advisory=ModelAdvisory(
+            analysis="存在扫描放大",
+            suggestions=("检查分区裁剪",),
+            uncertainties=(),
+        ),
+        usage=ModelUsage(input_tokens=None, output_tokens=None),
     )
     call = factory.clients[0].aio.models.calls[0]
     assert call["contents"] == (
@@ -197,11 +213,85 @@ async def test_client_is_closed_when_generation_raises() -> None:
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
     assert "private provider detail" not in str(caught.value)
+    assert caught.value.__context__ is None
     assert client.aio.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_hung_close_is_bounded_after_success() -> None:
+async def test_valid_usage_metadata_is_returned_with_the_typed_result() -> None:
+    metadata = SimpleNamespace(prompt_token_count=123, candidates_token_count=45)
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory(_intent_json(), metadata),
+        secret_reader=lambda path: "AIza" + "u" * 35,
+    )
+
+    result = await adapter.generate_intent(
+        ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+    )
+
+    assert result.usage == ModelUsage(input_tokens=123, output_tokens=45)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        SimpleNamespace(candidates_token_count=1),
+        SimpleNamespace(prompt_token_count=1),
+        SimpleNamespace(prompt_token_count=True, candidates_token_count=1),
+        SimpleNamespace(prompt_token_count=1.0, candidates_token_count=1),
+        SimpleNamespace(prompt_token_count=-1, candidates_token_count=1),
+        SimpleNamespace(prompt_token_count=2**63, candidates_token_count=1),
+        SimpleNamespace(prompt_token_count=1, candidates_token_count=True),
+        SimpleNamespace(prompt_token_count=1, candidates_token_count=1.0),
+        SimpleNamespace(prompt_token_count=1, candidates_token_count=-1),
+        SimpleNamespace(prompt_token_count=1, candidates_token_count=2**63),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_or_incomplete_usage_metadata_rejects_the_response(
+    metadata: object,
+) -> None:
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory(_intent_json(), metadata),
+        secret_reader=lambda path: "AIza" + "u" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_legitimate_slow_close_is_not_tuned_to_the_test_wall_clock() -> None:
+    class DelayedCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            await asyncio.sleep(0.06)
+
+    client = RecordingClient(_intent_json())
+    client.aio = DelayedCloseAsyncClient(RecordingModels(_intent_json()))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "d" * 35,
+    )
+
+    result = await adapter.generate_intent(
+        ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+    )
+
+    assert result.draft.intent == "starrocks.slow_query.diagnose"
+    assert client.aio.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hung_close_is_bounded_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gemini_model, "_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
     close_started = asyncio.Event()
 
     class HungAsyncClient(RecordingAsyncClient):
@@ -228,6 +318,7 @@ async def test_hung_close_is_bounded_after_success() -> None:
 
     assert close_started.is_set()
     assert caught.value.code is ModelErrorCode.TIMEOUT
+    assert caught.value.__context__ is None
     assert time.monotonic() - started < 0.3
 
 
@@ -256,6 +347,7 @@ async def test_close_error_does_not_mask_provider_error() -> None:
 
     assert caught.value.code is ModelErrorCode.TIMEOUT
     assert str(caught.value) == "model_timeout"
+    assert caught.value.__context__ is None
     assert client.aio.close_calls == 1
 
 
@@ -280,11 +372,15 @@ async def test_close_error_does_not_mask_schema_error() -> None:
 
     assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
     assert str(caught.value) == "model_invalid_response"
+    assert caught.value.__context__ is None
     assert client.aio.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_outer_cancellation_propagates_after_bounded_close() -> None:
+async def test_outer_cancellation_propagates_after_bounded_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gemini_model, "_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
     generation_started = asyncio.Event()
 
     class WaitingModels(RecordingModels):
@@ -317,3 +413,97 @@ async def test_outer_cancellation_propagates_after_bounded_close() -> None:
 
     assert client.aio.close_calls == 1
     assert time.monotonic() - started < 0.3
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, ModelErrorCode.UNAUTHORIZED),
+        (403, ModelErrorCode.FORBIDDEN),
+        (429, ModelErrorCode.RATE_LIMITED),
+        (500, ModelErrorCode.UNAVAILABLE),
+        (418, ModelErrorCode.UNAVAILABLE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sdk_api_errors_map_to_closed_codes_without_retained_context(
+    status: int, expected: ModelErrorCode
+) -> None:
+    provider_detail = "private-provider-body"
+
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise errors.APIError(status, {"message": provider_detail})
+
+    client = RecordingClient("{}")
+    client.aio.models = FailingModels("{}")
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "a" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is expected
+    assert provider_detail not in str(caught.value)
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_transport_error_maps_to_unavailable_without_retained_context() -> None:
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise OSError("private-transport-detail")
+
+    client = RecordingClient("{}")
+    client.aio.models = FailingModels("{}")
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "o" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.UNAVAILABLE
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_non_string_response_text_is_invalid_response() -> None:
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory({"not": "text"}),
+        secret_reader=lambda path: "AIza" + "n" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_client_construction_failure_is_safely_normalized() -> None:
+    def fail_client(**kwargs: Any) -> object:
+        raise OSError("private-client-construction-detail")
+
+    adapter = GeminiModelAdapter(
+        client_factory=fail_client,
+        secret_reader=lambda path: "AIza" + "f" * 35,
+    )
+
+    with pytest.raises(GeminiModelError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value.code is ModelErrorCode.UNAVAILABLE
+    assert caught.value.__context__ is None

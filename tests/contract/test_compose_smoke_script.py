@@ -32,6 +32,67 @@ class RecordingRunner:
         return subprocess.CompletedProcess(call, 0, stdout=output, stderr="")
 
 
+class ModelAuditRunner(RecordingRunner):
+    def __init__(
+        self,
+        services: tuple[str, ...],
+        *,
+        failure_at: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.failure_at = failure_at
+        self.service_by_container = {
+            f"model-container-{index}": service
+            for index, service in enumerate(services)
+        }
+
+    def __call__(
+        self, argv: Any, *, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(argv, timeout=timeout)
+        call = tuple(argv)
+        if self.failure_at == "create" and "create" in call:
+            raise subprocess.CalledProcessError(1, argv)
+        if call[-3:] == ("ps", "--all", "--quiet"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="".join(f"{container}\n" for container in self.service_by_container),
+                stderr="",
+            )
+        if call[:2] == ("/usr/bin/docker", "inspect"):
+            if self.failure_at == "inspect":
+                raise subprocess.CalledProcessError(1, argv)
+            service = self.service_by_container[call[-1]]
+            mounts: list[dict[str, object]] = []
+            environment: list[str] = []
+            if service == "worker":
+                mounts = [
+                    {
+                        "Destination": "/run/secrets/gemini_api_key",
+                        "RW": False,
+                    },
+                    {
+                        "Destination": "/run/secrets/postgres_password",
+                        "RW": False,
+                    },
+                ]
+                environment = ["XIAOWEI_GEMINI_ENABLED=true"]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    [
+                        {"com.docker.compose.service": service},
+                        environment,
+                        mounts,
+                    ]
+                ),
+                stderr="",
+            )
+        return result
+
+
 class CleanupBoundaryError(BaseException):
     """代表不会被 ``except Exception`` 捕获的清理失败。"""
 
@@ -140,6 +201,37 @@ def test_create_failure_still_cleans_only_the_generated_project(tmp_path: Path) 
             compose_command=("/usr/bin/docker", "compose"),
             runner=runner,
             workflow=workflow,
+            input_root=tmp_path / ".secrets",
+        )
+
+    down = [call for call in runner.calls if "down" in call]
+    assert len(down) == 1
+    assert "--volumes" in down[0]
+    assert "--remove-orphans" in down[0]
+
+
+@pytest.mark.parametrize("failure_at", ["create", "inspect"])
+def test_model_derived_session_failure_cleans_the_generated_project(
+    failure_at: str, tmp_path: Path
+) -> None:
+    runner = ModelAuditRunner(
+        compose_smoke._MODEL_AUDIT_SERVICES,
+        failure_at=failure_at,
+    )
+
+    with pytest.raises(
+        SmokeError,
+        match=(
+            "SMOKE_MODEL_SECRET_COMMAND_FAILED"
+            if failure_at == "create"
+            else "SMOKE_MODEL_SECRET_INSPECT_FAILED"
+        ),
+    ):
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker", "compose"),
+            runner=runner,
+            workflow=compose_smoke._require_model_secret_boundary,
             input_root=tmp_path / ".secrets",
         )
 
@@ -432,6 +524,48 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         "web-app",
     }
     assert not any("cat" in call or "exec" in call for call in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "services",
+    [
+        ("worker",),
+        tuple(
+            service
+            for service in compose_smoke._MODEL_AUDIT_SERVICES
+            if service != "api"
+        ),
+        (*compose_smoke._MODEL_AUDIT_SERVICES, "unknown-service"),
+        (*compose_smoke._MODEL_AUDIT_SERVICES, "api"),
+    ],
+)
+def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
+    services: tuple[str, ...],
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(services),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
+def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
+    services = (*compose_smoke._MODEL_AUDIT_SERVICES, "worker")
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(services),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+
+    compose_smoke._require_model_secret_boundary(session)
 
 
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(

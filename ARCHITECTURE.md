@@ -123,8 +123,10 @@ RequestEnvelope
 
 Only the granted durable Runtime path may call `IntentModelPort`; the existing
 `IntentInterpreter` remains the deterministic fallback and does not own provider access.
-Model output passes strict schema and local semantic validation before becoming an
-insert-once `AcceptedIntentDraft`; it means only that this task accepted an untrusted
+Provider output passes strict schema and local semantic validation, then the port returns
+the accepted DTO together with trusted nullable `ModelUsage`; usage is SDK metadata, not
+part of the model-generated schema. The draft may then become an insert-once
+`AcceptedIntentDraft`; it means only that this task accepted an untrusted
 draft, never that the model gained execution authority. 任务重试必须先读回并复用已接受草稿。若 provider 已收到请求但本地还没保存就崩溃，恢复后
 允许重复一次模型调用；模型无工具和执行副作用，因此 RI3 明确接受这一 at-least-once 取舍，不为此
 建设调用 reservation 平台。Resolver 仍须重新从当前注册能力、租户上下文、环境目录和确定性规则
@@ -384,6 +386,8 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
 | `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者只再增 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从 SDK prompt/candidates token count 构造；strict non-negative signed-64-bit；不保留 total/raw metadata，不进入 provider response schema |
+| `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
 | `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
@@ -468,6 +472,10 @@ an expired lease or stale fencing is rejected. Recovery reads accepted artifacts
 If the provider received a call before local save, only that unsaved model call may
 repeat under ADR-015's no-execution-side-effect at-least-once rule.
 Model call count, latency, usage and fallback enter the existing safe trace/audit path.
+PR 3B ports already return accepted DTO plus nullable bounded usage atomically, while the
+composition root exposes the same immutable invocation profile to the adapter and future
+application service; PR 3C therefore does not hardcode provider/model/revision or inspect
+the concrete adapter when persisting artifacts.
 The trace contract adds `PipelineStage.MODEL` plus typed `ModelCallObservation` (call
 kind, total elapsed milliseconds, request count, nullable input/output usage and a
 closed fallback code). Model-stage free-form detail remains empty. Prompt, response,

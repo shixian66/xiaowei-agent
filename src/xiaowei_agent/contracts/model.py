@@ -1,7 +1,7 @@
 """RI3 的两个窄模型端口所使用的严格契约。"""
 
 from collections.abc import Mapping
-from typing import Annotated, Final
+from typing import Annotated, Final, Literal
 
 from pydantic import AfterValidator, Field, model_validator
 
@@ -12,11 +12,13 @@ from xiaowei_agent.contracts.base import (
     FrozenMap,
     FrozenStrMap,
     NonEmptyText,
+    StrictInt,
     StrictStr,
 )
 from xiaowei_agent.contracts.intent import (
     INTENT_MISSING_ALLOWLISTS,
     INTENT_SLOT_ALLOWLISTS,
+    IntentDraft,
 )
 
 MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
@@ -29,6 +31,7 @@ MAX_ADVISORY_ROWS: Final[int] = 20
 MAX_INTENT_ITEMS: Final[int] = 20
 MAX_ADVISORY_ITEMS: Final[int] = 20
 MAX_ADVISORY_TEXT_CHARACTERS: Final[int] = 16_384
+MAX_MODEL_USAGE_TOKENS: Final[int] = 2**63 - 1
 
 
 def _utf8_size(value: str) -> int:
@@ -142,6 +145,62 @@ class ModelAdvisory(Contract):
     uncertainties: tuple[AdvisoryText, ...] = Field(max_length=MAX_ADVISORY_ITEMS)
 
 
+class ModelUsage(Contract):
+    """SDK 元数据收窄后的可信、可持久化 token 计数。"""
+
+    input_tokens: StrictInt | None = Field(
+        default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS
+    )
+    output_tokens: StrictInt | None = Field(
+        default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS
+    )
+
+
+class IntentModelResult(Contract):
+    """一次 intent 调用接受的 DTO 与同次可信 usage。"""
+
+    draft: IntentDraft
+    usage: ModelUsage
+
+
+class AdvisoryModelResult(Contract):
+    """一次 advisory 调用接受的 DTO 与同次可信 usage。"""
+
+    advisory: ModelAdvisory
+    usage: ModelUsage
+
+
+class ModelInvocationProfile(Contract):
+    """composition root 注入的固定、非秘密 RI3 身份与预算。"""
+
+    provider: Literal["google-gemini-developer-api"] = (
+        "google-gemini-developer-api"
+    )
+    model: Literal["gemini-3-flash-preview"] = "gemini-3-flash-preview"
+    api_version: Literal["v1beta"] = "v1beta"
+    origin: Literal["https://generativelanguage.googleapis.com"] = (
+        "https://generativelanguage.googleapis.com"
+    )
+    intent_prompt_revision: Literal["ri3-intent-prompt-v1"] = (
+        "ri3-intent-prompt-v1"
+    )
+    intent_schema_revision: Literal["ri3-intent-schema-v1"] = (
+        "ri3-intent-schema-v1"
+    )
+    advisory_prompt_revision: Literal["ri3-advisory-prompt-v1"] = (
+        "ri3-advisory-prompt-v1"
+    )
+    advisory_schema_revision: Literal["ri3-advisory-schema-v1"] = (
+        "ri3-advisory-schema-v1"
+    )
+    intent_thinking_level: Literal["LOW"] = "LOW"
+    advisory_thinking_level: Literal["HIGH"] = "HIGH"
+    intent_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
+    advisory_timeout_seconds: StrictInt = Field(default=180, ge=180, le=180)
+    intent_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
+    advisory_output_tokens: StrictInt = Field(default=4_000, ge=4_000, le=4_000)
+
+
 def model_text_values(value: Contract) -> tuple[str, ...]:
     """返回供应商响应中的全部文本，供 total redaction 复验。"""
     dumped = value.model_dump(mode="python")
@@ -170,8 +229,13 @@ __all__ = [
     "MAX_MODEL_REQUEST_BYTES",
     "MAX_MODEL_TEXT_BYTES",
     "MAX_MODEL_TEXT_CHARACTERS",
+    "MAX_MODEL_USAGE_TOKENS",
+    "AdvisoryModelResult",
+    "IntentModelResult",
     "ModelAdvisory",
     "ModelIntentRequest",
+    "ModelInvocationProfile",
+    "ModelUsage",
     "ProviderIntentResponse",
     "SlowQueryAdvisoryRequest",
     "model_text_values",

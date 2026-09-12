@@ -6,21 +6,22 @@
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
 > 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
 > `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机有
-> Docker client 与 standalone Compose，但 Colima daemon 未运行，也未提供 PostgreSQL DSN，
-> 隔离 PostgreSQL/Compose 运行证据来自旧版 GitHub CI。项目负责人已于
+> Docker client、standalone Compose 与可用的 Colima daemon，但未提供 PostgreSQL DSN；
+> 隔离 PostgreSQL/Compose 运行证据仍来自旧版 GitHub CI。项目负责人已于
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3A 只收口文档，仍没有 RI3 源码、
-> SDK 依赖、真实 key、网络调用或运行证据。
+> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3B 已离线实现严格 DTO、两个窄
+> port、固定 Gemini SDK adapter、默认关闭装配与 worker-only Compose secret；durable Runtime
+> 尚未接入，真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
-> completed its test surface. PR 3A is still documentation only. In later implementation PRs,
-> host `GEMINI_API_KEY` will stay outside Settings and `.env.example`, becoming a
-> worker-only Compose secret; no key should be added now.
+> completed its test surface. PR 3B is an offline SDK boundary only. Host
+> `GEMINI_API_KEY` stays outside Settings and `.env.example` and is exposed only as a
+> worker-only Compose secret when the explicit model override is used.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -382,8 +383,9 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
-当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
-smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
+当前开发机有 Docker client、standalone Compose 5.5.1 与可用的 Colima daemon；但 Docker credential
+helper 缺失，且用户已有容器占用 `127.0.0.1:8000`，所以本轮没有取得 PR 3B 完整 Compose/model
+mount audit 证据。本任务未停止或修改用户容器；本机仍只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
 `2d67b59` 已在 GitHub 隔离 runner 实际执行 Compose smoke 与隔离 PostgreSQL integration，八项
 CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
 

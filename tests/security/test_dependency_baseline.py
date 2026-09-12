@@ -1,11 +1,12 @@
 """生产依赖面与类型检查严格度是同一条边界。
 
 M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn，M6b 引入
-PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``。
+PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``，RI3 PR 3B
+引入官方模型 SDK ``google-genai``。
 两件事必须被机制钉住，而不是靠计划里的一句话：
 
-1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
-   httpx / PyYAML；仍不引入 Redis、队列、Worker 框架、模型 SDK 或 LangGraph。
+1. **依赖面**。M5 当时只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
+   httpx / PyYAML；当前仍不引入 Redis、队列、Worker 框架或 LangGraph。
    用集合相等表达比用禁用清单强：禁用清单挡不住清单外的新依赖。
 
 2. **``asyncpg`` 不得被 ``src/`` 直接 import**。T0 实测：``asyncpg`` 0.30.0 **不带

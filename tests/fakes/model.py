@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from xiaowei_agent.application.model_ports import validate_advisory_output_tokens
 from xiaowei_agent.contracts import (
-    IntentDraft,
-    ModelAdvisory,
+    AdvisoryModelResult,
+    IntentModelResult,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
@@ -13,13 +13,15 @@ from xiaowei_agent.contracts import (
 
 
 class ScriptedModelAdapter:
-    def __init__(self, *, intent: IntentDraft, advisory: ModelAdvisory) -> None:
+    def __init__(
+        self, *, intent: IntentModelResult, advisory: AdvisoryModelResult
+    ) -> None:
         self.intent = intent
         self.advisory = advisory
         self.intent_requests: list[ModelIntentRequest] = []
         self.advisory_requests: list[tuple[SlowQueryAdvisoryRequest, int]] = []
 
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentDraft:
+    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
         self.intent_requests.append(request)
         return self.intent
 
@@ -28,7 +30,7 @@ class ScriptedModelAdapter:
         request: SlowQueryAdvisoryRequest,
         *,
         max_output_tokens: StrictInt,
-    ) -> ModelAdvisory:
+    ) -> AdvisoryModelResult:
         limit = validate_advisory_output_tokens(max_output_tokens)
         self.advisory_requests.append((request, limit))
         return self.advisory

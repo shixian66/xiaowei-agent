@@ -567,6 +567,7 @@ class ComposeSession:
     environment: tuple[tuple[str, str], ...] = ()
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
+    _resource_owner: ComposeSession | None = None
 
     def argv(self, *arguments: str) -> list[str]:
         command = list(self.compose_command)
@@ -590,6 +591,7 @@ class ComposeSession:
             environment=self.environment,
             up_started=self.up_started,
             failure_code=failure_code,
+            _resource_owner=self._resource_owner or self,
         )
 
     def run(
@@ -600,6 +602,8 @@ class ComposeSession:
     ) -> subprocess.CompletedProcess[str]:
         if "up" in arguments or "create" in arguments:
             self.up_started = True
+            if self._resource_owner is not None:
+                self._resource_owner.up_started = True
         return self.run_docker(
             self.argv(*arguments),
             timeout=timeout,
@@ -820,10 +824,10 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
     )
     result = model.run("ps", "--all", "--quiet", timeout=15.0)
     container_ids = tuple(line for line in result.stdout.splitlines() if line)
-    if not container_ids:
+    if not container_ids or len(set(container_ids)) != len(container_ids):
         raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
 
-    worker_count = 0
+    service_counts: dict[str, int] = {}
     for container_id in container_ids:
         inspected = model.run_docker(
             (
@@ -850,6 +854,9 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
         service = labels.get("com.docker.compose.service")
         if not isinstance(service, str) or not service:
             raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR")
+        if service not in _MODEL_AUDIT_SERVICES:
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        service_counts[service] = service_counts.get(service, 0) + 1
         if any(
             value in item
             for value in model.sensitive_values
@@ -874,7 +881,6 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             if item.startswith("XIAOWEI_GEMINI_ENABLED=")
         ]
         if service == "worker":
-            worker_count += 1
             if (
                 enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
                 or len(secret_mounts) != 1
@@ -885,7 +891,11 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
                 raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
         elif enabled or secret_mounts:
             raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
-    if worker_count == 0:
+    if set(service_counts) != set(_MODEL_AUDIT_SERVICES) or any(
+        count != 1
+        for service, count in service_counts.items()
+        if service != "worker"
+    ):
         raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
 
 

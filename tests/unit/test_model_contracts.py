@@ -27,13 +27,23 @@ def _model_types() -> tuple[type[object], type[object], type[object], type[objec
         ProviderIntentResponse,
         SlowQueryAdvisoryRequest,
     )
-
     return (
         ModelIntentRequest,
         SlowQueryAdvisoryRequest,
         ProviderIntentResponse,
         ModelAdvisory,
     )
+
+
+def _result_types() -> tuple[type[object], type[object], type[object], type[object]]:
+    from xiaowei_agent.contracts import (
+        AdvisoryModelResult,
+        IntentModelResult,
+        ModelInvocationProfile,
+        ModelUsage,
+    )
+
+    return ModelUsage, IntentModelResult, AdvisoryModelResult, ModelInvocationProfile
 
 
 def test_intent_request_is_strict_immutable_and_bounded() -> None:
@@ -179,8 +189,8 @@ def test_advisory_request_enforces_complete_serialized_byte_boundary() -> None:
 def test_provider_intent_response_rejects_authority_and_source_fields(field: str) -> None:
     _, _, provider_intent_response, _ = _model_types()
     payload = {
-        "intent": "slow_query",
-        "slots": {},
+        "intent": "starrocks.slow_query.diagnose",
+        "slots": {"window_minutes": "30"},
         "missing": (),
         "confidence": 0.5,
         field: "forbidden",
@@ -346,17 +356,105 @@ def test_model_advisory_rejects_authority_fields_and_long_text() -> None:
         model_advisory.model_validate({**base, "analysis": "x" * 16_385})
 
 
-@pytest.mark.parametrize("confidence", [True, math.nan, math.inf, -math.inf])
-def test_provider_intent_response_rejects_non_finite_or_non_numeric_confidence(
+@pytest.mark.parametrize(
+    "confidence", [True, math.nan, math.inf, -math.inf, -0.1, 1.1]
+)
+def test_provider_intent_response_rejects_invalid_confidence(
     confidence: object,
 ) -> None:
     _, provider_intent_response = _types()
     with pytest.raises(ValidationError):
         provider_intent_response.model_validate(
             {
-                "intent": "slow_query",
-                "slots": {},
+                "intent": "starrocks.slow_query.diagnose",
+                "slots": {"window_minutes": "30"},
                 "missing": (),
                 "confidence": confidence,
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("input_tokens", True),
+        ("input_tokens", 1.0),
+        ("input_tokens", -1),
+        ("input_tokens", 2**63),
+        ("output_tokens", True),
+        ("output_tokens", 1.0),
+        ("output_tokens", -1),
+        ("output_tokens", 2**63),
+    ],
+)
+def test_model_usage_rejects_non_integer_negative_and_overflow_values(
+    field: str, value: object
+) -> None:
+    model_usage, _, _, _ = _result_types()
+
+    with pytest.raises(ValidationError):
+        model_usage.model_validate(
+            {"input_tokens": None, "output_tokens": None, field: value}
+        )
+
+
+def test_model_usage_accepts_nullable_and_signed_64_bit_boundary() -> None:
+    model_usage, _, _, _ = _result_types()
+
+    assert model_usage(input_tokens=None, output_tokens=None).model_dump() == {
+        "input_tokens": None,
+        "output_tokens": None,
+    }
+    exact = model_usage(input_tokens=2**63 - 1, output_tokens=0)
+    assert exact.input_tokens == 2**63 - 1
+    assert exact.output_tokens == 0
+
+
+def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable() -> None:
+    model_usage, intent_result, advisory_result, invocation_profile = _result_types()
+    _, _, _, model_advisory = _model_types()
+    from xiaowei_agent.contracts import IntentDraft, IntentSource
+
+    usage = model_usage(input_tokens=12, output_tokens=4)
+    intent = intent_result(
+        draft=IntentDraft(
+            intent="starrocks.slow_query.diagnose",
+            slots={"window_minutes": "30"},
+            missing=(),
+            confidence=0.5,
+            source=IntentSource.MODEL,
+        ),
+        usage=usage,
+    )
+    advisory = advisory_result(
+        advisory=model_advisory(
+            analysis="分析", suggestions=(), uncertainties=()
+        ),
+        usage=usage,
+    )
+    profile = invocation_profile()
+
+    assert set(type(intent).model_fields) == {"draft", "usage"}
+    assert set(type(advisory).model_fields) == {"advisory", "usage"}
+    assert profile.model_dump() == {
+        "provider": "google-gemini-developer-api",
+        "model": "gemini-3-flash-preview",
+        "api_version": "v1beta",
+        "origin": "https://generativelanguage.googleapis.com",
+        "intent_prompt_revision": "ri3-intent-prompt-v1",
+        "intent_schema_revision": "ri3-intent-schema-v1",
+        "advisory_prompt_revision": "ri3-advisory-prompt-v1",
+        "advisory_schema_revision": "ri3-advisory-schema-v1",
+        "intent_thinking_level": "LOW",
+        "advisory_thinking_level": "HIGH",
+        "intent_timeout_seconds": 60,
+        "advisory_timeout_seconds": 180,
+        "intent_output_tokens": 2_048,
+        "advisory_output_tokens": 4_000,
+    }
+    with pytest.raises(ValidationError):
+        invocation_profile.model_validate({"provider": "other"})
+    with pytest.raises(ValidationError):
+        invocation_profile.model_validate({"intent_timeout_seconds": 60.0})
+    with pytest.raises(ValidationError):
+        invocation_profile.model_validate({"extra": "forbidden"})

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Protocol
 
 from xiaowei_agent.contracts import (
-    IntentDraft,
-    ModelAdvisory,
+    AdvisoryModelResult,
+    IntentModelResult,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
@@ -23,8 +23,8 @@ def validate_advisory_output_tokens(value: StrictInt) -> StrictInt:
 
 
 class IntentModelPort(Protocol):
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentDraft:
-        """把净化后的 typed request 转为不可信意图草案。"""
+    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
+        """返回不可信意图草案与同次可信 usage。"""
         ...
 
 
@@ -34,8 +34,8 @@ class SlowQueryAdvisoryPort(Protocol):
         request: SlowQueryAdvisoryRequest,
         *,
         max_output_tokens: StrictInt,
-    ) -> ModelAdvisory:
-        """解释净化后的慢查询投影，不产生执行动作。"""
+    ) -> AdvisoryModelResult:
+        """返回只读建议与同次可信 usage，不产生执行动作。"""
         ...
 
 
