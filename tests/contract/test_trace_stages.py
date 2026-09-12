@@ -4,23 +4,121 @@
 要求的错误分析闭环的机器可验收部分。没有它，"阅读 trace → 归因到具体阶段"就只是
 一句文档要求。
 
-九个阶段中，Runner 覆盖 ADMISSION / GATEWAY / EVIDENCE / LIFECYCLE 四个；
-INTENT / RESOLVER / PLANNER / REFLECTION / RENDERING 由 Runtime 发射，在 T12 与
-本文件的用例合并成端到端断言。
+十个阶段中，Runner 覆盖 ADMISSION / GATEWAY / EVIDENCE / LIFECYCLE 四个；
+MODEL / INTENT / RESOLVER / PLANNER / REFLECTION / RENDERING 由 Runtime 发射，
+在 T12 与本文件的用例合并成端到端断言。
 """
 
 import logging
 import uuid
 
 import pytest
+from pydantic import ValidationError
 from tests.fakes.recordings import EMPTY_WITH_TRAFFIC, GOLDEN, MALFORMED, TIMEOUT
 from tests.fakes.runner import RunnerHarness
 
-from xiaowei_agent.contracts import ErrorCategory, PipelineStage, StageOutcome
+from xiaowei_agent.contracts import (
+    ErrorCategory,
+    ModelCallKind,
+    ModelCallObservation,
+    ModelErrorCode,
+    ModelFallbackCode,
+    PipelineStage,
+    StageOutcome,
+)
 from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
 from xiaowei_agent.observability.sink import Delivery
 from xiaowei_agent.runners.runner import WorkflowPaused
+
+_BIGINT_MAX = 2**63 - 1
+
+
+def _model_observation(**updates: object) -> ModelCallObservation:
+    values: dict[str, object] = {
+        "call_kind": ModelCallKind.INTENT,
+        "elapsed_ms": 0,
+        "request_count": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "fallback_code": ModelFallbackCode.DISABLED,
+    }
+    return ModelCallObservation(**(values | updates))
+
+
+def test_every_provider_error_has_a_trace_fallback_code() -> None:
+    """Application 按枚举值归一；新增 provider 错误不能漏掉 trace 对应项。"""
+    assert {code.value for code in ModelErrorCode} <= {
+        code.value for code in ModelFallbackCode
+    }
+
+
+def test_model_observation_accepts_every_numeric_endpoint() -> None:
+    low = _model_observation()
+    high = _model_observation(
+        elapsed_ms=_BIGINT_MAX,
+        request_count=2,
+        input_tokens=_BIGINT_MAX,
+        output_tokens=_BIGINT_MAX,
+        fallback_code=None,
+    )
+
+    assert low.request_count == 0
+    assert high.elapsed_ms == high.input_tokens == high.output_tokens == _BIGINT_MAX
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("elapsed_ms", True),
+        ("elapsed_ms", 1.0),
+        ("elapsed_ms", -1),
+        ("elapsed_ms", _BIGINT_MAX + 1),
+        ("request_count", True),
+        ("request_count", 1.0),
+        ("request_count", -1),
+        ("request_count", 3),
+        ("input_tokens", True),
+        ("input_tokens", 1.0),
+        ("input_tokens", -1),
+        ("input_tokens", _BIGINT_MAX + 1),
+        ("output_tokens", True),
+        ("output_tokens", 1.0),
+        ("output_tokens", -1),
+        ("output_tokens", _BIGINT_MAX + 1),
+    ],
+)
+def test_model_observation_rejects_invalid_numeric_shapes(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        _model_observation(**{field: value})
+
+
+def test_advisory_observation_allows_zero_or_one_request_only() -> None:
+    assert _model_observation(
+        call_kind=ModelCallKind.ADVISORY, request_count=1
+    ).request_count == 1
+    with pytest.raises(ValidationError, match="at most one request"):
+        _model_observation(call_kind=ModelCallKind.ADVISORY, request_count=2)
+
+
+def test_model_observation_is_present_if_and_only_if_stage_is_model() -> None:
+    from tests.fakes.sinks import make_event
+
+    observation = _model_observation()
+    event = make_event(stage=PipelineStage.MODEL, model=observation)
+    assert event.model == observation
+    with pytest.raises(ValidationError, match="presence must match"):
+        make_event(stage=PipelineStage.MODEL)
+    with pytest.raises(ValidationError, match="presence must match"):
+        make_event(stage=PipelineStage.INTENT, model=observation)
+    with pytest.raises(ValidationError, match="detail must remain empty"):
+        make_event(
+            stage=PipelineStage.MODEL,
+            model=observation,
+            detail={"unsafe": "text"},
+        )
 
 
 async def test_a_successful_run_emits_the_runner_stages_in_order() -> None:

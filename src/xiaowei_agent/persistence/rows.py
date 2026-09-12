@@ -27,6 +27,9 @@ from xiaowei_agent.contracts import (
     ChannelKind,
     Contract,
     DestinationKind,
+    IntentDraft,
+    ModelAdvisory,
+    ModelUsage,
     ProjectionErrorCode,
     ProjectionState,
     StepOutcomeKind,
@@ -37,6 +40,10 @@ from xiaowei_agent.contracts import (
 
 if TYPE_CHECKING:
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
+    from xiaowei_agent.persistence.model_artifacts import (
+        AcceptedIntentArtifact,
+        StoredModelAdvisory,
+    )
     from xiaowei_agent.persistence.store import StepExecutionRecord
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
@@ -119,6 +126,90 @@ def row_to_record(row: Mapping[str, Any]) -> TaskRecord:
         terminal_reason=row["terminal_reason"],
         lease_owner=row["lease_owner"],
         lease_expires_at=row["lease_expires_at"],
+        fencing_token=row["fencing_token"],
+    )
+
+
+def accepted_intent_to_row(artifact: "AcceptedIntentArtifact") -> dict[str, Any]:
+    """AcceptedIntentArtifact → 展开列与严格 JSONB。"""
+    return {
+        "task_id": artifact.task_id,
+        "artifact_version": artifact.artifact_version,
+        "draft": dump_contract(artifact.draft),
+        "origin": artifact.origin,
+        "provider": artifact.provider,
+        "model": artifact.model,
+        "provider_origin": artifact.provider_origin,
+        "prompt_revision": artifact.prompt_revision,
+        "schema_revision": artifact.schema_revision,
+        "input_digest": artifact.input_digest,
+        "result_digest": artifact.result_digest,
+        "usage": dump_contract(artifact.usage),
+        "created_at": artifact.created_at,
+        "fencing_token": artifact.fencing_token,
+    }
+
+
+def row_to_accepted_intent(row: Mapping[Any, Any]) -> "AcceptedIntentArtifact":
+    """数据库行 → 自校验 AcceptedIntentArtifact。"""
+    from xiaowei_agent.persistence.model_artifacts import AcceptedIntentArtifact
+
+    return AcceptedIntentArtifact(
+        task_id=row["task_id"],
+        artifact_version=row["artifact_version"],
+        draft=load_contract(IntentDraft, row["draft"]),
+        origin=row["origin"],
+        provider=row["provider"],
+        model=row["model"],
+        provider_origin=row["provider_origin"],
+        prompt_revision=row["prompt_revision"],
+        schema_revision=row["schema_revision"],
+        input_digest=row["input_digest"],
+        result_digest=row["result_digest"],
+        usage=load_contract(ModelUsage, row["usage"]),
+        created_at=row["created_at"],
+        fencing_token=row["fencing_token"],
+    )
+
+
+def model_advisory_to_row(artifact: "StoredModelAdvisory") -> dict[str, Any]:
+    """StoredModelAdvisory → 展开列与严格 JSONB。"""
+    return {
+        "task_id": artifact.task_id,
+        "artifact_version": artifact.artifact_version,
+        "advisory": dump_contract(artifact.advisory),
+        "origin": artifact.origin,
+        "provider": artifact.provider,
+        "model": artifact.model,
+        "provider_origin": artifact.provider_origin,
+        "prompt_revision": artifact.prompt_revision,
+        "schema_revision": artifact.schema_revision,
+        "input_digest": artifact.input_digest,
+        "result_digest": artifact.result_digest,
+        "usage": dump_contract(artifact.usage),
+        "created_at": artifact.created_at,
+        "fencing_token": artifact.fencing_token,
+    }
+
+
+def row_to_model_advisory(row: Mapping[Any, Any]) -> "StoredModelAdvisory":
+    """数据库行 → 自校验 StoredModelAdvisory。"""
+    from xiaowei_agent.persistence.model_artifacts import StoredModelAdvisory
+
+    return StoredModelAdvisory(
+        task_id=row["task_id"],
+        artifact_version=row["artifact_version"],
+        advisory=load_contract(ModelAdvisory, row["advisory"]),
+        origin=row["origin"],
+        provider=row["provider"],
+        model=row["model"],
+        provider_origin=row["provider_origin"],
+        prompt_revision=row["prompt_revision"],
+        schema_revision=row["schema_revision"],
+        input_digest=row["input_digest"],
+        result_digest=row["result_digest"],
+        usage=load_contract(ModelUsage, row["usage"]),
+        created_at=row["created_at"],
         fencing_token=row["fencing_token"],
     )
 

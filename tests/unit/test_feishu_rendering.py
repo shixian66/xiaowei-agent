@@ -159,6 +159,34 @@ def test_terminal_card_preserves_safe_render_order_and_detail_link() -> None:
     }
 
 
+def test_advisory_is_the_fourth_section_and_uses_existing_clipping() -> None:
+    advisory_body = "模型建议" * 200
+    card = render_feishu_card(
+        _projection(
+            TaskStatus.SUCCEEDED,
+            sections=(
+                RenderSection(title="事实", body="事实摘要", refs=()),
+                RenderSection(title="限制", body="限制摘要", refs=()),
+                RenderSection(title="说明", body="确定性说明", refs=()),
+                RenderSection(
+                    title="模型分析（仅供参考）",
+                    body=advisory_body,
+                    refs=(),
+                ),
+            ),
+        )
+    )
+    payload = json.loads(card.content_json)
+    visible = "\n".join(_plain_text_contents(payload))
+
+    assert visible.index("说明") < visible.index("模型分析（仅供参考）")
+    assert advisory_body not in visible
+    assert "模型建议" in visible
+    assert card.truncated is True
+    assert "还有更多证据" in visible
+    assert payload["elements"][-1]["actions"][0]["text"]["content"] == "查看完整结果"
+
+
 def test_card_budget_is_bounded_and_announces_omitted_evidence() -> None:
     sections = tuple(
         RenderSection(

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "cases": [
+    {"id": "RI3-I-01", "intent": "starrocks.slow_query.diagnose", "slots": {}, "expected_capabilities": ["starrocks.slow_query.diagnose"], "accepted": true},
+    {"id": "RI3-I-02", "intent": "starrocks.slow_query.diagnose", "slots": {"window_minutes": "30"}, "expected_capabilities": ["starrocks.slow_query.diagnose"], "accepted": true},
+    {"id": "RI3-I-03", "intent": "starrocks.slow_query.diagnose", "slots": {"database": "sales"}, "expected_capabilities": ["starrocks.slow_query.diagnose"], "accepted": true},
+    {"id": "RI3-I-04", "intent": "starrocks.slow_query.diagnose", "slots": {"user_name": "app_user_1"}, "expected_capabilities": ["starrocks.slow_query.diagnose"], "accepted": true},
+    {"id": "RI3-I-05", "intent": "starrocks.slow_query.diagnose", "slots": {"query_id": "q-1"}, "expected_capabilities": ["starrocks.slow_query.diagnose"], "accepted": true},
+    {"id": "RI3-I-06", "intent": "prometheus.alert.evidence", "slots": {"alert_name": "HostHighCpu", "instance": "node-1:9100"}, "expected_capabilities": ["prometheus.alert.evidence"], "accepted": true},
+    {"id": "RI3-I-07", "intent": "asset.inventory.lookup", "slots": {"asset_id": "asset-1"}, "expected_capabilities": ["asset.inventory.lookup"], "accepted": true},
+    {"id": "RI3-I-08", "intent": "asset.inventory.lookup", "slots": {"hostname": "node-1"}, "expected_capabilities": ["asset.inventory.lookup"], "accepted": true},
+    {"id": "RI3-I-09", "intent": "unknown", "slots": {}, "expected_capabilities": [], "accepted": true},
+    {"id": "RI3-I-10", "intent": "cluster.restart", "slots": {}, "expected_capabilities": [], "accepted": false}
+  ],
+  "authority_fields": [
+    "capability_id",
+    "capability_version",
+    "target",
+    "sql",
+    "tool",
+    "policy_profile",
+    "approval_ref",
+    "status",
+    "next_steps"
+  ],
+  "authority_slots": [
+    "sql",
+    "gateway",
+    "policy_profile",
+    "approval_ref",
+    "target"
+  ]
+}

@@ -18,6 +18,7 @@ from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
+    ModelInvocationProfile,
     ReadinessProbe,
     ReadinessReport,
 )
@@ -30,10 +31,15 @@ from xiaowei_agent.persistence.database import (
 from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+from xiaowei_agent.persistence.model_artifacts import (
+    InMemoryModelArtifactStore,
+    ModelArtifactStore,
+)
 from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
 from xiaowei_agent.persistence.postgres import (
     PostgresChannelStore,
     PostgresEvidenceLedger,
+    PostgresModelArtifactStore,
     PostgresPlanStore,
     PostgresTaskStore,
     PostgresWebSessionStore,
@@ -61,7 +67,6 @@ if TYPE_CHECKING:
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.contracts import (
         AdmissionCertificate,
-        ModelInvocationProfile,
         RequestContext,
         ToolCall,
         ToolResult,
@@ -116,6 +121,7 @@ class LocalStack:
     task_store: TaskStore
     plan_store: PlanStore
     evidence_ledger: EvidenceLedger
+    model_artifact_store: ModelArtifactStore
     clock: Clock
     monotonic: MonotonicClock
     settings: Settings
@@ -393,6 +399,7 @@ def _assemble_local_stack(
     task_store: TaskStore,
     plan_store: PlanStore,
     ledger: EvidenceLedger,
+    model_artifacts: ModelArtifactStore,
     readiness: ReadinessProbe,
     aclose: AsyncClose,
     clock: Clock,
@@ -439,6 +446,7 @@ def _assemble_local_stack(
     )
     from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
 
+    application_model_profile = ModelInvocationProfile()
     model_adapter = None
     model_profile = None
     if settings.gemini_enabled:
@@ -449,6 +457,7 @@ def _assemble_local_stack(
 
         model_profile = GEMINI_MODEL_PROFILE
         model_adapter = GeminiModelAdapter(profile=model_profile)
+        application_model_profile = model_profile
 
     starrocks_adapters, target_adapters, slow_query_live_policy = (
         _starrocks_gateway_registration(
@@ -528,7 +537,6 @@ def _assemble_local_stack(
         clock=clock,
         sink=sink,
         lease_ttl_seconds=settings.lease_ttl_seconds,
-        heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
     )
     runtime = XiaoweiRuntime(
         interpreter=RuleBasedIntentInterpreter(),
@@ -541,6 +549,13 @@ def _assemble_local_stack(
         runner=runner,
         sink=sink,
         clock=clock,
+        model_artifacts=model_artifacts,
+        model_profile=application_model_profile,
+        intent_model=model_adapter,
+        slow_query_advisory=model_adapter,
+        model_monotonic=monotonic,
+        lease_ttl_seconds=settings.lease_ttl_seconds,
+        heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
     )
 
     return LocalStack(
@@ -548,6 +563,7 @@ def _assemble_local_stack(
         task_store=task_store,
         plan_store=plan_store,
         evidence_ledger=ledger,
+        model_artifact_store=model_artifacts,
         clock=clock,
         monotonic=monotonic,
         settings=settings,
@@ -577,6 +593,7 @@ def build_in_memory_local_stack(
     )
     plan_store = InMemoryPlanStore(state=state)
     ledger = InMemoryEvidenceLedger(state=state)
+    model_artifacts = InMemoryModelArtifactStore(state=state, clock=clock)
 
     async def close() -> None:
         if on_close is not None:
@@ -587,6 +604,7 @@ def build_in_memory_local_stack(
         task_store=task_store,
         plan_store=plan_store,
         ledger=ledger,
+        model_artifacts=model_artifacts,
         readiness=_Ready(),
         aclose=close,
         clock=clock,
@@ -614,6 +632,7 @@ async def build_postgres_task_view_stack(
         )
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
+        model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         return TaskViewStack(
             runtime=TaskViewRuntime(
@@ -621,6 +640,8 @@ async def build_postgres_task_view_stack(
                 plan_store=plan_store,
                 ledger=ledger,
                 bindings=bindings,
+                model_artifacts=model_artifacts,
+                model_profile=ModelInvocationProfile(),
             ),
             task_store=task_store,
             plan_store=plan_store,
@@ -665,6 +686,7 @@ async def build_postgres_feishu_listener_stack(
         )
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
+        model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
@@ -672,6 +694,8 @@ async def build_postgres_feishu_listener_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            model_artifacts=model_artifacts,
+            model_profile=ModelInvocationProfile(),
         )
         identity_directory = load_feishu_identity_directory(
             path=cast(str, settings.feishu_identity_file),
@@ -746,6 +770,7 @@ async def build_postgres_channel_worker_stack(
         )
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
+        model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
@@ -753,6 +778,8 @@ async def build_postgres_channel_worker_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            model_artifacts=model_artifacts,
+            model_profile=ModelInvocationProfile(),
         )
         messages = (
             message_port
@@ -830,6 +857,7 @@ async def build_postgres_web_stack(
         )
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
+        model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
@@ -838,6 +866,8 @@ async def build_postgres_web_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            model_artifacts=model_artifacts,
+            model_profile=ModelInvocationProfile(),
         )
         identity_directory = load_feishu_identity_directory(
             path=cast(str, settings.feishu_identity_file),
@@ -912,6 +942,7 @@ async def build_postgres_local_stack(
             task_store=task_store,
             plan_store=PostgresPlanStore(engine=engine),
             ledger=PostgresEvidenceLedger(engine=engine),
+            model_artifacts=PostgresModelArtifactStore(engine=engine, clock=clock),
             readiness=PostgresReadinessProbe(engine=engine, assembled=True),
             aclose=close,
             clock=clock,

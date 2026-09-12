@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 顺序实施 RI3；PR 3B 已合入，下一步从最新 `main` 开始 PR 3C。`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 顺序实施 RI3；PR 3C 候选基于最新 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`，位于 `claude/ri3-pr3c-durable-runtime`。`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-13（Asia/Shanghai） |
-| 阶段 | **RI3 PR 3A 文档基线与 PR 3B 离线 Gemini SDK 边界均已合入；下一步是 PR 3C durable Runtime / MODEL trace。Runtime 仍未调用模型，也没有持久模型 artifact、MODEL trace stage、真实 secret/provider 网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **RI3 PR 3A/3B 已合入；PR 3C durable Runtime / MODEL trace 已形成离线候选，等待独立审查与合入。当前候选具备默认关闭的模型调用编排、持久模型 artifact、MODEL trace 和慢查询 advisory，但没有读取真实 secret、发起 Gemini 网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -53,9 +53,10 @@
 | RI1 离线交付 | 起点 `66864253e0c9c9a0c6ebda1eec3a25b8e06a8df2`；Task 1：`040daf7c7e22e278eef0496f3e69ee380077245c`、`b117493000895661f949ba14edf159512b4c9454`、`4db90a5982549837630c90388fe4fc89a7046cd4`；Task 2：`390720dfc6d9c16b6d49f9fa61288a4f2d592eca`、`36f010d0d9db40713952f50cbcb9662151a91833`；Task 3：`2fa0177ee33b6135015303344f791287f485280d`、`33fcbbc16d5a329877a6481d89d2e3cb64d6fa32`、`f1b03557dd62b4fbe070385529062330a39affb1`；跨任务审查补修：`5428cea403599e41414f7445644ffd0afcfb1013`；Task 4：`a85e9b9eae7f3f6ed3ac7d08e1f3595348235a50`、`3c53b4aa7254adc00c3473ee41354f67152bd4be`、`0f095774f32bd31cb0e78f0532b39abd08301a27`、`18a0c78a72696982be9d298b7c01e7ae1b46d4cc`、`e678c673cb1594fc97f9a14ce197b4b11c47163f`、`e1f1b45def5537d94d3503ef4d60b450af5266db`、`167af47352e42e025fce84753bc34160c1064944`；首个全分支受审与 CI head：`d4f48e8800a033bf01560d006c984cfbde514b5f`；提交前终审 head：`eb26975a1e07424d69b978f532da3c304d5f260d`；根因补修实现基线：`2d67b59e128c1c226fb062708edf10c9251a4b3e`。交付 PR：[#31](https://github.com/shixian66/xiaowei-agent/pull/31) |
 | RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7.1 已获批准。该行只记录规划批准，不是源码或运行证据 |
 | RI3 PR 3B 合入 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，最终受审 head `79675aeed895899282e6f4f697463f8b6b27e29b`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703681866`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703681866) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main` |
-| 下一步 | **PR 3B 已合入，下一步 PR 3C durable Runtime / MODEL trace。先用失败测试钉死两条边界：application 外层 timeout 触发时 SDK client close 仍完成且不能误记为 provider fallback；慢查询 advisory projector 必须从 `SLOW_QUERY_SURFACE.allowed_columns` 派生闭集并整体拒绝 `stmt` 等额外列。首次 Gemini 网络调用仍需独立现场 GO。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI3 PR 3C 候选 | 基于 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`；实现 grant-fenced insert-once intent/advisory、`rev_0008_model_artifacts`、entry-scoped heartbeat、MODEL trace、surface-derived 慢查询投影与终态 readback。当前只到本地 `tests`/临时 PostgreSQL 证据，尚未审查、合入或真实调用 |
+| 下一步 | **提交 PR 3C 给 Claude/Codex 按精确 head 审查；只有审查通过并合入后才从最新 `main` 开始 PR 3D。** 首次 Gemini 网络调用仍需 PR 3E 独立现场 GO；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack、M6b 默认关闭的 target-bound StarRocks adapter，以及 RI1 默认关闭的真实 OAuth adapter/Web/Compose 装配均已通过 `main` 交付；RI1 未作真实调用。仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配和 RI3 PR 3B 默认关闭的 Gemini adapter。PR 3C 候选只在本 worktree 通过离线 fake 与临时 PostgreSQL；仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
@@ -210,7 +211,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     正反例，并闭合超时层级、credential reader 公共 API 和容量风险口径。没有读取或保存真实 secret，
     也没有发起飞书网络调用。精确实现 SHA 见 §1；交付不解锁 RI2、H 层生产只读、部署、canary、用户
     验收或 M8。
-14. **RI3 Gemini 已进入顺序离线实施，PR 3B 已合入，下一步只做 PR 3C**：项目负责人已批准 ADR-015/V7.1 计划并于
+14. **RI3 Gemini 已进入顺序离线实施，PR 3B 已合入，PR 3C 已形成待审候选**：项目负责人已批准 ADR-015/V7.1 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
     Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
     文件到 worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
@@ -219,9 +220,11 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
     等 RI2 真实事件语义明确后再复用同一 assembler。PR 3B 已离线实现固定字段 provider slots、
     provider-neutral 错误/重试闭集、严格 usage 收窄、显式禁用 AFC 的真实 SDK seam、
-    默认关闭 LocalStack 与 worker-only Compose override/smoke；依赖锁定精确 wheel，但没有读取真实 key、真实调用、部署或归档。PR #34 已以
-    `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main`，因此顺序门现只开放 PR 3C；真实 Gemini
-    调用仍需 PR 3E 的独立现场 GO。
+    默认关闭 LocalStack 与 worker-only Compose override/smoke；依赖锁定精确 wheel。PR #34 已以
+    `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main`。PR 3C 候选现已补齐 durable-only
+    model/rule intent、grant-fenced insert-once artifact、单一 application heartbeat、MODEL trace、
+    surface-derived 慢查询 advisory 及 TaskView readback；尚待独立审查与合入，不能提前进入 PR 3D。
+    全程没有读取真实 key、真实调用、部署或归档；真实 Gemini 调用仍需 PR 3E 的独立现场 GO。
     Independent review V7 fixes the current-timeout fact, parent idempotency predicate,
     Settings versus host Compose env boundary, complete storage/protocol/suite/SDK/trace
     test surfaces, durable-only intent path, single-render advisory flow, bounded
@@ -291,6 +294,21 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 ## 8. 验证记录
 
 ### 已验证
+
+- **RI3 PR 3C 本地候选已沿 durable 调用链完成自审和深档验证**：先用失败测试钉住 application
+  外层 timeout 触发后 SDK close 必须完成且不能执行规则 fallback；慢查询 projector 以
+  `SLOW_QUERY_SURFACE.allowed_columns` 为唯一列顺序，整体拒绝 `stmt`、缺列、额外列、坏类型及非有限
+  数。实现同时覆盖 model/rule accepted intent、provider/schema/authority 二次复验、grant/fencing
+  insert-once、恢复期 digest/identity 漂移、已提交步骤不重放、advisory 保存前后崩溃、TaskView 零调用
+  readback、外层取消与 Worker 在 intent/advisory/retry 期间的单一 heartbeat。首次新增反例实际暴露并
+  修复三类根因：application 未复验 provider intent 的 intent/slot/missing 闭集、终态提交失败后 intent
+  漂移无法绑定既存 plan/evidence、被 20 项上限丢弃的旧历史仍被错误校验。聚焦命令在本机临时
+  PostgreSQL 上为 573 passed；数据库 migration/artifact 子集为 49 passed；完整
+  `python -m pytest -q`（带临时 PostgreSQL DSN）为 3675 passed / 6 个预期 socket-block warnings；
+  `python -m pytest -m security -q` 为 1269 passed / 79 skipped / 2327 deselected / 5 个预期 warning；
+  Ruff 通过，mypy 162 个源文件通过，`git diff --check` 无输出。临时数据库仅绑定
+  `127.0.0.1:55439`、使用无密码 trust 测试配置，验证后已停止并自动移除。以上证据等级仍为
+  `tests`，未读取真实 Gemini key、未访问 Gemini 或任何真实运维目标。
 
 - **RI3 PR 3B 独立复审问题已在实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`
   沿完整调用链修复**：单字段 32 KiB 判断不仅四处数学不可达，沿同一路径还确认历史已由
@@ -431,11 +449,12 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **RI3 PR 3B 仅完成离线 SDK 边界**：已锁定 `google-genai` 并实现严格 model DTO、两个窄 port、
-  固定 Gemini adapter、SDK-compatible fixed slots、typed usage/result/profile、provider-neutral 错误闭集、
-  默认关闭装配与 model Compose override；durable Runtime、migration、artifact、
-  MODEL trace 与 fallback/retry service 仍未实现。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0，也
-  没有模型质量、test-env、部署、canary 或用户验收证据。
+- **RI3 PR 3C 仍只是待审离线候选**：durable Runtime、`rev_0008`、artifact、MODEL trace、
+  fallback/retry service 和慢查询 advisory 已在 fake/临时 PostgreSQL 路径实现，但尚未经过独立
+  精确 SHA 审查、PR CI 或合入。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0；固定 10 个 intent/
+  5 个 advisory corpus 只证明本地安全矩阵，不证明真实模型质量、配额、延迟、usage 字段或 preview
+  模型稳定性，也没有 test-env、部署、canary 或用户验收证据。PR 3D 的 Web 显式父任务上下文和
+  `rev_0009_task_parent_context` 尚未开始。
 
 - **PR 3B 的完整 base+model workflow 尚未在本机实跑**：受控 model-only create/inspect 已取得
   worker-only mount 实证，但用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器，因此没有

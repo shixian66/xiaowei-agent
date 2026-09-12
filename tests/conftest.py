@@ -272,6 +272,15 @@ def evidence_ledger(
 
 
 @pytest.fixture
+def model_artifact_store(
+    memory_state: "InMemoryPersistenceState", clock: "ManualClock"
+):
+    from xiaowei_agent.persistence.model_artifacts import InMemoryModelArtifactStore
+
+    return InMemoryModelArtifactStore(state=memory_state, clock=clock)
+
+
+@pytest.fixture
 async def task(store: "InMemoryTaskStore", context: "RequestContext") -> "TaskRecord":
     return await store.create_task(submission=make_submission(context))
 

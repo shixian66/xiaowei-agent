@@ -5,9 +5,11 @@ import contextlib
 import datetime as dt
 import uuid
 from collections.abc import Callable, Coroutine
+from functools import partial
 from typing import Any, Protocol, TypeAlias
 
 from xiaowei_agent.application.runtime import RetryableTaskError, XiaoweiRuntime
+from xiaowei_agent.application.task_heartbeat import run_with_task_heartbeat
 from xiaowei_agent.contracts import (
     AttemptIntent,
     PipelineStage,
@@ -15,6 +17,7 @@ from xiaowei_agent.contracts import (
     StageOutcome,
     StepAttemptDecision,
     StepCommitRejection,
+    TaskSubmission,
     TraceEvent,
     TransitionRejection,
 )
@@ -50,6 +53,7 @@ class WorkerSettings(Protocol):
 
     environment_id: str
     lease_ttl_seconds: int
+    heartbeat_interval_seconds: float
     infrastructure_backoff_base_seconds: float
     infrastructure_backoff_cap_seconds: float
     continuous_infrastructure_failure_window_seconds: float
@@ -162,6 +166,35 @@ class WorkerLoop:
         if result.decision is RetryDecision.COMMAND_MISMATCH:
             raise WorkerInvariantError("retry replay disagrees with stored command")
 
+    async def _execute_granted_attempt(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        submission: TaskSubmission,
+        trace_id: str,
+    ) -> bool:
+        """执行并在同一 heartbeat scope 内安排 retry。"""
+        try:
+            await self._runtime.execute_task(grant=grant, submission=submission)
+        except WorkflowPaused:
+            return False
+        except LeaseLostError:
+            return False
+        except LifecycleError as exc:
+            if exc.rejection in _LOSER_REJECTIONS:
+                return False
+            raise WorkerInvariantError(
+                "worker encountered a lifecycle invariant failure"
+            ) from None
+        except RetryableTaskError as exc:
+            await self._schedule_retry(
+                error=exc,
+                grant=grant,
+                trace_id=trace_id,
+                policy_revision=submission.context.policy_revision,
+            )
+        return True
+
     async def _poll_once(self) -> int:
         candidates = await self._tasks.list_dispatchable_tasks(
             query=DispatchQuery(
@@ -190,25 +223,25 @@ class WorkerLoop:
             if grant is None or submission is None:
                 raise WorkerInvariantError("successful attempt result is incomplete")
             try:
-                await self._runtime.execute_task(grant=grant, submission=submission)
-            except WorkflowPaused:
-                continue
+                completed = await run_with_task_heartbeat(
+                    partial(
+                        self._execute_granted_attempt,
+                        grant=grant,
+                        submission=submission,
+                        trace_id=trace_id,
+                    ),
+                    grant=grant,
+                    task_store=self._tasks,
+                    lease_ttl_seconds=self._settings.lease_ttl_seconds,
+                    heartbeat_interval_seconds=(
+                        self._settings.heartbeat_interval_seconds
+                    ),
+                    sleep=self._sleep,
+                )
             except LeaseLostError:
                 continue
-            except LifecycleError as exc:
-                if exc.rejection in _LOSER_REJECTIONS:
-                    continue
-                raise WorkerInvariantError(
-                    "worker encountered a lifecycle invariant failure"
-                ) from None
-            except RetryableTaskError as exc:
-                await self._schedule_retry(
-                    error=exc,
-                    grant=grant,
-                    trace_id=trace_id,
-                    policy_revision=submission.context.policy_revision,
-                )
-            executed += 1
+            if completed:
+                executed += 1
         return executed
 
     async def poll_once(self) -> int:

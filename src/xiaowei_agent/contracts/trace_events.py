@@ -1,6 +1,6 @@
 """最小步骤级 trace / audit 事件契约。
 
-**只定义事件形状与阶段枚举，不实现采集后端**（DEVELOPMENT_PLAN §7 M2）。九个阶段
+**只定义事件形状与阶段枚举，不实现采集后端**（DEVELOPMENT_PLAN §7 M2）。十个阶段
 与 ARCHITECTURE §13.1 的错误归因阶段逐一对应，使一次失败能被定位到具体阶段——这是
 M3 建立首个错误分析闭环的前提。
 
@@ -12,7 +12,7 @@ M3 建立首个错误分析闭环的前提。
 from collections.abc import Mapping
 from typing import Annotated, Final
 
-from pydantic import AfterValidator, BeforeValidator, Field, PlainSerializer
+from pydantic import AfterValidator, BeforeValidator, Field, PlainSerializer, model_validator
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
@@ -23,7 +23,12 @@ from xiaowei_agent.contracts.base import (
     TraceId,
     frozen_map,
 )
-from xiaowei_agent.contracts.enums import PipelineStage, StageOutcome
+from xiaowei_agent.contracts.enums import (
+    ModelCallKind,
+    ModelFallbackCode,
+    PipelineStage,
+    StageOutcome,
+)
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.redaction import scrub_text
 
@@ -83,6 +88,25 @@ TraceDetail = Annotated[
     PlainSerializer(dict, return_type=dict, when_used="always"),
 ]
 
+_SIGNED_BIGINT_MAX: Final[int] = 2**63 - 1
+
+
+class ModelCallObservation(Contract):
+    """一次 application 模型阶段的聚合元数据；不含任何模型文本。"""
+
+    call_kind: ModelCallKind
+    elapsed_ms: StrictInt = Field(ge=0, le=_SIGNED_BIGINT_MAX)
+    request_count: StrictInt = Field(ge=0, le=2)
+    input_tokens: StrictInt | None = Field(default=None, ge=0, le=_SIGNED_BIGINT_MAX)
+    output_tokens: StrictInt | None = Field(default=None, ge=0, le=_SIGNED_BIGINT_MAX)
+    fallback_code: ModelFallbackCode | None = None
+
+    @model_validator(mode="after")
+    def _request_count_matches_kind(self) -> "ModelCallObservation":
+        if self.call_kind is ModelCallKind.ADVISORY and self.request_count > 1:
+            raise ValueError("advisory model stage permits at most one request")
+        return self
+
 
 class TraceEvent(Contract):
     event_id: StrictStr
@@ -97,3 +121,12 @@ class TraceEvent(Contract):
     attempt_number: StrictInt | None = Field(default=None, ge=0)
     error: AgentError | None
     detail: TraceDetail
+    model: ModelCallObservation | None = None
+
+    @model_validator(mode="after")
+    def _model_observation_matches_stage(self) -> "TraceEvent":
+        if (self.stage is PipelineStage.MODEL) != (self.model is not None):
+            raise ValueError("model observation presence must match MODEL stage")
+        if self.stage is PipelineStage.MODEL and self.detail:
+            raise ValueError("MODEL stage detail must remain empty")
+        return self

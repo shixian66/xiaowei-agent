@@ -29,6 +29,10 @@ from xiaowei_agent.contracts import (
     EvidenceEnvelope,
     ExecutionPlan,
     ExternalSource,
+    IntentDraft,
+    IntentSource,
+    ModelAdvisory,
+    ModelUsage,
     PipelineStage,
     RequestContext,
     RequestEnvelope,
@@ -115,6 +119,17 @@ _RECORD = TaskRecord(
 
 
 _AUDIT_EVENT = make_event(stage=PipelineStage.ADMISSION, detail={"reason": "denied"})
+_INTENT_DRAFT = IntentDraft(
+    intent="starrocks.slow_query.diagnose",
+    slots={"window_minutes": "30"},
+    missing=(),
+    confidence=0.9,
+    source=IntentSource.MODEL,
+)
+_MODEL_USAGE = ModelUsage(input_tokens=10, output_tokens=5)
+_MODEL_ADVISORY = ModelAdvisory(
+    analysis="扫描行数偏高", suggestions=("检查分区裁剪",), uncertainties=()
+)
 
 # 每个 JSONB 列存的是哪个契约。**这张表本身由下面的元测试对着 schema 核**，因为
 # 它此前是靠人记得往参数列表里加一项的——``task_audit_events.event`` 就是这样漏掉的：
@@ -127,6 +142,10 @@ _JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
     ("task_evidence", "envelope"): _EVIDENCE,
     ("task_approvals", "request"): _APPROVAL,
     ("task_audit_events", "event"): _AUDIT_EVENT,
+    ("task_accepted_intents", "draft"): _INTENT_DRAFT,
+    ("task_accepted_intents", "usage"): _MODEL_USAGE,
+    ("task_model_advisories", "advisory"): _MODEL_ADVISORY,
+    ("task_model_advisories", "usage"): _MODEL_USAGE,
 }
 
 _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
@@ -137,6 +156,10 @@ _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
     ("task_evidence", "envelope"): EvidenceEnvelope,
     ("task_approvals", "request"): ApprovalRequest,
     ("task_audit_events", "event"): TraceEvent,
+    ("task_accepted_intents", "draft"): IntentDraft,
+    ("task_accepted_intents", "usage"): ModelUsage,
+    ("task_model_advisories", "advisory"): ModelAdvisory,
+    ("task_model_advisories", "usage"): ModelUsage,
 }
 
 

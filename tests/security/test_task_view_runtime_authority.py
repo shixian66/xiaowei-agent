@@ -21,6 +21,8 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.application
     xiaowei_agent.application.capability_runtime
     xiaowei_agent.application.default_capabilities
+    xiaowei_agent.application.model_advisory
+    xiaowei_agent.application.model_ports
     xiaowei_agent.application.task_view_runtime
     xiaowei_agent.capabilities
     xiaowei_agent.capabilities.asset_inventory
@@ -80,6 +82,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.persistence.evidence
     xiaowei_agent.persistence.fake
     xiaowei_agent.persistence.memory
+    xiaowei_agent.persistence.model_artifacts
     xiaowei_agent.persistence.migrations
     xiaowei_agent.persistence.migrations.runner
     xiaowei_agent.persistence.plans
@@ -110,6 +113,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.rendering
     xiaowei_agent.rendering.asset_inventory
     xiaowei_agent.rendering.generic
+    xiaowei_agent.rendering.model_advisory
     xiaowei_agent.rendering.pending
     xiaowei_agent.rendering.prometheus_alert
     xiaowei_agent.rendering.slow_query
@@ -199,6 +203,9 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_ledger") == {"load"}
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_bindings") == {
         "runtime_for_plan"
+    }
+    assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_model_artifacts") == {
+        "load_advisory"
     }
 
 

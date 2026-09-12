@@ -25,6 +25,7 @@ from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.contracts import (
     Channel,
+    ModelInvocationProfile,
     RenderPayload,
     RequestEnvelope,
     TaskLookup,
@@ -32,6 +33,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+from xiaowei_agent.persistence.model_artifacts import InMemoryModelArtifactStore
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
@@ -87,6 +89,8 @@ class RuntimeHarness:
         as_of: dt.datetime = _AS_OF,
         synthetic_write: bool = False,
         clear_ledger_before_render: bool = False,
+        intent_model: Any = None,
+        slow_query_advisory: Any = None,
     ) -> None:
         self.clock = ManualClock(start=as_of)
         self.as_of = as_of
@@ -94,6 +98,9 @@ class RuntimeHarness:
         self.store = _TrackingTaskStore(clock=self.clock, state=self.state)
         self.plan_store = InMemoryPlanStore(state=self.state)
         self.ledger = InMemoryEvidenceLedger(state=self.state)
+        self.model_artifacts = InMemoryModelArtifactStore(
+            state=self.state, clock=self.clock
+        )
         if adapters is not None and recording is not None:
             raise ValueError("pass recording or adapters, not both")
         if adapters is None:
@@ -146,6 +153,10 @@ class RuntimeHarness:
             runner=runner,
             sink=self.sink,
             clock=self.clock,
+            model_artifacts=self.model_artifacts,
+            model_profile=ModelInvocationProfile(),
+            intent_model=intent_model,
+            slow_query_advisory=slow_query_advisory,
         )
         self._injection: str | None = None
         self.task_id = ""

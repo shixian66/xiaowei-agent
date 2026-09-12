@@ -121,19 +121,32 @@ from xiaowei_agent.persistence.evidence import (
     EvidenceConflictError,
     EvidenceNotFoundError,
 )
+from xiaowei_agent.persistence.model_artifacts import (
+    AcceptedIntentArtifact,
+    AdvisoryArtifactCandidate,
+    IntentArtifactCandidate,
+    ModelArtifactConflictError,
+    ModelArtifactGrantError,
+    StoredModelAdvisory,
+    artifact_matches_candidate,
+)
 from xiaowei_agent.persistence.plans import (
     PlanConflictError,
     PlanNotFoundError,
     StoredPlan,
 )
 from xiaowei_agent.persistence.rows import (
+    accepted_intent_to_row,
     channel_binding_to_row,
     dump_contract,
     load_contract,
+    model_advisory_to_row,
     oauth_state_to_row,
     projection_subscription_to_row,
     record_to_row,
+    row_to_accepted_intent,
     row_to_channel_binding,
+    row_to_model_advisory,
     row_to_oauth_state,
     row_to_projection_subscription,
     row_to_record,
@@ -148,9 +161,11 @@ from xiaowei_agent.persistence.schema import (
     FENCING_SEQUENCE,
     PROJECTION_FENCING_SEQUENCE,
     PROJECTION_SUBSCRIPTIONS,
+    TASK_ACCEPTED_INTENTS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
+    TASK_MODEL_ADVISORIES,
     TASK_PLANS,
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
@@ -2104,3 +2119,169 @@ class PostgresEvidenceLedger:
                 "no evidence recorded under this reference", task_id=task_id
             )
         return load_contract(EvidenceEnvelope, row["envelope"])
+
+
+class PostgresModelArtifactStore:
+    """ModelArtifactStore 的 PostgreSQL 实现；任务行锁内验证 grant 并插入。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    async def _current_for_update(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> TaskRecord | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASKS)
+                    .where(TASKS.c.task_id == task_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_record(_as_row(row))
+
+    @staticmethod
+    def _require_grant(
+        current: TaskRecord | None,
+        grant: TaskAttemptGrant,
+        *,
+        now: _dt.datetime,
+        allowed_statuses: frozenset[TaskStatus],
+    ) -> None:
+        if current is None or grant_is_current(
+            current,
+            grant,
+            now=now,
+            allowed_statuses=allowed_statuses,
+        ) is not None:
+            raise ModelArtifactGrantError(
+                "model artifact grant is not current", task_id=grant.task_id
+            )
+
+    async def _load_intent_row(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> AcceptedIntentArtifact | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_ACCEPTED_INTENTS).where(
+                        TASK_ACCEPTED_INTENTS.c.task_id == task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_accepted_intent(row)
+
+    @_persistence_boundary(write=False)
+    async def load_intent(self, *, task_id: str) -> AcceptedIntentArtifact | None:
+        async with self._engine.connect() as connection:
+            return await self._load_intent_row(connection, task_id=task_id)
+
+    @_persistence_boundary(write=True)
+    async def save_intent(
+        self, *, grant: TaskAttemptGrant, candidate: IntentArtifactCandidate
+    ) -> AcceptedIntentArtifact:
+        async with _write_transaction(self._engine) as connection:
+            current = await self._current_for_update(
+                connection, task_id=grant.task_id
+            )
+            self._require_grant(
+                current,
+                grant,
+                now=self._clock(),
+                allowed_statuses=frozenset(
+                    {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
+                ),
+            )
+            artifact = AcceptedIntentArtifact(
+                **candidate.model_dump(mode="python"),
+                task_id=grant.task_id,
+                created_at=self._clock(),
+                fencing_token=grant.fencing_token,
+            )
+            insert = (
+                sa.dialects.postgresql.insert(TASK_ACCEPTED_INTENTS)
+                .values(**accepted_intent_to_row(artifact))
+                .on_conflict_do_nothing(index_elements=["task_id"])
+                .returning(TASK_ACCEPTED_INTENTS.c.task_id)
+            )
+            if (await connection.execute(insert)).first() is not None:
+                return artifact
+            existing = await self._load_intent_row(
+                connection, task_id=grant.task_id
+            )
+            if existing is None or not artifact_matches_candidate(
+                existing, candidate
+            ):
+                raise ModelArtifactConflictError(
+                    "different accepted intent is already stored",
+                    task_id=grant.task_id,
+                )
+            return existing
+
+    async def _load_advisory_row(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> StoredModelAdvisory | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_MODEL_ADVISORIES).where(
+                        TASK_MODEL_ADVISORIES.c.task_id == task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_model_advisory(row)
+
+    @_persistence_boundary(write=False)
+    async def load_advisory(self, *, task_id: str) -> StoredModelAdvisory | None:
+        async with self._engine.connect() as connection:
+            return await self._load_advisory_row(connection, task_id=task_id)
+
+    @_persistence_boundary(write=True)
+    async def save_advisory(
+        self, *, grant: TaskAttemptGrant, candidate: AdvisoryArtifactCandidate
+    ) -> StoredModelAdvisory:
+        async with _write_transaction(self._engine) as connection:
+            current = await self._current_for_update(
+                connection, task_id=grant.task_id
+            )
+            self._require_grant(
+                current,
+                grant,
+                now=self._clock(),
+                allowed_statuses=frozenset({TaskStatus.RUNNING}),
+            )
+            artifact = StoredModelAdvisory(
+                **candidate.model_dump(mode="python"),
+                task_id=grant.task_id,
+                created_at=self._clock(),
+                fencing_token=grant.fencing_token,
+            )
+            insert = (
+                sa.dialects.postgresql.insert(TASK_MODEL_ADVISORIES)
+                .values(**model_advisory_to_row(artifact))
+                .on_conflict_do_nothing(index_elements=["task_id"])
+                .returning(TASK_MODEL_ADVISORIES.c.task_id)
+            )
+            if (await connection.execute(insert)).first() is not None:
+                return artifact
+            existing = await self._load_advisory_row(
+                connection, task_id=grant.task_id
+            )
+            if existing is None or not artifact_matches_candidate(
+                existing, candidate
+            ):
+                raise ModelArtifactConflictError(
+                    "different model advisory is already stored",
+                    task_id=grant.task_id,
+                )
+            return existing

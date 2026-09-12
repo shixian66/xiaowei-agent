@@ -1,7 +1,9 @@
 """M5 Runtime 的提交、执行、查询与 fencing 契约。"""
 
+import asyncio
 import datetime as dt
 from dataclasses import replace
+from typing import Any
 from urllib.parse import quote
 
 import pytest
@@ -32,6 +34,7 @@ from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     AttemptIntent,
     EvidenceEnvelope,
+    ModelAdvisory,
     RenderPayload,
     RetryReason,
     TaskAttemptRejection,
@@ -50,6 +53,7 @@ from xiaowei_agent.persistence import (
 )
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
 from xiaowei_agent.runners.deterministic import DriftError, LifecycleError
+from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
 
 
 def test_task_view_encodes_its_own_query_path() -> None:
@@ -97,6 +101,55 @@ async def test_submit_is_persistent_but_does_not_execute() -> None:
     assert record.status is TaskStatus.CREATED
     assert harness.gateway.invocations == 0
     assert await harness.store.load_step_executions(task_id=view.task_id) == ()
+
+
+async def test_compatibility_handle_has_one_periodic_heartbeat_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingAdapter:
+        def __init__(self) -> None:
+            self.inner = StarRocksRecordingAdapter(GOLDEN)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def execute(self, call: Any, *, context: Any) -> Any:
+            self.entered.set()
+            await self.release.wait()
+            return await self.inner.execute(call, context=context)
+
+    adapter = BlockingAdapter()
+    harness = RuntimeHarness(None, adapters={"starrocks": adapter})
+    tick = asyncio.Event()
+    renewed = asyncio.Event()
+    original_renew = harness.store.renew_lease
+
+    async def controlled_sleep(_: float) -> None:
+        await tick.wait()
+        tick.clear()
+
+    async def observe_renewal(**kwargs: Any) -> Any:
+        result = await original_renew(**kwargs)
+        renewed.set()
+        return result
+
+    harness.runtime._heartbeat_sleep = controlled_sleep
+    monkeypatch.setattr(harness.store, "renew_lease", observe_renewal)
+    handling = asyncio.create_task(
+        harness.handle("最近30分钟有哪些慢查询")
+    )
+    await adapter.entered.wait()
+
+    # Runner 保留一次开工前的 grant 检查；它不是周期 owner。
+    assert len(harness.store.renewals) == 1
+    renewed.clear()
+    tick.set()
+    await renewed.wait()
+    assert len(harness.store.renewals) == 2
+
+    adapter.release.set()
+    payload = await handling
+    assert payload.status is TaskStatus.SUCCEEDED
+    assert len(harness.store.renewals) == 2
 
 
 async def test_execute_uses_the_persisted_as_of_and_finishes_the_task() -> None:
@@ -161,6 +214,7 @@ async def test_handle_and_query_share_the_terminal_projection(
         evidences: tuple[EvidenceEnvelope, ...],
         verdict: AnswerabilityVerdict,
         binding: CapabilityRuntimeBinding,
+        advisory: ModelAdvisory | None = None,
     ) -> RenderPayload:
         nonlocal calls
         calls += 1
@@ -169,6 +223,7 @@ async def test_handle_and_query_share_the_terminal_projection(
             evidences=evidences,
             verdict=verdict,
             binding=binding,
+            advisory=advisory,
         )
 
     monkeypatch.setattr(task_view_module, "project_terminal", _counting_projection)

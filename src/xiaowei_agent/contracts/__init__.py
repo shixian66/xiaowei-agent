@@ -49,7 +49,9 @@ from xiaowei_agent.contracts.enums import (
     GrantRejection,
     IdentitySource,
     IntentSource,
+    ModelCallKind,
     ModelErrorCode,
+    ModelFallbackCode,
     PipelineStage,
     PolicyReason,
     ProjectionErrorCode,
@@ -135,7 +137,7 @@ from xiaowei_agent.contracts.task import (
     task_query_path,
 )
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
-from xiaowei_agent.contracts.trace_events import TraceEvent
+from xiaowei_agent.contracts.trace_events import ModelCallObservation, TraceEvent
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -197,7 +199,10 @@ __all__ = [
     "LeaseGrant",
     "MissingItem",
     "ModelAdvisory",
+    "ModelCallKind",
+    "ModelCallObservation",
     "ModelErrorCode",
+    "ModelFallbackCode",
     "ModelIntentRequest",
     "ModelInvocationProfile",
     "ModelUsage",

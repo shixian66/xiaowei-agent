@@ -26,8 +26,11 @@ RequestEnvelope
    ``terminal_status_for`` 是那一步确定性映射，TaskStore 的终态保护兜底。
 """
 
+import asyncio
 import datetime as _dt
+import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Final
 
 from xiaowei_agent.application.capability_runtime import (
@@ -37,6 +40,13 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
+from xiaowei_agent.application.model_advisory import load_or_accept_advisory
+from xiaowei_agent.application.model_intent import load_or_accept_intent
+from xiaowei_agent.application.model_ports import (
+    IntentModelPort,
+    SlowQueryAdvisoryPort,
+)
+from xiaowei_agent.application.task_heartbeat import run_with_task_heartbeat
 from xiaowei_agent.application.task_view_runtime import (
     TaskViewRuntime,
     assess_evidence,
@@ -52,11 +62,17 @@ from xiaowei_agent.contracts import (
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
+    ExecutionPlan,
     IntentDraft,
+    ModelAdvisory,
+    ModelCallObservation,
+    ModelFallbackCode,
+    ModelInvocationProfile,
     PipelineStage,
     RenderPayload,
     RequestContext,
     RequestEnvelope,
+    ResolvedTarget,
     RetryReason,
     StageOutcome,
     TaskLookup,
@@ -80,6 +96,11 @@ from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger
+from xiaowei_agent.persistence.model_artifacts import (
+    ModelArtifactConflictError,
+    ModelArtifactGrantError,
+    ModelArtifactStore,
+)
 from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError, PlanStore
 from xiaowei_agent.persistence.store import (
     Clock,
@@ -94,6 +115,7 @@ from xiaowei_agent.rendering.pending import render_pending
 from xiaowei_agent.runners.deterministic import (
     RECOVERY_DRIFT_REASON,
     DriftError,
+    LeaseLostError,
     LifecycleError,
     StepJournalInvariantError,
 )
@@ -151,6 +173,15 @@ class XiaoweiRuntime:
         runner: WorkflowRunner,
         sink: TraceSink,
         clock: Clock,
+        model_artifacts: ModelArtifactStore,
+        model_profile: ModelInvocationProfile,
+        intent_model: IntentModelPort | None = None,
+        slow_query_advisory: SlowQueryAdvisoryPort | None = None,
+        model_monotonic: Callable[[], float] = time.monotonic,
+        model_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        lease_ttl_seconds: int = 60,
+        heartbeat_interval_seconds: float = 10.0,
+        heartbeat_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._interpreter = interpreter
         self._resolver = resolver
@@ -162,11 +193,22 @@ class XiaoweiRuntime:
         self._runner = runner
         self._sink = sink
         self._clock = clock
+        self._model_artifacts = model_artifacts
+        self._model_profile = model_profile
+        self._intent_model = intent_model
+        self._slow_query_advisory = slow_query_advisory
+        self._model_monotonic = model_monotonic
+        self._model_sleep = model_sleep
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._heartbeat_sleep = heartbeat_sleep
         self._task_views = TaskViewRuntime(
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            model_artifacts=model_artifacts,
+            model_profile=model_profile,
         )
 
     # --- trace --------------------------------------------------------------
@@ -179,6 +221,7 @@ class XiaoweiRuntime:
         context: RequestContext,
         task_id: str | None = None,
         attempt_number: int | None = None,
+        model: ModelCallObservation | None = None,
     ) -> TraceEvent:
         return TraceEvent(
             event_id=str(uuid.uuid4()),
@@ -195,6 +238,7 @@ class XiaoweiRuntime:
             # 与 Runner 同理：阶段与结果已足以归因，detail 是最容易把外部文本
             # 带出去的地方。
             detail={},
+            model=model,
         )
 
     async def _emit(
@@ -205,6 +249,7 @@ class XiaoweiRuntime:
         context: RequestContext,
         task_id: str | None = None,
         attempt_number: int | None = None,
+        model: ModelCallObservation | None = None,
         delivery: Delivery,
     ) -> None:
         await self._sink.emit(
@@ -214,6 +259,7 @@ class XiaoweiRuntime:
                 context=context,
                 task_id=task_id,
                 attempt_number=attempt_number,
+                model=model,
             ),
             delivery=delivery,
         )
@@ -243,13 +289,46 @@ class XiaoweiRuntime:
         terminal: TaskOutcome | None = None
         binding: CapabilityRuntimeBinding | None = None
         prepared: PreparedCapability | None = None
+        recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
-            draft = await self._interpret(
+            accepted = await load_or_accept_intent(
+                grant=grant,
                 envelope=submission.envelope,
+                context=context,
+                history=(),
+                interpreter=self._interpreter,
+                model=self._intent_model,
+                profile=self._model_profile,
+                artifacts=self._model_artifacts,
+                monotonic=self._model_monotonic,
+                sleep=self._model_sleep,
+            )
+            if accepted.observation is not None:
+                fallback = accepted.observation.fallback_code
+                await self._emit(
+                    stage=PipelineStage.MODEL,
+                    outcome=(
+                        StageOutcome.OK
+                        if fallback is None
+                        else StageOutcome.SKIPPED
+                        if fallback is ModelFallbackCode.DISABLED
+                        else StageOutcome.FAILED
+                    ),
+                    context=context,
+                    task_id=grant.task_id,
+                    attempt_number=grant.attempt_number,
+                    model=accepted.observation,
+                    delivery=Delivery.LOG_AND_DURABLE,
+                )
+            draft = accepted.artifact.draft
+            await self._emit(
+                stage=PipelineStage.INTENT,
+                outcome=StageOutcome.OK,
                 context=context,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
+                delivery=Delivery.LOG_AND_DURABLE,
             )
             candidate, binding = await self._resolve(
                 draft=draft,
@@ -282,7 +361,28 @@ class XiaoweiRuntime:
             raise
         except (PersistenceUnavailableError, PersistenceIntegrityError):
             raise
-        except (DriftError, PlanConflictError, PlanNotFoundError, StepJournalInvariantError):
+        except ModelArtifactConflictError:
+            # Intent artifact 在 Resolver 前被复验；若上次尝试已经提交过 plan/证据，
+            # 本次必须恢复该 plan 的 binding 才能按事实收成 recovery_drift。否则
+            # assess_evidence 会把“有证据但 binding=None”当成另一项不变量错误。
+            try:
+                stored = await self._plans.load(task_id=grant.task_id)
+            except PlanNotFoundError:
+                pass
+            else:
+                recovered_plan = stored.plan
+                binding = self._bindings.runtime_for_plan(plan=stored.plan)
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.FAILED,
+                terminal_reason=RECOVERY_DRIFT_REASON,
+            )
+        except (
+            DriftError,
+            PlanConflictError,
+            PlanNotFoundError,
+            StepJournalInvariantError,
+        ):
             terminal = _task_outcome(
                 task_id=grant.task_id,
                 status=TaskStatus.FAILED,
@@ -291,6 +391,8 @@ class XiaoweiRuntime:
         except LookupError:
             # gateway adapter 缺失是装配故障，不能写坏当前任务。
             raise
+        except ModelArtifactGrantError as exc:
+            raise LeaseLostError("model artifact grant is no longer current") from exc
         except (
             RequestRejectedError,
             PolicyDeniedError,
@@ -316,12 +418,18 @@ class XiaoweiRuntime:
             )
         if terminal is None:
             raise RuntimeError("execution produced no terminal outcome")
-        winner, evidences, _ = await self._finalize(
+        winner, evidences, _, _ = await self._finalize(
             record=record,
             outcome=terminal,
             context=context,
             grant=grant,
-            binding=binding if prepared is not None else None,
+            binding=(
+                binding
+                if prepared is not None or recovered_plan is not None
+                else None
+            ),
+            plan=prepared.plan if prepared is not None else recovered_plan,
+            allow_advisory=True,
         )
         return TaskOutcome(
             task_id=winner.task_id,
@@ -367,7 +475,7 @@ class XiaoweiRuntime:
                 task_id=record.task_id,
                 intent=AttemptIntent.DISPATCH,
                 owner="runtime-handle",
-                ttl_seconds=60,
+                ttl_seconds=self._lease_ttl_seconds,
                 trace_id=context.trace_id,
             )
         )
@@ -377,9 +485,37 @@ class XiaoweiRuntime:
                     record=attempt.winner, context=context
                 )
             raise TaskInProgressError(task_id=record.task_id)
+        grant = attempt.grant
+        return await run_with_task_heartbeat(
+            lambda: self._handle_granted_attempt(
+                record=record,
+                grant=grant,
+                plan=plan,
+                target=target,
+                context=context,
+                binding=binding,
+            ),
+            grant=grant,
+            task_store=self._tasks,
+            lease_ttl_seconds=self._lease_ttl_seconds,
+            heartbeat_interval_seconds=self._heartbeat_interval_seconds,
+            sleep=self._heartbeat_sleep,
+        )
+
+    async def _handle_granted_attempt(
+        self,
+        *,
+        record: TaskRecord,
+        grant: TaskAttemptGrant,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+        binding: CapabilityRuntimeBinding,
+    ) -> RenderPayload:
+        """兼容同步入口取得 grant 后的完整 attempt。"""
         try:
             outcome = await self._runner.start(
-                attempt.grant, plan=plan, target=target, context=context
+                grant, plan=plan, target=target, context=context
             )
         except WorkflowPaused as paused:
             evidences = await self._ledger.load(task_id=record.task_id)
@@ -388,7 +524,7 @@ class XiaoweiRuntime:
                 outcome=StageOutcome.OK,
                 context=context,
                 task_id=record.task_id,
-                attempt_number=attempt.grant.attempt_number,
+                attempt_number=grant.attempt_number,
                 delivery=Delivery.LOG_AND_DURABLE,
             )
             return render_pending(
@@ -398,7 +534,7 @@ class XiaoweiRuntime:
             record=record,
             outcome=outcome,
             context=context,
-            grant=attempt.grant,
+            grant=grant,
             binding=binding,
         )
 
@@ -524,18 +660,21 @@ class XiaoweiRuntime:
         binding: CapabilityRuntimeBinding,
     ) -> RenderPayload:
         """读回证据、判定终态、写 TaskStore、投影。"""
-        winner, evidences, verdict = await self._finalize(
+        winner, evidences, verdict, advisory = await self._finalize(
             record=record,
             outcome=outcome,
             context=context,
             grant=grant,
             binding=binding,
+            plan=None,
+            allow_advisory=False,
         )
         payload = project_terminal(
             record=winner,
             evidences=evidences,
             verdict=verdict,
             binding=binding,
+            advisory=advisory,
         )
         await self._emit(
             stage=PipelineStage.RENDERING,
@@ -555,7 +694,14 @@ class XiaoweiRuntime:
         context: RequestContext,
         grant: TaskAttemptGrant,
         binding: CapabilityRuntimeBinding | None,
-    ) -> tuple[TaskRecord, tuple[EvidenceEnvelope, ...], AnswerabilityVerdict]:
+        plan: ExecutionPlan | None,
+        allow_advisory: bool,
+    ) -> tuple[
+        TaskRecord,
+        tuple[EvidenceEnvelope, ...],
+        AnswerabilityVerdict,
+        ModelAdvisory | None,
+    ]:
         """在原 grant 下完成终态 CAS，并返回投影所需的持久化事实。"""
         task_id = record.task_id
         if task_id != grant.task_id or outcome.task_id != grant.task_id:
@@ -578,6 +724,52 @@ class XiaoweiRuntime:
             task_id=task_id,
             attempt_number=grant.attempt_number,
         )
+        advisory: ModelAdvisory | None = None
+        model_event: TraceEvent | None = None
+        if allow_advisory and binding is not None and plan is not None:
+            try:
+                accepted = await load_or_accept_advisory(
+                    grant=grant,
+                    task_id=task_id,
+                    plan=plan,
+                    outcome=outcome,
+                    evidences=evidences,
+                    verdict=verdict,
+                    projector=binding.advisory_projector,
+                    model=self._slow_query_advisory,
+                    profile=self._model_profile,
+                    artifacts=self._model_artifacts,
+                    monotonic=self._model_monotonic,
+                )
+            except ModelArtifactConflictError:
+                outcome = _task_outcome(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    terminal_reason=RECOVERY_DRIFT_REASON,
+                )
+            except ModelArtifactGrantError as exc:
+                raise LeaseLostError(
+                    "model artifact grant is no longer current"
+                ) from exc
+            else:
+                if accepted.artifact is not None:
+                    advisory = accepted.artifact.advisory
+                if accepted.observation is not None:
+                    fallback = accepted.observation.fallback_code
+                    model_event = self._event(
+                        stage=PipelineStage.MODEL,
+                        outcome=(
+                            StageOutcome.OK
+                            if fallback is None
+                            else StageOutcome.SKIPPED
+                            if fallback is ModelFallbackCode.DISABLED
+                            else StageOutcome.FAILED
+                        ),
+                        context=context,
+                        task_id=task_id,
+                        attempt_number=grant.attempt_number,
+                        model=accepted.observation,
+                    )
         status = _terminal_status(outcome=outcome, verdict=verdict)
         current = await self._tasks.get(
             lookup=TaskLookup(
@@ -601,12 +793,18 @@ class XiaoweiRuntime:
                     to_status=status,
                     fencing_token=grant.fencing_token,
                     terminal_reason=outcome.terminal_reason,
-                    audit_events=(reflection_event, lifecycle_event),
+                    audit_events=tuple(
+                        event
+                        for event in (reflection_event, model_event, lifecycle_event)
+                        if event is not None
+                    ),
                 )
             )
         except Exception as exc:
             delivery = delivery_for_write_exception(exc)
-            for event in (reflection_event, lifecycle_event):
+            for event in (reflection_event, model_event, lifecycle_event):
+                if event is None:
+                    continue
                 await self._sink.emit(event, delivery=delivery)
             raise
         delivery = (
@@ -614,13 +812,15 @@ class XiaoweiRuntime:
             if result.applied
             else Delivery.COMMAND_ROLLED_BACK
         )
-        for event in (reflection_event, lifecycle_event):
+        for event in (reflection_event, model_event, lifecycle_event):
+            if event is None:
+                continue
             await self._sink.emit(event, delivery=delivery)
         if not result.applied:
             raise LifecycleError(
                 "terminal transition rejected", rejection=result.rejection
             )
-        return result.winner, evidences, verdict
+        return result.winner, evidences, verdict, advisory
 
 
 def _independent_delivery(task_id: str | None) -> Delivery:

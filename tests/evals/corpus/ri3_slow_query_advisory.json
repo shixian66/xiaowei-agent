@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "cases": [
+    {"id": "RI3-A-01", "scenario": "eligible", "expected": "request"},
+    {"id": "RI3-A-02", "scenario": "failed", "expected": "no_request"},
+    {"id": "RI3-A-03", "scenario": "insufficient", "expected": "no_request"},
+    {"id": "RI3-A-04", "scenario": "wrong_source", "expected": "no_request"},
+    {"id": "RI3-A-05", "scenario": "sensitive_extra", "expected": "no_request"}
+  ],
+  "authority_fields": [
+    "status",
+    "facts",
+    "refs",
+    "next_steps",
+    "tool_call",
+    "sql",
+    "action"
+  ]
+}

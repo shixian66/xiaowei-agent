@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from xiaowei_agent.persistence.migrations.runner import run_downgrade, run_upgrade
 from xiaowei_agent.persistence.postgres import (
     PostgresEvidenceLedger,
+    PostgresModelArtifactStore,
     PostgresPlanStore,
     PostgresTaskStore,
 )
@@ -185,6 +186,13 @@ def plan_store(clean_database: AsyncEngine) -> PostgresPlanStore:
 def evidence_ledger(clean_database: AsyncEngine) -> PostgresEvidenceLedger:
     """覆盖根 conftest 的内存 ``evidence_ledger``。"""
     return PostgresEvidenceLedger(engine=clean_database)
+
+
+@pytest.fixture
+def model_artifact_store(
+    clean_database: AsyncEngine, clock: Any
+) -> PostgresModelArtifactStore:
+    return PostgresModelArtifactStore(engine=clean_database, clock=clock)
 
 
 @pytest.fixture

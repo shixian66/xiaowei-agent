@@ -188,6 +188,74 @@ TASK_EVIDENCE: Final = sa.Table(
 )
 """append-only 证据台账。"""
 
+TASK_ACCEPTED_INTENTS: Final = sa.Table(
+    "task_accepted_intents",
+    METADATA,
+    sa.Column("task_id", sa.Text, primary_key=True),
+    sa.Column("artifact_version", sa.Integer, nullable=False),
+    sa.Column("draft", JSONB, nullable=False),
+    sa.Column("origin", sa.Text, nullable=False),
+    sa.Column("provider", sa.Text, nullable=True),
+    sa.Column("model", sa.Text, nullable=True),
+    sa.Column("provider_origin", sa.Text, nullable=True),
+    sa.Column("prompt_revision", sa.Text, nullable=False),
+    sa.Column("schema_revision", sa.Text, nullable=False),
+    sa.Column("input_digest", sa.CHAR(64), nullable=False),
+    sa.Column("result_digest", sa.CHAR(64), nullable=False),
+    sa.Column("usage", JSONB, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("fencing_token", sa.BigInteger, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["task_id"], ["tasks.task_id"], name="fk_task_accepted_intents_task", ondelete="CASCADE"
+    ),
+    sa.CheckConstraint(
+        "artifact_version = 1", name="ck_task_accepted_intents_version"
+    ),
+    sa.CheckConstraint(
+        "fencing_token > 0", name="ck_task_accepted_intents_fencing_positive"
+    ),
+    sa.CheckConstraint(
+        "(origin = 'model' AND provider IS NOT NULL AND model IS NOT NULL"
+        " AND provider_origin IS NOT NULL) OR"
+        " (origin = 'rule' AND provider IS NULL AND model IS NULL"
+        " AND provider_origin IS NULL)",
+        name="ck_task_accepted_intents_origin_identity",
+    ),
+)
+"""Resolver 前已接受的 model/rule intent；每个 task insert-once。"""
+
+TASK_MODEL_ADVISORIES: Final = sa.Table(
+    "task_model_advisories",
+    METADATA,
+    sa.Column("task_id", sa.Text, primary_key=True),
+    sa.Column("artifact_version", sa.Integer, nullable=False),
+    sa.Column("advisory", JSONB, nullable=False),
+    sa.Column("origin", sa.Text, nullable=False),
+    sa.Column("provider", sa.Text, nullable=False),
+    sa.Column("model", sa.Text, nullable=False),
+    sa.Column("provider_origin", sa.Text, nullable=False),
+    sa.Column("prompt_revision", sa.Text, nullable=False),
+    sa.Column("schema_revision", sa.Text, nullable=False),
+    sa.Column("input_digest", sa.CHAR(64), nullable=False),
+    sa.Column("result_digest", sa.CHAR(64), nullable=False),
+    sa.Column("usage", JSONB, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("fencing_token", sa.BigInteger, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["task_id"], ["tasks.task_id"], name="fk_task_model_advisories_task", ondelete="CASCADE"
+    ),
+    sa.CheckConstraint(
+        "artifact_version = 1", name="ck_task_model_advisories_version"
+    ),
+    sa.CheckConstraint(
+        "origin = 'model'", name="ck_task_model_advisories_origin"
+    ),
+    sa.CheckConstraint(
+        "fencing_token > 0", name="ck_task_model_advisories_fencing_positive"
+    ),
+)
+"""终态前已接受的慢查询 advisory；每个 task insert-once。"""
+
 TASK_APPROVALS: Final = sa.Table(
     "task_approvals",
     METADATA,
@@ -402,6 +470,8 @@ ALL_TABLES: Final = (
     TASK_STEP_EXECUTIONS,
     TASK_PLANS,
     TASK_EVIDENCE,
+    TASK_ACCEPTED_INTENTS,
+    TASK_MODEL_ADVISORIES,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     CHANNEL_BINDINGS,

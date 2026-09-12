@@ -8,7 +8,12 @@ import pytest
 from tests.fakes.sinks import make_event
 
 from xiaowei_agent.config import Settings
-from xiaowei_agent.contracts import PipelineStage
+from xiaowei_agent.contracts import (
+    ModelCallKind,
+    ModelCallObservation,
+    ModelFallbackCode,
+    PipelineStage,
+)
 from xiaowei_agent.log import configure_logging
 from xiaowei_agent.observability.durable_sink import DurableTraceSink
 from xiaowei_agent.observability.log_sink import (
@@ -185,6 +190,7 @@ async def test_structured_log_extra_keys_are_an_exact_closed_set(
         "attempt_number",
         "delivery_state",
         "error",
+        "model",
         "detail",
         "worker_instance",
     }
@@ -200,6 +206,36 @@ async def test_non_worker_log_still_has_a_null_worker_instance(
             delivery=Delivery.COMMAND_COMMITTED,
         )
     assert caplog.records[0].worker_instance is None
+
+
+async def test_model_log_contains_only_typed_aggregate_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    observation = ModelCallObservation(
+        call_kind=ModelCallKind.INTENT,
+        elapsed_ms=12,
+        request_count=1,
+        input_tokens=20,
+        output_tokens=4,
+        fallback_code=ModelFallbackCode.INVALID_RESPONSE,
+    )
+    with caplog.at_level(logging.INFO):
+        await StructuredLogTraceSink().emit(
+            make_event(
+                stage=PipelineStage.MODEL,
+                model=observation,
+            ),
+            delivery=Delivery.COMMAND_COMMITTED,
+        )
+
+    assert caplog.records[0].model == {
+        "call_kind": "intent",
+        "elapsed_ms": 12,
+        "request_count": 1,
+        "input_tokens": 20,
+        "output_tokens": 4,
+        "fallback_code": "model_invalid_response",
+    }
 
 
 async def test_worker_event_trace_survives_the_real_logging_filter() -> None:

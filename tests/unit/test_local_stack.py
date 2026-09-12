@@ -526,7 +526,14 @@ async def test_postgres_task_view_stack_has_only_projection_dependencies(
         "aclose",
         "policy_revision",
     }
-    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert set(vars(stack.runtime)) == {
+        "_tasks",
+        "_plans",
+        "_ledger",
+        "_bindings",
+        "_model_artifacts",
+        "_model_profile",
+    }
     assert stack.task_store._engine is engine
     assert stack.plan_store._engine is engine
     assert stack.evidence_ledger._engine is engine
@@ -714,7 +721,14 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "aclose",
         "policy_revision",
     }
-    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert set(vars(stack.runtime)) == {
+        "_tasks",
+        "_plans",
+        "_ledger",
+        "_bindings",
+        "_model_artifacts",
+        "_model_profile",
+    }
     assert stack.oauth_port is oauth
     assert stack.membership is membership
     assert stack.task_store._engine is engine
@@ -875,7 +889,14 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
         "aclose",
         "policy_revision",
     }
-    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert set(vars(stack.runtime)) == {
+        "_tasks",
+        "_plans",
+        "_ledger",
+        "_bindings",
+        "_model_artifacts",
+        "_model_profile",
+    }
     assert stack.transport is fake_transport
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
@@ -966,7 +987,14 @@ async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
         "aclose",
         "policy_revision",
     }
-    assert set(vars(stack.runtime)) == {"_tasks", "_plans", "_ledger", "_bindings"}
+    assert set(vars(stack.runtime)) == {
+        "_tasks",
+        "_plans",
+        "_ledger",
+        "_bindings",
+        "_model_artifacts",
+        "_model_profile",
+    }
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
     await stack.aclose()
