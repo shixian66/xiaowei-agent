@@ -302,7 +302,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   secret 内容。聚焦 Compose/Gemini credential 契约为 159 passed；本地四门为 3268 passed /
   195 skipped / 5 个预期 socket-block warnings、security 1254 passed / 79 skipped / 2128 deselected /
   同 5 warnings、Ruff 通过、mypy 156 个源码文件通过；冻结依赖导出 80 个包，严格 `pip-audit` 无已知
-  漏洞。以上仍只是离线 `tests`/本机容器结构证据，不是 Gemini 网络、测试环境、部署或用户验收。
+  漏洞。根因修复实现提交为 `e7a529db927fd70be901e8b88df520e90d8c9b39`；PR #34 run
+  [`34698212114`](https://github.com/shixian66/xiaowei-agent/actions/runs/34698212114) 精确绑定该提交，
+  tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项均
+  success。以上仍只是离线 `tests`/本机容器结构证据，不是 Gemini 网络、测试环境、部署或用户验收。
 
 - **RI3 PR 3A 文档候选基于最新 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`**：
   PR #30/#31 的 GitHub 状态均为 merged，当前分支只修改 11 份规划/ADR 文档，`src/`、`tests/`、
@@ -410,11 +413,11 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 - **PR 3B 的完整 base+model workflow 尚未在本机实跑**：受控 model-only create/inspect 已取得
   worker-only mount 实证，但用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器，因此没有
-  在本机启动整套 base+model 服务。PR #34 修复 head 的 GitHub 隔离 runner 仍需重新执行完整
-  Compose smoke 和 PostgreSQL integration。即使远端通过，也仍只是一次性的 `tests` 证据，不能声称
-  本机或测试企业的 Web/OAuth/Gemini 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke
-  会请求本机 Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider
-  或其他真实外部业务接口。
+  在本机启动整套 base+model 服务。PR #34 的 GitHub 隔离 runner 已执行完整 Compose smoke 和
+  PostgreSQL integration，但这仍只是一次性的 `tests` 证据，不能声称本机或测试企业的
+  Web/OAuth/Gemini 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke 请求隔离 runner
+  Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider 或其他真实
+  外部业务接口。
 - **M7 PR 1–8 离线范围已验收并归档，但证据上限仍是 `tests`**：当时本机未能使用 Docker
   daemon，也未提供 PostgreSQL DSN，因此新增 M7 同库 integration 在本机受控 skip、Compose
   未在本机实跑。PR 与
