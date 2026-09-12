@@ -8,4 +8,4 @@ services:
 
 secrets:
   gemini_api_key:
-    environment: GEMINI_API_KEY
+    file: ${GEMINI_API_KEY_FILE:-./.secrets/gemini_api_key}

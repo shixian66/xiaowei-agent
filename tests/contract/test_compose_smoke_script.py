@@ -38,9 +38,13 @@ class ModelAuditRunner(RecordingRunner):
         services: tuple[str, ...],
         *,
         failure_at: str | None = None,
+        gemini_source: str = "/workspace/fixtures/fake-gemini-key",
+        worker_environment: tuple[str, ...] = ("XIAOWEI_GEMINI_ENABLED=true",),
     ) -> None:
         super().__init__()
         self.failure_at = failure_at
+        self.gemini_source = gemini_source
+        self.worker_environment = worker_environment
         self.service_by_container = {
             f"model-container-{index}": service
             for index, service in enumerate(services)
@@ -69,6 +73,7 @@ class ModelAuditRunner(RecordingRunner):
             if service == "worker":
                 mounts = [
                     {
+                        "Source": self.gemini_source,
                         "Destination": "/run/secrets/gemini_api_key",
                         "RW": False,
                     },
@@ -77,7 +82,7 @@ class ModelAuditRunner(RecordingRunner):
                         "RW": False,
                     },
                 ]
-                environment = ["XIAOWEI_GEMINI_ENABLED=true"]
+                environment = list(self.worker_environment)
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -469,6 +474,7 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
                 if service == "worker" or leak_to_api:
                     mounts = [
                         {
+                            "Source": "/workspace/fixtures/fake-gemini-key",
                             "Destination": "/run/secrets/gemini_api_key",
                             "RW": False,
                         }
@@ -499,7 +505,9 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
         sensitive_values=("AIza" + "fake-smoke-value",),
-        environment=(("GEMINI_API_KEY", "AIza" + "fake-smoke-value"),),
+        environment=(
+            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
+        ),
     )
 
     if leak_to_api:
@@ -548,6 +556,9 @@ def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
+        environment=(
+            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
+        ),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -563,9 +574,62 @@ def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
+        environment=(
+            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
+        ),
     )
 
     compose_smoke._require_model_secret_boundary(session)
+
+
+def test_model_secret_smoke_rejects_an_unexpected_host_source() -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(
+            compose_smoke._MODEL_AUDIT_SERVICES,
+            gemini_source="/workspace/fixtures/unexpected-gemini-key",
+        ),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        environment=(
+            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
+        ),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
+@pytest.mark.parametrize(
+    "leaked_environment",
+    (
+        "GEMINI_API_KEY_FILE=/workspace/fixtures/fake-gemini-key",
+        "GEMINI_API_" + "KEY=unrelated-value",
+    ),
+)
+def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
+    leaked_environment: str,
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(
+            compose_smoke._MODEL_AUDIT_SERVICES,
+            worker_environment=(
+                "XIAOWEI_GEMINI_ENABLED=true",
+                leaked_environment,
+            ),
+        ),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        environment=(
+            ("GEMINI_API_KEY_FILE", "/workspace/fixtures/fake-gemini-key"),
+        ),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
 
 
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
@@ -742,7 +806,7 @@ def test_generated_secret_is_host_isolated_and_container_readable(tmp_path: Path
     assert path.read_text(encoding="utf-8").endswith("\n")
 
 
-def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -> None:
+def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None:
     parent = tmp_path / ".secrets"
     observed_paths: tuple[Path, ...] = ()
     observed_sensitive_values: tuple[str, ...] = ()
@@ -756,11 +820,15 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         identities = Path(
             override["services"]["web-app"]["volumes"][0]["source"]
         )
-        observed_paths = (postgres, feishu, identities)
+        assert tuple(name for name, _ in session.environment) == (
+            "GEMINI_API_KEY_FILE",
+        )
+        gemini = Path(session.environment[0][1])
+        observed_paths = (postgres, feishu, identities, gemini)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
-            for path in (postgres, feishu, identities)
+            for path in observed_paths
         )
         assert json.loads(identities.read_text(encoding="utf-8")) == {
             "version": 1,
@@ -770,8 +838,8 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         }
         assert postgres.read_text(encoding="utf-8").strip() in session.sensitive_values
         assert feishu.read_text(encoding="utf-8").strip() in session.sensitive_values
-        assert tuple(name for name, _ in session.environment) == ("GEMINI_API_KEY",)
-        assert session.environment[0][1] in session.sensitive_values
+        assert gemini.read_text(encoding="utf-8").strip() in session.sensitive_values
+        assert str(gemini) not in session.sensitive_values
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -807,13 +875,16 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         feishu = Path(document["secrets"]["feishu_app_secret"]["file"])
         identity_mount = document["services"]["web-app"]["volumes"][0]
         identity = Path(identity_mount["source"])
-        assert {path.parent for path in (postgres, feishu, identity)} == {
+        assert session.environment[0][0] == "GEMINI_API_KEY_FILE"
+        gemini = Path(session.environment[0][1])
+        assert {path.parent for path in (postgres, feishu, identity, gemini)} == {
             override.parent
         }
-        assert {path.name for path in (postgres, feishu, identity)} == {
+        assert {path.name for path in (postgres, feishu, identity, gemini)} == {
             "postgres_password",
             "feishu_app_secret",
             "feishu-identities.json",
+            "gemini_api_key",
         }
         assert identity_mount["target"] == "/run/config/feishu-identities.json"
         assert identity_mount["read_only"] is True
@@ -822,8 +893,7 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         ]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
-        assert session.environment[0][0] == "GEMINI_API_KEY"
-        assert session.environment[0][1] not in override_text
+        assert str(gemini) not in override_text
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -873,10 +943,16 @@ def test_partial_private_input_failure_cleans_only_the_private_namespace(
 @pytest.mark.parametrize(
     ("failure_at", "error_type"),
     [
+        (1, KeyboardInterrupt),
+        (1, RuntimeError),
         (2, KeyboardInterrupt),
         (2, RuntimeError),
         (3, KeyboardInterrupt),
         (3, RuntimeError),
+        (4, KeyboardInterrupt),
+        (4, RuntimeError),
+        (5, KeyboardInterrupt),
+        (5, RuntimeError),
     ],
 )
 def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(

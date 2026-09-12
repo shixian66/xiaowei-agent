@@ -31,7 +31,7 @@
 | ---: | --- | --- | --- |
 | 1 | The draft confused RI4's proposed query budgets with current source facts. | It would change timeout assumptions before RI4 and make RI3 evidence false. | Preserve the current 25-second query-timeout upper bound and 30-second read-only policy cap; test those bounds remain unchanged. |
 | 2 | The draft treated the full stored-submission checksum as the same-key conflict predicate. | Parent-aware retries could be specified against the wrong digest and silently break idempotency or later fail row-integrity readback. | Add non-null parent only to the semantic request digest and stored submission checksum, never the scope digest; update every create/readback recomputation site, freeze null-parent bytes and test same/different parent cases. |
-| 3 | The host Compose key was mistaken for a Settings environment key. | Adding it to `.env.example` breaks the exact Settings-key contract and risks broader container exposure. | Keep `GEMINI_API_KEY` host-only; pass it through an environment-backed Compose secret mounted only on worker; assert it is absent from Settings and `.env.example`. |
+| 3 | The host Compose key was mistaken for a Settings environment key. | Adding it to `.env.example` breaks the exact Settings-key contract and risks broader container exposure. | Keep plaintext only in a Git-ignored host file; pass it through a file-backed Compose secret mounted only on worker; assert key and host path reference are absent from Settings, `.env.example` and container environments. |
 | 4 | Persistence work listed contracts but not every backend and row mapping. | One backend could pass while another loses artifacts or parent context. | PR 3C covers fake/PostgreSQL/memory artifact paths and mappings; PR 3D covers fake/PostgreSQL plus a memory-backend no-change inspection; bind shared backend suites. |
 | 5 | New Protocols had no static/runtime conformance anchors. | Implementations could drift while tests exercised only one concrete object. | Add `_conformance.py` assignments and exact protocol-conformance tests for every new port/store. |
 | 6 | The dependency plan named an SDK without the repository's exact-set baseline. | The lock, wheel identity, license, or typing marker could drift unnoticed. | Pin `google-genai==2.23.0`, audit the exact wheel/hash/license/`py.typed`, and extend dependency-baseline tests. |
@@ -82,7 +82,7 @@
 | API | `v1beta` at canonical origin `https://generativelanguage.googleapis.com`; `client.aio.models.generate_content()` + structured JSON response |
 | 意图 | low thinking；60 秒总预算；2,048 output tokens；仅指定错误最多重试 1 次 |
 | 诊断 | high thinking；180 秒总预算；4,000 output tokens；不重试 |
-| Key | 宿主 `.env` 的 `GEMINI_API_KEY` → Compose secret → worker 固定文件 |
+| Key | 宿主 Git-ignored key 文件 → file-backed Compose secret → worker 固定文件 |
 | 默认状态 | 关闭；只有显式 model Compose override 才启用 |
 | 成本 | 不设本地费用硬封顶；记录安全 usage、次数、延迟和 fallback；PR 3E 核验供应商账户告警 |
 | 上下文 | 显式父任务；最多 20 个父任务、64,000 字符；Web 先行 |
@@ -236,9 +236,12 @@ git diff -- AGENT_HANDOFF.md ARCHITECTURE.md DEVELOPMENT_PLAN.md README.md docs
 - Modify: `src/xiaowei_agent/interfaces/__init__.py`
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
-- Modify: `.env.example` (application `XIAOWEI_*` settings only; never `GEMINI_API_KEY`)
-- Inspect, expected no direct change: `.dockerignore` (already excludes `.env`/`.env.*`)
-- Inspect, expected no direct change: `.gitignore` (already excludes `.env`/`.env.*`)
+- Modify: `.env.example` (application `XIAOWEI_*` settings only; never host-only
+  `GEMINI_API_KEY` or `GEMINI_API_KEY_FILE`)
+- Inspect, expected no direct change: `.dockerignore` (already excludes `.secrets` and
+  `.env`/`.env.*`)
+- Inspect, expected no direct change: `.gitignore` (already excludes `.secrets` and
+  `.env`/`.env.*`)
 - Inspect, expected no direct change: `docker-compose.yml`
 - Create: `docker-compose.model.yml`
 - Modify: `scripts/compose_smoke.py`
@@ -354,21 +357,27 @@ reject invented `XIAOWEI_GEMINI_MODEL`, endpoint, proxy, timeout or secret-path 
 
 The base `docker-compose.yml` remains model-disabled and has no Gemini secret mount.
 Only `docker-compose.model.yml` sets `XIAOWEI_GEMINI_ENABLED=true` and introduces the secret.
-The model override defines a top-level `gemini_api_key` with
-`environment: GEMINI_API_KEY` and appends that secret only to `worker`.
+The model override defines a top-level file-backed `gemini_api_key` and appends that
+secret only to `worker`.
+The previously planned environment-backed secret is rejected by runtime evidence:
+Compose can render it but cannot materialize it for the existing read-only worker.
+Do not fix that incompatibility by removing `read_only: true` or exposing the key as a
+container environment variable.
 The merged worker secret list must contain both `postgres_password` and
 `gemini_api_key`; every other service must retain its current list.
 The enable flag is declared only under `services.worker.environment`; it must not be
 added to the shared `x-app-environment` anchor or any non-worker service. Rendered-config
 tests assert that non-worker services have neither the flag nor the Gemini secret.
 
-`GEMINI_API_KEY` is host-side Compose input, not an application setting:
-`.env.example` must remain exactly equal to `_FIELD_TO_ENV` and must not contain
-that name. Setup is documented only in README/runbook. Require Docker Compose
+The default plaintext source is `.secrets/gemini_api_key`. `GEMINI_API_KEY_FILE` is an
+optional host-side Compose path reference, not an application setting or container
+environment value; `.env` may contain only that path, never the key. `.env.example` must
+remain exactly equal to `_FIELD_TO_ENV` and contain neither host-only name. Setup is
+documented only in README/runbook. Require Docker Compose
 2.24.4 or newer (the project support floor shared with RI6's `!override` deployment
 path), but treat the version floor as necessary and insufficient. Extend the
 existing `scripts/compose_smoke.py` workflow instead of creating a second probe service:
-with a split fake environment secret and the model override, inspect the actual Linux
+with a split fake file secret and the model override, inspect the actual Linux
 containers to prove the fixed worker mount exists and every non-worker container lacks
 it, without opening or printing the file. `docker stack deploy` is unsupported. A
 separate rendered-config test proves the declared secret union is correct and the fake
@@ -390,11 +399,12 @@ runtime and worker does not load the SDK. The two model ports and every real/fak
 implementation are assigned in `_conformance.py`; the protocol-conformance registry
 and keyword-only signature checks must cover both ports.
 
-`tests/security/test_gemini_credential_boundary.py` proves the host key is never a
-Settings field or container environment value, only worker receives the fixed secret
-file, missing/invalid credential causes zero client/network calls, and key-shaped values
-never enter errors, logs, traces or persisted model artifacts. It also freezes the
-existing `.gitignore`/`.dockerignore` exclusion of `.env` and `.env.*`.
+`tests/security/test_gemini_credential_boundary.py` proves the host key and its optional
+path reference are never Settings fields or container environment values, only worker
+receives the fixed secret file, missing/invalid credential causes zero client/network
+calls, and key-shaped values never enter errors, logs, traces or persisted model
+artifacts. It also freezes the existing `.gitignore`/`.dockerignore` exclusion of
+`.secrets`, `.env` and `.env.*`.
 
 - [ ] **Step 6: focused 验证**
 
@@ -971,7 +981,7 @@ tests 证据，不算真实 provider、部署或用户验收。
 - [ ] entry-scoped heartbeat 在 Worker 和兼容 `handle()` 两条入口分别覆盖完整 attempt，且每次只有一个 owner。
 - [ ] Slow-query advisory sends at most 20 rows using the exact
   `SLOW_QUERY_SURFACE.allowed_columns` set/order; SQL/stmt/clientIp/full Evidence stay out.
-- [ ] key 只从 `.env` 经 Compose secret 进入 worker；默认 Compose 0 key/0 网络。
+- [ ] key 只从 Git-ignored 宿主文件经 file-backed Compose secret 进入 worker；默认 Compose 0 key/0 网络。
 - [ ] Web 显式 parent 上下文有归属校验、20 轮/64,000 字符上限和旧 hash 冻结向量。
 - [ ] 飞书上下文、Admin readback、多 worker、其他 provider 和生产调用保持明确未实现。
 - [ ] 离线实现、test-env、部署、canary、用户验收证据严格分级。
@@ -992,7 +1002,7 @@ tests 证据，不算真实 provider、部署或用户验收。
 
 ### 残余风险
 
-至少报告 provider 保存前崩溃可能重复调用、单 worker 吞吐、preview 模型漂移、`.env` 无版本回滚和
+至少报告 provider 保存前崩溃可能重复调用、单 worker 吞吐、preview 模型漂移、宿主 key 文件无版本回滚和
 供应商数据政策变化。
 
 本计划已获项目负责人和 Claude/Codex 审核，并于 2026-09-12 收到“开始 RI3”离线开工口令。

@@ -627,24 +627,26 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 Secrets are mounted only through fixed file references resolved by a trusted composition
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
 worker, listener and channel worker publish no host ports. Gemini plaintext originates
-only from host-side `.env` key `GEMINI_API_KEY`. The model override converts it to the
-top-level `gemini_api_key: {environment: GEMINI_API_KEY}` secret and appends that secret
-only to task worker while retaining its existing `postgres_password` mount. All other
+only from the Git-ignored host file `.secrets/gemini_api_key`. The model override defines
+a file-backed top-level `gemini_api_key` secret and appends that secret only to task
+worker while retaining its existing `postgres_password` mount. All other
 services keep their current secret lists. Worker sees a fixed
 `/run/secrets/gemini_api_key` path.
 The override declares `XIAOWEI_GEMINI_ENABLED=true` only under
 `services.worker.environment`; the shared `x-app-environment` anchor and all non-worker
 services remain free of both the flag and the Gemini secret.
 
-`GEMINI_API_KEY` is not a Settings/`_FIELD_TO_ENV` key and never appears in
-`.env.example`; the only application setting is default-false
+`GEMINI_API_KEY_FILE` is an optional host-side Compose path reference defaulting to
+`./.secrets/gemini_api_key`; it is not passed to a container. Neither it nor
+`GEMINI_API_KEY` is a Settings/`_FIELD_TO_ENV` key or appears in `.env.example`; the only
+application setting is default-false
 `XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits/secret path are versioned constants;
 RI3 fixes Developer API `v1beta` and canonical origin
 `https://generativelanguage.googleapis.com`.
 README/runbook alone explain host-side key setup. This path requires Docker
 Compose 2.24.4+ (the project support floor shared with RI6's `!override` deployment
 path) and Linux containers. The version floor and rendered-config check are
-necessary but insufficient: a split-fake environment secret must pass a functional mount
+necessary but insufficient: a split-fake file secret must pass a functional mount
 preflight without printing its value before model activation. This is not a
 `docker stack deploy` contract. The three channel processes remain in the `m7-channels`
 profile with their feature flags defaulting to false; no offline result proves activation.
@@ -652,7 +654,7 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-`.dockerignore` 必须排除 `.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
+`.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
 结果。
 

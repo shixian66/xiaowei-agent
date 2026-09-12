@@ -270,8 +270,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 3. admin 显式发布后生成不可变版本和审计记录。
 4. composition root 读取 active version，校验 readback 后才激活对应 provider。
 5. 回滚指向上一已发布版本；旧版本和审计保留，secret 始终由只读文件挂载提供。
-6. Gemini key 是例外的 bootstrap secret：用户在部署主机 `.env` 修改它，模型开启命令显式使用
-   `docker compose --env-file .env`，再转成只挂 task-worker 的 secret 文件。Admin 只能显示 safe
+6. Gemini key 是例外的 bootstrap secret：用户在部署主机受限 key 文件中修改它，模型开启命令
+   显式叠加 model override，转成只挂 task-worker 的 file-backed secret。非默认宿主路径可由
+   `.env` 中的 `GEMINI_API_KEY_FILE` 引用。Admin 只能显示 safe
    readback，不能保存、读取或一键回滚 key；现场禁用会打印环境内容的 `config --environment`。
 
 ## 7. 配置与 secret
@@ -281,12 +282,13 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 - 普通配置使用 `XIAOWEI_*` 环境变量，并继续 `extra=forbid`、半配置拒绝和默认关闭。
 - secret 只通过容器只读文件引用，例如 Docker Compose secret；只有受信 composition root 接收
   绝对挂载路径，不接收明文环境变量。
-- Gemini `GEMINI_API_KEY` may exist only in the Git-ignored host `.env`. It is
-  host-side Compose input, not a Settings/`_FIELD_TO_ENV` key and must stay absent
-  from `.env.example`.
+- Gemini plaintext may exist only in a Git-ignored host key file, defaulting to
+  `.secrets/gemini_api_key`. `GEMINI_API_KEY_FILE` is only an optional host-side Compose
+  path reference; `.env` may contain that path but never the key. Neither host-only name
+  is a Settings/`_FIELD_TO_ENV` key or belongs in `.env.example`.
 - The only new application setting is default-false `XIAOWEI_GEMINI_ENABLED`; provider,
   model, API, budgets, proxy policy and secret path are fixed in versioned code.
-- The model override declares `gemini_api_key: {environment: GEMINI_API_KEY}` and
+- The model override declares a file-backed `gemini_api_key` and
   grants it only to task worker. Merged worker secrets retain `postgres_password`;
   every other service keeps its current secret list. Container path is fixed at
   `/run/secrets/gemini_api_key`.
@@ -295,7 +297,7 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
   non-worker service.
 - Require Docker Compose 2.24.4+ (the project support floor shared with RI6's
   `!override` deployment path) and Linux containers. Version/config checks are necessary
-  but insufficient; a split-fake secret must pass a functional mount preflight without
+  but insufficient; a split-fake file secret must pass a functional mount preflight without
   exposing its value. This is not a `docker stack deploy` path.
 - Gemini 复用现有 `interfaces.secret_file.read_secret_file()`；RI3 不统一重构飞书、StarRocks、
   PostgreSQL 的 reader。共同 hardening 由对应真实接入阶段单独负责。
@@ -308,7 +310,7 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 - 逻辑凭证名和目标名都来自进程启动时加载的闭集 registry。路径解析、host/port/TLS/user 解析只在
   composition root 内发生；未知名、路径分隔符、点段或 registry revision 漂移全部 fail-closed。
 - StarRocks 目标 registry 由部署者只读维护；Admin 只能选择其中已批准目标，不能新增或修改 endpoint。
-- API 和 UI 不提供 Gemini key 的明文写入、读取、回显、版本或 rollback；`.env` key 由部署者管理。
+- API 和 UI 不提供 Gemini key 的明文写入、读取、回显、版本或 rollback；宿主 key 文件由部署者管理。
 - 发布和回滚使用 CAS，避免两个 admin 互相覆盖；每次操作产生 append-only 审计事件。
 - 环境变量只保留 bootstrap 能力；发布配置的优先级和可覆盖字段由 ADR 固定，禁止同一字段有两个隐式真源。
 
@@ -428,7 +430,8 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 | draft 可提交 host/port/任意 secret path | 配置管理员可借测试连接做 SSRF、端口探测或读取挂载文件 | DTO 只接收闭集逻辑 `target_ref`/`credential_ref`；路径与 endpoint 只在 composition root 从只读 registry 解析；未知名/路径形状/registry 漂移零网络调用 |
 | 六阶段只存在于临时计划 | 总体里程碑、ADR 授权和实现计划会各说各话 | 先做纯文档 V2.4，把路线映射为 RI1–RI6，并同步修订 ADR-007；未批准前不实施 |
 | RI2/RI4 复制已有真实调用清单 | 两份硬门会随时间漂移，执行者可能选择较弱版本 | RI2 直接引用 M7 §0.3.2；RI4 直接引用 M6b §3.3、ADR-012 与 handoff 未完成项，分计划只记录执行证据 |
-| Treat host `GEMINI_API_KEY` as an application setting | It would break the exact `.env.example` = `_FIELD_TO_ENV` contract and could leak into containers | Keep the key only as host Compose input; `.env.example` documents only actual `XIAOWEI_*` settings; merged-config tests prove the declaration/no-value boundary, while a split-fake Linux-container preflight separately proves worker-only mount and non-worker absence |
+| Treat host key material as an application setting | It would break the exact `.env.example` = `_FIELD_TO_ENV` contract and could leak into containers | Keep plaintext only in a Git-ignored host file; `.env.example` documents only actual `XIAOWEI_*` settings; merged-config tests prove the declaration/no-value boundary, while a split-fake Linux-container preflight separately proves worker-only mount and non-worker absence |
+| Use a Compose environment-backed secret for the read-only worker | Rendered config advertises the secret, but actual container creation supplies no mount and startup rejects non-file secret sources for a read-only service | Use a file-backed secret; preserve the worker read-only rootfs and keep key material out of container environments |
 | 为了入口形式统一而删除 `XiaoweiRuntime.handle()` | 它当前只被测试使用；删除会制造大范围测试迁移，却不增加真实模型安全性 | 保留该便利入口但不装配真实 provider；生产模型调用者静态限制为 worker durable path |
 | 使用一个通用 `ModelProviderPort.generate(prompt, schema)` | application 可借任意 prompt/schema 外送字段，理解与诊断权限无法分开 | application 定义 intent/advisory 两个窄端口，Gemini adapter 分别实现；分层与方法等式测试禁止通用 generate |
 | Send unbounded request/history text to the model | Redaction work becomes unbounded and pasted credentials may leave the process | Bound raw characters/UTF-8/history before total `scrub_text()`, then reserialize and enforce the final byte cap; omit whole oversized history rounds; invalid/oversized input yields zero model calls |

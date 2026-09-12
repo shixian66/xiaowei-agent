@@ -44,6 +44,7 @@ _OAUTH_STATE_COOKIE_PAIR_RE = re.compile(
 _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
 _MINIMUM_COMPOSE_VERSION = (2, 24, 4)
+_GEMINI_HOST_SECRET_FILE_ENV = "GEMINI_API_" + "KEY_FILE"
 _GEMINI_SECRET_DESTINATION = "/run/secrets/gemini_api_" + "key"
 _POSTGRES_SECRET_DESTINATION = "/run/secrets/postgres_" + "password"
 _MODEL_AUDIT_SERVICES = (
@@ -509,6 +510,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
     postgres_secret = namespace.path / "postgres_password"
     feishu_secret = namespace.path / "feishu_app_secret"
+    gemini_secret = namespace.path / "gemini_api_key"
     identity = namespace.path / "feishu-identities.json"
     override = namespace.path / "compose-smoke-inputs.json"
     created: list[_OwnedInput] = []
@@ -517,6 +519,9 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         created.append(postgres_owned)
         feishu_value, feishu_owned = _create_secret(feishu_secret)
         created.append(feishu_owned)
+        gemini_value = "AIza" + secrets.token_urlsafe(32)
+        gemini_owned = _create_input(gemini_secret, f"{gemini_value}\n")
+        created.append(gemini_owned)
         identity_owned = _create_input(
             identity,
             json.dumps(
@@ -546,13 +551,12 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         except BaseException:
             _safe_add_fixed_note(exc, "SMOKE_INPUT_CLEANUP_FAILED")
         raise
-    gemini_value = "AIza" + secrets.token_urlsafe(32)
     return _SmokeInputs(
         namespace=namespace,
         sensitive_values=(postgres_value, feishu_value, gemini_value),
         owned_inputs=tuple(created),
         override_path=override,
-        environment=(("GEMINI_API_KEY", gemini_value),),
+        environment=((_GEMINI_HOST_SECRET_FILE_ENV, str(gemini_secret)),),
     )
 
 
@@ -812,6 +816,14 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
 
 def _require_model_secret_boundary(session: ComposeSession) -> None:
     """叠加模型 override 后只检查容器元数据，绝不打开 secret 文件。"""
+    expected_sources = [
+        value
+        for name, value in session.environment
+        if name == _GEMINI_HOST_SECRET_FILE_ENV
+    ]
+    if len(expected_sources) != 1 or not os.path.isabs(expected_sources[0]):
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+    expected_source = os.path.normcase(os.path.normpath(expected_sources[0]))
     model = session.derive(
         files=(*session.files, _ROOT / "docker-compose.model.yml"),
         failure_code="SMOKE_MODEL_SECRET_COMMAND_FAILED",
@@ -858,6 +870,13 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
         service_counts[service] = service_counts.get(service, 0) + 1
         if any(
+            item.startswith(
+                ("GEMINI_API_" + "KEY=", f"{_GEMINI_HOST_SECRET_FILE_ENV}=")
+            )
+            for item in environment
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        if any(
             value in item
             for value in model.sensitive_values
             for item in environment
@@ -881,9 +900,12 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             if item.startswith("XIAOWEI_GEMINI_ENABLED=")
         ]
         if service == "worker":
+            source = secret_mounts[0].get("Source") if secret_mounts else None
             if (
                 enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
                 or len(secret_mounts) != 1
+                or not isinstance(source, str)
+                or os.path.normcase(os.path.normpath(source)) != expected_source
                 or secret_mounts[0].get("RW") is not False
                 or len(postgres_mounts) != 1
                 or postgres_mounts[0].get("RW") is not False

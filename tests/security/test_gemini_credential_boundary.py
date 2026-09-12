@@ -154,9 +154,10 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
     assert secret not in caplog.text
 
 
-def test_key_is_not_a_setting_and_ignore_files_cover_dotenv_variants() -> None:
+def test_key_is_not_a_setting_and_ignore_files_cover_host_secret_sources() -> None:
     assert GEMINI_SECRET_FILE == "/run/secrets/gemini_api_" + "key"
     assert "GEMINI_API_KEY" not in _FIELD_TO_ENV.values()
+    assert "GEMINI_API_KEY_FILE" not in _FIELD_TO_ENV.values()
     assert not any(
         "gemini" in name.lower() and "key" in name.lower()
         for name in Settings.model_fields
@@ -169,3 +170,4 @@ def test_key_is_not_a_setting_and_ignore_files_cover_dotenv_variants() -> None:
         }
         assert ".env" in lines
         assert ".env.*" in lines
+        assert any(line.rstrip("/") == ".secrets" for line in lines)

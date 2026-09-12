@@ -75,7 +75,8 @@
   审计精确 wheel，身份或元数据不匹配就停下复审。
   不建通用 provider registry，不启用 provider chat/session、tools、function calling、搜索、代码执行、
   文件或 MCP。意图与慢查询解释走两个窄 port。
-- **RI3 已批准的精简生命周期设计**：Gemini key 只由宿主 `.env` 经 Compose secret 挂给 task worker。
+- **RI3 已批准的精简生命周期设计**：Gemini key 只由宿主 Git-ignored key 文件经 file-backed
+  Compose secret 挂给 task worker；`.env` 最多保存可选宿主文件路径，不保存 key。
   意图 low/60 秒/最多两次 request，解释 high/180 秒/一次 request，分别限制 2048/4000 output tokens；
   RI3 adds no whole-task deadline and preserves the current StarRocks 25-second
   query-timeout upper bound/30-second read-only policy cap; future 180/190/195/200-second layers belong
@@ -209,8 +210,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     验收或 M8。
 14. **RI3 Gemini 已进入顺序离线实施，当前只做 PR 3B**：项目负责人已批准 ADR-015/V7 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
-    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、`.env` 到
-    worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
+    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
+    文件到 worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
     advisory、Web 显式父任务和逐列定型的 20 行 StarRocks 投影。计划由 9 PR/4 migration 收缩为
     5 PR/2 migration；不新增任务总 deadline、调用预约平台、统一终态表、进度状态机、全项目凭证
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
@@ -287,6 +288,21 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 ## 8. 验证记录
 
 ### 已验证
+
+- **RI3 PR 3B 的 Compose secret 失败已沿真实容器路径定位并按根因修复**：首轮 PR #34 CI 的
+  `tests`/`integration` 失败来自契约测试只查找旧版独立 `docker-compose`，没有复用 smoke 已有的
+  Compose v2/legacy 解析；`compose-smoke` 失败则不是测试环境偶发问题。实际 Compose create/start
+  证明 environment-backed secret 虽出现在渲染配置中，却不能为现有 `read_only` worker 建立 mount，
+  启动会拒绝非 file 来源。修复复用既有 Compose command resolver，并把 Gemini 改为宿主
+  Git-ignored key 文件到 worker-only file-backed secret；没有取消 worker 只读根文件系统，也没有把
+  key 放进容器环境。新增反例覆盖错误宿主 source、两类宿主输入名进入容器环境、非 worker 泄漏、
+  全部五个临时输入创建点的 `RuntimeError`/`KeyboardInterrupt` 清理；受控本机 model-only
+  create/inspect 已证明 worker mount 的
+  `Source` 精确等于本轮 fake key 文件、目标为固定只读路径，其他服务没有该 mount，且全程不读取
+  secret 内容。聚焦 Compose/Gemini credential 契约为 159 passed；本地四门为 3268 passed /
+  195 skipped / 5 个预期 socket-block warnings、security 1254 passed / 79 skipped / 2128 deselected /
+  同 5 warnings、Ruff 通过、mypy 156 个源码文件通过；冻结依赖导出 80 个包，严格 `pip-audit` 无已知
+  漏洞。以上仍只是离线 `tests`/本机容器结构证据，不是 Gemini 网络、测试环境、部署或用户验收。
 
 - **RI3 PR 3A 文档候选基于最新 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`**：
   PR #30/#31 的 GitHub 状态均为 merged，当前分支只修改 11 份规划/ADR 文档，`src/`、`tests/`、
@@ -392,11 +408,11 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   MODEL trace 与 fallback/retry service 仍未实现。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0，也
   没有模型质量、test-env、部署、canary 或用户验收证据。
 
-- **PR 3B 完整 Compose/model mount audit 尚未在本机取得**：当前 Colima daemon 可用，但 Docker
-  credential helper 缺失，且用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器。
-  因此本机没有完成 base+model merged containers 的 worker-only mount 实证。PR #31 的 GitHub 隔离
-  runner 执行 Compose smoke 和隔离 PostgreSQL integration，但这仍只是一次性的 `tests` 证据，
-  不能声称本机或测试企业的 Web/OAuth 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke
+- **PR 3B 的完整 base+model workflow 尚未在本机实跑**：受控 model-only create/inspect 已取得
+  worker-only mount 实证，但用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器，因此没有
+  在本机启动整套 base+model 服务。PR #34 修复 head 的 GitHub 隔离 runner 仍需重新执行完整
+  Compose smoke 和 PostgreSQL integration。即使远端通过，也仍只是一次性的 `tests` 证据，不能声称
+  本机或测试企业的 Web/OAuth/Gemini 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke
   会请求本机 Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider
   或其他真实外部业务接口。
 - **M7 PR 1–8 离线范围已验收并归档，但证据上限仍是 `tests`**：当时本机未能使用 Docker

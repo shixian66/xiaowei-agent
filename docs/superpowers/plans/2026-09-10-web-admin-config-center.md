@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在飞书、模型和 StarRocks 配置契约稳定后，提供一个只有 admin 可用的最小 Web 配置中心，支持 draft、测试连接、显式发布、版本 readback、审计和回滚，永不保存或回显明文 secret；Gemini key 只由宿主 `.env` 管理，Admin 只显示安全状态。
+**Goal:** 在飞书、模型和 StarRocks 配置契约稳定后，提供一个只有 admin 可用的最小 Web 配置中心，支持 draft、测试连接、显式发布、版本 readback、审计和回滚，永不保存或回显明文 secret；Gemini key 只由宿主 Git-ignored key 文件管理，Admin 只显示安全状态。
 
 **Architecture:** PostgreSQL 保存不可变配置版本、active pointer、测试请求/摘要和审计；secret 仍是
-容器只读文件；其中 Gemini 的 `GEMINI_API_KEY` 只从宿主 `.env` 经显式命令
-`docker compose --env-file .env` 进入 Compose environment-backed secret，再以固定路径只挂给 task worker。它不进入
+容器只读文件；其中 Gemini key 只从宿主 Git-ignored 文件进入 file-backed Compose secret，再以
+固定路径只挂给 task worker。可选的 `GEMINI_API_KEY_FILE` 只引用宿主路径；它不进入
 PostgreSQL 配置版本，也不能由 Admin 创建、
 更新、查看或回滚。Web 只是受 CSRF 保护的薄 API/静态页面，业务规则位于
 `application/configuration.py`。该 application service 只写测试请求，永不 import/调用 Gateway。
@@ -39,14 +39,13 @@ Gemini secret 仍只挂现有 task-worker；configuration-test worker、Web 和�
 ## 非目标
 
 - 不做复杂 RBAC、审批流、无停机热更新、插件市场或通用配置 DSL。
-- 不在 UI 输入、保存或显示 secret 明文和真实文件路径；不宣称能版本化或回滚宿主 `.env` 中的
-  `GEMINI_API_KEY`。
+- 不在 UI 输入、保存或显示 secret 明文和真实文件路径；不宣称能版本化或回滚宿主 key 文件。
 - 不用 Admin 权限解锁 E1、任意 SQL、跨租户查看或 provider 自动选择。
 
 ## ADR
 
 新增 `docs/adr/ADR-016-versioned-admin-configuration.md`，固定逻辑 target/credential registry、配置与
-secret 真源、Gemini `.env` 例外、由 task-worker 执行的固定无数据 Gemini probe、不可变版本、测试
+secret 真源、Gemini 宿主 key 文件例外、由 task-worker 执行的固定无数据 Gemini probe、不可变版本、测试
 请求绑定、持久限流、CAS 发布/回滚、受控重启 readback、worker 启动代次绑定、独立 Admin 权限和
 StarRocks 正常任务链。
 ADR 还必须显式修订 M7/`ARCHITECTURE.md`“只有 task-worker 装配完整
@@ -69,7 +68,8 @@ ADR 还必须显式修订 M7/`ARCHITECTURE.md`“只有 task-worker 装配完整
 ## 进入条件
 
 - 飞书、模型和 StarRocks 的字段、默认值、逻辑 credential/target reference、超时和开关已分别由
-  ADR 固定；Gemini provider/model/API/超时不由 Admin 自由配置，key 的唯一来源固定为宿主 `.env`。
+  ADR 固定；Gemini provider/model/API/超时不由 Admin 自由配置，key 的唯一来源固定为宿主
+  Git-ignored key 文件。
 - RI1、RI3、RI4 的离线安全测试均已合并；RI2/RI4 的真实证据是否完成必须在 handoff 中如实记录。
 - 从当时最新 `main` 创建 `claude/web-admin-config` 并重新记录 SHA/status。
 - 用户批准“发布后受控重启才生效”的最小方案；本阶段不做无停机热更新。
@@ -529,8 +529,8 @@ loaded；disabled/missing/failed 也必须写成**最新 current generation** �
 关闭。Gemini 另加反例：只有 task worker 挂载固定 secret，其他服务没有该 mount；
 readback 只能反映 configured/loaded/tested，不能包含 key、文件路径或可逆摘要。
 同时断言 `.env.example` 与 `_FIELD_TO_ENV` 精确同键，逻辑 registry 配置只给安全空值/默认值。
-Here `.env.example` contains only actual application `XIAOWEI_*` settings and
-explicitly excludes host-side `GEMINI_API_KEY`. Model-enabled merged Compose must keep
+Here `.env.example` contains only actual application `XIAOWEI_*` settings and explicitly
+excludes host-only `GEMINI_API_KEY` and `GEMINI_API_KEY_FILE`. Model-enabled merged Compose must keep
 worker's `postgres_password` plus `gemini_api_key`, leave every other service's
 secret list unchanged, keep `XIAOWEI_GEMINI_ENABLED` only in the worker service
 environment rather than the shared application anchor, and pass the RI3 Docker Compose
@@ -540,8 +540,8 @@ environment rather than the shared application anchor, and pass the RI3 Docker C
 
 飞书/StarRocks 固定为：最小数据库/bootstrap 环境变量 → PostgreSQL active config 中的逻辑名 →
 启动时只读 target/credential registries → 预挂载 secret file。Admin 数据永远不能解析为任意
-host/port/path。Gemini 单独固定为：宿主 `.env` 的 `GEMINI_API_KEY` → Compose 顶层
-environment-backed secret → task worker `/run/secrets/gemini_api_key`；Admin active version 只能控制
+host/port/path。Gemini 单独固定为：宿主 Git-ignored key 文件 → Compose 顶层
+file-backed secret → task worker `/run/secrets/gemini_api_key`；Admin active version 只能控制
 固定模型能力是否启用，不能改变 key 来源、provider、model、API version 或 endpoint。
 RI5 起有效激活条件固定为“Compose bootstrap/model override 已启用 **且** Admin active model version
 为 enabled”；任一为 false，用户任务都不调用模型。bootstrap 已挂 key 但 active version 关闭时，
@@ -580,7 +580,7 @@ git diff origin/main...HEAD --check
 
 - 只有独立 `manage_configuration` 权限可访问 Admin；该权限不扩大运维执行权。
 - 三类配置均有严格 DTO、测试绑定、显式发布、restart-required、进程 readback 和审计；可版本化的
-  非敏感配置与逻辑引用支持 CAS 回滚。宿主 `.env` 中的 Gemini key 明确不在版本/回滚范围内。
+  非敏感配置与逻辑引用支持 CAS 回滚。宿主 Gemini key 文件明确不在版本/回滚范围内。
 - PostgreSQL、API、UI、日志和测试均不保存或回显 secret 明文和真实路径。
 - StarRocks DTO 不含 host/port/path；只选择部署者闭集 registry 中的逻辑 target/credential 名。
 - Gemini connection test 只由持 key 的 task-worker 执行固定无用户数据 probe；独立候选 worker、Web

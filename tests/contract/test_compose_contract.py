@@ -1,5 +1,6 @@
 """Dockerfile 与 Compose 的静态安全、装配和 override 契约。"""
 
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
+from scripts.compose_smoke import _default_runner, _resolve_compose_command
 
 from xiaowei_agent import interfaces as interfaces_module
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
@@ -86,19 +88,25 @@ def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
                 "secrets": ["postgres_password", "gemini_api_key"],
             }
         },
-        "secrets": {"gemini_api_key": {"environment": "GEMINI_API_KEY"}},
+        "secrets": {
+            "gemini_api_key": {
+                "file": "${GEMINI_API_KEY_FILE:-./.secrets/gemini_api_key}"
+            }
+        },
     }
 
 
 def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
-    command = shutil.which("docker-compose")
-    assert command is not None
-    fake = "AIza" + "rendered-fake-value" * 2
+    docker = shutil.which("docker")
+    assert docker is not None
+    command = _resolve_compose_command(docker=docker, runner=_default_runner)
+    key_file = _ROOT / ".secrets" / "rendered-gemini-key-does-not-exist"
     environment = dict(os.environ)
-    environment["GEMINI_API_KEY"] = fake
+    environment.pop("GEMINI_API_KEY", None)
+    environment["GEMINI_API_KEY_FILE"] = str(key_file)
     result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
         [
-            command,
+            *command,
             "-f",
             str(_ROOT / "docker-compose.yml"),
             "-f",
@@ -113,8 +121,10 @@ def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_moun
         capture_output=True,
         text=True,
     )
-    assert fake not in result.stdout
-    rendered = __import__("json").loads(result.stdout)
+    rendered = json.loads(result.stdout)
+    secret = rendered["secrets"]["gemini_api_key"]
+    assert secret["file"] == str(key_file)
+    assert "environment" not in secret
     services = rendered["services"]
     assert services["worker"]["environment"]["XIAOWEI_GEMINI_ENABLED"] == "true"
     assert {item["source"] for item in services["worker"]["secrets"]} == {
@@ -128,6 +138,13 @@ def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_moun
         assert "gemini_api_key" not in {
             item["source"] for item in service.get("secrets", ())
         }
+    assert all(
+        not any(
+            item.startswith(("GEMINI_API_KEY=", "GEMINI_API_KEY_FILE="))
+            for item in service.get("environment", ())
+        )
+        for service in services.values()
+    )
 
 
 def test_local_environment_exists_in_the_registered_target_directory() -> None:

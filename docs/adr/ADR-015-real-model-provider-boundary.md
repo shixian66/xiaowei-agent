@@ -268,22 +268,32 @@ projection 的聚合事务，也不新增进度状态机。
 
 ### D7 Key 只通过 Compose secret 进入 worker
 
-The Git-ignored host `.env` is the only plaintext source for `GEMINI_API_KEY`.
-Compose defines `gemini_api_key: {environment: GEMINI_API_KEY}` only in the model
-override and grants it only to `worker`, where it is mounted at
+The Git-ignored host file `.secrets/gemini_api_key` is the default plaintext source.
+Compose defines `gemini_api_key` as a file-backed secret only in the model override and
+grants it only to `worker`, where it is mounted at
 `/run/secrets/gemini_api_key`. The merged worker list must retain
 `postgres_password`; Web, API, Feishu, migrate and PostgreSQL keep their existing
 secret lists. `XIAOWEI_GEMINI_ENABLED=true` is declared only under
 `services.worker.environment`, never in the shared `x-app-environment` anchor or another
 service.
 
-`GEMINI_API_KEY` is host-side Compose input, not a Settings key and never appears in
-`.env.example`; that file remains exactly aligned with `_FIELD_TO_ENV`. README/runbook
-documents the host-only entry. The supported path requires Docker Compose 2.24.4 or newer
+`GEMINI_API_KEY_FILE` is an optional host-side Compose path reference, not a Settings key
+or container environment value. It defaults to `./.secrets/gemini_api_key`; `.env` may
+override only that path, never carry the plaintext key. Neither `GEMINI_API_KEY` nor
+`GEMINI_API_KEY_FILE` appears in `.env.example`, which remains exactly aligned with
+`_FIELD_TO_ENV`. README/runbook documents the host-only file. The supported path requires
+Docker Compose 2.24.4 or newer
 (the project support floor shared with RI6's `!override` deployment path) and Linux
 containers. Version and rendered-config checks are necessary but insufficient:
-a split-fake environment secret must pass a functional mount preflight without printing
-its value. `docker stack deploy` is not supported for environment-sourced secrets.
+a split-fake file secret must pass a functional mount preflight without printing its
+value. `docker stack deploy` is outside this contract.
+
+Environment-backed Compose secrets are explicitly rejected for this read-only worker.
+Actual container creation proved that the merged config can advertise the secret while
+the created worker has no corresponding mount; attempting to start it fails because
+`file` is the sole supported secret source for a read-only service. Removing
+`read_only: true` or injecting the key into the container environment would weaken an
+existing security boundary, so the secret source changed instead.
 
 adapter 复用现有 `interfaces.secret_file.read_secret_file()`；RI3 不重构飞书、StarRocks、PostgreSQL
 的凭证读取。若现有 reader 的 owner/mode/中间目录 symlink hardening 需要加强，应由对应真实接入阶段
@@ -345,7 +355,7 @@ RI6 的生产模型调用。
   can be requested again.
 - 单 worker 下长模型调用会降低吞吐，但没有真实容量证据前不引入并发 worker 平台；
 - Web 首版有连续上下文，飞书需等待 RI2 真实事件语义；
-- `.env` key 没有数据库版本和一键回滚，关闭方式是移除 model override 并重建 worker；
+- 宿主 key 文件没有数据库版本和一键回滚，关闭方式是移除 model override 并重建 worker；
 - Gemini preview 模型和 SDK 仍可能演进，升级必须重新做 schema、timeout、usage 和数据边界测试。
 
 ## 备选方案与否决理由
@@ -359,6 +369,8 @@ RI6 的生产模型调用。
 - **仅在内存保存模型结果**：worker 恢复会改变已接受意图或终态展示；否决。
 - **现在同时支持飞书上下文**：真实 reply/thread 契约尚未由 RI2 验证；延期。
 - **一次重构所有凭证 reader**：属于独立安全 hardening，不是 Gemini 接入的必要条件；延期。
+- **宿主 `.env` 明文 key 转 Compose environment secret**：渲染配置会显示授权，但只读 worker
+  无法获得实际 mount；取消只读或改为容器环境变量都会扩大泄漏面，因此否决。
 
 ## 回滚
 
@@ -371,6 +383,7 @@ RI6 的生产模型调用。
 以下任一变化必须修订本 ADR，而不是只改环境变量：
 
 - 增加供应商、模型、endpoint、API 形态或工具调用；
+- 改变宿主 key 明文来源、Compose secret 类型、容器目标路径或 worker-only 授权范围；
 - 扩大出站字段、任一字符/UTF-8/最终序列化字节上限、历史容量或支持新诊断 capability；
 - 让模型影响 plan、target、SQL、approval、tool 或 next_steps；
 - 修改调用次数、阶段 timeout、fallback 或持久化语义；

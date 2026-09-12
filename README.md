@@ -20,8 +20,9 @@
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host
-> `GEMINI_API_KEY` stays outside Settings and `.env.example` and is exposed only as a
-> worker-only Compose secret when the explicit model override is used.
+> Gemini key stays outside Settings and `.env.example`; it lives in a Git-ignored host
+> file and is exposed only as a worker-only Compose secret when the explicit model
+> override is used.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -274,6 +275,11 @@ Compose 启动 Web 前要准备三个已被 Git 忽略的本地文件：
 `.secrets/` 保持 `0700`，三个文件写完后保持 `0444`。App secret 只能写入文件，不能放进环境变量、
 命令行、日志或已跟踪的 Compose 文件；请使用不会回显、不会进入 shell 历史的本地方式写入。
 
+启用 Gemini model override 时，再准备 `.secrets/gemini_api_key`，同样保持 `0444`。这是默认且唯一
+包含 key 明文的宿主文件；不要把 key 写进 `.env`。如必须使用其他受限路径，可在宿主 `.env` 中只写
+`GEMINI_API_KEY_FILE=/absolute/path/to/key-file`，该变量只是 Compose 的宿主文件引用，不会进入
+Settings 或容器环境。模型名、endpoint、timeout 等仍是代码固定值，不需要填写。
+
 基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，应把下面这种 override 存在已忽略的
 `.secrets/docker-compose.feishu-local.yml`，再替换本机的 App ID 与 HTTPS SSO origin；不要把真实值提交：
 
@@ -365,15 +371,16 @@ python -m scripts.compose_smoke
 ```
 
 脚本要求 Docker Compose 2.24.4 或更新版本。RI3 PR 3B 在同一 workflow 的末段临时叠加
-`docker-compose.model.yml`，使用内存中的拆分 fake host environment secret，只通过 Docker
+`docker-compose.model.yml`，创建一次性的拆分 fake key 文件，只通过 Docker
 inspect 的 label/environment/mount 元数据证明 worker 获得固定只读 mount、所有已创建的
 非 worker 容器都没有该 mount；脚本不打开或输出 secret 文件。基础 Compose 仍默认关闭模型。
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
-下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入三个 fake 输入和一个不含 secret 值的
-JSON Compose override；override 只把本次 secret/config 引用指向该私有目录，不读取或覆盖上文供
-人工启动使用的三个固定文件。清理时先原子隔离该目录，再核对目录与四个已知文件的 inode，且不递归
+下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入四个 fake 输入和一个不含 secret 值的
+JSON Compose override；宿主 `GEMINI_API_KEY_FILE` 只指向其中的 fake key 文件，override 只把其余
+secret/config 引用指向该私有目录，不读取或覆盖上文供人工启动使用的固定文件。清理时先原子隔离该
+目录，再核对目录与五个已知文件的 inode，且不递归
 删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地
 `HTTPConnection` 请求一次受信 Host 的 `/oauth/feishu/start`，核对 302、官方 Location、一次性
