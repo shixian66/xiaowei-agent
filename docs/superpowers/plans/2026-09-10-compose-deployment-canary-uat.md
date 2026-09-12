@@ -5,7 +5,9 @@
 **Goal:** 用 Docker Compose 把已通过前序门的精确制品部署到正式主机，完成回滚演练、小范围 canary 和产品用户验收，并严格分开各级证据。
 
 **Architecture:** 继续一个镜像、多进程 Compose：PostgreSQL、migrate、内部 API、task worker、Web、
-飞书 listener、channel worker。基础 Compose 保持 `127.0.0.1:8080`；只有 production override 发布
+飞书 listener、channel worker。若启用 Gemini，固定 provider/model/API 的 adapter 和
+`GEMINI_API_KEY` secret 只存在于 task worker；其他服务不获得 key。基础 Compose 保持
+`127.0.0.1:8080`；只有 production override 发布
 `0.0.0.0:8080:8080`，使宿主 IP/端口网络可达。项目不部署 TLS/Ingress，OAuth/session 仍只允许
 已有 HTTPS SSO Host/Origin。镜像 digest、配置版本和进程 readback 共同证明运行的是哪个版本。
 
@@ -18,6 +20,8 @@
 本计划不授权部署。正式主机、变更窗口、canary 用户、验收人和回滚负责人都必须由项目负责人
 明确。旧小维与 2.0 机器人不得同时运行；不新增 Kubernetes、Ingress、TLS 容器或云部署平台。
 直接 HTTP IP 只提供网络到达能力，不能完成 OAuth 或使用受保护 session。
+RI3 首版先按现有一个 Compose `worker` 容器验证。是否增加 worker 必须基于真实排队、provider 限流和
+数据库领取证据另行决定；RI6 不在现场临时扩副本后把它写成已验证架构。
 
 ---
 
@@ -43,7 +47,9 @@
 - 前序所有计划已由用户批准并按独立 PR 合并；四条项目基线命令在部署候选精确 SHA 上通过。
 - 飞书和 StarRocks 至少具有 `test-env verified`；模型若启用也必须有独立 test-env 证据。该证据只
   允许进入 RI6，不自动授权生产网络调用；未验证或未逐项获批的 provider/目标必须保持关闭。
-- Admin active config、secret references 和目标进程 loaded readback 在测试环境一致。
+- Admin active config、允许版本化的 secret references 和目标进程 loaded readback 在测试环境一致；
+  Gemini key 由宿主 `.env` 单独管理，只要求 task-worker 的 configured/loaded/test readback 一致，
+  不要求也不允许 Admin 回显或回滚 key。
 - 项目负责人指定正式主机、网络边界、Compose project name、数据备份责任人、部署窗口、canary 用户/群、观察窗口、UAT 验收人和旧小维恢复方式；并按 ADR-007 H 层逐项批准本次要启用的
   provider/只读目标、逻辑凭证、身份范围、数据处置和现场 GO。也允许先部署但保持全部 provider 关闭。
 - 项目负责人已经单独勾选 ADR-007 的 H 层生产只读授权面变化；未勾选时不得建立新的生产只读
@@ -55,6 +61,7 @@
 **Files:**
 
 - Inspect only: `docker-compose.yml`（不得修改其 Web loopback 发布）
+- Inspect only: `docker-compose.model.yml`（RI3 已提供；Gemini 唯一启用 override）
 - Create: `docker-compose.production.yml`
 - Modify: `tests/contract/test_compose_contract.py`
 - Modify: `tests/contract/test_compose_smoke_script.py`
@@ -71,7 +78,11 @@
 - base `docker-compose.yml` 的 Web 仍精确为 `127.0.0.1:8080:8080`；production override 才发布
   `0.0.0.0:8080:8080`，并通过 Compose 支持的显式列表替换语义覆盖 base `ports`，不得把两条发布
   规则合并保留；渲染结果必须只有一条 Web 宿主发布。内部 API 默认仍只绑定 loopback 或 Compose network；
-- secret 只读挂载，容器 `read_only`、drop capabilities、no-new-privileges 保持；
+- secret 只读挂载，容器 `read_only`、drop capabilities、no-new-privileges 保持；Gemini secret
+  精确只挂载给 task worker，`XIAOWEI_GEMINI_ENABLED` 也只在 worker 自己的 environment 中出现；
+  其他服务的渲染配置中不得出现该 secret 或开关；
+- production override 本身不复制模型配置；只有本次 Gemini 生产 GO 已签认时，所有部署命令才额外
+  叠加既有 `docker-compose.model.yml`。契约分别渲染“模型关闭”和“三文件模型开启”两种组合；
 - provider feature flag 分别可关闭；
 - migration 是独立一次性服务，其他服务等待其成功；
 - PostgreSQL volume 名称固定在 Compose project scope，禁止广泛删除。
@@ -114,12 +125,12 @@ git commit -m "chore(deploy): add immutable compose production profile"
 
 - [ ] **Step 2: 写部署 runbook**
 
-顺序固定：只读检查 → 备份/恢复点 → 拉取不可变镜像 → `docker compose config` → 停旧小维 → migration → 启动 2.0 → 健康/readback → 烟测。任何一步失败都进入回滚，不边修边部署。
+顺序固定：只读检查 → 备份/恢复点 → 拉取不可变镜像 → `docker compose config` → 停旧小维 → migration → 启动 2.0 → 健康/readback → 烟测。runbook 必须把模型关闭的 base+production 与模型开启的 base+production+model 两套命令完整列开，不能靠操作者临时记得追加 override。任何一步失败都进入回滚，不边修边部署。
 
 - [ ] **Step 3: 写 canary/UAT 清单**
 
 - canary 只开放给负责人指定的小范围用户/群；
-- 观察 OAuth 成功率、事件重复、任务失败、渠道 dead letter、模型 fallback/成本、StarRocks timeout/权限漂移、进程重启和配置 readback；
+- 观察 OAuth 成功率、事件重复、任务失败、渠道 dead letter、模型 fallback/延迟/usage、StarRocks timeout/权限漂移、进程重启和配置 readback；
 - UAT 由产品用户验证登录、提交、查看、飞书卡片、只读结果、失败提示、Admin 发布/readback/回滚；
 - 不测试 Dinky、E1、Alertmanager 写入或其他非目标。
 
@@ -153,7 +164,7 @@ git commit -m "docs(deploy): add compose rollout and acceptance gates"
 
 - [ ] **Step 3: 停旧小维并部署 2.0**
 
-按 runbook 先证明旧 listener 已停，再启动 2.0。使用 production override 和不可变镜像 digest；migration 成功后才启动长期服务。
+按 runbook 先证明旧 listener 已停，再启动 2.0。使用 production override 和不可变镜像 digest；migration 成功后才启动长期服务。下面第一组保持 Gemini 关闭：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.production.yml config
@@ -163,13 +174,37 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml --profile 
 docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 ```
 
+只有本次 Gemini 生产网络调用已单独 GO 且 `.env`/readback 前置齐备时，必须从 `config` 到 `ps` 全程
+显式使用 `--env-file .env` 和三文件组合，不能依赖工作目录隐式发现 `.env`，也不能只在 `up` 时
+临时追加。禁止运行或留存会打印解析环境（可能包含 key）的 `config --environment`：
+
+```bash
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml config
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml pull
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml up -d migrate
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml --profile m7-channels up -d
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml ps
+```
+
 - [ ] **Step 4: 健康与 readback**
 
-核对所有进程健康、实际 image digest、policy revision、active config version 与 loaded readback。此时最多标记 `deployed SHA`，还不是 `canary`/`user-accepted`。
+核对所有进程健康、实际 image digest、policy revision、active config version 与 loaded readback。模型
+启用时还要保存最终 Compose 文件集合包含 `docker-compose.model.yml` 的非秘密证据，并证明只有
+task-worker 有 mount。同时证明只有一个 `worker` 容器，并且 readback 对应该启动代。此时最多标记
+`deployed SHA`，还不是 `canary`/`user-accepted`。
 
 - [ ] **Step 5: 回滚演练**
 
-在 canary 前执行一次受控回滚：停止 2.0 渠道进程、切回上一配置/镜像、确认 readback，并在 2.0 完全断连后恢复旧小维。数据库不做普通 downgrade；应用版本必须兼容已升级 schema。演练后再按同一 runbook恢复候选版本。
+在 canary 前执行一次受控回滚：停止 2.0 渠道进程、切回上一配置/镜像、确认 readback，并在 2.0 完全
+断连后恢复旧小维。必须把两种动作分开演练：
+
+1. **回滚镜像/非秘密配置但继续启用 Gemini**：从 `config` 到 `ps/readback` 仍使用
+   base+production+model 三文件组合，不能意外卸掉已获批能力；
+2. **紧急关闭 Gemini**：只使用 base+production，并 `--force-recreate worker`，证明新容器已无
+   Gemini mount、readback 为 disabled；不能只改环境变量或仍叠 model override。
+
+数据库不做普通 downgrade；应用版本必须兼容已升级 schema。演练后按目标状态对应的完整文件组合
+恢复候选版本。
 
 ### Task 4：canary
 
@@ -195,7 +230,13 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 
 - [ ] **Step 3: 运行验收场景并观察**
 
-执行登录、飞书消息、只读任务、1–2 分钟 StarRocks 查询、模型 fallback 和 Admin readback。观察完整窗口内的错误率、重复事件、dead letter、超时、成本和进程稳定性。
+Run login, Feishu messaging, read-only tasks, Gemini advisory/fallback and Admin safe
+readback. Run a 1-2 minute StarRocks case only when RI4's exact deployed SHA has already
+delivered and verified its proposed 180/190/195/200-second layers; those values are not
+facts of the current pre-RI4 source. Observe model 60/180-second stages and the exact
+RI4 contract actually deployed, plus error rate, duplicates, dead letters,
+queue/end-to-end latency, usage and process stability. Capacity shortfall stops
+expansion; it does not authorize live timeout edits or an unreviewed worker scale-out.
 
 - [ ] **Step 4: go/no-go**
 
@@ -244,6 +285,21 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml config
 git diff origin/main...HEAD --check
 ```
 
+上面的命令验证模型关闭组合；Gemini 获生产 GO 时，还必须在现场 `.env` 已安全就绪后对同一条命令
+显式追加 `--env-file .env -f docker-compose.model.yml` 并记录脱敏结果。继续启用模型的版本回滚也
+使用该三文件组合；
+只有紧急关闭模型才切回两文件，并强制重建 worker 后验证 mount/readback。PR 6A 的离线契约测试用
+拆分构造的 fake key 渲染三文件组合，不读取真实 key。
+Before any model-enabled render/start, verify Docker Compose is at least 2.24.4 (the
+project support floor required by this plan's `!override` path) and use
+Linux containers. The version floor and merged-config check are necessary but
+insufficient: a split-fake environment secret must pass a functional mount preflight
+without printing its value. The merged config must show worker with both
+`postgres_password` and `gemini_api_key`, every other service with its prior secret list,
+`XIAOWEI_GEMINI_ENABLED=true` only under worker (never the shared application anchor),
+no `GEMINI_API_KEY` container environment, and no secret value in rendered output.
+`docker stack deploy` is not an accepted substitute.
+
 真实部署命令只在负责人现场 GO 后执行，不能由计划批准自动触发。
 
 ## 退出标准
@@ -260,4 +316,7 @@ git diff origin/main...HEAD --check
 
 ## 回滚
 
-停止 2.0 渠道服务，关闭对应 provider 开关，切回上一 active config 和上一不可变镜像 digest，受控重建并核对 readback；确认 2.0 listener 断连后才恢复旧小维。若只是一类 provider 故障，优先关闭该类开关，保留其他已验证功能。
+停止 2.0 渠道服务，切回上一 active config 和上一不可变镜像 digest，受控重建并核对 readback；确认
+2.0 listener 断连后才恢复旧小维。模型继续启用的版本回滚使用三文件组合；模型紧急关闭使用两文件
+组合强制重建 worker，并确认 mount 消失/readback disabled。若只是一类 provider 故障，优先关闭该类
+开关，保留其他已验证功能。
