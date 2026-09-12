@@ -6,10 +6,10 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 的 `claude/ri3-pr3a-docs` 分支执行 RI3 PR 3A 文档收口；`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 的 `claude/ri3-pr3b-gemini-adapter` 分支执行 RI3 PR 3B 离线实现；`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-12（Asia/Shanghai） |
-| 阶段 | **RI1 默认关闭的离线实现与合并前审查补修已通过 PR #31 交付；RI3 ADR-015 与 V7 详细计划已经复审并于 2026-09-12 获“开始 RI3”离线开工授权，当前只执行 PR 3A 文档收口。RI3 尚无源码、依赖、真实 secret、网络调用、部署、canary 或用户验收证据。ADR-007 H 层生产只读授权仍未单独签认并保持关闭。** |
-| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
+| 阶段 | **RI3 PR 3A 文档基线已交付；当前 PR 3B 只离线落地严格模型 DTO/两个窄 port、固定 Gemini SDK adapter、默认关闭 Settings 与 worker-only Compose secret。Runtime 还不调用模型，也没有持久模型 artifact、MODEL trace stage、真实 secret/provider 网络调用、部署、canary 或用户验收证据。** |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
@@ -51,8 +51,9 @@
 | M6b 实现与合入 | 开发基线 `e8128c8c364e1e5ba560c916044dfae0409dd490`；PR [#17](https://github.com/shixian66/xiaowei-agent/pull/17) 的受审 head 为 `0162888ebe4fe415aabfa3318a02a0b26459501c`，以 squash commit `a5b60baa25eda7ec964b2b48f13f051bf926e3c4` 合入 `main`；合入后 CI run [`34078690572`](https://github.com/shixian66/xiaowei-agent/actions/runs/34078690572) 八项全绿 |
 | M7 状态 | **离线范围已验收并归档**。PR #20–#27 已合入最终代码/测试基线 `ba5ecfe5edffb408e20c4bb9cbf494bfbb035b82`；PR #28 以 `a5c88cbc285658f7f38355a9470bfdd725858ba5` 合入离线完成交接。归档见 [docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)，验收报告见 [docs/handoff/M7-acceptance-report.md](docs/handoff/M7-acceptance-report.md)。证据等级仍为 `tests`，真实渠道退出门未通过 |
 | RI1 离线交付 | 起点 `66864253e0c9c9a0c6ebda1eec3a25b8e06a8df2`；Task 1：`040daf7c7e22e278eef0496f3e69ee380077245c`、`b117493000895661f949ba14edf159512b4c9454`、`4db90a5982549837630c90388fe4fc89a7046cd4`；Task 2：`390720dfc6d9c16b6d49f9fa61288a4f2d592eca`、`36f010d0d9db40713952f50cbcb9662151a91833`；Task 3：`2fa0177ee33b6135015303344f791287f485280d`、`33fcbbc16d5a329877a6481d89d2e3cb64d6fa32`、`f1b03557dd62b4fbe070385529062330a39affb1`；跨任务审查补修：`5428cea403599e41414f7445644ffd0afcfb1013`；Task 4：`a85e9b9eae7f3f6ed3ac7d08e1f3595348235a50`、`3c53b4aa7254adc00c3473ee41354f67152bd4be`、`0f095774f32bd31cb0e78f0532b39abd08301a27`、`18a0c78a72696982be9d298b7c01e7ae1b46d4cc`、`e678c673cb1594fc97f9a14ce197b4b11c47163f`、`e1f1b45def5537d94d3503ef4d60b450af5266db`、`167af47352e42e025fce84753bc34160c1064944`；首个全分支受审与 CI head：`d4f48e8800a033bf01560d006c984cfbde514b5f`；提交前终审 head：`eb26975a1e07424d69b978f532da3c304d5f260d`；根因补修实现基线：`2d67b59e128c1c226fb062708edf10c9251a4b3e`。交付 PR：[#31](https://github.com/shixian66/xiaowei-agent/pull/31) |
-| RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7 已获批准。该行只记录规划批准，不是源码或运行证据 |
-| 下一步 | **完成 PR 3A 的纯文档验证并提交审核；PR 3A 未审查合入前不开始 PR 3B SDK/契约实现。首次 Gemini 网络调用仍需独立现场 GO。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7.1 已获批准。该行只记录规划批准，不是源码或运行证据 |
+| RI3 PR 3B 复审补修 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，证据 head `1f339c8f9c7611491143ee2ef052720e0fc55c08`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703470947`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703470947) 精确绑定该证据 head，八项全绿；仍等待独立合并前审查 |
+| 下一步 | **对 PR 3B 精确 SHA 做合并前审查；审查合入前不开始 PR 3C durable Runtime/MODEL trace。首次 Gemini 网络调用仍需独立现场 GO。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | M5 的 API、CLI、Worker、migration、同镜像 Compose、三能力 fake local stack、M6b 默认关闭的 target-bound StarRocks adapter，以及 RI1 默认关闭的真实 OAuth adapter/Web/Compose 装配均已通过 `main` 交付；RI1 未作真实调用。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -75,7 +76,8 @@
   审计精确 wheel，身份或元数据不匹配就停下复审。
   不建通用 provider registry，不启用 provider chat/session、tools、function calling、搜索、代码执行、
   文件或 MCP。意图与慢查询解释走两个窄 port。
-- **RI3 已批准的精简生命周期设计**：Gemini key 只由宿主 `.env` 经 Compose secret 挂给 task worker。
+- **RI3 已批准的精简生命周期设计**：Gemini key 只由固定宿主 Git-ignored 文件
+  `.secrets/gemini_api_key` 经 file-backed Compose secret 挂给 task worker；`.env` 不保存 key 或路径。
   意图 low/60 秒/最多两次 request，解释 high/180 秒/一次 request，分别限制 2048/4000 output tokens；
   RI3 adds no whole-task deadline and preserves the current StarRocks 25-second
   query-timeout upper bound/30-second read-only policy cap; future 180/190/195/200-second layers belong
@@ -92,7 +94,8 @@
   journal without Gateway replay. Trace gains a typed MODEL stage.
   Model text is raw-size-bounded before total `scrub_text()`, then reserialized and checked
   against the final cap; there is no redaction-failure branch. Parent history is explicit Web-only, ownership-checked, limited to 20 complete
-  tasks/64,000 characters/256 KiB UTF-8. Null-parent digest bytes stay frozen; non-null
+  tasks/64,000 characters, which itself guarantees at most 256,000 UTF-8 bytes
+  (less than 256 KiB). Null-parent digest bytes stay frozen; non-null
   parent enters semantic request and stored submission digests, not the scope digest.
   Slow-query projection derives exact names/order from
   `SLOW_QUERY_SURFACE.allowed_columns`, takes at most 20 rows and rejects a bad batch;
@@ -207,15 +210,16 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     正反例，并闭合超时层级、credential reader 公共 API 和容量风险口径。没有读取或保存真实 secret，
     也没有发起飞书网络调用。精确实现 SHA 见 §1；交付不解锁 RI2、H 层生产只读、部署、canary、用户
     验收或 M8。
-14. **RI3 Gemini 已进入顺序离线实施，当前只做 PR 3A**：项目负责人已批准 ADR-015/V7 计划并于
+14. **RI3 Gemini 已进入顺序离线实施，当前只做 PR 3B**：项目负责人已批准 ADR-015/V7.1 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
-    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、`.env` 到
-    worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
+    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
+    文件到 worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
     advisory、Web 显式父任务和逐列定型的 20 行 StarRocks 投影。计划由 9 PR/4 migration 收缩为
     5 PR/2 migration；不新增任务总 deadline、调用预约平台、统一终态表、进度状态机、全项目凭证
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
-    等 RI2 真实事件语义明确后再复用同一 assembler。PR 3A 只有文档收口；当前仍没有源码实现、
-    安装依赖、读取 key、真实调用、部署或归档。PR 3A 未审查合入前不开始 PR 3B，真实 Gemini 调用
+    等 RI2 真实事件语义明确后再复用同一 assembler。PR 3B 已离线实现固定字段 provider slots、
+    provider-neutral 错误/重试闭集、严格 usage 收窄、显式禁用 AFC 的真实 SDK seam、
+    默认关闭 LocalStack 与 worker-only Compose override/smoke；依赖锁定精确 wheel，但没有读取真实 key、真实调用、部署或归档。PR 3B 未审查合入前不开始 PR 3C，真实 Gemini 调用
     仍需 PR 3E 的独立现场 GO。
     Independent review V7 fixes the current-timeout fact, parent idempotency predicate,
     Settings versus host Compose env boundary, complete storage/protocol/suite/SDK/trace
@@ -287,6 +291,45 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 已验证
 
+- **RI3 PR 3B 独立复审问题已在实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`
+  沿完整调用链修复**：单字段 32 KiB 判断不仅四处数学不可达，沿同一路径还确认历史已由
+  64,000 字符限制在最多 256,000 UTF-8 字节（小于 256 KiB），所以删除重复假保护，保留字符边界、
+  UTF-8 合法性与真正独立可达的 512 KiB 完整序列化上限；usage 两个 SDK 字段分别允许省略或 null，
+  只有实际非 null 的负数/溢出拒绝。Python 3.11 实测表明单次取消并不会必然跳过 finally 中的 close；
+  真正缺口是重复取消会中断清理、close 自身 `CancelledError` 会遮蔽主异常，现以单一 tracked task、
+  共同 deadline、shield、取消后收口和主异常优先修复；自审又发现任意 close `BaseException` 原文可越过
+  拒绝边界，已归一为固定本地错误码。Gemini 宿主 key 固定为 `.secrets/gemini_api_key`，ambient
+  `GEMINI_API_KEY_FILE` 不能改变渲染结果；smoke 用最后一层私有 JSON override 注入自己的 fake 文件，
+  不读取宿主环境。与模型无关的 shared secret reader/StarRocks 行为及 245 行测试已从 PR diff 完整移除，
+  相对 `origin/main` 四个路径零差异。
+  新反例在旧实现得到 5 failed/1 passed；修复后相关 286 passed，另补 profile mutation、httpx 层级、
+  close-side cancellation/BaseException 与 hostile Compose env 边界。两个隔离源码变体均确认从临时路径
+  加载：删 UTF-8 合法性校验后 surrogate 用例转红，删 512 KiB 校验后 `+1` 用例转红。最终本地四门为
+  3268 passed / 195 skipped / 5 个预期 socket-block warnings、security 1255 passed / 79 skipped /
+  2129 deselected / 同 5 warnings、Ruff 通过、mypy 156 个源码文件通过。证据 head
+  `1f339c8f9c7611491143ee2ef052720e0fc55c08` 的 PR run
+  [`34703470947`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703470947) 已由 GitHub 回读确认
+  tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项 success。
+  以上仍只到 `tests`，没有读取真实 key、调用 Gemini、部署、canary 或用户验收。
+
+- **RI3 PR 3B 的 Compose secret 首轮失败此前已沿真实容器路径定位并按根因修复**：首轮 PR #34 CI 的
+  `tests`/`integration` 失败来自契约测试只查找旧版独立 `docker-compose`，没有复用 smoke 已有的
+  Compose v2/legacy 解析；`compose-smoke` 失败则不是测试环境偶发问题。实际 Compose create/start
+  证明 environment-backed secret 虽出现在渲染配置中，却不能为现有 `read_only` worker 建立 mount，
+  启动会拒绝非 file 来源。修复复用既有 Compose command resolver，并把 Gemini 改为宿主
+  Git-ignored key 文件到 worker-only file-backed secret；没有取消 worker 只读根文件系统，也没有把
+  key 放进容器环境。新增反例覆盖错误宿主 source、两类宿主输入名进入容器环境、非 worker 泄漏、
+  全部五个临时输入创建点的 `RuntimeError`/`KeyboardInterrupt` 清理；受控本机 model-only
+  create/inspect 已证明 worker mount 的
+  `Source` 精确等于本轮 fake key 文件、目标为固定只读路径，其他服务没有该 mount，且全程不读取
+  secret 内容。聚焦 Compose/Gemini credential 契约为 159 passed；本地四门为 3268 passed /
+  195 skipped / 5 个预期 socket-block warnings、security 1254 passed / 79 skipped / 2128 deselected /
+  同 5 warnings、Ruff 通过、mypy 156 个源码文件通过；冻结依赖导出 80 个包，严格 `pip-audit` 无已知
+  漏洞。根因修复实现提交为 `e7a529db927fd70be901e8b88df520e90d8c9b39`；PR #34 run
+  [`34698212114`](https://github.com/shixian66/xiaowei-agent/actions/runs/34698212114) 精确绑定该提交，
+  tests、integration、compose-smoke、security-gate、lint、types、deps-audit、secret-scan 八项均
+  success。以上仍只是离线 `tests`/本机容器结构证据，不是 Gemini 网络、测试环境、部署或用户验收。
+
 - **RI3 PR 3A 文档候选基于最新 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`**：
   PR #30/#31 的 GitHub 状态均为 merged，当前分支只修改 11 份规划/ADR 文档，`src/`、`tests/`、
   dependency、Compose 和脚本均未改动。聚焦文档/分层/Runner/Compose 契约为 211 passed；本地四门为
@@ -296,8 +339,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 - **RI3 规划基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1` 重新入职**：按
   `AGENTS.md` 顺序读取五份真源，并直接检查 Runtime、Worker、Runner、TaskStore、TaskView、
-  Compose 与 secret reader 的当前调用链。源码事实仍是只有规则解释器、无 Gemini dependency/
-  adapter/真实调用；PR 3A 只产生已批准的文档基线。Google 官方模型、structured-output 和 Python SDK 文档
+  Compose 与 secret reader 的当前调用链。该 PR 3A 审计时的源码事实仍是只有规则解释器、无 Gemini
+  dependency/adapter/真实调用；PR 3A 只产生已批准的文档基线。当前 PR 3B 已离线补齐 dependency/
+  adapter，但 Runtime 与真实调用仍为零。Google 官方模型、structured-output 和 Python SDK 文档
   支持使用成熟的异步 `models.generate_content`，因此精简稿不再使用 Interactions API；实际 wheel
   仍要求实现开始时再次审计并精确锁定。
 
@@ -384,17 +428,19 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **RI3 尚未实现或运行**：没有安装 `google-genai`，没有创建 migration/adapter/model DTO，未读取
-  `GEMINI_API_KEY`，未渲染 model Compose override，未调用 Google API，也没有模型质量、test-env、
-  部署、canary 或用户验收证据。ADR-015/计划中的命令与阈值都是未来验收要求，不是已通过结果。
+- **RI3 PR 3B 仅完成离线 SDK 边界**：已锁定 `google-genai` 并实现严格 model DTO、两个窄 port、
+  固定 Gemini adapter、SDK-compatible fixed slots、typed usage/result/profile、provider-neutral 错误闭集、
+  默认关闭装配与 model Compose override；durable Runtime、migration、artifact、
+  MODEL trace 与 fallback/retry service 仍未实现。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0，也
+  没有模型质量、test-env、部署、canary 或用户验收证据。
 
-- **RI1 新版 Compose smoke 未在本机启动容器**：`docker context show` 返回 `colima`，
-  `/opt/homebrew/bin/colima status` 以 exit 1 报告 daemon 未运行，`docker info` 也无法连接该
-  socket；因此没有在本机执行 `.venv/bin/python -m scripts.compose_smoke`。PR #31 的 GitHub 隔离
-  runner 执行 Compose smoke 和隔离 PostgreSQL integration，但这仍只是一次性的 `tests` 证据，
-  不能声称本机或测试企业的 Web/OAuth 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke
-  会请求本机 Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider
-  或其他真实外部业务接口。
+- **PR 3B 的完整 base+model workflow 尚未在本机实跑**：受控 model-only create/inspect 已取得
+  worker-only mount 实证，但用户已有容器占用 `127.0.0.1:8000`；本任务未停止或修改该容器，因此没有
+  在本机启动整套 base+model 服务。PR #34 的 GitHub 隔离 runner 已执行完整 Compose smoke 和
+  PostgreSQL integration，但这仍只是一次性的 `tests` 证据，不能声称本机或测试企业的
+  Web/OAuth/Gemini 已运行，更不能外推为部署、canary 或用户验收。加固后的 smoke 请求隔离 runner
+  Web 进程的 OAuth start 正反例，但不跟随 Location、不请求 callback、不调用 provider 或其他真实
+  外部业务接口。
 - **M7 PR 1–8 离线范围已验收并归档，但证据上限仍是 `tests`**：当时本机未能使用 Docker
   daemon，也未提供 PostgreSQL DSN，因此新增 M7 同库 integration 在本机受控 skip、Compose
   未在本机实跑。PR 与
@@ -410,8 +456,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   范围验收，不改变 readiness ladder。
 - 未连接任何真实运维目标或模型服务：StarRocks、Prometheus、资产系统与任何模型 API 均未连接；M5 只使用 GitHub runner 上一次性的隔离 PostgreSQL/Compose，**E1 调用恒为 0**。
 - ~~M2 只有契约与 fake~~：M3 已落地 `CapabilityResolver`、`PlanCompiler`、`StepAdmission`、`ToolPolicy`、`SQLGuard`、`ApprovalGate`、`DeterministicStepRunner`、`EvidenceBuilder`、Reflection 与 `XiaoweiRuntime`，**全部只用 fake/recording 数据**。
-- 当前开发机未提供 `PYTEST_POSTGRES_DSN`，且 Docker client 所指向的 Colima daemon 未运行，
-  因此本机资产 PostgreSQL integration 是受控 skip、RI1 Compose 未实跑；最终 PR #14 run
+- 当前开发机未提供 `PYTEST_POSTGRES_DSN`；Colima daemon 当前可用，但上述 credential helper 与
+  `127.0.0.1:8000` 冲突仍阻止本轮完整 PR 3B mount audit。本机资产 PostgreSQL integration 仍是
+  受控 skip；最终 PR #14 run
   `33975532006` 与 main run `33976421909` 只补得当时版本的 GitHub 隔离 runner 证据。单次 CI
   仍不能外推到 RI1 新版、其他 PostgreSQL/Docker/Compose 版本或长期运行。
 - 主 `main` checkout 的旧 M6a 同路径计划稿已在 PR 1 合入前移到临时目录备份；当前仍保留三份与

@@ -6,7 +6,7 @@
 
 **Architecture:** 继续一个镜像、多进程 Compose：PostgreSQL、migrate、内部 API、task worker、Web、
 飞书 listener、channel worker。若启用 Gemini，固定 provider/model/API 的 adapter 和
-`GEMINI_API_KEY` secret 只存在于 task worker；其他服务不获得 key。基础 Compose 保持
+file-backed `gemini_api_key` secret 只存在于 task worker；其他服务不获得 key。基础 Compose 保持
 `127.0.0.1:8080`；只有 production override 发布
 `0.0.0.0:8080:8080`，使宿主 IP/端口网络可达。项目不部署 TLS/Ingress，OAuth/session 仍只允许
 已有 HTTPS SSO Host/Origin。镜像 digest、配置版本和进程 readback 共同证明运行的是哪个版本。
@@ -48,7 +48,7 @@ RI3 首版先按现有一个 Compose `worker` 容器验证。是否增加 worker
 - 飞书和 StarRocks 至少具有 `test-env verified`；模型若启用也必须有独立 test-env 证据。该证据只
   允许进入 RI6，不自动授权生产网络调用；未验证或未逐项获批的 provider/目标必须保持关闭。
 - Admin active config、允许版本化的 secret references 和目标进程 loaded readback 在测试环境一致；
-  Gemini key 由宿主 `.env` 单独管理，只要求 task-worker 的 configured/loaded/test readback 一致，
+  Gemini key 由宿主 Git-ignored key 文件单独管理，只要求 task-worker 的 configured/loaded/test readback 一致，
   不要求也不允许 Admin 回显或回滚 key。
 - 项目负责人指定正式主机、网络边界、Compose project name、数据备份责任人、部署窗口、canary 用户/群、观察窗口、UAT 验收人和旧小维恢复方式；并按 ADR-007 H 层逐项批准本次要启用的
   provider/只读目标、逻辑凭证、身份范围、数据处置和现场 GO。也允许先部署但保持全部 provider 关闭。
@@ -174,16 +174,17 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml --profile 
 docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 ```
 
-只有本次 Gemini 生产网络调用已单独 GO 且 `.env`/readback 前置齐备时，必须从 `config` 到 `ps` 全程
-显式使用 `--env-file .env` 和三文件组合，不能依赖工作目录隐式发现 `.env`，也不能只在 `up` 时
-临时追加。禁止运行或留存会打印解析环境（可能包含 key）的 `config --environment`：
+只有本次 Gemini 生产网络调用已单独 GO 且宿主 key 文件/readback 前置齐备时，必须从 `config` 到
+`ps` 全程显式使用三文件组合，不能只在 `up` 时临时追加。若引用非默认 key 文件路径，还必须全程
+显式使用 `--env-file .env`，不能依赖工作目录隐式发现。禁止运行或留存会打印解析环境的
+`config --environment`：
 
 ```bash
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml config
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml pull
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml up -d migrate
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml --profile m7-channels up -d
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml ps
+docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml config
+docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml pull
+docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml up -d migrate
+docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml --profile m7-channels up -d
+docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.model.yml ps
 ```
 
 - [ ] **Step 4: 健康与 readback**
@@ -285,19 +286,21 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml config
 git diff origin/main...HEAD --check
 ```
 
-上面的命令验证模型关闭组合；Gemini 获生产 GO 时，还必须在现场 `.env` 已安全就绪后对同一条命令
-显式追加 `--env-file .env -f docker-compose.model.yml` 并记录脱敏结果。继续启用模型的版本回滚也
-使用该三文件组合；
+上面的命令验证模型关闭组合；Gemini 获生产 GO 时，还必须在现场 Git-ignored key 文件已安全就绪后
+对同一条命令显式追加 `-f docker-compose.model.yml` 并记录脱敏结果。系统不提供 `.env` 路径覆盖；
+部署者必须把 key 安全放入固定 `.secrets/gemini_api_key`。继续启用模型的版本
+回滚也使用该三文件组合；
 只有紧急关闭模型才切回两文件，并强制重建 worker 后验证 mount/readback。PR 6A 的离线契约测试用
-拆分构造的 fake key 渲染三文件组合，不读取真实 key。
+拆分构造的 fake key 文件渲染三文件组合，不读取真实 key。
 Before any model-enabled render/start, verify Docker Compose is at least 2.24.4 (the
 project support floor required by this plan's `!override` path) and use
 Linux containers. The version floor and merged-config check are necessary but
-insufficient: a split-fake environment secret must pass a functional mount preflight
+insufficient: a split-fake file secret must pass a functional mount preflight
 without printing its value. The merged config must show worker with both
 `postgres_password` and `gemini_api_key`, every other service with its prior secret list,
 `XIAOWEI_GEMINI_ENABLED=true` only under worker (never the shared application anchor),
-no `GEMINI_API_KEY` container environment, and no secret value in rendered output.
+no `GEMINI_API_KEY` or `GEMINI_API_KEY_FILE` container environment, and no secret value
+in rendered output.
 `docker stack deploy` is not an accepted substitute.
 
 真实部署命令只在负责人现场 GO 后执行，不能由计划批准自动触发。

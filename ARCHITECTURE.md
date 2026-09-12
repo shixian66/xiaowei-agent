@@ -123,8 +123,11 @@ RequestEnvelope
 
 Only the granted durable Runtime path may call `IntentModelPort`; the existing
 `IntentInterpreter` remains the deterministic fallback and does not own provider access.
-Model output passes strict schema and local semantic validation before becoming an
-insert-once `AcceptedIntentDraft`; it means only that this task accepted an untrusted
+Provider output passes strict schema and local semantic validation, then the port returns
+the accepted DTO together with trusted nullable `ModelUsage`; usage is the locked SDK's
+normalized metadata narrowed again to local bounds, not part of the model-generated schema.
+The draft may then become an insert-once
+`AcceptedIntentDraft`; it means only that this task accepted an untrusted
 draft, never that the model gained execution authority. 任务重试必须先读回并复用已接受草稿。若 provider 已收到请求但本地还没保存就崩溃，恢复后
 允许重复一次模型调用；模型无工具和执行副作用，因此 RI3 明确接受这一 at-least-once 取舍，不为此
 建设调用 reservation 平台。Resolver 仍须重新从当前注册能力、租户上下文、环境目录和确定性规则
@@ -238,12 +241,14 @@ RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
 Model context is bounded by field count, row count, Unicode character count and
 serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
 constants; RI3 does not enable provider caching or sessions. Variable evidence is
-projected separately. Typed builders apply raw per-field and aggregate limits
-before the total `redaction.scrub_text()` function; there is no redaction-exception
-branch. Model ports never receive `RequestEnvelope`. Current text and each history text
-field are capped at 8,192 characters/32 KiB UTF-8, and
-selected history at 20 complete tasks/64,000 characters/256 KiB UTF-8. After scrubbing,
-the complete typed request is serialized again and must fit 512 KiB; otherwise whole old
+projected separately. Typed builders apply raw per-field character/UTF-8-validity checks
+and aggregate character/count limits before the total `redaction.scrub_text()` function;
+there is no redaction-exception branch. Model ports never receive `RequestEnvelope`.
+The 8,192-character current/history field limit itself implies a 32 KiB UTF-8 ceiling;
+it is not duplicated as an unreachable second guard. The 64,000-character history limit
+likewise implies at most 256,000 UTF-8 bytes (less than 256 KiB), so there is no duplicate
+history-byte branch. After scrubbing, the complete typed request is serialized again and
+must fit the independent 512 KiB cap; otherwise whole old
 rounds are dropped or, if the current request alone cannot fit, the call is rejected.
 
 The StarRocks advisory projector derives names and order directly from
@@ -383,7 +388,11 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
-| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者只再增 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `ProviderIntentSlots` | 现有 intent allowlist 并集的 11 个 omitted-or-string 字段 | Developer API schema 不宣告 null；显式 null/未知字段都整体拒绝，本地语义校验仍以 intent-specific allowlist 为单一真源 |
+| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从锁定 SDK 已归一化的 prompt/candidates token count 构造；SDK 会把可强制转换的 integer-like raw 值（bool、整数形 float、数字字符串）转为 int，本地再做 non-negative signed-64-bit 边界；不保留 total/raw metadata，不进入 provider response schema |
+| `ModelPortError` | 闭集 `ModelErrorCode` | application 可消费的 provider-neutral 安全失败；intent 仅将 rate-limit、5xx server 与明确 transport error 列为可重试 |
+| `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
 | `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
@@ -468,6 +477,10 @@ an expired lease or stale fencing is rejected. Recovery reads accepted artifacts
 If the provider received a call before local save, only that unsaved model call may
 repeat under ADR-015's no-execution-side-effect at-least-once rule.
 Model call count, latency, usage and fallback enter the existing safe trace/audit path.
+PR 3B ports already return accepted DTO plus nullable bounded usage atomically, while the
+composition root exposes the same immutable invocation profile to the adapter and future
+application service; PR 3C therefore does not hardcode provider/model/revision or inspect
+the concrete adapter when persisting artifacts.
 The trace contract adds `PipelineStage.MODEL` plus typed `ModelCallObservation` (call
 kind, total elapsed milliseconds, request count, nullable input/output usage and a
 closed fallback code). Model-stage free-form detail remains empty. Prompt, response,
@@ -616,24 +629,27 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 Secrets are mounted only through fixed file references resolved by a trusted composition
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
 worker, listener and channel worker publish no host ports. Gemini plaintext originates
-only from host-side `.env` key `GEMINI_API_KEY`. The model override converts it to the
-top-level `gemini_api_key: {environment: GEMINI_API_KEY}` secret and appends that secret
-only to task worker while retaining its existing `postgres_password` mount. All other
+only from the Git-ignored host file `.secrets/gemini_api_key`. The model override defines
+a file-backed top-level `gemini_api_key` secret and appends that secret only to task
+worker while retaining its existing `postgres_password` mount. All other
 services keep their current secret lists. Worker sees a fixed
 `/run/secrets/gemini_api_key` path.
 The override declares `XIAOWEI_GEMINI_ENABLED=true` only under
 `services.worker.environment`; the shared `x-app-environment` anchor and all non-worker
 services remain free of both the flag and the Gemini secret.
 
-`GEMINI_API_KEY` is not a Settings/`_FIELD_TO_ENV` key and never appears in
-`.env.example`; the only application setting is default-false
+The host source path is fixed to `./.secrets/gemini_api_key`; an environment variable
+cannot replace it, so rendered Compose evidence is stable across ambient host settings.
+Neither `GEMINI_API_KEY_FILE` nor `GEMINI_API_KEY` is a Settings/`_FIELD_TO_ENV` key,
+container environment value or `.env.example` entry; the only
+application setting is default-false
 `XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits/secret path are versioned constants;
 RI3 fixes Developer API `v1beta` and canonical origin
 `https://generativelanguage.googleapis.com`.
 README/runbook alone explain host-side key setup. This path requires Docker
 Compose 2.24.4+ (the project support floor shared with RI6's `!override` deployment
 path) and Linux containers. The version floor and rendered-config check are
-necessary but insufficient: a split-fake environment secret must pass a functional mount
+necessary but insufficient: a split-fake file secret must pass a functional mount
 preflight without printing its value before model activation. This is not a
 `docker stack deploy` contract. The three channel processes remain in the `m7-channels`
 profile with their feature flags defaulting to false; no offline result proves activation.
@@ -641,7 +657,7 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-`.dockerignore` 必须排除 `.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
+`.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
 结果。
 

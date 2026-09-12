@@ -1,10 +1,16 @@
 """Dockerfile 与 Compose 的静态安全、装配和 override 契约。"""
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import pytest
 import yaml
+from scripts.compose_smoke import _default_runner, _resolve_compose_command
 
 from xiaowei_agent import interfaces as interfaces_module
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
@@ -65,6 +71,83 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
         assert services[name]["depends_on"] == {
             "migrate": {"condition": "service_completed_successfully"}
         }
+
+
+def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
+    base = _yaml("docker-compose.yml")
+    override = _yaml("docker-compose.model.yml")
+    assert "gemini_api_key" not in base["secrets"]
+    assert all(
+        "gemini_api_key" not in service.get("secrets", ())
+        for service in base["services"].values()
+    )
+    assert "XIAOWEI_GEMINI_ENABLED" not in base["x-app-environment"]
+    assert override == {
+        "services": {
+            "worker": {
+                "environment": {"XIAOWEI_GEMINI_ENABLED": "true"},
+                "secrets": ["postgres_password", "gemini_api_key"],
+            }
+        },
+        "secrets": {
+            "gemini_api_key": {
+                "file": "./.secrets/gemini_api_key"
+            }
+        },
+    }
+
+
+def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable; compose-smoke remains the no-skip gate")
+    command = _resolve_compose_command(docker=docker, runner=_default_runner)
+    environment = dict(os.environ)
+    environment.pop("GEMINI_API_KEY", None)
+    environment["GEMINI_API_KEY_FILE"] = str(
+        _ROOT / ".secrets" / "must-not-override-gemini-path"
+    )
+    result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
+        [
+            *command,
+            "-f",
+            str(_ROOT / "docker-compose.yml"),
+            "-f",
+            str(_ROOT / "docker-compose.model.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(result.stdout)
+    secret = rendered["secrets"]["gemini_api_key"]
+    assert secret["file"] == str(_ROOT / ".secrets" / "gemini_api_key")
+    assert "environment" not in secret
+    services = rendered["services"]
+    assert services["worker"]["environment"]["XIAOWEI_GEMINI_ENABLED"] == "true"
+    assert {item["source"] for item in services["worker"]["secrets"]} == {
+        "postgres_password",
+        "gemini_api_key",
+    }
+    for name, service in services.items():
+        if name == "worker":
+            continue
+        assert "XIAOWEI_GEMINI_ENABLED" not in service.get("environment", {})
+        assert "gemini_api_key" not in {
+            item["source"] for item in service.get("secrets", ())
+        }
+    assert all(
+        not any(
+            item.startswith(("GEMINI_API_KEY=", "GEMINI_API_KEY_FILE="))
+            for item in service.get("environment", ())
+        )
+        for service in services.values()
+    )
 
 
 def test_local_environment_exists_in_the_registered_target_directory() -> None:

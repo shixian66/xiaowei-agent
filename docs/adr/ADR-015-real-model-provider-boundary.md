@@ -1,6 +1,7 @@
 # ADR-015：RI3 Gemini 理解、诊断与上下文边界
 
-- 状态：Accepted（2026-09-12；仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
+- 状态：Accepted（2026-09-12；PR 3B 复审澄清独立 nullable usage、派生字段字节上限与固定宿主路径；
+  仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
 - 日期：2026-09-12
 - 适用阶段：RI3
 - 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)
@@ -47,15 +48,34 @@ metadata and `google/genai/py.typed` marker, and stop for plan re-review on any 
 
 模型边界只有：
 
-1. `IntentModelPort`：安全文本输入，输出严格 `IntentDraft`；
-2. `SlowQueryAdvisoryPort`：固定的慢查询样本输入，输出严格 `ModelAdvisory`。
+1. `IntentModelPort`：安全文本输入，输出 `IntentModelResult`（严格 `IntentDraft` + 同次可信
+   `ModelUsage`）；
+2. `SlowQueryAdvisoryPort`：固定的慢查询样本输入，输出 `AdvisoryModelResult`（严格
+   `ModelAdvisory` + 同次可信 `ModelUsage`）。
 
 两个端口都不接受自由 prompt 或 provider 配置。`SlowQueryAdvisoryPort` 只额外接受一个必填、仅限
 1–4,000 的 keyword-only `max_output_tokens` 控制值，用来承接 D4 的当前 plan budget；它不是模型
 内容，不能由用户、模型或环境变量提供。
 
-模型响应采用 `extra="forbid"`。出现未知字段、错类型、超长、非法枚举或解析失败时，整体拒绝，不能
-删除越权字段后继续使用。即使模型返回合法 `IntentDraft`，仍必须经过现有：
+`ModelUsage` 只接收锁定 SDK `usage_metadata` 的 nullable `prompt_token_count` 与
+`candidates_token_count`，分别映射为 input/output tokens；不保存 total 或原始 metadata。metadata
+整体缺失时两项均为 `None`；metadata 已出现时，两字段仍按 SDK 的独立 optional 语义处理，省略或
+显式 null 均映射为对应的 `None`，不能因另一项存在就丢弃合法回答。实际出现的非 null 值再按本地
+strict non-negative signed-64-bit 边界收窄，负数或溢出按 `INVALID_RESPONSE` 拒绝。
+`google-genai==2.23.0` 会在 adapter 收到对象前把可强制转换的
+integer-like raw 值（`bool`、整数形状 float、`"1"`/`"1.0"` 等数字字符串）归一为 `int`，本地不能
+声称恢复并拒绝这些原始类型；这项 raw-envelope 风险由锁版事实测试与
+供应商账户 usage/费用告警及现场 readback 兜底。usage 不进入 provider response schema，模型不能
+生成或修改它。
+
+composition root 将同一个不可变 `ModelInvocationProfile` 同时交给 adapter，并保留给 PR 3C 的
+application service。profile 固定 provider/model/origin/API version、prompt/schema revision、
+thinking、60/180 秒 stage budget 与 2048/4000 output ceiling；application 不反向 import adapter 常量，
+也不靠窥探 concrete adapter 生成 artifact metadata/digest。
+
+模型响应采用 `extra="forbid"`。固定 slots 字段在 provider schema 中只能省略或给 string，不宣告
+null；本地 `model_fields_set` 另拒绝实际出现的显式 null。出现未知字段、错类型、超长、非法枚举或
+解析失败时，整体拒绝，不能删除越权字段后继续使用。即使模型返回合法 `IntentDraft`，仍必须经过现有：
 
 The provider response schema does not let the model choose `IntentSource`; the adapter
 stamps accepted provider output as `MODEL`. Any output field that changes under the
@@ -73,14 +93,20 @@ IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner
 
 ### D3 出站数据使用两个固定白名单
 
-Typed builders enforce raw character and UTF-8 byte limits before calling the total
-`redaction.scrub_text()` function. After scrubbing, they reserialize the complete typed
-request and recheck the final byte cap. Oversize or invalid input prevents a model call;
+Typed builders enforce raw character limits and UTF-8 encodability before calling the
+total `redaction.scrub_text()` function. A valid Unicode code point occupies at most four
+UTF-8 bytes, so the 8,192-character field limit itself proves the stated 32 KiB per-field
+ceiling; this is a derived guarantee, not a second independently reachable rejection
+branch. The 64,000-character history limit similarly proves at most 256,000 UTF-8 bytes
+(less than 256 KiB), so a separate 256 KiB history check would also be unreachable. After
+scrubbing, builders reserialize the complete typed request and enforce the independently
+reachable 512 KiB final cap. Oversize or invalid input prevents a model call;
 there is no fictional redaction-exception branch.
 
 For the intent request, the current user text and each retained history text field are
-each capped at 8,192 characters and 32 KiB of UTF-8 before scrubbing. Selected history is
-capped at 20 complete parent tasks, 64,000 characters and 256 KiB of UTF-8. After all
+each capped at 8,192 characters, which implies at most 32 KiB of UTF-8 before scrubbing.
+Selected history is capped at 20 complete parent tasks and 64,000 characters, which
+implies at most 256,000 UTF-8 bytes (less than 256 KiB). After all
 retained strings have been scrubbed, the complete typed request is serialized again and
 must fit 512 KiB. Old history is omitted only as complete rounds; if the current request
 alone cannot satisfy its field limits or the final serialized cap, the provider call count
@@ -102,7 +128,7 @@ The projector belongs to `application/model_advisory.py`, because application ma
 the capability surface and Evidence contracts. `rendering/model_advisory.py` and
 `rendering/slow_query.py` consume only already-validated display data and must not import
 `xiaowei_agent.capabilities`; the existing rendering-layer allowlist remains unchanged.
-Per-field and aggregate character/UTF-8 limits are checked before redaction; an
+Per-field character/UTF-8-validity plus aggregate row/field/count limits are checked before redaction; an
 oversized advisory batch is rejected as a whole before any provider call. A later RI4
 live schema correction must update the surface, typed projector, digest revision and
 pairing tests together, and requires explicit outbound-data review under this ADR's
@@ -132,12 +158,25 @@ SDK 隐式重试必须关闭或纳入上述次数，不能与应用层重试叠�
 鉴权错误、限流耗尽和 provider 故障都回退：意图使用现有规则解释器，分析段省略；确定性查询和回答
 不因此失败。外层 `CancelledError`/SIGTERM 不属于 provider fallback：在 bounded close 后继续传播，
 不保存模型事实、不进入 Resolver/Planner，也不伪造任务终态，由既有 lease/stale recovery 接管。
+Client close runs as one separately tracked task: cancellation arriving during cleanup is
+remembered and propagated only after close completes or the close deadline cancels and
+settles that task. No detached close task may remain; a close-side `CancelledError` must
+not replace an already propagating provider/schema/cancellation error, and after a
+successful provider response it is normalized as a close failure rather than forged into
+an outer cancellation.
 The provider budget starts before fixed-secret read/client construction and includes all
 allowed requests, backoff, response validation and client close. Each SDK call receives
 only the remaining budget. Artifact lookup/save stays outside this timeout and keeps the
 existing persistence-failure semantics; a database failure must not be relabeled as a
 model fallback. Local cancellation discards late SDK results but cannot prove that the
 remote provider stopped processing.
+
+Application exposes a provider-neutral `ModelPortError` carrying only the closed local
+code. The exact intent retry set is `RATE_LIMITED` / `SERVER_ERROR` / `TRANSPORT_ERROR`:
+429 maps to rate limited, 5xx to server error, and only explicit non-timeout
+`httpx.TransportError` / `OSError` to transport error. 401/403, timeout, invalid response,
+local construction failure and other 4xx are not retryable. `httpx` is therefore a direct
+runtime dependency rather than a dev-only tool; no new resolved package is introduced.
 
 RI3 does not add a persistent 450-second whole-task deadline. Current source uses a
 25-second StarRocks query-timeout upper bound under a 30-second read-only policy maximum, and RI3
@@ -168,10 +207,11 @@ sequence remains deterministic.
 新增一次 migration，建立两张小表：
 
 1. `task_accepted_intents`：每个 task 最多一条，保存首次被本地复验接受的 model/rule `IntentDraft`、
-   `intent_input_digest`、来源和安全 metadata/result digest；进入 Resolver 前落库；
+   `intent_input_digest`、来源和安全 metadata/result digest，以及端口返回的 nullable usage；进入
+   Resolver 前落库；
 2. `task_model_advisories`：每个 task 最多一条，保存被本地复验接受的 advisory、
-   `advisory_input_digest` 和安全 metadata/result digest；终态提交前落库，TaskView 只在任务已终态时
-   展示。
+   `advisory_input_digest`、安全 metadata/result digest 和端口返回的 nullable usage；终态提交前
+   落库，TaskView 只在任务已终态时展示。
 The durable worker never renders before this call. Advisory input binds the typed
 projection plus capability/surface/evidence/profile/schema revisions and sampled flag,
 not `RenderPayload` or display prose. TaskView/`handle()` render once after terminal
@@ -216,9 +256,10 @@ artifact is hidden if recovery later ends failed/rejected/indeterminate or detec
 - parent 必须存在且已经终态；
 - actor、tenant、environment、channel 与 Web binding owner 必须一致；重新登录不会仅因 session ID
   变化而丢失上下文；
-- 最多追溯 20 个完整父任务；每个历史文本字段最多 8,192 字符/32 KiB UTF-8；
+- 最多追溯 20 个完整父任务；每个历史文本字段最多 8,192 字符，由此保证不超过 32 KiB UTF-8；
 - 只读取持久化用户文本和确定性渲染结果/已保存 advisory；
-- 脱敏前选中的历史总量最多 64,000 字符/256 KiB UTF-8；超量按确定性规则从旧到新整轮丢弃；
+- 脱敏前选中的历史总量最多 64,000 字符，由此保证最多 256,000 UTF-8 字节（小于 256 KiB）；
+  超量按确定性规则从旧到新整轮丢弃；
 - 脱敏后连同当前请求和固定 schema 重新序列化，完整 typed request 最多 512 KiB；
 - 循环、越权、损坏或非终态 parent 一律拒绝，不退回“猜最近消息”。
 
@@ -242,22 +283,33 @@ projection 的聚合事务，也不新增进度状态机。
 
 ### D7 Key 只通过 Compose secret 进入 worker
 
-The Git-ignored host `.env` is the only plaintext source for `GEMINI_API_KEY`.
-Compose defines `gemini_api_key: {environment: GEMINI_API_KEY}` only in the model
-override and grants it only to `worker`, where it is mounted at
+The Git-ignored host file `.secrets/gemini_api_key` is the default plaintext source.
+Compose defines `gemini_api_key` as a file-backed secret only in the model override and
+grants it only to `worker`, where it is mounted at
 `/run/secrets/gemini_api_key`. The merged worker list must retain
 `postgres_password`; Web, API, Feishu, migrate and PostgreSQL keep their existing
 secret lists. `XIAOWEI_GEMINI_ENABLED=true` is declared only under
 `services.worker.environment`, never in the shared `x-app-environment` anchor or another
 service.
 
-`GEMINI_API_KEY` is host-side Compose input, not a Settings key and never appears in
-`.env.example`; that file remains exactly aligned with `_FIELD_TO_ENV`. README/runbook
-documents the host-only entry. The supported path requires Docker Compose 2.24.4 or newer
+The host source is the fixed repository-relative path `./.secrets/gemini_api_key`.
+There is no host path environment-variable override: this keeps rendered Compose evidence
+independent of ambient shell state and matches the existing PostgreSQL/Feishu secret
+shape. Neither `GEMINI_API_KEY` nor `GEMINI_API_KEY_FILE` is a Settings key, container
+environment value or `.env.example` entry; `.env.example` remains exactly aligned with
+`_FIELD_TO_ENV`. README/runbook documents the host-only file. The supported path requires
+Docker Compose 2.24.4 or newer
 (the project support floor shared with RI6's `!override` deployment path) and Linux
 containers. Version and rendered-config checks are necessary but insufficient:
-a split-fake environment secret must pass a functional mount preflight without printing
-its value. `docker stack deploy` is not supported for environment-sourced secrets.
+a split-fake file secret must pass a functional mount preflight without printing its
+value. `docker stack deploy` is outside this contract.
+
+Environment-backed Compose secrets are explicitly rejected for this read-only worker.
+Actual container creation proved that the merged config can advertise the secret while
+the created worker has no corresponding mount; attempting to start it fails because
+`file` is the sole supported secret source for a read-only service. Removing
+`read_only: true` or injecting the key into the container environment would weaken an
+existing security boundary, so the secret source changed instead.
 
 adapter 复用现有 `interfaces.secret_file.read_secret_file()`；RI3 不重构飞书、StarRocks、PostgreSQL
 的凭证读取。若现有 reader 的 owner/mode/中间目录 symlink hardening 需要加强，应由对应真实接入阶段
@@ -319,7 +371,7 @@ RI6 的生产模型调用。
   can be requested again.
 - 单 worker 下长模型调用会降低吞吐，但没有真实容量证据前不引入并发 worker 平台；
 - Web 首版有连续上下文，飞书需等待 RI2 真实事件语义；
-- `.env` key 没有数据库版本和一键回滚，关闭方式是移除 model override 并重建 worker；
+- 宿主 key 文件没有数据库版本和一键回滚，关闭方式是移除 model override 并重建 worker；
 - Gemini preview 模型和 SDK 仍可能演进，升级必须重新做 schema、timeout、usage 和数据边界测试。
 
 ## 备选方案与否决理由
@@ -333,6 +385,8 @@ RI6 的生产模型调用。
 - **仅在内存保存模型结果**：worker 恢复会改变已接受意图或终态展示；否决。
 - **现在同时支持飞书上下文**：真实 reply/thread 契约尚未由 RI2 验证；延期。
 - **一次重构所有凭证 reader**：属于独立安全 hardening，不是 Gemini 接入的必要条件；延期。
+- **宿主 `.env` 明文 key 转 Compose environment secret**：渲染配置会显示授权，但只读 worker
+  无法获得实际 mount；取消只读或改为容器环境变量都会扩大泄漏面，因此否决。
 
 ## 回滚
 
@@ -345,6 +399,7 @@ RI6 的生产模型调用。
 以下任一变化必须修订本 ADR，而不是只改环境变量：
 
 - 增加供应商、模型、endpoint、API 形态或工具调用；
+- 改变宿主 key 明文来源、Compose secret 类型、容器目标路径或 worker-only 授权范围；
 - 扩大出站字段、任一字符/UTF-8/最终序列化字节上限、历史容量或支持新诊断 capability；
 - 让模型影响 plan、target、SQL、approval、tool 或 next_steps；
 - 修改调用次数、阶段 timeout、fallback 或持久化语义；

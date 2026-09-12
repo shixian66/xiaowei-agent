@@ -20,6 +20,8 @@ M3 补齐了五个此前只有形状、没有实现的 Protocol 锚点：``Capab
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
+    from tests.fakes.model import ScriptedModelAdapter
+
     from xiaowei_agent.application.capability_runtime import (
         CapabilityAssessor,
         CapabilityBindingRegistry,
@@ -32,6 +34,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         TaskProjectionPort,
     )
     from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
+    from xiaowei_agent.application.model_ports import (
+        IntentModelPort,
+        SlowQueryAdvisoryPort,
+    )
     from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
     from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
     from xiaowei_agent.capabilities.resolver import (
@@ -51,6 +57,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         FeishuSdkMembershipAdapter,
         FeishuSdkMessageAdapter,
     )
+    from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
@@ -151,6 +158,17 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """真实读取 Runtime 必须满足渠道只读投影的最小端口。"""
         anchored: TaskProjectionPort = runtime
         _ = anchored
+
+    def _model_port_anchors(
+        gemini: "GeminiModelAdapter",
+        scripted: "ScriptedModelAdapter",
+    ) -> None:
+        """两个模型 port 的真实/fake 实现都必须保持窄签名。"""
+        real_intent: IntentModelPort = gemini
+        real_advisory: SlowQueryAdvisoryPort = gemini
+        fake_intent: IntentModelPort = scripted
+        fake_advisory: SlowQueryAdvisoryPort = scripted
+        _ = (real_intent, real_advisory, fake_intent, fake_advisory)
 
     def _postgres_port_anchors(
         plans: "PostgresPlanStore", ledger: "PostgresEvidenceLedger"

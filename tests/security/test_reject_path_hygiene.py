@@ -78,6 +78,13 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "PromqlGuardRejection.RECOMPILE_MISMATCH",
         "PromqlGuardRejection.SURFACE_MISSING",
         "PromqlGuardRejection.UNKNOWN_TEMPLATE",
+        # --- ModelErrorCode 枚举成员：只携代码定义的闭集本地错误码 ---
+        # provider 异常原文仍不允许加入本白名单。
+        "ModelErrorCode.AMBIENT_PROXY",
+        "ModelErrorCode.CREDENTIAL_UNAVAILABLE",
+        "ModelErrorCode.INVALID_RESPONSE",
+        "ModelErrorCode.TIMEOUT",
+        "ModelErrorCode.UNAVAILABLE",
         # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
         # 被拒的环境标识来自调用方，不进消息；由
         # test_rejection_message_never_echoes_the_environment_id 反向承重。

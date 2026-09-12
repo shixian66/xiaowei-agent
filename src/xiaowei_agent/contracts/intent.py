@@ -1,4 +1,4 @@
-"""模型产出的意图草案。
+"""模型产出的意图草案与当前意图槽位闭集。
 
 **这是全项目不可信度最高的 DTO**：字段集刻意只有五项且 ``extra="forbid"``，
 模型无法通过多写字段来影响 capability、目标、SQL、权限或审批（ARCHITECTURE
@@ -6,10 +6,49 @@
 通道。
 """
 
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final
+
 from pydantic import Field
 
 from xiaowei_agent.contracts.base import Contract, FrozenStrMap, StrictStr
 from xiaowei_agent.contracts.enums import IntentSource
+
+SLOW_QUERY_INTENT: Final[str] = "starrocks.slow_query.diagnose"
+PROMETHEUS_ALERT_INTENT: Final[str] = "prometheus.alert.evidence"
+ASSET_INVENTORY_INTENT: Final[str] = "asset.inventory.lookup"
+UNKNOWN_INTENT: Final[str] = "unknown"
+
+INTENT_SLOT_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        SLOW_QUERY_INTENT: frozenset(
+            {
+                "environment_id",
+                "database",
+                "user_name",
+                "query_id",
+                "window_minutes",
+            }
+        ),
+        PROMETHEUS_ALERT_INTENT: frozenset(
+            {"alert_name", "instance", "fingerprint", "window_minutes"}
+        ),
+        ASSET_INVENTORY_INTENT: frozenset({"asset_id", "hostname", "ip"}),
+        UNKNOWN_INTENT: frozenset(),
+    }
+)
+"""规则与模型 provider 响应共同使用的 intent-specific 槽位真源。"""
+
+INTENT_MISSING_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        SLOW_QUERY_INTENT: frozenset({"environment_id"}),
+        PROMETHEUS_ALERT_INTENT: frozenset({"alert_name", "instance"}),
+        ASSET_INVENTORY_INTENT: frozenset({"asset_selector"}),
+        UNKNOWN_INTENT: frozenset(),
+    }
+)
+"""模型可以声明缺失的 intent-specific 输入名闭集。"""
 
 
 class IntentDraft(Contract):

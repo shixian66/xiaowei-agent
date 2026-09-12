@@ -147,6 +147,11 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.interfaces",
         "xiaowei_agent.log",
     },
+    "interfaces/gemini_model.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/local_stack.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.capabilities",

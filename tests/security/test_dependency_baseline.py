@@ -1,11 +1,13 @@
 """生产依赖面与类型检查严格度是同一条边界。
 
 M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn，M6b 引入
-PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``。
+PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``，RI3 PR 3B
+引入官方模型 SDK ``google-genai``，并将 SDK transport 泄漏类型 ``httpx`` 提升为
+生产直接依赖以做精确错误分类。
 两件事必须被机制钉住，而不是靠计划里的一句话：
 
-1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
-   httpx / PyYAML；仍不引入 Redis、队列、Worker 框架、模型 SDK 或 LangGraph。
+1. **依赖面**。M5 当时只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
+   PyYAML；当前仍不引入 Redis、队列、Worker 框架或 LangGraph。
    用集合相等表达比用禁用清单强：禁用清单挡不住清单外的新依赖。
 
 2. **``asyncpg`` 不得被 ``src/`` 直接 import**。T0 实测：``asyncpg`` 0.30.0 **不带
@@ -21,6 +23,7 @@ from importlib.metadata import metadata
 from importlib.util import find_spec
 from pathlib import Path
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.security
@@ -41,6 +44,8 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "uvicorn",
         "pymysql",
         "lark-oapi",
+        "google-genai",
+        "httpx",
     }
 )
 
@@ -53,7 +58,6 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
         "mypy",
         "pip-audit",
         "hatchling",
-        "httpx",
         "pyyaml",
         "types-pymysql",
     }
@@ -155,6 +159,45 @@ def test_lark_oapi_is_exactly_pinned_and_still_lacks_py_typed() -> None:
     spec = find_spec("lark_oapi")
     assert spec is not None and spec.origin is not None
     assert not (Path(spec.origin).parent / "py.typed").is_file()
+
+
+def test_google_genai_exact_wheel_license_and_typing_marker_are_locked() -> None:
+    project = _pyproject()["project"]
+    assert isinstance(project, dict)
+    declared = project["dependencies"]
+    assert isinstance(declared, list)
+    assert "google-genai==2.23.0" in declared
+    assert "httpx>=0.28,<1" in declared
+
+    lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = lock["package"]
+    assert isinstance(packages, list)
+    matches = [item for item in packages if item.get("name") == "google-genai"]
+    assert len(matches) == 1
+    package = matches[0]
+    assert package["version"] == "2.23.0"
+    assert {
+        (item["url"].rsplit("/", 1)[-1], item["hash"])
+        for item in package["wheels"]
+    } == {
+        (
+            "google_genai-2.23.0-py3-none-any.whl",
+            "sha256:1e63211d44d188b8069c2b354d92b9bde25c1e821513fdbe1948b7c0d9f6b922",
+        )
+    }
+
+    assert metadata("google-genai")["License-Expression"] == "Apache-2.0"
+    spec = find_spec("google.genai")
+    assert spec is not None and spec.origin is not None
+    assert (Path(spec.origin).parent / "py.typed").is_file()
+
+
+def test_httpx_error_hierarchy_matches_the_adapter_classification() -> None:
+    """上游异常层级漂移时必须重新审核 Gemini 的闭集错误映射。"""
+    assert issubclass(httpx.TimeoutException, httpx.TransportError)
+    assert issubclass(httpx.ConnectError, httpx.TransportError)
+    assert issubclass(httpx.RemoteProtocolError, httpx.TransportError)
+    assert not issubclass(httpx.HTTPStatusError, httpx.TransportError)
 
 
 def test_lark_oapi_wheel_digest_is_locked_to_the_reviewed_artifact() -> None:

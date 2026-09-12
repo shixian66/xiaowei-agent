@@ -43,6 +43,19 @@ _OAUTH_STATE_COOKIE_PAIR_RE = re.compile(
 )
 _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
+_MINIMUM_COMPOSE_VERSION = (2, 24, 4)
+_GEMINI_HOST_SECRET_FILE_ENV = "GEMINI_API_" + "KEY_FILE"
+_GEMINI_SECRET_DESTINATION = "/run/secrets/gemini_api_" + "key"
+_POSTGRES_SECRET_DESTINATION = "/run/secrets/postgres_" + "password"
+_MODEL_AUDIT_SERVICES = (
+    "postgres",
+    "migrate",
+    "api",
+    "worker",
+    "feishu-listener",
+    "channel-worker",
+    "web-app",
+)
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _NON_SUCCESS_CODES = {
     "failed": "SMOKE_TASK_FAILED",
@@ -86,7 +99,9 @@ class CommandRunner(Protocol):
 
 
 def _default_runner(
-    argv: Sequence[str], *, timeout: float
+    argv: Sequence[str],
+    *,
+    timeout: float,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 -- argv[0] 由 shutil.which 解析为绝对路径
         list(argv),
@@ -112,10 +127,17 @@ def _resolve_compose_command(
         candidates.append((standalone,))
     for command in candidates:
         try:
-            runner((*command, "version"), timeout=15.0)
+            result = runner((*command, "version", "--short"), timeout=15.0)
         except (OSError, subprocess.SubprocessError):
             continue
-        return command
+        match = re.fullmatch(
+            r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", result.stdout.strip()
+        )
+        if (
+            match is not None
+            and tuple(map(int, match.groups())) >= _MINIMUM_COMPOSE_VERSION
+        ):
+            return command
     raise SmokeError("SMOKE_COMPOSE_NOT_FOUND") from None
 
 
@@ -167,6 +189,7 @@ class _SmokeInputs:
     sensitive_values: tuple[str, ...]
     owned_inputs: tuple[_OwnedInput, ...]
     override_path: Path
+    model_secret_source: Path
 
 
 def _cleanup_unreturned_input(
@@ -367,7 +390,7 @@ def _create_private_input_namespace(root: Path) -> _PrivateInputNamespace:
 
 
 def _input_override_document(
-    *, postgres: Path, feishu: Path, identity: Path
+    *, postgres: Path, feishu: Path, gemini: Path, identity: Path
 ) -> str:
     identity_mount = {
         "type": "bind",
@@ -382,6 +405,7 @@ def _input_override_document(
                 "secrets": {
                     "postgres_password": {"file": str(postgres)},
                     "feishu_app_secret": {"file": str(feishu)},
+                    "gemini_api_key": {"file": str(gemini)},
                 },
                 "services": {
                     "feishu-listener": {"volumes": [identity_mount]},
@@ -482,6 +506,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
     postgres_secret = namespace.path / "postgres_password"
     feishu_secret = namespace.path / "feishu_app_secret"
+    gemini_secret = namespace.path / "gemini_api_key"
     identity = namespace.path / "feishu-identities.json"
     override = namespace.path / "compose-smoke-inputs.json"
     created: list[_OwnedInput] = []
@@ -490,6 +515,9 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         created.append(postgres_owned)
         feishu_value, feishu_owned = _create_secret(feishu_secret)
         created.append(feishu_owned)
+        gemini_value = "AIza" + secrets.token_urlsafe(32)
+        gemini_owned = _create_input(gemini_secret, f"{gemini_value}\n")
+        created.append(gemini_owned)
         identity_owned = _create_input(
             identity,
             json.dumps(
@@ -509,6 +537,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
             _input_override_document(
                 postgres=postgres_secret,
                 feishu=feishu_secret,
+                gemini=gemini_secret,
                 identity=identity,
             ),
         )
@@ -521,9 +550,10 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         raise
     return _SmokeInputs(
         namespace=namespace,
-        sensitive_values=(postgres_value, feishu_value),
+        sensitive_values=(postgres_value, feishu_value, gemini_value),
         owned_inputs=tuple(created),
         override_path=override,
+        model_secret_source=gemini_secret,
     )
 
 
@@ -535,8 +565,10 @@ class ComposeSession:
     files: tuple[Path, ...]
     compose_command: tuple[str, ...]
     sensitive_values: tuple[str, ...] = ()
+    model_secret_source: Path | None = None
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
+    _resource_owner: ComposeSession | None = None
 
     def argv(self, *arguments: str) -> list[str]:
         command = list(self.compose_command)
@@ -557,8 +589,10 @@ class ComposeSession:
             files=files,
             compose_command=self.compose_command,
             sensitive_values=self.sensitive_values,
+            model_secret_source=self.model_secret_source,
             up_started=self.up_started,
             failure_code=failure_code,
+            _resource_owner=self._resource_owner or self,
         )
 
     def run(
@@ -567,8 +601,10 @@ class ComposeSession:
         timeout: float = _COMMAND_TIMEOUT,
         failure_code: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        if "up" in arguments:
+        if "up" in arguments or "create" in arguments:
             self.up_started = True
+            if self._resource_owner is not None:
+                self._resource_owner.up_started = True
         return self.run_docker(
             self.argv(*arguments),
             timeout=timeout,
@@ -619,6 +655,7 @@ def run_smoke(
         ),
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
+        model_secret_source=smoke_inputs.model_secret_source,
     )
     primary_error: BaseException | None = None
     try:
@@ -766,6 +803,115 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
     if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
         raise SmokeError("SMOKE_INSPECT_PROTOCOL_ERROR")
     return set(values)
+
+
+def _require_model_secret_boundary(session: ComposeSession) -> None:
+    """叠加模型 override 后只检查容器元数据，绝不打开 secret 文件。"""
+    if session.model_secret_source is None or not session.model_secret_source.is_absolute():
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+    expected_source = os.path.normcase(os.path.normpath(session.model_secret_source))
+    model_files = (*session.files, _ROOT / "docker-compose.model.yml")
+    if session.files and session.files[-1].name == "compose-smoke-inputs.json":
+        model_files = (
+            *session.files[:-1],
+            _ROOT / "docker-compose.model.yml",
+            session.files[-1],
+        )
+    model = session.derive(
+        files=model_files,
+        failure_code="SMOKE_MODEL_SECRET_COMMAND_FAILED",
+    )
+    model.run(
+        "create",
+        "--force-recreate",
+        *_MODEL_AUDIT_SERVICES,
+        timeout=60.0,
+    )
+    result = model.run("ps", "--all", "--quiet", timeout=15.0)
+    container_ids = tuple(line for line in result.stdout.splitlines() if line)
+    if not container_ids or len(set(container_ids)) != len(container_ids):
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+
+    service_counts: dict[str, int] = {}
+    for container_id in container_ids:
+        inspected = model.run_docker(
+            (
+                model.docker,
+                "inspect",
+                "--format",
+                "[{{json .Config.Labels}},{{json .Config.Env}},{{json .Mounts}}]",
+                container_id,
+            ),
+            timeout=15.0,
+            failure_code="SMOKE_MODEL_SECRET_INSPECT_FAILED",
+        )
+        try:
+            labels, environment, mounts = json.loads(inspected.stdout)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR") from None
+        if (
+            not isinstance(labels, dict)
+            or not isinstance(environment, list)
+            or not isinstance(mounts, list)
+            or not all(isinstance(item, str) for item in environment)
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR")
+        service = labels.get("com.docker.compose.service")
+        if not isinstance(service, str) or not service:
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR")
+        if service not in _MODEL_AUDIT_SERVICES:
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        service_counts[service] = service_counts.get(service, 0) + 1
+        if any(
+            item.startswith(
+                ("GEMINI_API_" + "KEY=", f"{_GEMINI_HOST_SECRET_FILE_ENV}=")
+            )
+            for item in environment
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        if any(
+            value in item
+            for value in model.sensitive_values
+            for item in environment
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        secret_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict)
+            and mount.get("Destination") == _GEMINI_SECRET_DESTINATION
+        ]
+        postgres_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict)
+            and mount.get("Destination") == _POSTGRES_SECRET_DESTINATION
+        ]
+        enabled = [
+            item
+            for item in environment
+            if item.startswith("XIAOWEI_GEMINI_ENABLED=")
+        ]
+        if service == "worker":
+            source = secret_mounts[0].get("Source") if secret_mounts else None
+            if (
+                enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
+                or len(secret_mounts) != 1
+                or not isinstance(source, str)
+                or os.path.normcase(os.path.normpath(source)) != expected_source
+                or secret_mounts[0].get("RW") is not False
+                or len(postgres_mounts) != 1
+                or postgres_mounts[0].get("RW") is not False
+            ):
+                raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        elif enabled or secret_mounts:
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+    if set(service_counts) != set(_MODEL_AUDIT_SERVICES) or any(
+        count != 1
+        for service, count in service_counts.items()
+        if service != "worker"
+    ):
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
 
 
 def _require_web_container_boundary(session: ComposeSession) -> None:
@@ -1392,6 +1538,7 @@ def _full_workflow(session: ComposeSession) -> None:
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)
     _require_logs_clean(session, sensitive_canary, oauth_state)
+    _require_model_secret_boundary(session)
 
 
 def main() -> int:

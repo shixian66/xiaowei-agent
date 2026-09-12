@@ -247,6 +247,7 @@ class Settings(BaseModel):
     web_bind_port: int = Field(default=8080, gt=0, le=65_535)
     web_oauth_state_ttl_seconds: int = Field(default=300, gt=0, le=600)
     web_session_ttl_seconds: int = Field(default=3600, gt=0, le=86_400)
+    gemini_enabled: bool = False
 
     @model_validator(mode="after")
     def _worker_timings_are_consistent(self) -> "Settings":
@@ -545,6 +546,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "web_bind_port": "XIAOWEI_WEB_BIND_PORT",
     "web_oauth_state_ttl_seconds": "XIAOWEI_WEB_OAUTH_STATE_TTL_SECONDS",
     "web_session_ttl_seconds": "XIAOWEI_WEB_SESSION_TTL_SECONDS",
+    "gemini_enabled": "XIAOWEI_GEMINI_ENABLED",
 }
 
 

@@ -32,6 +32,72 @@ class RecordingRunner:
         return subprocess.CompletedProcess(call, 0, stdout=output, stderr="")
 
 
+class ModelAuditRunner(RecordingRunner):
+    def __init__(
+        self,
+        services: tuple[str, ...],
+        *,
+        failure_at: str | None = None,
+        gemini_source: str = "/workspace/fixtures/fake-gemini-key",
+        worker_environment: tuple[str, ...] = ("XIAOWEI_GEMINI_ENABLED=true",),
+    ) -> None:
+        super().__init__()
+        self.failure_at = failure_at
+        self.gemini_source = gemini_source
+        self.worker_environment = worker_environment
+        self.service_by_container = {
+            f"model-container-{index}": service
+            for index, service in enumerate(services)
+        }
+
+    def __call__(
+        self, argv: Any, *, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(argv, timeout=timeout)
+        call = tuple(argv)
+        if self.failure_at == "create" and "create" in call:
+            raise subprocess.CalledProcessError(1, argv)
+        if call[-3:] == ("ps", "--all", "--quiet"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="".join(f"{container}\n" for container in self.service_by_container),
+                stderr="",
+            )
+        if call[:2] == ("/usr/bin/docker", "inspect"):
+            if self.failure_at == "inspect":
+                raise subprocess.CalledProcessError(1, argv)
+            service = self.service_by_container[call[-1]]
+            mounts: list[dict[str, object]] = []
+            environment: list[str] = []
+            if service == "worker":
+                mounts = [
+                    {
+                        "Source": self.gemini_source,
+                        "Destination": "/run/secrets/gemini_api_key",
+                        "RW": False,
+                    },
+                    {
+                        "Destination": "/run/secrets/postgres_password",
+                        "RW": False,
+                    },
+                ]
+                environment = list(self.worker_environment)
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    [
+                        {"com.docker.compose.service": service},
+                        environment,
+                        mounts,
+                    ]
+                ),
+                stderr="",
+            )
+        return result
+
+
 class CleanupBoundaryError(BaseException):
     """代表不会被 ``except Exception`` 捕获的清理失败。"""
 
@@ -117,6 +183,67 @@ def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> N
             "feishu-identities.json",
         )
     )
+
+
+def test_create_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> None:
+    class FailingRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            if "create" in argv:
+                raise subprocess.CalledProcessError(1, argv)
+            return result
+
+    runner = FailingRunner()
+
+    def workflow(session: ComposeSession) -> None:
+        session.run("create", "--force-recreate", "worker")
+
+    with pytest.raises(SmokeError, match="SMOKE_COMPOSE_COMMAND_FAILED"):
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker", "compose"),
+            runner=runner,
+            workflow=workflow,
+            input_root=tmp_path / ".secrets",
+        )
+
+    down = [call for call in runner.calls if "down" in call]
+    assert len(down) == 1
+    assert "--volumes" in down[0]
+    assert "--remove-orphans" in down[0]
+
+
+@pytest.mark.parametrize("failure_at", ["create", "inspect"])
+def test_model_derived_session_failure_cleans_the_generated_project(
+    failure_at: str, tmp_path: Path
+) -> None:
+    runner = ModelAuditRunner(
+        compose_smoke._MODEL_AUDIT_SERVICES,
+        failure_at=failure_at,
+    )
+
+    with pytest.raises(
+        SmokeError,
+        match=(
+            "SMOKE_MODEL_SECRET_COMMAND_FAILED"
+            if failure_at == "create"
+            else "SMOKE_MODEL_SECRET_INSPECT_FAILED"
+        ),
+    ):
+        run_smoke(
+            docker="/usr/bin/docker",
+            compose_command=("/usr/bin/docker", "compose"),
+            runner=runner,
+            workflow=compose_smoke._require_model_secret_boundary,
+            input_root=tmp_path / ".secrets",
+        )
+
+    down = [call for call in runner.calls if "down" in call]
+    assert len(down) == 1
+    assert "--volumes" in down[0]
+    assert "--remove-orphans" in down[0]
 
 
 def test_successful_workflow_reports_the_fixed_down_cleanup_code(
@@ -312,6 +439,189 @@ def test_barrier_recovery_start_inherits_the_resolved_standalone_command() -> No
     )
 
 
+@pytest.mark.parametrize("leak_to_api", [False, True])
+def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
+    leak_to_api: bool,
+) -> None:
+    class InspectRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            call = tuple(argv)
+            if call[-3:] == ("ps", "--all", "--quiet"):
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout="".join(
+                        f"{service}-id\n"
+                        for service in (
+                            "postgres",
+                            "migrate",
+                            "api",
+                            "worker",
+                            "feishu-listener",
+                            "channel-worker",
+                            "web-app",
+                        )
+                    ),
+                    stderr="",
+                )
+            if call[:2] == ("/usr/bin/docker", "inspect"):
+                service = call[-1].removesuffix("-id")
+                mounts: list[dict[str, object]] = []
+                environment: list[str] = []
+                if service == "worker" or leak_to_api:
+                    mounts = [
+                        {
+                            "Source": "/workspace/fixtures/fake-gemini-key",
+                            "Destination": "/run/secrets/gemini_api_key",
+                            "RW": False,
+                        }
+                    ]
+                if service == "worker":
+                    mounts.append(
+                        {
+                            "Destination": "/run/secrets/postgres_password",
+                            "RW": False,
+                        }
+                    )
+                    environment = ["XIAOWEI_GEMINI_ENABLED=true"]
+                payload = [
+                    {"com.docker.compose.service": service},
+                    environment,
+                    mounts,
+                ]
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=json.dumps(payload), stderr=""
+                )
+            return result
+
+    runner = InspectRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        sensitive_values=("AIza" + "fake-smoke-value",),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+    )
+
+    if leak_to_api:
+        with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+            compose_smoke._require_model_secret_boundary(session)
+    else:
+        compose_smoke._require_model_secret_boundary(session)
+
+    assert any(
+        str(compose_smoke._ROOT / "docker-compose.model.yml") in call
+        for call in runner.calls
+    )
+    create = next(call for call in runner.calls if "create" in call)
+    assert "--force-recreate" in create
+    assert set(create[create.index("--force-recreate") + 1 :]) == {
+        "postgres",
+        "migrate",
+        "api",
+        "worker",
+        "feishu-listener",
+        "channel-worker",
+        "web-app",
+    }
+    assert not any("cat" in call or "exec" in call for call in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "services",
+    [
+        ("worker",),
+        tuple(
+            service
+            for service in compose_smoke._MODEL_AUDIT_SERVICES
+            if service != "api"
+        ),
+        (*compose_smoke._MODEL_AUDIT_SERVICES, "unknown-service"),
+        (*compose_smoke._MODEL_AUDIT_SERVICES, "api"),
+    ],
+)
+def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
+    services: tuple[str, ...],
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(services),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
+def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
+    services = (*compose_smoke._MODEL_AUDIT_SERVICES, "worker")
+
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(services),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+    )
+
+    compose_smoke._require_model_secret_boundary(session)
+
+
+def test_model_secret_smoke_rejects_an_unexpected_host_source() -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(
+            compose_smoke._MODEL_AUDIT_SERVICES,
+            gemini_source="/workspace/fixtures/unexpected-gemini-key",
+        ),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
+@pytest.mark.parametrize(
+    "leaked_environment",
+    (
+        "GEMINI_API_KEY_FILE=/workspace/fixtures/fake-gemini-key",
+        "GEMINI_API_" + "KEY=unrelated-value",
+    ),
+)
+def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
+    leaked_environment: str,
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(
+            compose_smoke._MODEL_AUDIT_SERVICES,
+            worker_environment=(
+                "XIAOWEI_GEMINI_ENABLED=true",
+                leaked_environment,
+            ),
+        ),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,7 +796,7 @@ def test_generated_secret_is_host_isolated_and_container_readable(tmp_path: Path
     assert path.read_text(encoding="utf-8").endswith("\n")
 
 
-def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -> None:
+def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None:
     parent = tmp_path / ".secrets"
     observed_paths: tuple[Path, ...] = ()
     observed_sensitive_values: tuple[str, ...] = ()
@@ -500,11 +810,13 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         identities = Path(
             override["services"]["web-app"]["volumes"][0]["source"]
         )
-        observed_paths = (postgres, feishu, identities)
+        gemini = Path(override["secrets"]["gemini_api_key"]["file"])
+        assert session.model_secret_source == gemini
+        observed_paths = (postgres, feishu, identities, gemini)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
-            for path in (postgres, feishu, identities)
+            for path in observed_paths
         )
         assert json.loads(identities.read_text(encoding="utf-8")) == {
             "version": 1,
@@ -514,6 +826,8 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         }
         assert postgres.read_text(encoding="utf-8").strip() in session.sensitive_values
         assert feishu.read_text(encoding="utf-8").strip() in session.sensitive_values
+        assert gemini.read_text(encoding="utf-8").strip() in session.sensitive_values
+        assert str(gemini) not in session.sensitive_values
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -523,7 +837,7 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         input_root=parent,
     )
 
-    assert len(observed_sensitive_values) == 2
+    assert len(observed_sensitive_values) == 3
     assert not any(path.exists() for path in observed_paths)
 
 
@@ -549,13 +863,16 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         feishu = Path(document["secrets"]["feishu_app_secret"]["file"])
         identity_mount = document["services"]["web-app"]["volumes"][0]
         identity = Path(identity_mount["source"])
-        assert {path.parent for path in (postgres, feishu, identity)} == {
+        gemini = Path(document["secrets"]["gemini_api_key"]["file"])
+        assert session.model_secret_source == gemini
+        assert {path.parent for path in (postgres, feishu, identity, gemini)} == {
             override.parent
         }
-        assert {path.name for path in (postgres, feishu, identity)} == {
+        assert {path.name for path in (postgres, feishu, identity, gemini)} == {
             "postgres_password",
             "feishu_app_secret",
             "feishu-identities.json",
+            "gemini_api_key",
         }
         assert identity_mount["target"] == "/run/config/feishu-identities.json"
         assert identity_mount["read_only"] is True
@@ -564,6 +881,7 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         ]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
+        assert str(gemini) in override_text
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -613,10 +931,16 @@ def test_partial_private_input_failure_cleans_only_the_private_namespace(
 @pytest.mark.parametrize(
     ("failure_at", "error_type"),
     [
+        (1, KeyboardInterrupt),
+        (1, RuntimeError),
         (2, KeyboardInterrupt),
         (2, RuntimeError),
         (3, KeyboardInterrupt),
         (3, RuntimeError),
+        (4, KeyboardInterrupt),
+        (4, RuntimeError),
+        (5, KeyboardInterrupt),
+        (5, RuntimeError),
     ],
 )
 def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(
@@ -984,7 +1308,14 @@ def test_missing_docker_is_a_hard_failure(
 def test_compose_plugin_is_preferred_when_its_version_probe_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner = RecordingRunner()
+    class VersionRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout="2.24.4\n", stderr="")
+
+    runner = VersionRunner()
     monkeypatch.setattr(
         compose_smoke.shutil,
         "which",
@@ -996,7 +1327,7 @@ def test_compose_plugin_is_preferred_when_its_version_probe_succeeds(
     )
 
     assert command == ("/usr/bin/docker", "compose")
-    assert runner.calls == [("/usr/bin/docker", "compose", "version")]
+    assert runner.calls == [("/usr/bin/docker", "compose", "version", "--short")]
 
 
 def test_compose_probe_falls_back_to_verified_standalone_binary(
@@ -1007,11 +1338,18 @@ def test_compose_probe_falls_back_to_verified_standalone_binary(
             self, argv: Any, *, timeout: float
         ) -> subprocess.CompletedProcess[str]:
             result = super().__call__(argv, timeout=timeout)
-            if tuple(argv) == ("/usr/bin/docker", "compose", "version"):
+            if tuple(argv) == (
+                "/usr/bin/docker",
+                "compose",
+                "version",
+                "--short",
+            ):
                 raise subprocess.CalledProcessError(
                     1, argv, stderr="private-plugin-error"
                 )
-            return result
+            return subprocess.CompletedProcess(
+                result.args, result.returncode, stdout="2.24.4\n", stderr=""
+            )
 
     runner = FallbackRunner()
     monkeypatch.setattr(
@@ -1026,8 +1364,8 @@ def test_compose_probe_falls_back_to_verified_standalone_binary(
 
     assert command == ("/usr/bin/docker-compose",)
     assert runner.calls == [
-        ("/usr/bin/docker", "compose", "version"),
-        ("/usr/bin/docker-compose", "version"),
+        ("/usr/bin/docker", "compose", "version", "--short"),
+        ("/usr/bin/docker-compose", "version", "--short"),
     ]
 
 
@@ -1058,9 +1396,27 @@ def test_compose_probe_double_failure_exposes_only_a_fixed_error(
     assert caught.value.__context__ is None
     assert "private-compose-output" not in str(caught.value)
     assert runner.calls == [
-        ("/usr/bin/docker", "compose", "version"),
-        ("/usr/bin/docker-compose", "version"),
+        ("/usr/bin/docker", "compose", "version", "--short"),
+        ("/usr/bin/docker-compose", "version", "--short"),
     ]
+
+
+@pytest.mark.parametrize("version", ["2.24.3", "1.29.2", "unknown"])
+def test_compose_below_the_supported_floor_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    class VersionRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout=version, stderr="")
+
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: None)
+    with pytest.raises(SmokeError, match=r"^SMOKE_COMPOSE_NOT_FOUND$"):
+        compose_smoke._resolve_compose_command(
+            docker="/usr/bin/docker", runner=VersionRunner()
+        )
 
 
 def test_main_reports_only_the_fixed_smoke_error_code(

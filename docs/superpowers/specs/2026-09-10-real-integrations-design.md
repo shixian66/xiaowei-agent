@@ -48,8 +48,8 @@ canary。
   用户验收证据。
 - 飞书长连接、消息发送/更新和群成员 adapter 已有 default-off 离线实现，但没有真实飞书环境证据。
 - M6b 的 StarRocks target-bound readonly adapter 已合并离线代码和测试；真实目标、授权和现场验证仍缺失。
-- 当前仍只有规则式 `IntentInterpreter`，没有 Gemini dependency、adapter、真实调用或模型运行证据；
-  ADR-015 与 RI3 详细计划已经批准，但 PR 3A 只收口文档，不能据此声称源码已经实现。
+- 规则式 `IntentInterpreter` 仍是 Runtime 当前唯一路径；PR 3B 已离线实现固定 Gemini dependency、
+  严格 DTO/窄 port 与 adapter seam，但尚未接入 durable Runtime，也没有真实调用或模型运行证据。
 - 当前没有 Admin 配置中心；配置来自进程环境和只读文件引用。
 - M6b/M7 的现有最强证据是离线测试，不是部署、canary 或用户验收。
 
@@ -117,6 +117,8 @@ Admin   --> 只管理版本化配置和 secret reference --> 显式发布后 com
   模型 adapter 不进入 `ToolGateway`，也不能持有 Runner、Policy、SQLGuard 或基础设施客户端。
   严格复验后的 model/rule draft 作为 task 级 insert-once accepted intent 保存，随后重新经过
   `CapabilityResolver`；合法 advisory 另作 task 级 insert-once 展示事实。
+  端口失败只抛 provider-neutral `ModelPortError`；意图重试闭集精确为 429、5xx 与明确 transport
+  error，application 不 import Gemini concrete exception。
 - StarRocks 仍只由 `ToolGateway` 调用现有 target-bound readonly adapter；真实连接配置不能出现在 `ToolCall`、模型输出或用户请求中。
 - Admin 发布配置不等于激活真实调用。composition root 只有在对应 feature flag、配置版本和健康检查全部通过时才注册 provider。
 - Admin application service 不能 import/调用 `ToolGateway`，不能构造 `PlanStep`、`ToolCall` 或
@@ -154,8 +156,11 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 
 ### 6.3 模型
 
-1. Typed builders enforce explicit raw character and UTF-8 byte limits before the total
-   `redaction.scrub_text()`, then reserialize and recheck the final byte cap; invalid or
+1. Typed builders enforce raw character limits and UTF-8 validity before the total
+   `redaction.scrub_text()`. Per-field byte ceilings are mathematically derived from the
+   character limits; the aggregate history byte ceiling is likewise derived from its
+   64,000-character limit. Builders then
+   reserialize and recheck the final byte cap; invalid or
    oversized input yields zero model calls.
    Model ports receive only closed `user_text/history/context_truncated` or
    `rows/sampled` DTOs, never `RequestEnvelope` or arbitrary context dictionaries.
@@ -174,8 +179,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    environment, channel and Web binding ownership; a new session ID does not break
    ownership. Recent-message guesses, root refs and provider chat state are forbidden.
    Before scrubbing, current text and each history text field are capped at 8,192
-   characters/32 KiB UTF-8; selected complete history is capped
-   at 20 parent tasks, 64,000 characters/256 KiB UTF-8. After scrubbing, the complete
+   characters, which implies at most 32 KiB UTF-8; selected complete history is capped
+   at 20 parent tasks and 64,000 characters, which implies at most 256,000 UTF-8 bytes
+   (less than 256 KiB). After scrubbing, the complete
    typed request is serialized again and must fit 512 KiB; oldest rounds are omitted
    whole, while an oversized current request yields zero calls. `scrub_text()` is total
    for typed strings, so no fake redaction-error path exists. Feishu reply/thread context waits
@@ -211,7 +217,10 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    state plus `_heartbeat()`/`_run_with_heartbeat()`; it retains lease TTL and
    `_require_current_grant()` for the one-shot start/resume grant renewal.
 8. Gemini 使用官方 SDK 的 `client.aio.models.generate_content()` 与 structured JSON response；固定无
-   tools/search/code/files/function calling/provider session。intent/advisory 输出分别为 2,048/4,000
+   tools/search/code/files/function calling/provider session，并显式禁用 automatic function calling。
+   intent 的 slots 使用 allowlist 并集的固定字段 frozen DTO，避免 Developer API 不支持的动态
+   `additionalProperties` map；字段只能省略或给 string，显式 null 整体拒绝；intent-specific
+   allowlist 仍由本地单一真源复验。intent/advisory 输出分别为 2,048/4,000
    tokens，仍需本地 Pydantic 语义复验。模型文本只以 escaped/plain text 展示，不能形成链接、按钮或
    可执行 next step。
    The adapter fixes Developer API `v1beta` and canonical origin
@@ -221,6 +230,11 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    `1e63211d44d188b8069c2b354d92b9bde25c1e821513fdbe1948b7c0d9f6b922`;
    the implementation PR independently audits the artifact and dependency tests verify
    Apache-2.0 metadata and `google/genai/py.typed`.
+   Offline conformance uses the locked SDK's outer async method and schema transformer over
+   an `httpx.MockTransport`, proving one transport request without real network or AFC warning.
+   SDK-normalized usage is then narrowed to nullable non-negative signed-64-bit local counts;
+   coercible integer-like raw values (bool, integral float and numeric string) are no longer
+   distinguishable after SDK normalization.
    A source-wide AST boundary permits `google.genai` only in the Gemini adapter seam.
    Trace adds one typed MODEL-stage aggregate observation, never prompt/response/error
    text; numeric fields are strict, non-negative and signed-64-bit bounded, with request
@@ -260,8 +274,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 3. admin 显式发布后生成不可变版本和审计记录。
 4. composition root 读取 active version，校验 readback 后才激活对应 provider。
 5. 回滚指向上一已发布版本；旧版本和审计保留，secret 始终由只读文件挂载提供。
-6. Gemini key 是例外的 bootstrap secret：用户在部署主机 `.env` 修改它，模型开启命令显式使用
-   `docker compose --env-file .env`，再转成只挂 task-worker 的 secret 文件。Admin 只能显示 safe
+6. Gemini key 是例外的 bootstrap secret：用户只在部署主机固定受限文件
+   `.secrets/gemini_api_key` 中修改它，模型开启命令显式叠加 model override，转成只挂
+   task-worker 的 file-backed secret；不提供 `.env` 路径覆盖。Admin 只能显示 safe
    readback，不能保存、读取或一键回滚 key；现场禁用会打印环境内容的 `config --environment`。
 
 ## 7. 配置与 secret
@@ -271,12 +286,12 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 - 普通配置使用 `XIAOWEI_*` 环境变量，并继续 `extra=forbid`、半配置拒绝和默认关闭。
 - secret 只通过容器只读文件引用，例如 Docker Compose secret；只有受信 composition root 接收
   绝对挂载路径，不接收明文环境变量。
-- Gemini `GEMINI_API_KEY` may exist only in the Git-ignored host `.env`. It is
-  host-side Compose input, not a Settings/`_FIELD_TO_ENV` key and must stay absent
-  from `.env.example`.
+- Gemini plaintext may exist only in the fixed Git-ignored host key file
+  `.secrets/gemini_api_key`. Neither `GEMINI_API_KEY` nor `GEMINI_API_KEY_FILE` is a
+  Settings/`_FIELD_TO_ENV` key, container environment value or `.env.example` entry.
 - The only new application setting is default-false `XIAOWEI_GEMINI_ENABLED`; provider,
   model, API, budgets, proxy policy and secret path are fixed in versioned code.
-- The model override declares `gemini_api_key: {environment: GEMINI_API_KEY}` and
+- The model override declares a file-backed `gemini_api_key` and
   grants it only to task worker. Merged worker secrets retain `postgres_password`;
   every other service keeps its current secret list. Container path is fixed at
   `/run/secrets/gemini_api_key`.
@@ -285,7 +300,7 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
   non-worker service.
 - Require Docker Compose 2.24.4+ (the project support floor shared with RI6's
   `!override` deployment path) and Linux containers. Version/config checks are necessary
-  but insufficient; a split-fake secret must pass a functional mount preflight without
+  but insufficient; a split-fake file secret must pass a functional mount preflight without
   exposing its value. This is not a `docker stack deploy` path.
 - Gemini 复用现有 `interfaces.secret_file.read_secret_file()`；RI3 不统一重构飞书、StarRocks、
   PostgreSQL 的 reader。共同 hardening 由对应真实接入阶段单独负责。
@@ -298,7 +313,7 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 - 逻辑凭证名和目标名都来自进程启动时加载的闭集 registry。路径解析、host/port/TLS/user 解析只在
   composition root 内发生；未知名、路径分隔符、点段或 registry revision 漂移全部 fail-closed。
 - StarRocks 目标 registry 由部署者只读维护；Admin 只能选择其中已批准目标，不能新增或修改 endpoint。
-- API 和 UI 不提供 Gemini key 的明文写入、读取、回显、版本或 rollback；`.env` key 由部署者管理。
+- API 和 UI 不提供 Gemini key 的明文写入、读取、回显、版本或 rollback；宿主 key 文件由部署者管理。
 - 发布和回滚使用 CAS，避免两个 admin 互相覆盖；每次操作产生 append-only 审计事件。
 - 环境变量只保留 bootstrap 能力；发布配置的优先级和可覆盖字段由 ADR 固定，禁止同一字段有两个隐式真源。
 
@@ -418,7 +433,8 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 | draft 可提交 host/port/任意 secret path | 配置管理员可借测试连接做 SSRF、端口探测或读取挂载文件 | DTO 只接收闭集逻辑 `target_ref`/`credential_ref`；路径与 endpoint 只在 composition root 从只读 registry 解析；未知名/路径形状/registry 漂移零网络调用 |
 | 六阶段只存在于临时计划 | 总体里程碑、ADR 授权和实现计划会各说各话 | 先做纯文档 V2.4，把路线映射为 RI1–RI6，并同步修订 ADR-007；未批准前不实施 |
 | RI2/RI4 复制已有真实调用清单 | 两份硬门会随时间漂移，执行者可能选择较弱版本 | RI2 直接引用 M7 §0.3.2；RI4 直接引用 M6b §3.3、ADR-012 与 handoff 未完成项，分计划只记录执行证据 |
-| Treat host `GEMINI_API_KEY` as an application setting | It would break the exact `.env.example` = `_FIELD_TO_ENV` contract and could leak into containers | Keep the key only as host Compose input; `.env.example` documents only actual `XIAOWEI_*` settings; merged-config tests prove the declaration/no-value boundary, while a split-fake Linux-container preflight separately proves worker-only mount and non-worker absence |
+| Treat host key material as an application setting | It would break the exact `.env.example` = `_FIELD_TO_ENV` contract and could leak into containers | Keep plaintext only in a Git-ignored host file; `.env.example` documents only actual `XIAOWEI_*` settings; merged-config tests prove the declaration/no-value boundary, while a split-fake Linux-container preflight separately proves worker-only mount and non-worker absence |
+| Use a Compose environment-backed secret for the read-only worker | Rendered config advertises the secret, but actual container creation supplies no mount and startup rejects non-file secret sources for a read-only service | Use a file-backed secret; preserve the worker read-only rootfs and keep key material out of container environments |
 | 为了入口形式统一而删除 `XiaoweiRuntime.handle()` | 它当前只被测试使用；删除会制造大范围测试迁移，却不增加真实模型安全性 | 保留该便利入口但不装配真实 provider；生产模型调用者静态限制为 worker durable path |
 | 使用一个通用 `ModelProviderPort.generate(prompt, schema)` | application 可借任意 prompt/schema 外送字段，理解与诊断权限无法分开 | application 定义 intent/advisory 两个窄端口，Gemini adapter 分别实现；分层与方法等式测试禁止通用 generate |
 | Send unbounded request/history text to the model | Redaction work becomes unbounded and pasted credentials may leave the process | Bound raw characters/UTF-8/history before total `scrub_text()`, then reserialize and enforce the final byte cap; omit whole oversized history rounds; invalid/oversized input yields zero model calls |

@@ -6,21 +6,23 @@
 > adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
 > 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
 > `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机有
-> Docker client 与 standalone Compose，但 Colima daemon 未运行，也未提供 PostgreSQL DSN，
-> 隔离 PostgreSQL/Compose 运行证据来自旧版 GitHub CI。项目负责人已于
+> Docker client、standalone Compose 与可用的 Colima daemon，但未提供 PostgreSQL DSN；
+> 隔离 PostgreSQL/Compose 运行证据仍来自旧版 GitHub CI。项目负责人已于
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
-> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3A 只收口文档，仍没有 RI3 源码、
-> SDK 依赖、真实 key、网络调用或运行证据。
+> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
+> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3B 已离线实现严格 DTO、两个窄
+> port、固定 Gemini SDK adapter、默认关闭装配与 worker-only Compose secret；durable Runtime
+> 尚未接入，真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
-> completed its test surface. PR 3A is still documentation only. In later implementation PRs,
-> host `GEMINI_API_KEY` will stay outside Settings and `.env.example`, becoming a
-> worker-only Compose secret; no key should be added now.
+> completed its test surface. PR 3B is an offline SDK boundary only. Host
+> Gemini key stays outside Settings and `.env.example`; it lives in a Git-ignored host
+> file and is exposed only as a worker-only Compose secret when the explicit model
+> override is used.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
@@ -98,7 +100,8 @@
 - Ruff 作为唯一 linter，mypy 作为唯一类型检查器。**本阶段不启用任何自动 formatter**：PEP 8 + Ruff lint 是唯一格式 gate。
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
-- 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
+- `google-genai==2.23.0` 仅用于固定 structured JSON 生成；生产 adapter 直接识别 `httpx`
+  transport error，模型调用仍由两个窄端口隔离且默认关闭。
 - `sqlglot` 用于 SQL AST 解析和安全校验（M3 引入，是 M3 唯一新增的运行依赖）。
 - `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
 - PyMySQL 是 M6b 新增的 StarRocks MySQL 协议 driver，只允许在 `tools/starrocks.py` 的
@@ -109,7 +112,8 @@
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
-`lark-oapi` 也已合入。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
+`lark-oapi` 也已合入；当前 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
+提升为生产直接依赖。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
 兼容性仍需独立部署与运行证据。
 
 ## 预期目录
@@ -271,6 +275,10 @@ Compose 启动 Web 前要准备三个已被 Git 忽略的本地文件：
 `.secrets/` 保持 `0700`，三个文件写完后保持 `0444`。App secret 只能写入文件，不能放进环境变量、
 命令行、日志或已跟踪的 Compose 文件；请使用不会回显、不会进入 shell 历史的本地方式写入。
 
+启用 Gemini model override 时，再准备固定文件 `.secrets/gemini_api_key`，同样保持 `0444`。
+这是唯一包含 key 明文的宿主文件；不要把 key 或文件路径写进 `.env`。模型名、endpoint、timeout
+等仍是代码固定值，不需要填写。
+
 基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，应把下面这种 override 存在已忽略的
 `.secrets/docker-compose.feishu-local.yml`，再替换本机的 App ID 与 HTTPS SSO origin；不要把真实值提交：
 
@@ -361,11 +369,17 @@ docker compose down --volumes --remove-orphans
 python -m scripts.compose_smoke
 ```
 
+脚本要求 Docker Compose 2.24.4 或更新版本。RI3 PR 3B 在同一 workflow 的末段临时叠加
+`docker-compose.model.yml`，创建一次性的拆分 fake key 文件，只通过 Docker
+inspect 的 label/environment/mount 元数据证明 worker 获得固定只读 mount、所有已创建的
+非 worker 容器都没有该 mount；脚本不打开或输出 secret 文件。基础 Compose 仍默认关闭模型。
+
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
-下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入三个 fake 输入和一个不含 secret 值的
-JSON Compose override；override 只把本次 secret/config 引用指向该私有目录，不读取或覆盖上文供
-人工启动使用的三个固定文件。清理时先原子隔离该目录，再核对目录与四个已知文件的 inode，且不递归
+下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入四个 fake 输入和一个不含 secret 值的
+JSON Compose override；override 把全部 fake secret/config（含 Gemini key 文件）引用指向该私有
+目录，不读取或覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离该
+目录，再核对目录与五个已知文件的 inode，且不递归
 删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地
 `HTTPConnection` 请求一次受信 Host 的 `/oauth/feishu/start`，核对 302、官方 Location、一次性
@@ -377,16 +391,17 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
-当前开发机有 Docker client 与 standalone Compose 5.5.1，但 Colima daemon 未运行，所以 RI1 新版
-smoke 尚未在本机启动容器；本机只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
+当前开发机有 Docker client、standalone Compose 5.5.1 与可用的 Colima daemon；但 Docker credential
+helper 缺失，且用户已有容器占用 `127.0.0.1:8000`，所以本轮没有取得 PR 3B 完整 Compose/model
+mount audit 证据。本任务未停止或修改用户容器；本机仍只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
 `2d67b59` 已在 GitHub 隔离 runner 实际执行 Compose smoke 与隔离 PostgreSQL integration，八项
 CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
 
 ### 尚未完成与能力边界
 
-当前实现仍只使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；当前从仅含文档的
-PR 3A 开始，尚未进入 SDK 或 Runtime 源码实现。M6a 增加了
+当前 Runtime 仍只使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
+与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B 只离线新增了
+固定 Gemini SDK adapter、严格 DTO/窄 port 与 worker-only secret override，未接入 durable Runtime，也未进行真实 provider 调用。M6a 增加了
 Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
 已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
 PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离
