@@ -79,13 +79,16 @@ def _map_error(error: BaseException) -> ModelPortError:
     if isinstance(error, TimeoutError | httpx.TimeoutException):
         return ModelPortError(ModelErrorCode.TIMEOUT)
     if isinstance(error, errors.APIError):
-        if error.code == 401:
+        code = error.code
+        if type(code) is not int:
+            return ModelPortError(ModelErrorCode.UNAVAILABLE)
+        if code == 401:
             return ModelPortError(ModelErrorCode.UNAUTHORIZED)
-        if error.code == 403:
+        if code == 403:
             return ModelPortError(ModelErrorCode.FORBIDDEN)
-        if error.code == 429:
+        if code == 429:
             return ModelPortError(ModelErrorCode.RATE_LIMITED)
-        if 500 <= error.code <= 599:
+        if 500 <= code <= 599:
             return ModelPortError(ModelErrorCode.SERVER_ERROR)
         return ModelPortError(ModelErrorCode.UNAVAILABLE)
     if isinstance(error, httpx.TransportError | OSError):

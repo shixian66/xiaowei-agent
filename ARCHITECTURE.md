@@ -387,8 +387,8 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
 | `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
-| `ProviderIntentSlots` | 现有 intent allowlist 并集的 11 个 optional string 字段 | Developer API 可表达的固定 provider wire DTO；`extra=forbid`，本地语义校验仍以 intent-specific allowlist 为单一真源 |
-| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从锁定 SDK 已归一化的 prompt/candidates token count 构造；本地 strict non-negative signed-64-bit；不保留 total/raw metadata，不进入 provider response schema |
+| `ProviderIntentSlots` | 现有 intent allowlist 并集的 11 个 omitted-or-string 字段 | Developer API schema 不宣告 null；显式 null/未知字段都整体拒绝，本地语义校验仍以 intent-specific allowlist 为单一真源 |
+| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从锁定 SDK 已归一化的 prompt/candidates token count 构造；SDK 会把可强制转换的 integer-like raw 值（bool、整数形 float、数字字符串）转为 int，本地再做 non-negative signed-64-bit 边界；不保留 total/raw metadata，不进入 provider response schema |
 | `ModelPortError` | 闭集 `ModelErrorCode` | application 可消费的 provider-neutral 安全失败；intent 仅将 rate-limit、5xx server 与明确 transport error 列为可重试 |
 | `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |

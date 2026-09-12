@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Annotated, Final, Literal
 
 from pydantic import AfterValidator, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from xiaowei_agent.contracts.base import (
     Contract,
@@ -112,20 +113,24 @@ class SlowQueryAdvisoryRequest(Contract):
         return self
 
 
+_ProviderSlotText = Annotated[StrictStr, Field(max_length=1_024)]
+_ProviderSlot = _ProviderSlotText | SkipJsonSchema[None]
+
+
 class ProviderIntentSlots(Contract):
     """Developer API schema 可表达的固定 provider wire 槽位。"""
 
-    environment_id: StrictStr | None = Field(default=None, max_length=1_024)
-    database: StrictStr | None = Field(default=None, max_length=1_024)
-    user_name: StrictStr | None = Field(default=None, max_length=1_024)
-    query_id: StrictStr | None = Field(default=None, max_length=1_024)
-    window_minutes: StrictStr | None = Field(default=None, max_length=1_024)
-    alert_name: StrictStr | None = Field(default=None, max_length=1_024)
-    instance: StrictStr | None = Field(default=None, max_length=1_024)
-    fingerprint: StrictStr | None = Field(default=None, max_length=1_024)
-    asset_id: StrictStr | None = Field(default=None, max_length=1_024)
-    hostname: StrictStr | None = Field(default=None, max_length=1_024)
-    ip: StrictStr | None = Field(default=None, max_length=1_024)
+    environment_id: _ProviderSlot = None
+    database: _ProviderSlot = None
+    user_name: _ProviderSlot = None
+    query_id: _ProviderSlot = None
+    window_minutes: _ProviderSlot = None
+    alert_name: _ProviderSlot = None
+    instance: _ProviderSlot = None
+    fingerprint: _ProviderSlot = None
+    asset_id: _ProviderSlot = None
+    hostname: _ProviderSlot = None
+    ip: _ProviderSlot = None
 
 
 class ProviderIntentResponse(Contract):
@@ -139,6 +144,8 @@ class ProviderIntentResponse(Contract):
     @model_validator(mode="after")
     def _intent_collections_are_bounded(self) -> "ProviderIntentResponse":
         slots = self.slots.model_dump(exclude_none=True)
+        if self.slots.model_fields_set - slots.keys():
+            raise ValueError("explicit null intent slot is not allowed")
         allowed_slots = INTENT_SLOT_ALLOWLISTS.get(self.intent)
         if allowed_slots is None or not slots.keys() <= allowed_slots:
             raise ValueError("intent slot key is not allowed")

@@ -214,6 +214,23 @@ async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intent_rejects_explicit_null_slot_from_provider_json() -> None:
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory(
+            _intent_json(slots={"window_minutes": None})
+        ),
+        secret_reader=lambda path: "AIza" + "x" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
+
+
+@pytest.mark.asyncio
 async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
     response = json.dumps(
         {"analysis": "存在扫描放大", "suggestions": ["检查分区裁剪"], "uncertainties": []}
@@ -380,15 +397,29 @@ async def test_usage_metadata_accepts_explicit_nullable_fields() -> None:
     assert result.usage == ModelUsage(input_tokens=None, output_tokens=None)
 
 
-def test_locked_sdk_normalizes_raw_bool_and_integral_float_usage_to_int() -> None:
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (False, 0),
+        (True, 1),
+        (0.0, 0),
+        (1.0, 1),
+        ("1", 1),
+        ("1.0", 1),
+    ],
+)
+def test_locked_sdk_normalizes_integer_like_raw_usage_to_int(
+    raw_value: object,
+    expected: int,
+) -> None:
     metadata = types.GenerateContentResponseUsageMetadata(
-        prompt_token_count=True,
-        candidates_token_count=1.0,
+        prompt_token_count=raw_value,
+        candidates_token_count=raw_value,
     )
 
-    assert metadata.prompt_token_count == 1
+    assert metadata.prompt_token_count == expected
     assert type(metadata.prompt_token_count) is int
-    assert metadata.candidates_token_count == 1
+    assert metadata.candidates_token_count == expected
     assert type(metadata.candidates_token_count) is int
     assert metadata.model_fields_set == {
         "prompt_token_count",
@@ -598,6 +629,27 @@ async def test_sdk_api_errors_map_to_closed_codes_without_retained_context(
 
     assert_safe_model_port_error(caught.value, expected)
     assert provider_detail not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_sdk_api_error_with_non_integer_code_fails_safe() -> None:
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise errors.APIError("500", {"message": "private-provider-body"})  # type: ignore[arg-type]
+
+    client = RecordingClient("{}")
+    client.aio.models = FailingModels("{}")
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "a" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.UNAVAILABLE)
 
 
 @pytest.mark.asyncio

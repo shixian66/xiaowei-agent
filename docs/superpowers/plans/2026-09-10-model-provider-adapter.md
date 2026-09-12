@@ -285,8 +285,9 @@ contains the accepted DTO plus trusted `ModelUsage`; the latter maps only nullab
 `prompt_token_count` / `candidates_token_count` to input/output tokens. Missing metadata
 maps to two nulls. When metadata appears, both fields must be present in the locked SDK
 type's `model_fields_set`, then pass local non-negative signed-64-bit bounds. The locked SDK
-normalizes raw JSON bool and integral floats to `int` before the adapter; tests characterize
-that fact rather than claiming local raw-type rejection. Negative or overflow metadata
+normalizes coercible integer-like raw values—bool, integral floats and numeric strings such
+as `"1"` / `"1.0"`—to `int` before the adapter; tests characterize that fact rather than
+claiming local raw-type rejection. Negative or overflow metadata
 rejects the response. Usage is not part of the provider response schema and is never
 carried through `last_usage`, a tuple, global state or callback.
 
@@ -304,7 +305,8 @@ carried through `last_usage`, a tuple, global state or callback.
 - 固定 model；
 - `response_mime_type="application/json"` 且 response schema 对应本地 DTO；
 - intent slots 使用 allowlist 并集的固定字段 DTO，使锁定 SDK Developer API schema transformer 不生成
-  unsupported dynamic `additionalProperties`；两种 response schema 都经真实 outer async path +
+  unsupported dynamic `additionalProperties`；provider schema 不宣告 null，显式 null 由本地
+  `model_fields_set` 整体拒绝，真正省略仍合法；两种 response schema 都经真实 outer async path +
   `httpx.MockTransport` 离线通过，且每次恰好一个 transport request；
 - intent 使用 low/2048；advisory 使用 high、固定 profile ceiling 4000，plan-bound application
   可以按当前 plan budget 请求更少，但绝不能请求更多；

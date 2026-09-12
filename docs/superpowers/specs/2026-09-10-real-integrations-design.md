@@ -215,7 +215,8 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 8. Gemini 使用官方 SDK 的 `client.aio.models.generate_content()` 与 structured JSON response；固定无
    tools/search/code/files/function calling/provider session，并显式禁用 automatic function calling。
    intent 的 slots 使用 allowlist 并集的固定字段 frozen DTO，避免 Developer API 不支持的动态
-   `additionalProperties` map；intent-specific allowlist 仍由本地单一真源复验。intent/advisory 输出分别为 2,048/4,000
+   `additionalProperties` map；字段只能省略或给 string，显式 null 整体拒绝；intent-specific
+   allowlist 仍由本地单一真源复验。intent/advisory 输出分别为 2,048/4,000
    tokens，仍需本地 Pydantic 语义复验。模型文本只以 escaped/plain text 展示，不能形成链接、按钮或
    可执行 next step。
    The adapter fixes Developer API `v1beta` and canonical origin
@@ -228,7 +229,8 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    Offline conformance uses the locked SDK's outer async method and schema transformer over
    an `httpx.MockTransport`, proving one transport request without real network or AFC warning.
    SDK-normalized usage is then narrowed to nullable non-negative signed-64-bit local counts;
-   raw bool/integral-float JSON types are no longer observable after SDK normalization.
+   coercible integer-like raw values (bool, integral float and numeric string) are no longer
+   distinguishable after SDK normalization.
    A source-wide AST boundary permits `google.genai` only in the Gemini adapter seam.
    Trace adds one typed MODEL-stage aggregate observation, never prompt/response/error
    text; numeric fields are strict, non-negative and signed-64-bit bounded, with request

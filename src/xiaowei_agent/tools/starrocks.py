@@ -433,6 +433,7 @@ class StarRocksReadonlyAdapter:
     ) -> AdapterResponse:
         password = _read_password_file(self._config.password_file)
         connection = self._connection_factory(password)
+        primary_error: BaseException | None = None
         try:
             self._preflight(connection)
             if call.operation == self._config.list_operation:
@@ -461,8 +462,17 @@ class StarRocksReadonlyAdapter:
                 error=None,
                 elapsed_ms=self._elapsed_ms(started),
             )
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            connection.close()
+            close_failed = False
+            try:
+                connection.close()
+            except Exception:
+                close_failed = True
+            if close_failed and primary_error is None:
+                raise RuntimeError("StarRocks connection close failed")
 
     def _preflight(self, connection: StarRocksConnection) -> None:
         connection.execute(f"SET query_timeout = {self._config.query_timeout_seconds}")

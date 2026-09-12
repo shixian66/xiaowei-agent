@@ -60,8 +60,9 @@ metadata and `google/genai/py.typed` marker, and stop for plan re-review on any 
 `candidates_token_count`，分别映射为 input/output tokens；不保存 total 或原始 metadata。metadata
 整体缺失时两项均为 `None`；metadata 已出现时，以 SDK type 的 `model_fields_set` 要求两字段都实际
 出现，再按本地 strict non-negative signed-64-bit 边界收窄，缺字段、负数或溢出按
-`INVALID_RESPONSE` 拒绝。`google-genai==2.23.0` 会在 adapter 收到对象前把 raw JSON `bool` 与整数形状
-float 归一为 `int`，本地不能声称恢复并拒绝该原始类型；这项 raw-envelope 风险由锁版事实测试与
+`INVALID_RESPONSE` 拒绝。`google-genai==2.23.0` 会在 adapter 收到对象前把可强制转换的
+integer-like raw 值（`bool`、整数形状 float、`"1"`/`"1.0"` 等数字字符串）归一为 `int`，本地不能
+声称恢复并拒绝这些原始类型；这项 raw-envelope 风险由锁版事实测试与
 供应商账户 usage/费用告警及现场 readback 兜底。usage 不进入 provider response schema，模型不能
 生成或修改它。
 
@@ -70,8 +71,9 @@ application service。profile 固定 provider/model/origin/API version、prompt/
 thinking、60/180 秒 stage budget 与 2048/4000 output ceiling；application 不反向 import adapter 常量，
 也不靠窥探 concrete adapter 生成 artifact metadata/digest。
 
-模型响应采用 `extra="forbid"`。出现未知字段、错类型、超长、非法枚举或解析失败时，整体拒绝，不能
-删除越权字段后继续使用。即使模型返回合法 `IntentDraft`，仍必须经过现有：
+模型响应采用 `extra="forbid"`。固定 slots 字段在 provider schema 中只能省略或给 string，不宣告
+null；本地 `model_fields_set` 另拒绝实际出现的显式 null。出现未知字段、错类型、超长、非法枚举或
+解析失败时，整体拒绝，不能删除越权字段后继续使用。即使模型返回合法 `IntentDraft`，仍必须经过现有：
 
 The provider response schema does not let the model choose `IntentSource`; the adapter
 stamps accepted provider output as `MODEL`. Any output field that changes under the

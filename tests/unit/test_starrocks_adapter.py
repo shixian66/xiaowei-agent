@@ -670,6 +670,101 @@ async def test_connection_is_closed_when_query_raises(tmp_path: Path) -> None:
     assert connection.closed is True
 
 
+async def test_close_failure_does_not_replace_query_timeout(tmp_path: Path) -> None:
+    close_marker = "private-close-marker"
+    password_file = tmp_path / "database-credential"
+    _write_password(password_file)
+
+    class _TimeoutThenCloseFailure(_Connection):
+        def query(self, statement: str, *, max_rows: int) -> StarRocksQueryBatch:
+            if statement == _call().typed_args["sql"]:
+                raise TimeoutError("private-query-timeout")
+            return super().query(statement, max_rows=max_rows)
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError(close_marker)
+
+    connection = _TimeoutThenCloseFailure(
+        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
+    )
+    adapter = StarRocksReadonlyAdapter(
+        config=_config(password_file),
+        connection_factory=_Factory(connection),
+        monotonic=_TickingMonotonic(),
+    )
+
+    response = await adapter.execute(_call(), context=_CONTEXT)
+
+    assert response.status is AdapterStatus.TIMEOUT
+    assert response.payload == ()
+    assert close_marker not in response.model_dump_json()
+    assert connection.closed is True
+
+
+async def test_close_failure_after_success_is_safe_error(tmp_path: Path) -> None:
+    close_marker = "private-close-marker"
+    password_file = tmp_path / "database-credential"
+    _write_password(password_file)
+
+    class _SuccessfulThenCloseFailure(_Connection):
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError(close_marker)
+
+    connection = _SuccessfulThenCloseFailure(
+        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
+    )
+    adapter = StarRocksReadonlyAdapter(
+        config=_config(password_file),
+        connection_factory=_Factory(connection),
+        monotonic=_TickingMonotonic(),
+    )
+
+    response = await adapter.execute(_call(), context=_CONTEXT)
+
+    assert response.status is AdapterStatus.ERROR
+    assert response.payload == ()
+    assert close_marker not in response.model_dump_json()
+    assert connection.closed is True
+
+
+async def test_close_exception_does_not_replace_query_base_exception(
+    tmp_path: Path,
+) -> None:
+    class StopQuery(BaseException):
+        pass
+
+    sentinel = StopQuery()
+    password_file = tmp_path / "database-credential"
+    _write_password(password_file)
+
+    class _StoppedThenCloseFailure(_Connection):
+        def query(self, statement: str, *, max_rows: int) -> StarRocksQueryBatch:
+            if statement == _call().typed_args["sql"]:
+                raise sentinel
+            return super().query(statement, max_rows=max_rows)
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("private-close-marker")
+
+    connection = _StoppedThenCloseFailure(
+        _batches(StarRocksQueryBatch(columns=_LIST_COLUMNS, rows=(_ROW,)))
+    )
+    adapter = StarRocksReadonlyAdapter(
+        config=_config(password_file),
+        connection_factory=_Factory(connection),
+        monotonic=_TickingMonotonic(),
+    )
+
+    with pytest.raises(StopQuery) as caught:
+        await adapter.execute(_call(), context=_CONTEXT)
+
+    assert caught.value is sentinel
+    assert connection.closed is True
+
+
 def test_pymysql_factory_uses_the_closed_driver_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
