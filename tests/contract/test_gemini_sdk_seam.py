@@ -6,9 +6,14 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
-from google.genai import errors
+from google import genai
+from google.genai import errors, types
+from google.genai import models as genai_models
+from tests.fakes.model import assert_safe_model_port_error
 
+from xiaowei_agent.application.model_ports import ModelPortError
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentDraft,
@@ -27,7 +32,6 @@ from xiaowei_agent.interfaces.gemini_model import (
     GEMINI_MODEL,
     GEMINI_PROVIDER_ORIGIN,
     GeminiModelAdapter,
-    GeminiModelError,
 )
 
 
@@ -84,6 +88,81 @@ def _intent_json(**updates: object) -> str:
     return json.dumps(payload)
 
 
+def _sdk_response(text: str) -> dict[str, object]:
+    return {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"text": text}]},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2},
+    }
+
+
+@pytest.mark.parametrize("call_kind", ["intent", "advisory"])
+@pytest.mark.asyncio
+async def test_locked_sdk_outer_async_path_transforms_schema_once_without_afc_or_network(
+    call_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[httpx.Request] = []
+    response_text = (
+        _intent_json()
+        if call_kind == "intent"
+        else json.dumps(
+            {"analysis": "分析", "suggestions": [], "uncertainties": []}
+        )
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_sdk_response(response_text))
+
+    transport = httpx.MockTransport(handle)
+
+    def real_client_factory(**kwargs: Any) -> genai.Client:
+        options = kwargs["http_options"].model_copy(
+            update={
+                "async_client_args": {
+                    "transport": transport,
+                    "trust_env": False,
+                }
+            }
+        )
+        return genai.Client(**{**kwargs, "http_options": options})
+
+    for name in gemini_model._PROXY_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(genai_models.AsyncModels, "_logged_afc_warning", False)
+    adapter = GeminiModelAdapter(
+        client_factory=real_client_factory,
+        secret_reader=lambda path: "AIza" + "r" * 35,
+    )
+
+    with caplog.at_level("WARNING", logger="google.genai.models"):
+        if call_kind == "intent":
+            result = await adapter.generate_intent(
+                ModelIntentRequest(
+                    user_text="x", history=(), context_truncated=False
+                )
+            )
+            assert isinstance(result, IntentModelResult)
+        else:
+            result = await adapter.generate_advisory(
+                SlowQueryAdvisoryRequest(
+                    rows=({"queryId": "q"},), sampled=False
+                ),
+                max_output_tokens=100,
+            )
+            assert isinstance(result, AdvisoryModelResult)
+
+    assert len(requests) == 1
+    assert result.usage == ModelUsage(input_tokens=3, output_tokens=2)
+    assert "automatic function calling" not in caplog.text.lower()
+
+
 @pytest.mark.asyncio
 async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
     factory = RecordingClientFactory(_intent_json())
@@ -129,6 +208,7 @@ async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
     assert config.response_schema is ProviderIntentResponse
     assert config.max_output_tokens == 2_048
     assert config.thinking_config.thinking_level.value == "LOW"
+    assert config.automatic_function_calling.disable is True
     assert config.tools is None
     assert factory.clients[0].aio.close_calls == 1
 
@@ -166,6 +246,7 @@ async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
     assert config.response_schema is ModelAdvisory
     assert config.max_output_tokens == 1_234
     assert config.thinking_config.thinking_level.value == "HIGH"
+    assert config.automatic_function_calling.disable is True
     assert factory.clients[0].aio.close_calls == 1
 
 
@@ -208,18 +289,20 @@ async def test_client_is_closed_when_generation_raises() -> None:
         client_factory=build,
         secret_reader=lambda path: "AIza" + "w" * 35,
     )
-    with pytest.raises(Exception, match="model_timeout") as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
-    assert "private provider detail" not in str(caught.value)
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.TIMEOUT)
     assert client.aio.close_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_valid_usage_metadata_is_returned_with_the_typed_result() -> None:
-    metadata = SimpleNamespace(prompt_token_count=123, candidates_token_count=45)
+    metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=123,
+        candidates_token_count=45,
+    )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(_intent_json(), metadata),
         secret_reader=lambda path: "AIza" + "u" * 35,
@@ -232,37 +315,85 @@ async def test_valid_usage_metadata_is_returned_with_the_typed_result() -> None:
     assert result.usage == ModelUsage(input_tokens=123, output_tokens=45)
 
 
-@pytest.mark.parametrize(
-    "metadata",
-    [
-        SimpleNamespace(candidates_token_count=1),
-        SimpleNamespace(prompt_token_count=1),
-        SimpleNamespace(prompt_token_count=True, candidates_token_count=1),
-        SimpleNamespace(prompt_token_count=1.0, candidates_token_count=1),
-        SimpleNamespace(prompt_token_count=-1, candidates_token_count=1),
-        SimpleNamespace(prompt_token_count=2**63, candidates_token_count=1),
-        SimpleNamespace(prompt_token_count=1, candidates_token_count=True),
-        SimpleNamespace(prompt_token_count=1, candidates_token_count=1.0),
-        SimpleNamespace(prompt_token_count=1, candidates_token_count=-1),
-        SimpleNamespace(prompt_token_count=1, candidates_token_count=2**63),
-    ],
-)
+@pytest.mark.parametrize("missing", ["prompt", "candidates"])
 @pytest.mark.asyncio
-async def test_invalid_or_incomplete_usage_metadata_rejects_the_response(
-    metadata: object,
+async def test_usage_metadata_requires_both_fields_to_have_appeared(
+    missing: str,
 ) -> None:
+    metadata = types.GenerateContentResponseUsageMetadata(
+        **(
+            {"candidates_token_count": 1}
+            if missing == "prompt"
+            else {"prompt_token_count": 1}
+        )
+    )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(_intent_json(), metadata),
         secret_reader=lambda path: "AIza" + "u" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
+
+
+@pytest.mark.parametrize("value", [-1, 2**63])
+@pytest.mark.asyncio
+async def test_usage_metadata_rejects_negative_and_overflow_after_sdk_normalization(
+    value: int,
+) -> None:
+    metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=value,
+        candidates_token_count=1,
+    )
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory(_intent_json(), metadata),
+        secret_reader=lambda path: "AIza" + "u" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
+
+
+@pytest.mark.asyncio
+async def test_usage_metadata_accepts_explicit_nullable_fields() -> None:
+    metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=None,
+        candidates_token_count=None,
+    )
+    adapter = GeminiModelAdapter(
+        client_factory=RecordingClientFactory(_intent_json(), metadata),
+        secret_reader=lambda path: "AIza" + "u" * 35,
+    )
+
+    result = await adapter.generate_intent(
+        ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+    )
+
+    assert result.usage == ModelUsage(input_tokens=None, output_tokens=None)
+
+
+def test_locked_sdk_normalizes_raw_bool_and_integral_float_usage_to_int() -> None:
+    metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=True,
+        candidates_token_count=1.0,
+    )
+
+    assert metadata.prompt_token_count == 1
+    assert type(metadata.prompt_token_count) is int
+    assert metadata.candidates_token_count == 1
+    assert type(metadata.candidates_token_count) is int
+    assert metadata.model_fields_set == {
+        "prompt_token_count",
+        "candidates_token_count",
+    }
 
 
 @pytest.mark.asyncio
@@ -308,7 +439,7 @@ async def test_hung_close_is_bounded_after_success(
     )
 
     started = time.monotonic()
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await asyncio.wait_for(
             adapter.generate_intent(
                 ModelIntentRequest(user_text="x", history=(), context_truncated=False)
@@ -317,9 +448,31 @@ async def test_hung_close_is_bounded_after_success(
         )
 
     assert close_started.is_set()
-    assert caught.value.code is ModelErrorCode.TIMEOUT
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.TIMEOUT)
     assert time.monotonic() - started < 0.3
+
+
+@pytest.mark.asyncio
+async def test_close_failure_after_success_is_safely_normalized() -> None:
+    class FailingCloseAsyncClient(RecordingAsyncClient):
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("private-close-detail")
+
+    client = RecordingClient(_intent_json())
+    client.aio = FailingCloseAsyncClient(RecordingModels(_intent_json()))
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "e" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert_safe_model_port_error(caught.value, ModelErrorCode.UNAVAILABLE)
+    assert client.aio.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -340,14 +493,12 @@ async def test_close_error_does_not_mask_provider_error() -> None:
         secret_reader=lambda path: "AIza" + "e" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.TIMEOUT
-    assert str(caught.value) == "model_timeout"
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.TIMEOUT)
     assert client.aio.close_calls == 1
 
 
@@ -365,14 +516,12 @@ async def test_close_error_does_not_mask_schema_error() -> None:
         secret_reader=lambda path: "AIza" + "s" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
-    assert str(caught.value) == "model_invalid_response"
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
     assert client.aio.close_calls == 1
 
 
@@ -421,7 +570,7 @@ async def test_outer_cancellation_propagates_after_bounded_close(
         (401, ModelErrorCode.UNAUTHORIZED),
         (403, ModelErrorCode.FORBIDDEN),
         (429, ModelErrorCode.RATE_LIMITED),
-        (500, ModelErrorCode.UNAVAILABLE),
+        (500, ModelErrorCode.SERVER_ERROR),
         (418, ModelErrorCode.UNAVAILABLE),
     ],
 )
@@ -442,21 +591,29 @@ async def test_sdk_api_errors_map_to_closed_codes_without_retained_context(
         secret_reader=lambda path: "AIza" + "a" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is expected
+    assert_safe_model_port_error(caught.value, expected)
     assert provider_detail not in str(caught.value)
-    assert caught.value.__context__ is None
 
 
 @pytest.mark.asyncio
-async def test_transport_error_maps_to_unavailable_without_retained_context() -> None:
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        OSError("private-os-detail"),
+        httpx.ConnectError("private-httpx-detail"),
+    ],
+)
+async def test_transport_error_maps_to_retryable_transport_code_without_retained_context(
+    transport_error: Exception,
+) -> None:
     class FailingModels(RecordingModels):
         async def generate_content(self, **kwargs: Any) -> object:
-            raise OSError("private-transport-detail")
+            raise transport_error
 
     client = RecordingClient("{}")
     client.aio.models = FailingModels("{}")
@@ -465,13 +622,41 @@ async def test_transport_error_maps_to_unavailable_without_retained_context() ->
         secret_reader=lambda path: "AIza" + "o" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.UNAVAILABLE
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.TRANSPORT_ERROR)
+
+
+@pytest.mark.asyncio
+async def test_poisoned_local_model_error_is_replaced_with_a_fresh_safe_error() -> None:
+    original = RuntimeError("private-provider-detail")
+    poisoned = ModelPortError(ModelErrorCode.RATE_LIMITED)
+    try:
+        raise poisoned from original
+    except ModelPortError as caught:
+        poisoned = caught
+
+    class FailingModels(RecordingModels):
+        async def generate_content(self, **kwargs: Any) -> object:
+            raise poisoned
+
+    client = RecordingClient("{}")
+    client.aio.models = FailingModels("{}")
+    adapter = GeminiModelAdapter(
+        client_factory=lambda **kwargs: client,
+        secret_reader=lambda path: "AIza" + "p" * 35,
+    )
+
+    with pytest.raises(ModelPortError) as caught:
+        await adapter.generate_intent(
+            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
+        )
+
+    assert caught.value is not poisoned
+    assert_safe_model_port_error(caught.value, ModelErrorCode.RATE_LIMITED)
 
 
 @pytest.mark.asyncio
@@ -481,13 +666,12 @@ async def test_non_string_response_text_is_invalid_response() -> None:
         secret_reader=lambda path: "AIza" + "n" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.INVALID_RESPONSE
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
 
 
 @pytest.mark.asyncio
@@ -500,10 +684,9 @@ async def test_client_construction_failure_is_safely_normalized() -> None:
         secret_reader=lambda path: "AIza" + "f" * 35,
     )
 
-    with pytest.raises(GeminiModelError) as caught:
+    with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
             ModelIntentRequest(user_text="x", history=(), context_truncated=False)
         )
 
-    assert caught.value.code is ModelErrorCode.UNAVAILABLE
-    assert caught.value.__context__ is None
+    assert_safe_model_port_error(caught.value, ModelErrorCode.UNAVAILABLE)

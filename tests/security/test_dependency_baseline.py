@@ -2,11 +2,12 @@
 
 M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn，M6b 引入
 PyMySQL 与对应 typeshed stub，M7 引入官方飞书 SDK ``lark-oapi``，RI3 PR 3B
-引入官方模型 SDK ``google-genai``。
+引入官方模型 SDK ``google-genai``，并将 SDK transport 泄漏类型 ``httpx`` 提升为
+生产直接依赖以做精确错误分类。
 两件事必须被机制钉住，而不是靠计划里的一句话：
 
 1. **依赖面**。M5 当时只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
-   httpx / PyYAML；当前仍不引入 Redis、队列、Worker 框架或 LangGraph。
+   PyYAML；当前仍不引入 Redis、队列、Worker 框架或 LangGraph。
    用集合相等表达比用禁用清单强：禁用清单挡不住清单外的新依赖。
 
 2. **``asyncpg`` 不得被 ``src/`` 直接 import**。T0 实测：``asyncpg`` 0.30.0 **不带
@@ -43,6 +44,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "pymysql",
         "lark-oapi",
         "google-genai",
+        "httpx",
     }
 )
 
@@ -55,7 +57,6 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
         "mypy",
         "pip-audit",
         "hatchling",
-        "httpx",
         "pyyaml",
         "types-pymysql",
     }
@@ -165,6 +166,7 @@ def test_google_genai_exact_wheel_license_and_typing_marker_are_locked() -> None
     declared = project["dependencies"]
     assert isinstance(declared, list)
     assert "google-genai==2.23.0" in declared
+    assert "httpx>=0.28,<1" in declared
 
     lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
     packages = lock["package"]

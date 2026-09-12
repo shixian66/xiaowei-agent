@@ -214,7 +214,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     advisory、Web 显式父任务和逐列定型的 20 行 StarRocks 投影。计划由 9 PR/4 migration 收缩为
     5 PR/2 migration；不新增任务总 deadline、调用预约平台、统一终态表、进度状态机、全项目凭证
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
-    等 RI2 真实事件语义明确后再复用同一 assembler。PR 3B 已离线实现严格 DTO、SDK seam、
+    等 RI2 真实事件语义明确后再复用同一 assembler。PR 3B 已离线实现固定字段 provider slots、
+    provider-neutral 错误/重试闭集、严格 usage 收窄、显式禁用 AFC 的真实 SDK seam、
     默认关闭 LocalStack 与 worker-only Compose override/smoke；依赖锁定精确 wheel，但没有读取真实 key、真实调用、部署或归档。PR 3B 未审查合入前不开始 PR 3C，真实 Gemini 调用
     仍需 PR 3E 的独立现场 GO。
     Independent review V7 fixes the current-timeout fact, parent idempotency predicate,
@@ -296,8 +297,9 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 - **RI3 规划基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1` 重新入职**：按
   `AGENTS.md` 顺序读取五份真源，并直接检查 Runtime、Worker、Runner、TaskStore、TaskView、
-  Compose 与 secret reader 的当前调用链。源码事实仍是只有规则解释器、无 Gemini dependency/
-  adapter/真实调用；PR 3A 只产生已批准的文档基线。Google 官方模型、structured-output 和 Python SDK 文档
+  Compose 与 secret reader 的当前调用链。该 PR 3A 审计时的源码事实仍是只有规则解释器、无 Gemini
+  dependency/adapter/真实调用；PR 3A 只产生已批准的文档基线。当前 PR 3B 已离线补齐 dependency/
+  adapter，但 Runtime 与真实调用仍为零。Google 官方模型、structured-output 和 Python SDK 文档
   支持使用成熟的异步 `models.generate_content`，因此精简稿不再使用 Interactions API；实际 wheel
   仍要求实现开始时再次审计并精确锁定。
 
@@ -385,7 +387,8 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 ### 未覆盖
 
 - **RI3 PR 3B 仅完成离线 SDK 边界**：已锁定 `google-genai` 并实现严格 model DTO、两个窄 port、
-  固定 Gemini adapter、默认关闭装配与 model Compose override；durable Runtime、migration、artifact、
+  固定 Gemini adapter、SDK-compatible fixed slots、typed usage/result/profile、provider-neutral 错误闭集、
+  默认关闭装配与 model Compose override；durable Runtime、migration、artifact、
   MODEL trace 与 fallback/retry service 仍未实现。未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0，也
   没有模型质量、test-env、部署、canary 或用户验收证据。
 

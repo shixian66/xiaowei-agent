@@ -117,6 +117,8 @@ Admin   --> 只管理版本化配置和 secret reference --> 显式发布后 com
   模型 adapter 不进入 `ToolGateway`，也不能持有 Runner、Policy、SQLGuard 或基础设施客户端。
   严格复验后的 model/rule draft 作为 task 级 insert-once accepted intent 保存，随后重新经过
   `CapabilityResolver`；合法 advisory 另作 task 级 insert-once 展示事实。
+  端口失败只抛 provider-neutral `ModelPortError`；意图重试闭集精确为 429、5xx 与明确 transport
+  error，application 不 import Gemini concrete exception。
 - StarRocks 仍只由 `ToolGateway` 调用现有 target-bound readonly adapter；真实连接配置不能出现在 `ToolCall`、模型输出或用户请求中。
 - Admin 发布配置不等于激活真实调用。composition root 只有在对应 feature flag、配置版本和健康检查全部通过时才注册 provider。
 - Admin application service 不能 import/调用 `ToolGateway`，不能构造 `PlanStep`、`ToolCall` 或
@@ -211,7 +213,9 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    state plus `_heartbeat()`/`_run_with_heartbeat()`; it retains lease TTL and
    `_require_current_grant()` for the one-shot start/resume grant renewal.
 8. Gemini 使用官方 SDK 的 `client.aio.models.generate_content()` 与 structured JSON response；固定无
-   tools/search/code/files/function calling/provider session。intent/advisory 输出分别为 2,048/4,000
+   tools/search/code/files/function calling/provider session，并显式禁用 automatic function calling。
+   intent 的 slots 使用 allowlist 并集的固定字段 frozen DTO，避免 Developer API 不支持的动态
+   `additionalProperties` map；intent-specific allowlist 仍由本地单一真源复验。intent/advisory 输出分别为 2,048/4,000
    tokens，仍需本地 Pydantic 语义复验。模型文本只以 escaped/plain text 展示，不能形成链接、按钮或
    可执行 next step。
    The adapter fixes Developer API `v1beta` and canonical origin
@@ -221,6 +225,10 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
    `1e63211d44d188b8069c2b354d92b9bde25c1e821513fdbe1948b7c0d9f6b922`;
    the implementation PR independently audits the artifact and dependency tests verify
    Apache-2.0 metadata and `google/genai/py.typed`.
+   Offline conformance uses the locked SDK's outer async method and schema transformer over
+   an `httpx.MockTransport`, proving one transport request without real network or AFC warning.
+   SDK-normalized usage is then narrowed to nullable non-negative signed-64-bit local counts;
+   raw bool/integral-float JSON types are no longer observable after SDK normalization.
    A source-wide AST boundary permits `google.genai` only in the Gemini adapter seam.
    Trace adds one typed MODEL-stage aggregate observation, never prompt/response/error
    text; numeric fields are strict, non-negative and signed-64-bit bounded, with request

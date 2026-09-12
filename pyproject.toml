@@ -19,6 +19,7 @@ requires-python = ">=3.11,<3.12"
 #   pymysql     —— M6b StarRocks 测试环境只读 adapter；仅在 exact binding 命中后导入。
 #   lark-oapi   —— M7 飞书长连接、消息与成员 API；仅由 interfaces/feishu_sdk.py 动态加载。
 #   google-genai —— RI3 固定 Gemini Developer API 的异步 structured-output seam。
+#   httpx        —— Gemini SDK 实际泄漏的 typed transport error 分类边界。
 dependencies = [
     "pydantic>=2.13,<3",
     "sqlglot>=27,<31",
@@ -30,6 +31,7 @@ dependencies = [
     "PyMySQL>=1.2,<1.3",
     "lark-oapi==1.7.3",
     "google-genai==2.23.0",
+    "httpx>=0.28,<1",
 ]
 
 [project.scripts]
@@ -45,7 +47,6 @@ dev = [
     "pip-audit>=2.7,<3",
     # 构建后端同时列为 dev 依赖，使其进入 uv.lock 与 pip-audit 的可复核集合。
     "hatchling==1.28.0",
-    "httpx>=0.28,<1",     # ASGITransport 契约测试；不进入运行镜像
     "PyYAML>=6,<7",       # Compose 静态契约测试；不进入运行镜像
     "types-PyMySQL>=1.2,<1.3",  # 真实 adapter 的 DB-API 类型契约
 ]

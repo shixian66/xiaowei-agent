@@ -283,7 +283,10 @@ and use deterministic fallback instead of persisting or resolving it.
 The two ports return concrete `IntentModelResult` / `AdvisoryModelResult` wrappers. Each
 contains the accepted DTO plus trusted `ModelUsage`; the latter maps only nullable SDK
 `prompt_token_count` / `candidates_token_count` to input/output tokens. Missing metadata
-maps to two nulls, while present-but-malformed, negative or signed-64-bit-overflow metadata
+maps to two nulls. When metadata appears, both fields must be present in the locked SDK
+type's `model_fields_set`, then pass local non-negative signed-64-bit bounds. The locked SDK
+normalizes raw JSON bool and integral floats to `int` before the adapter; tests characterize
+that fact rather than claiming local raw-type rejection. Negative or overflow metadata
 rejects the response. Usage is not part of the provider response schema and is never
 carried through `last_usage`, a tuple, global state or callback.
 
@@ -300,9 +303,13 @@ carried through `last_usage`, a tuple, global state or callback.
   redirect the SDK transport;
 - 固定 model；
 - `response_mime_type="application/json"` 且 response schema 对应本地 DTO；
+- intent slots 使用 allowlist 并集的固定字段 DTO，使锁定 SDK Developer API schema transformer 不生成
+  unsupported dynamic `additionalProperties`；两种 response schema 都经真实 outer async path +
+  `httpx.MockTransport` 离线通过，且每次恰好一个 transport request；
 - intent 使用 low/2048；advisory 使用 high、固定 profile ceiling 4000，plan-bound application
   可以按当前 plan budget 请求更少，但绝不能请求更多；
 - SDK 自身不额外重试；
+- 显式 `AutomaticFunctionCallingConfig(disable=True)`，不产生 AFC warning；
 - async client 正确关闭；
 - SDK/API 错误只映射为闭集本地错误码，不暴露原始正文。
 
@@ -368,8 +375,9 @@ for the other.
 
 - [ ] **Step 5: 依赖与边界审计**
 
-检查 `google-genai` 直接/传递依赖、许可证、import 副作用和网络入口。运行时依赖集合等式只增加
-`google-genai`，开发依赖集合保持不变；锁文件对精确 SDK wheel/version/hash 的断言与项目依赖集合
+检查 `google-genai` 直接/传递依赖、许可证、import 副作用和网络入口。运行时依赖集合等式增加
+`google-genai`，并把已经解析存在、生产错误分类直接 import 的 `httpx` 从 dev 提升为 runtime；不新增
+resolved package。锁文件对精确 SDK wheel/version/hash 的断言与项目依赖集合
 等式同时承重。`tests/security/test_no_network.py`
 必须证明 import、配置加载和默认 LocalStack 构造均为 0 网络。
 

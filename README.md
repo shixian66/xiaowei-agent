@@ -99,7 +99,8 @@
 - Ruff 作为唯一 linter，mypy 作为唯一类型检查器。**本阶段不启用任何自动 formatter**：PEP 8 + Ruff lint 是唯一格式 gate。
 - PostgreSQL 作为 TaskStore、审批、证据索引和运行审计的事实存储。
 - 一个镜像同时支持 API Gateway 和 Worker，先以进程角色区分，不提前拆微服务。
-- 官方模型 SDK 仅用于文本/JSON 生成；模型调用通过 adapter 隔离。
+- `google-genai==2.23.0` 仅用于固定 structured JSON 生成；生产 adapter 直接识别 `httpx`
+  transport error，模型调用仍由两个窄端口隔离且默认关闭。
 - `sqlglot` 用于 SQL AST 解析和安全校验（M3 引入，是 M3 唯一新增的运行依赖）。
 - `sqlalchemy[asyncio]`、`alembic`、`asyncpg` 是 M4 新增且仅有的三个运行依赖。**用 SQLAlchemy Core，不用 ORM**：ORM 的 identity map 与 flush 时机会让「必须采纳存储层 winner」这条不变量更难断言，而并发语义正是 M4 的全部承重点。`asyncpg` **不带 `py.typed`**，因此业务代码不得直接 import 它——驱动只经 `postgresql+asyncpg://` 的 DSN 方言字符串由 SQLAlchemy 内部加载。
 - PyMySQL 是 M6b 新增的 StarRocks MySQL 协议 driver，只允许在 `tools/starrocks.py` 的
@@ -110,7 +111,8 @@
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
-`lark-oapi` 也已合入。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
+`lark-oapi` 也已合入；当前 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
+提升为生产直接依赖。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
 兼容性仍需独立部署与运行证据。
 
 ## 预期目录

@@ -1,8 +1,10 @@
 """M6b StarRocks 真实只读 adapter 的无网络单元测试。"""
 
 import datetime as dt
+import stat
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +12,7 @@ from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST, SLOW_QUERY_SURFA
 from xiaowei_agent.contracts import AdapterStatus, RequestContext, ToolCall
 from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1, compile_sql
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
+from xiaowei_agent.tools import starrocks as starrocks_module
 from xiaowei_agent.tools.starrocks import (
     NORMALIZER_VERSION,
     PhysicalIdentityProbe,
@@ -101,6 +104,35 @@ class _Factory:
 
 def _write_password(path: Path, content: str = "fixture-credential") -> None:
     path.write_text(content + "\n", encoding="utf-8")
+
+
+def _install_password_file_ops(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    read_error: OSError | None = None,
+    close_error: OSError | None = None,
+) -> list[int]:
+    closed: list[int] = []
+    monkeypatch.setattr(starrocks_module.os, "open", lambda path, flags: 23)
+    monkeypatch.setattr(
+        starrocks_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(st_mode=stat.S_IFREG),
+    )
+
+    def read(descriptor: int, limit: int) -> bytes:
+        if read_error is not None:
+            raise read_error
+        return b"fixture-credential\n"
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if close_error is not None:
+            raise close_error
+
+    monkeypatch.setattr(starrocks_module.os, "read", read)
+    monkeypatch.setattr(starrocks_module.os, "close", close)
+    return closed
 
 
 def _config(password_file: Path, **overrides: object) -> StarRocksReadonlyAdapterConfig:
@@ -512,6 +544,45 @@ async def test_password_file_symlink_is_rejected_without_connect(tmp_path: Path)
 
     assert response.status is AdapterStatus.ERROR
     assert factory.calls == []
+
+
+def test_password_reader_closes_descriptor_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = _install_password_file_ops(monkeypatch)
+
+    assert starrocks_module._read_password_file("/run/secrets/fake") == (
+        "fixture-credential"
+    )
+    assert closed == [23]
+
+
+@pytest.mark.parametrize(
+    ("read_error", "close_error"),
+    [
+        (OSError("private-read-detail"), None),
+        (None, OSError("private-close-detail")),
+        (OSError("private-read-detail"), OSError("private-close-detail")),
+    ],
+)
+def test_password_reader_normalizes_read_and_close_failures_without_leaking_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    read_error: OSError | None,
+    close_error: OSError | None,
+) -> None:
+    closed = _install_password_file_ops(
+        monkeypatch,
+        read_error=read_error,
+        close_error=close_error,
+    )
+
+    with pytest.raises(ValueError) as caught:
+        starrocks_module._read_password_file("/run/secrets/fake")
+
+    assert str(caught.value) == "credential file is unavailable or invalid"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert closed == [23]
 
 
 @pytest.mark.parametrize(

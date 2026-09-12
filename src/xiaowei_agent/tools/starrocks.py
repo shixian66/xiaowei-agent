@@ -258,23 +258,34 @@ def _read_password_file(path: str) -> str:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
+    payload = b""
+    failed = False
     try:
         descriptor = os.open(path, flags)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("credential reference is not a regular file")
         payload = os.read(descriptor, _MAX_PASSWORD_BYTES + 1)
-    except (OSError, ValueError) as exc:
-        raise ValueError("credential file is unavailable or invalid") from exc
+    except (OSError, ValueError):
+        failed = True
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                failed = True
+    if failed:
+        raise ValueError("credential file is unavailable or invalid")
     if not payload or len(payload) > _MAX_PASSWORD_BYTES:
         raise ValueError("credential file is unavailable or invalid")
+    decode_failed = False
     try:
         value = payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("credential file is unavailable or invalid") from exc
+    except UnicodeDecodeError:
+        decode_failed = True
+        value = ""
+    if decode_failed:
+        raise ValueError("credential file is unavailable or invalid")
     if value.endswith("\n"):
         value = value[:-1]
     if not value or "\n" in value or "\r" in value or "\x00" in value:

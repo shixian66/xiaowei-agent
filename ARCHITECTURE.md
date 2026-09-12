@@ -124,8 +124,9 @@ RequestEnvelope
 Only the granted durable Runtime path may call `IntentModelPort`; the existing
 `IntentInterpreter` remains the deterministic fallback and does not own provider access.
 Provider output passes strict schema and local semantic validation, then the port returns
-the accepted DTO together with trusted nullable `ModelUsage`; usage is SDK metadata, not
-part of the model-generated schema. The draft may then become an insert-once
+the accepted DTO together with trusted nullable `ModelUsage`; usage is the locked SDK's
+normalized metadata narrowed again to local bounds, not part of the model-generated schema.
+The draft may then become an insert-once
 `AcceptedIntentDraft`; it means only that this task accepted an untrusted
 draft, never that the model gained execution authority. 任务重试必须先读回并复用已接受草稿。若 provider 已收到请求但本地还没保存就崩溃，恢复后
 允许重复一次模型调用；模型无工具和执行副作用，因此 RI3 明确接受这一 at-least-once 取舍，不为此
@@ -385,8 +386,10 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
-| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者只再增 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
-| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从 SDK prompt/candidates token count 构造；strict non-negative signed-64-bit；不保留 total/raw metadata，不进入 provider response schema |
+| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `ProviderIntentSlots` | 现有 intent allowlist 并集的 11 个 optional string 字段 | Developer API 可表达的固定 provider wire DTO；`extra=forbid`，本地语义校验仍以 intent-specific allowlist 为单一真源 |
+| `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从锁定 SDK 已归一化的 prompt/candidates token count 构造；本地 strict non-negative signed-64-bit；不保留 total/raw metadata，不进入 provider response schema |
+| `ModelPortError` | 闭集 `ModelErrorCode` | application 可消费的 provider-neutral 安全失败；intent 仅将 rate-limit、5xx server 与明确 transport error 列为可重试 |
 | `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |

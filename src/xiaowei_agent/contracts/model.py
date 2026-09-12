@@ -10,7 +10,6 @@ from xiaowei_agent.contracts.base import (
     FiniteFloat,
     FreeText,
     FrozenMap,
-    FrozenStrMap,
     NonEmptyText,
     StrictInt,
     StrictStr,
@@ -113,23 +112,36 @@ class SlowQueryAdvisoryRequest(Contract):
         return self
 
 
+class ProviderIntentSlots(Contract):
+    """Developer API schema 可表达的固定 provider wire 槽位。"""
+
+    environment_id: StrictStr | None = Field(default=None, max_length=1_024)
+    database: StrictStr | None = Field(default=None, max_length=1_024)
+    user_name: StrictStr | None = Field(default=None, max_length=1_024)
+    query_id: StrictStr | None = Field(default=None, max_length=1_024)
+    window_minutes: StrictStr | None = Field(default=None, max_length=1_024)
+    alert_name: StrictStr | None = Field(default=None, max_length=1_024)
+    instance: StrictStr | None = Field(default=None, max_length=1_024)
+    fingerprint: StrictStr | None = Field(default=None, max_length=1_024)
+    asset_id: StrictStr | None = Field(default=None, max_length=1_024)
+    hostname: StrictStr | None = Field(default=None, max_length=1_024)
+    ip: StrictStr | None = Field(default=None, max_length=1_024)
+
+
 class ProviderIntentResponse(Contract):
     """供应商可返回的意图字段闭集；adapter 本地补 ``source``。"""
 
     intent: StrictStr = Field(max_length=256)
-    slots: FrozenStrMap
+    slots: ProviderIntentSlots
     missing: tuple[StrictStr, ...] = Field(max_length=MAX_INTENT_ITEMS)
     confidence: FiniteFloat = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _intent_collections_are_bounded(self) -> "ProviderIntentResponse":
-        if len(self.slots) > MAX_INTENT_ITEMS:
-            raise ValueError("too many intent slots")
+        slots = self.slots.model_dump(exclude_none=True)
         allowed_slots = INTENT_SLOT_ALLOWLISTS.get(self.intent)
-        if allowed_slots is None or not self.slots.keys() <= allowed_slots:
+        if allowed_slots is None or not slots.keys() <= allowed_slots:
             raise ValueError("intent slot key is not allowed")
-        if any(len(key) > 128 or len(value) > 1_024 for key, value in self.slots.items()):
-            raise ValueError("intent slot exceeds its text limit")
         if not set(self.missing) <= INTENT_MISSING_ALLOWLISTS[self.intent]:
             raise ValueError("missing intent field is not allowed")
         if any(len(item) > 128 for item in self.missing):
@@ -237,6 +249,7 @@ __all__ = [
     "ModelInvocationProfile",
     "ModelUsage",
     "ProviderIntentResponse",
+    "ProviderIntentSlots",
     "SlowQueryAdvisoryRequest",
     "model_text_values",
 ]

@@ -92,6 +92,7 @@ from xiaowei_agent.contracts.model import (
     ModelInvocationProfile,
     ModelUsage,
     ProviderIntentResponse,
+    ProviderIntentSlots,
     SlowQueryAdvisoryRequest,
 )
 from xiaowei_agent.contracts.plan import (
@@ -214,6 +215,7 @@ __all__ = [
     "PromqlGuardRejection",
     "PromqlSurface",
     "ProviderIntentResponse",
+    "ProviderIntentSlots",
     "ReadinessProbe",
     "ReadinessReport",
     "Rejection",

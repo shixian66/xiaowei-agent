@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Final, Protocol
 
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentModelResult,
+    ModelErrorCode,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
 )
 
 ADVISORY_OUTPUT_TOKEN_LIMIT = 4_000
+INTENT_RETRYABLE_ERROR_CODES: Final[frozenset[ModelErrorCode]] = frozenset(
+    {
+        ModelErrorCode.RATE_LIMITED,
+        ModelErrorCode.SERVER_ERROR,
+        ModelErrorCode.TRANSPORT_ERROR,
+    }
+)
+
+
+class ModelPortError(RuntimeError):
+    """只携 provider-neutral 闭集错误码的安全端口异常。"""
+
+    def __init__(self, code: ModelErrorCode) -> None:
+        self.code = code
+        super().__init__(code.value)
 
 
 def validate_advisory_output_tokens(value: StrictInt) -> StrictInt:
@@ -24,7 +40,7 @@ def validate_advisory_output_tokens(value: StrictInt) -> StrictInt:
 
 class IntentModelPort(Protocol):
     async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
-        """返回不可信意图草案与同次可信 usage。"""
+        """返回草案与 usage；失败时抛安全的 ``ModelPortError``。"""
         ...
 
 
@@ -35,13 +51,15 @@ class SlowQueryAdvisoryPort(Protocol):
         *,
         max_output_tokens: StrictInt,
     ) -> AdvisoryModelResult:
-        """返回只读建议与同次可信 usage，不产生执行动作。"""
+        """返回建议与 usage；失败时抛安全的 ``ModelPortError``。"""
         ...
 
 
 __all__ = [
     "ADVISORY_OUTPUT_TOKEN_LIMIT",
+    "INTENT_RETRYABLE_ERROR_CODES",
     "IntentModelPort",
+    "ModelPortError",
     "SlowQueryAdvisoryPort",
     "validate_advisory_output_tokens",
 ]

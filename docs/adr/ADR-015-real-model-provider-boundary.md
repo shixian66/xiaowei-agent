@@ -56,10 +56,14 @@ metadata and `google/genai/py.typed` marker, and stop for plan re-review on any 
 1–4,000 的 keyword-only `max_output_tokens` 控制值，用来承接 D4 的当前 plan budget；它不是模型
 内容，不能由用户、模型或环境变量提供。
 
-`ModelUsage` 只接收 SDK `usage_metadata` 的 nullable `prompt_token_count` 与
+`ModelUsage` 只接收锁定 SDK `usage_metadata` 的 nullable `prompt_token_count` 与
 `candidates_token_count`，分别映射为 input/output tokens；不保存 total 或原始 metadata。metadata
-整体缺失时两项均为 `None`；metadata 已出现但字段缺失、bool/float/负数或超过 signed-64-bit 时，
-整次响应按 `INVALID_RESPONSE` 拒绝。usage 不进入 provider response schema，模型不能生成或修改它。
+整体缺失时两项均为 `None`；metadata 已出现时，以 SDK type 的 `model_fields_set` 要求两字段都实际
+出现，再按本地 strict non-negative signed-64-bit 边界收窄，缺字段、负数或溢出按
+`INVALID_RESPONSE` 拒绝。`google-genai==2.23.0` 会在 adapter 收到对象前把 raw JSON `bool` 与整数形状
+float 归一为 `int`，本地不能声称恢复并拒绝该原始类型；这项 raw-envelope 风险由锁版事实测试与
+供应商账户 usage/费用告警及现场 readback 兜底。usage 不进入 provider response schema，模型不能
+生成或修改它。
 
 composition root 将同一个不可变 `ModelInvocationProfile` 同时交给 adapter，并保留给 PR 3C 的
 application service。profile 固定 provider/model/origin/API version、prompt/schema revision、
@@ -150,6 +154,13 @@ only the remaining budget. Artifact lookup/save stays outside this timeout and k
 existing persistence-failure semantics; a database failure must not be relabeled as a
 model fallback. Local cancellation discards late SDK results but cannot prove that the
 remote provider stopped processing.
+
+Application exposes a provider-neutral `ModelPortError` carrying only the closed local
+code. The exact intent retry set is `RATE_LIMITED` / `SERVER_ERROR` / `TRANSPORT_ERROR`:
+429 maps to rate limited, 5xx to server error, and only explicit non-timeout
+`httpx.TransportError` / `OSError` to transport error. 401/403, timeout, invalid response,
+local construction failure and other 4xx are not retryable. `httpx` is therefore a direct
+runtime dependency rather than a dev-only tool; no new resolved package is introduced.
 
 RI3 does not add a persistent 450-second whole-task deadline. Current source uses a
 25-second StarRocks query-timeout upper bound under a 30-second read-only policy maximum, and RI3

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from xiaowei_agent.application.model_ports import validate_advisory_output_tokens
+from xiaowei_agent.application.model_ports import (
+    ModelPortError,
+    validate_advisory_output_tokens,
+)
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentModelResult,
+    ModelErrorCode,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
@@ -36,4 +40,14 @@ class ScriptedModelAdapter:
         return self.advisory
 
 
-__all__ = ["ScriptedModelAdapter"]
+def assert_safe_model_port_error(
+    error: ModelPortError, expected: ModelErrorCode
+) -> None:
+    """断言端口错误没有 provider detail 或 Python 异常链。"""
+    assert error.code is expected
+    assert str(error) == expected.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+__all__ = ["ScriptedModelAdapter", "assert_safe_model_port_error"]

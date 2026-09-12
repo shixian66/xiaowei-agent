@@ -105,6 +105,8 @@ class ModelErrorCode(StrEnum):
     UNAUTHORIZED = "model_unauthorized"
     FORBIDDEN = "model_forbidden"
     RATE_LIMITED = "model_rate_limited"
+    SERVER_ERROR = "model_server_error"
+    TRANSPORT_ERROR = "model_transport_error"
     TIMEOUT = "model_timeout"
     INVALID_RESPONSE = "model_invalid_response"
     UNAVAILABLE = "model_unavailable"

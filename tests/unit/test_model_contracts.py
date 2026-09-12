@@ -199,6 +199,31 @@ def test_provider_intent_response_rejects_authority_and_source_fields(field: str
         provider_intent_response.model_validate(payload)
 
 
+def test_provider_intent_slots_have_a_fixed_sdk_compatible_wire_shape() -> None:
+    _, _, provider_intent_response, _ = _model_types()
+    expected = {
+        "environment_id",
+        "database",
+        "user_name",
+        "query_id",
+        "window_minutes",
+        "alert_name",
+        "instance",
+        "fingerprint",
+        "asset_id",
+        "hostname",
+        "ip",
+    }
+
+    schema = provider_intent_response.model_json_schema()
+    slots_schema = schema["properties"]["slots"]
+    slots_definition = schema["$defs"]["ProviderIntentSlots"]
+
+    assert "$ref" in slots_schema
+    assert set(slots_definition["properties"]) == expected
+    assert slots_definition["additionalProperties"] is False
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -274,7 +299,7 @@ def test_provider_intent_response_accepts_current_intent_specific_slots(
         intent=intent, slots=slots, missing=(), confidence=0.5
     )
 
-    assert dict(response.slots) == slots
+    assert response.slots.model_dump(exclude_none=True) == slots
 
 
 @pytest.mark.parametrize(
