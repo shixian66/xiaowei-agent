@@ -312,6 +312,67 @@ def test_barrier_recovery_start_inherits_the_resolved_standalone_command() -> No
     )
 
 
+@pytest.mark.parametrize("leak_to_api", [False, True])
+def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
+    leak_to_api: bool,
+) -> None:
+    class InspectRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(argv, timeout=timeout)
+            call = tuple(argv)
+            if call[-3:] == ("ps", "--all", "--quiet"):
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="worker-id\napi-id\n", stderr=""
+                )
+            if call[:2] == ("/usr/bin/docker", "inspect"):
+                service = "worker" if call[-1] == "worker-id" else "api"
+                mounts: list[dict[str, object]] = []
+                environment: list[str] = []
+                if service == "worker" or leak_to_api:
+                    mounts = [
+                        {
+                            "Destination": "/run/secrets/gemini_api_key",
+                            "RW": False,
+                        }
+                    ]
+                if service == "worker":
+                    environment = ["XIAOWEI_GEMINI_ENABLED=true"]
+                payload = [
+                    {"com.docker.compose.service": service},
+                    environment,
+                    mounts,
+                ]
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=json.dumps(payload), stderr=""
+                )
+            return result
+
+    runner = InspectRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        sensitive_values=("AIza" + "fake-smoke-value",),
+        environment=(("GEMINI_API_KEY", "AIza" + "fake-smoke-value"),),
+    )
+
+    if leak_to_api:
+        with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+            compose_smoke._require_model_secret_boundary(session)
+    else:
+        compose_smoke._require_model_secret_boundary(session)
+
+    assert any(
+        str(compose_smoke._ROOT / "docker-compose.model.yml") in call
+        for call in runner.calls
+    )
+    assert not any("cat" in call or "exec" in call for call in runner.calls)
+
+
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -514,6 +575,8 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         }
         assert postgres.read_text(encoding="utf-8").strip() in session.sensitive_values
         assert feishu.read_text(encoding="utf-8").strip() in session.sensitive_values
+        assert tuple(name for name, _ in session.environment) == ("GEMINI_API_KEY",)
+        assert session.environment[0][1] in session.sensitive_values
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -523,7 +586,7 @@ def test_smoke_owns_and_cleans_all_three_generated_input_files(tmp_path: Path) -
         input_root=parent,
     )
 
-    assert len(observed_sensitive_values) == 2
+    assert len(observed_sensitive_values) == 3
     assert not any(path.exists() for path in observed_paths)
 
 
@@ -564,6 +627,8 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         ]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
+        assert session.environment[0][0] == "GEMINI_API_KEY"
+        assert session.environment[0][1] not in override_text
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -984,7 +1049,14 @@ def test_missing_docker_is_a_hard_failure(
 def test_compose_plugin_is_preferred_when_its_version_probe_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner = RecordingRunner()
+    class VersionRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout="2.24.4\n", stderr="")
+
+    runner = VersionRunner()
     monkeypatch.setattr(
         compose_smoke.shutil,
         "which",
@@ -996,7 +1068,7 @@ def test_compose_plugin_is_preferred_when_its_version_probe_succeeds(
     )
 
     assert command == ("/usr/bin/docker", "compose")
-    assert runner.calls == [("/usr/bin/docker", "compose", "version")]
+    assert runner.calls == [("/usr/bin/docker", "compose", "version", "--short")]
 
 
 def test_compose_probe_falls_back_to_verified_standalone_binary(
@@ -1007,11 +1079,18 @@ def test_compose_probe_falls_back_to_verified_standalone_binary(
             self, argv: Any, *, timeout: float
         ) -> subprocess.CompletedProcess[str]:
             result = super().__call__(argv, timeout=timeout)
-            if tuple(argv) == ("/usr/bin/docker", "compose", "version"):
+            if tuple(argv) == (
+                "/usr/bin/docker",
+                "compose",
+                "version",
+                "--short",
+            ):
                 raise subprocess.CalledProcessError(
                     1, argv, stderr="private-plugin-error"
                 )
-            return result
+            return subprocess.CompletedProcess(
+                result.args, result.returncode, stdout="2.24.4\n", stderr=""
+            )
 
     runner = FallbackRunner()
     monkeypatch.setattr(
@@ -1026,8 +1105,8 @@ def test_compose_probe_falls_back_to_verified_standalone_binary(
 
     assert command == ("/usr/bin/docker-compose",)
     assert runner.calls == [
-        ("/usr/bin/docker", "compose", "version"),
-        ("/usr/bin/docker-compose", "version"),
+        ("/usr/bin/docker", "compose", "version", "--short"),
+        ("/usr/bin/docker-compose", "version", "--short"),
     ]
 
 
@@ -1058,9 +1137,27 @@ def test_compose_probe_double_failure_exposes_only_a_fixed_error(
     assert caught.value.__context__ is None
     assert "private-compose-output" not in str(caught.value)
     assert runner.calls == [
-        ("/usr/bin/docker", "compose", "version"),
-        ("/usr/bin/docker-compose", "version"),
+        ("/usr/bin/docker", "compose", "version", "--short"),
+        ("/usr/bin/docker-compose", "version", "--short"),
     ]
+
+
+@pytest.mark.parametrize("version", ["2.24.3", "1.29.2", "unknown"])
+def test_compose_below_the_supported_floor_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    class VersionRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout=version, stderr="")
+
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: None)
+    with pytest.raises(SmokeError, match=r"^SMOKE_COMPOSE_NOT_FOUND$"):
+        compose_smoke._resolve_compose_command(
+            docker="/usr/bin/docker", runner=VersionRunner()
+        )
 
 
 def test_main_reports_only_the_fixed_smoke_error_code(

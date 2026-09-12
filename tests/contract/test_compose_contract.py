@@ -1,5 +1,8 @@
 """Dockerfile 与 Compose 的静态安全、装配和 override 契约。"""
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -64,6 +67,66 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
     for name in _PROCESS_SERVICES:
         assert services[name]["depends_on"] == {
             "migrate": {"condition": "service_completed_successfully"}
+        }
+
+
+def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
+    base = _yaml("docker-compose.yml")
+    override = _yaml("docker-compose.model.yml")
+    assert "gemini_api_key" not in base["secrets"]
+    assert all(
+        "gemini_api_key" not in service.get("secrets", ())
+        for service in base["services"].values()
+    )
+    assert "XIAOWEI_GEMINI_ENABLED" not in base["x-app-environment"]
+    assert override == {
+        "services": {
+            "worker": {
+                "environment": {"XIAOWEI_GEMINI_ENABLED": "true"},
+                "secrets": ["postgres_password", "gemini_api_key"],
+            }
+        },
+        "secrets": {"gemini_api_key": {"environment": "GEMINI_API_KEY"}},
+    }
+
+
+def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
+    command = shutil.which("docker-compose")
+    assert command is not None
+    fake = "AIza" + "rendered-fake-value" * 2
+    environment = dict(os.environ)
+    environment["GEMINI_API_KEY"] = fake
+    result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
+        [
+            command,
+            "-f",
+            str(_ROOT / "docker-compose.yml"),
+            "-f",
+            str(_ROOT / "docker-compose.model.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert fake not in result.stdout
+    rendered = __import__("json").loads(result.stdout)
+    services = rendered["services"]
+    assert services["worker"]["environment"]["XIAOWEI_GEMINI_ENABLED"] == "true"
+    assert {item["source"] for item in services["worker"]["secrets"]} == {
+        "postgres_password",
+        "gemini_api_key",
+    }
+    for name, service in services.items():
+        if name == "worker":
+            continue
+        assert "XIAOWEI_GEMINI_ENABLED" not in service.get("environment", {})
+        assert "gemini_api_key" not in {
+            item["source"] for item in service.get("secrets", ())
         }
 
 

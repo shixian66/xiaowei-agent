@@ -15,7 +15,7 @@ import sys
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
@@ -43,6 +43,8 @@ _OAUTH_STATE_COOKIE_PAIR_RE = re.compile(
 )
 _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
+_MINIMUM_COMPOSE_VERSION = (2, 24, 4)
+_GEMINI_SECRET_DESTINATION = "/run/secrets/gemini_api_" + "key"
 _TERMINAL = {"succeeded", "failed", "rejected", "canceled", "indeterminate"}
 _NON_SUCCESS_CODES = {
     "failed": "SMOKE_TASK_FAILED",
@@ -86,8 +88,14 @@ class CommandRunner(Protocol):
 
 
 def _default_runner(
-    argv: Sequence[str], *, timeout: float
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    process_environment = None
+    if environment is not None:
+        process_environment = {**os.environ, **environment}
     return subprocess.run(  # noqa: S603 -- argv[0] 由 shutil.which 解析为绝对路径
         list(argv),
         shell=False,
@@ -95,6 +103,7 @@ def _default_runner(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=process_environment,
     )
 
 
@@ -112,10 +121,17 @@ def _resolve_compose_command(
         candidates.append((standalone,))
     for command in candidates:
         try:
-            runner((*command, "version"), timeout=15.0)
+            result = runner((*command, "version", "--short"), timeout=15.0)
         except (OSError, subprocess.SubprocessError):
             continue
-        return command
+        match = re.fullmatch(
+            r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", result.stdout.strip()
+        )
+        if (
+            match is not None
+            and tuple(map(int, match.groups())) >= _MINIMUM_COMPOSE_VERSION
+        ):
+            return command
     raise SmokeError("SMOKE_COMPOSE_NOT_FOUND") from None
 
 
@@ -167,6 +183,7 @@ class _SmokeInputs:
     sensitive_values: tuple[str, ...]
     owned_inputs: tuple[_OwnedInput, ...]
     override_path: Path
+    environment: tuple[tuple[str, str], ...]
 
 
 def _cleanup_unreturned_input(
@@ -519,11 +536,13 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
         except BaseException:
             _safe_add_fixed_note(exc, "SMOKE_INPUT_CLEANUP_FAILED")
         raise
+    gemini_value = "AIza" + secrets.token_urlsafe(32)
     return _SmokeInputs(
         namespace=namespace,
-        sensitive_values=(postgres_value, feishu_value),
+        sensitive_values=(postgres_value, feishu_value, gemini_value),
         owned_inputs=tuple(created),
         override_path=override,
+        environment=(("GEMINI_API_KEY", gemini_value),),
     )
 
 
@@ -535,6 +554,7 @@ class ComposeSession:
     files: tuple[Path, ...]
     compose_command: tuple[str, ...]
     sensitive_values: tuple[str, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
 
@@ -557,6 +577,7 @@ class ComposeSession:
             files=files,
             compose_command=self.compose_command,
             sensitive_values=self.sensitive_values,
+            environment=self.environment,
             up_started=self.up_started,
             failure_code=failure_code,
         )
@@ -585,6 +606,12 @@ class ComposeSession:
         """运行 Docker argv；只把当前固定阶段码带过脱敏边界。"""
         failure: SmokeError | None = None
         try:
+            if self.runner is _default_runner and self.environment:
+                return _default_runner(
+                    argv,
+                    timeout=timeout,
+                    environment=dict(self.environment),
+                )
             return self.runner(argv, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
             failure = SmokeError(failure_code or self.failure_code)
@@ -619,6 +646,7 @@ def run_smoke(
         ),
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
+        environment=smoke_inputs.environment,
     )
     primary_error: BaseException | None = None
     try:
@@ -766,6 +794,83 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
     if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
         raise SmokeError("SMOKE_INSPECT_PROTOCOL_ERROR")
     return set(values)
+
+
+def _require_model_secret_boundary(session: ComposeSession) -> None:
+    """叠加模型 override 后只检查容器元数据，绝不打开 secret 文件。"""
+    model = session.derive(
+        files=(*session.files, _ROOT / "docker-compose.model.yml"),
+        failure_code="SMOKE_MODEL_SECRET_COMMAND_FAILED",
+    )
+    model.run(
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "worker",
+        timeout=60.0,
+    )
+    result = model.run("ps", "--all", "--quiet", timeout=15.0)
+    container_ids = tuple(line for line in result.stdout.splitlines() if line)
+    if not container_ids:
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+
+    worker_count = 0
+    for container_id in container_ids:
+        inspected = model.run_docker(
+            (
+                model.docker,
+                "inspect",
+                "--format",
+                "[{{json .Config.Labels}},{{json .Config.Env}},{{json .Mounts}}]",
+                container_id,
+            ),
+            timeout=15.0,
+            failure_code="SMOKE_MODEL_SECRET_INSPECT_FAILED",
+        )
+        try:
+            labels, environment, mounts = json.loads(inspected.stdout)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR") from None
+        if (
+            not isinstance(labels, dict)
+            or not isinstance(environment, list)
+            or not isinstance(mounts, list)
+            or not all(isinstance(item, str) for item in environment)
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR")
+        service = labels.get("com.docker.compose.service")
+        if not isinstance(service, str) or not service:
+            raise SmokeError("SMOKE_MODEL_SECRET_INSPECT_PROTOCOL_ERROR")
+        if any(
+            value in item
+            for value in model.sensitive_values
+            for item in environment
+        ):
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        secret_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict)
+            and mount.get("Destination") == _GEMINI_SECRET_DESTINATION
+        ]
+        enabled = [
+            item
+            for item in environment
+            if item.startswith("XIAOWEI_GEMINI_ENABLED=")
+        ]
+        if service == "worker":
+            worker_count += 1
+            if (
+                enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
+                or len(secret_mounts) != 1
+                or secret_mounts[0].get("RW") is not False
+            ):
+                raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        elif enabled or secret_mounts:
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+    if worker_count == 0:
+        raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
 
 
 def _require_web_container_boundary(session: ComposeSession) -> None:
@@ -1388,6 +1493,7 @@ def _full_workflow(session: ComposeSession) -> None:
     _require_same_asset_render(asset_before, asset_after)
 
     session.failure_code = "SMOKE_FINAL_AUDIT_COMMAND_FAILED"
+    _require_model_secret_boundary(session)
     console_id = _submit(session, key=f"console-{uuid.uuid4().hex}")
     _task(session, "task", "get", console_id)
     session.run("ps", "-a", timeout=15.0)

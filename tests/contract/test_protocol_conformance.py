@@ -15,7 +15,9 @@ import pytest
 
 from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.application.model_ports import IntentModelPort, SlowQueryAdvisoryPort
 from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
 from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.store import TaskStore
@@ -44,6 +46,8 @@ _ANCHORED = {
     "WorkflowRunner",
     "TraceSink",
     "WebSessionStore",
+    "IntentModelPort",
+    "SlowQueryAdvisoryPort",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
@@ -104,6 +108,42 @@ def test_oauth_adapter_keeps_the_protocol_keyword_arguments() -> None:
     )
 
 
+def test_model_adapters_keep_both_narrow_port_signatures() -> None:
+    from tests.fakes.model import ScriptedModelAdapter
+
+    for implementation in (GeminiModelAdapter, ScriptedModelAdapter):
+        assert inspect.signature(implementation.generate_intent) == inspect.signature(
+            IntentModelPort.generate_intent
+        )
+        assert inspect.signature(implementation.generate_advisory) == inspect.signature(
+            SlowQueryAdvisoryPort.generate_advisory
+        )
+        assert _keyword_params(implementation.generate_advisory) == {
+            "max_output_tokens"
+        }
+
+
+def test_model_conformance_anchor_assigns_both_real_and_fake_to_both_ports() -> None:
+    tree = ast.parse(Path(inspect.getfile(_conformance)).read_text(encoding="utf-8"))
+    functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_model_port_anchors"
+    ]
+    assert len(functions) == 1
+    assignments = {
+        (node.target.id, node.annotation.id)
+        for node in functions[0].body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and isinstance(node.annotation, ast.Name)
+    }
+    assert assignments == {
+        ("real_intent", "IntentModelPort"),
+        ("real_advisory", "SlowQueryAdvisoryPort"),
+        ("fake_intent", "IntentModelPort"),
+        ("fake_advisory", "SlowQueryAdvisoryPort"),
+    }
 def test_binding_registry_keeps_the_execution_provider_signature() -> None:
     assert _keyword_params(
         CapabilityBindingRegistry.execution_for

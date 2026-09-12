@@ -361,6 +361,11 @@ docker compose down --volumes --remove-orphans
 python -m scripts.compose_smoke
 ```
 
+脚本要求 Docker Compose 2.24.4 或更新版本。RI3 PR 3B 在同一 workflow 的末段临时叠加
+`docker-compose.model.yml`，使用内存中的拆分 fake host environment secret，只通过 Docker
+inspect 的 label/environment/mount 元数据证明 worker 获得固定只读 mount、所有已创建的
+非 worker 容器都没有该 mount；脚本不打开或输出 secret 文件。基础 Compose 仍默认关闭模型。
+
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
 下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入三个 fake 输入和一个不含 secret 值的
@@ -384,9 +389,9 @@ CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、ca
 
 ### 尚未完成与能力边界
 
-当前实现仍只使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；当前从仅含文档的
-PR 3A 开始，尚未进入 SDK 或 Runtime 源码实现。M6a 增加了
+当前 Runtime 仍只使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
+与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B 只离线新增了
+固定 Gemini SDK adapter、严格 DTO/窄 port 与 worker-only secret override，未接入 durable Runtime，也未进行真实 provider 调用。M6a 增加了
 Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
 已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
 PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离

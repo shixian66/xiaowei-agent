@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from xiaowei_agent.config import DEFAULT_TENANT_ID, Settings, load_settings
+from xiaowei_agent.config import _FIELD_TO_ENV, DEFAULT_TENANT_ID, Settings, load_settings
 
 
 def _test_readonly_env(password_file: Path) -> dict[str, str]:
@@ -46,6 +46,16 @@ def test_load_from_explicit_mapping() -> None:
 
 def test_log_level_defaults_to_info() -> None:
     assert load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}).log_level == "INFO"
+
+
+def test_model_configuration_surface_is_exactly_one_default_off_flag() -> None:
+    settings = load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"})
+    assert settings.gemini_enabled is False
+    assert {
+        field: environment
+        for field, environment in _FIELD_TO_ENV.items()
+        if field.startswith("gemini_")
+    } == {"gemini_enabled": "XIAOWEI_GEMINI_ENABLED"}
 
 
 def test_tenant_id_is_a_constant() -> None:

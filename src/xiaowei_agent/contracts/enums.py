@@ -97,6 +97,19 @@ class IntentSource(StrEnum):
     FAKE = "fake"
 
 
+class ModelErrorCode(StrEnum):
+    """供应商错误只允许映射为这些本地安全码。"""
+
+    CREDENTIAL_UNAVAILABLE = "model_credential_unavailable"
+    AMBIENT_PROXY = "model_ambient_proxy"
+    UNAUTHORIZED = "model_unauthorized"
+    FORBIDDEN = "model_forbidden"
+    RATE_LIMITED = "model_rate_limited"
+    TIMEOUT = "model_timeout"
+    INVALID_RESPONSE = "model_invalid_response"
+    UNAVAILABLE = "model_unavailable"
+
+
 class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"

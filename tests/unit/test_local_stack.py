@@ -68,6 +68,8 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         "asset_inventory",
     }
     assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
+    assert stack.intent_model is None
+    assert stack.slow_query_advisory is None
     assert stack.runtime._runner._bindings is stack.runtime._bindings
     assert await stack.readiness.check() == ReadinessReport(
         database_ok=True,
@@ -75,6 +77,28 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         assembled=True,
     )
     await stack.aclose()
+
+
+def test_enabled_gemini_is_lazily_assembled_without_reading_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def forbidden_read(path: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("composition must not read the key")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.secret_file.read_secret_file",
+        forbidden_read,
+    )
+    stack = build_in_memory_local_stack(
+        settings=Settings(environment_id="dev", gemini_enabled=True)
+    )
+    assert stack.intent_model is not None
+    assert stack.intent_model is stack.slow_query_advisory
+    assert calls == 0
 
 
 def _live_settings(**updates: object) -> Settings:

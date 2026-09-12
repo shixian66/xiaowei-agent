@@ -41,6 +41,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "uvicorn",
         "pymysql",
         "lark-oapi",
+        "google-genai",
     }
 )
 
@@ -155,6 +156,36 @@ def test_lark_oapi_is_exactly_pinned_and_still_lacks_py_typed() -> None:
     spec = find_spec("lark_oapi")
     assert spec is not None and spec.origin is not None
     assert not (Path(spec.origin).parent / "py.typed").is_file()
+
+
+def test_google_genai_exact_wheel_license_and_typing_marker_are_locked() -> None:
+    project = _pyproject()["project"]
+    assert isinstance(project, dict)
+    declared = project["dependencies"]
+    assert isinstance(declared, list)
+    assert "google-genai==2.23.0" in declared
+
+    lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = lock["package"]
+    assert isinstance(packages, list)
+    matches = [item for item in packages if item.get("name") == "google-genai"]
+    assert len(matches) == 1
+    package = matches[0]
+    assert package["version"] == "2.23.0"
+    assert {
+        (item["url"].rsplit("/", 1)[-1], item["hash"])
+        for item in package["wheels"]
+    } == {
+        (
+            "google_genai-2.23.0-py3-none-any.whl",
+            "sha256:1e63211d44d188b8069c2b354d92b9bde25c1e821513fdbe1948b7c0d9f6b922",
+        )
+    }
+
+    assert metadata("google-genai")["License-Expression"] == "Apache-2.0"
+    spec = find_spec("google.genai")
+    assert spec is not None and spec.origin is not None
+    assert (Path(spec.origin).parent / "py.typed").is_file()
 
 
 def test_lark_oapi_wheel_digest_is_locked_to_the_reviewed_artifact() -> None:

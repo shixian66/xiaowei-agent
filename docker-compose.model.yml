@@ -1,0 +1,11 @@
+services:
+  worker:
+    environment:
+      XIAOWEI_GEMINI_ENABLED: "true"
+    secrets:
+      - postgres_password
+      - gemini_api_key
+
+secrets:
+  gemini_api_key:
+    environment: GEMINI_API_KEY

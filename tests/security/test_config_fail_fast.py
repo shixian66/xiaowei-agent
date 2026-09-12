@@ -57,6 +57,22 @@ def test_missing_required_field_fails_fast() -> None:
         load_settings({})
 
 
+def test_model_profile_and_credential_variables_fail_closed() -> None:
+    for name in (
+        "XIAOWEI_GEMINI_MODEL",
+        "XIAOWEI_GEMINI_ENDPOINT",
+        "XIAOWEI_GEMINI_PROXY",
+        "XIAOWEI_GEMINI_TIMEOUT_SECONDS",
+        "XIAOWEI_GEMINI_API_KEY",
+        "XIAOWEI_GEMINI_API_KEY_FILE",
+        "XIAOWEI_GEMINI_SECRET_PATH",
+    ):
+        with pytest.raises(ConfigError) as caught:
+            load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev", name: _SECRET})
+        assert name in str(caught.value)
+        assert _SECRET not in str(caught.value)
+
+
 def test_tenant_id_cannot_be_overridden_by_env() -> None:
     with pytest.raises(ConfigError) as exc:
         load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev", "XIAOWEI_TENANT_ID": "attacker"})

@@ -49,6 +49,7 @@ from xiaowei_agent.contracts.enums import (
     GrantRejection,
     IdentitySource,
     IntentSource,
+    ModelErrorCode,
     PipelineStage,
     PolicyReason,
     ProjectionErrorCode,
@@ -76,6 +77,16 @@ from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.external_input import ExternalInput
 from xiaowei_agent.contracts.intent import IntentDraft
+from xiaowei_agent.contracts.model import (
+    MAX_ADVISORY_ROWS,
+    MAX_MODEL_HISTORY_ITEMS,
+    MAX_MODEL_TEXT_BYTES,
+    MAX_MODEL_TEXT_CHARACTERS,
+    ModelAdvisory,
+    ModelIntentRequest,
+    ProviderIntentResponse,
+    SlowQueryAdvisoryRequest,
+)
 from xiaowei_agent.contracts.plan import (
     PLAN_SCHEMA_VERSION,
     ExecutionPlan,
@@ -120,6 +131,10 @@ from xiaowei_agent.contracts.trace_events import TraceEvent
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "MAX_ADVISORY_ROWS",
+    "MAX_MODEL_HISTORY_ITEMS",
+    "MAX_MODEL_TEXT_BYTES",
+    "MAX_MODEL_TEXT_CHARACTERS",
     "MAX_PROMQL_POINTS_PER_SERIES",
     "MAX_PROMQL_SERIES",
     "MAX_PROMQL_WINDOW_MINUTES",
@@ -168,6 +183,9 @@ __all__ = [
     "JsonScalar",
     "LeaseGrant",
     "MissingItem",
+    "ModelAdvisory",
+    "ModelErrorCode",
+    "ModelIntentRequest",
     "NonEmptyText",
     "OperationSpec",
     "PipelineStage",
@@ -181,6 +199,7 @@ __all__ = [
     "ProjectionState",
     "PromqlGuardRejection",
     "PromqlSurface",
+    "ProviderIntentResponse",
     "ReadinessProbe",
     "ReadinessReport",
     "Rejection",
@@ -194,6 +213,7 @@ __all__ = [
     "RiskLevel",
     "ScopeTaskPageQuery",
     "Sha256Hex",
+    "SlowQueryAdvisoryRequest",
     "SqlGuardRejection",
     "SqlSurface",
     "StageOutcome",
