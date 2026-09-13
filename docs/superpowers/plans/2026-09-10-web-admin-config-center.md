@@ -1,4 +1,6 @@
-# RI5 Minimal Web Admin Configuration Center Implementation Plan
+# RI5 Minimal Web Admin Configuration Center Implementation Plan（已取代）
+
+> 本计划已被 [`docs/plans/RI5-local-web-admin-simplified-design.md`](../../plans/RI5-local-web-admin-simplified-design.md) 取代，不再作为实现依据。保留本文仅用于历史追溯。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
