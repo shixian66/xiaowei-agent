@@ -180,6 +180,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .button-primary { color: #fff; background: linear-gradient(135deg, var(--brand), var(--brand-deep)); box-shadow: 0 8px 18px rgba(18, 112, 85, 0.18); }
 .button-secondary { color: var(--ink-700); border: 1px solid var(--line-strong); background: #fff; }
 .button-quiet { color: #d7e6e2; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.06); }
+.button-link { padding: 3px 0; color: var(--brand-deep); background: transparent; font-size: 12px; font-weight: 750; }
 
 .workspace-grid { display: grid; min-height: calc(100vh - 116px); grid-template-columns: 330px minmax(0, 1fr); }
 .task-sidebar {
@@ -234,6 +235,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .assistant-heading p:last-child { margin: 3px 0 0; color: var(--ink-500); }
 .ai-orb { display: grid; width: 54px; height: 54px; flex: 0 0 auto; place-items: center; border: 1px solid #c5e5d9; border-radius: 17px; color: var(--brand); background: linear-gradient(145deg, #fff, #dff5ec); box-shadow: inset 0 0 0 5px rgba(255, 255, 255, 0.65); font-size: 13px; font-weight: 850; }
 .composer-card { position: relative; z-index: 1; margin-top: 20px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 14px; background: #fff; box-shadow: var(--shadow-soft); }
+.context-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 18px; color: var(--brand-deep); border-bottom: 1px solid #d8ebe4; background: var(--surface-tint); font-size: 12px; }
+.context-banner strong { word-break: break-all; }
 .composer-card textarea { display: block; width: 100%; min-height: 108px; padding: 18px 18px 8px; resize: vertical; border: 0; outline: 0; color: var(--ink-900); background: transparent; line-height: 1.7; }
 .composer-card textarea::placeholder { color: #94a29d; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 12px 18px; }
@@ -244,6 +247,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .capability-chip { padding: 5px 10px; border: 1px solid #dce8e3; border-radius: 999px; background: rgba(255, 255, 255, 0.74); }
 
 .task-stage { margin-top: 26px; }
+.stage-actions { display: flex; align-items: center; gap: 8px; }
 .empty-stage { display: grid; min-height: 330px; margin-top: 16px; place-content: center; justify-items: center; text-align: center; border: 1px dashed #ccd9d4; border-radius: 16px; color: var(--ink-500); background: rgba(255, 255, 255, 0.62); }
 .empty-stage h3 { margin: 20px 0 5px; color: var(--ink-700); font-size: 17px; }
 .empty-stage p { margin: 0; }

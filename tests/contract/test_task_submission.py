@@ -1,6 +1,7 @@
 """M5 提交事实与作用域查询契约。"""
 
 import datetime as dt
+import inspect
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +13,11 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskSubmission,
 )
-from xiaowei_agent.persistence.store import request_dedup_digest, submission_digest
+from xiaowei_agent.persistence.store import (
+    idempotency_scope_digest,
+    request_dedup_digest,
+    submission_digest,
+)
 
 _AS_OF = dt.datetime(2026, 9, 5, 9, 30, tzinfo=dt.UTC)
 
@@ -50,6 +55,20 @@ def _submission(**updates: object) -> TaskSubmission:
     return TaskSubmission(**(values | updates))
 
 
+def test_submission_parent_is_optional_strict_text() -> None:
+    assert set(TaskSubmission.model_fields) == {
+        "envelope",
+        "context",
+        "as_of",
+        "parent_task_id",
+    }
+    assert _submission().parent_task_id is None
+    assert _submission(parent_task_id="task-parent").parent_task_id == "task-parent"
+    for invalid in (1, True, b"task-parent"):
+        with pytest.raises(ValidationError):
+            _submission(parent_task_id=invalid)
+
+
 def test_submission_requires_an_aware_as_of() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
         _submission(as_of=_AS_OF.replace(tzinfo=None))
@@ -73,6 +92,12 @@ def test_submission_digest_is_a_sha256_hex_checksum() -> None:
     assert set(digest) <= set("0123456789abcdef")
 
 
+def test_submission_digest_covers_a_non_null_parent() -> None:
+    assert submission_digest(_submission(parent_task_id="task-parent")) != (
+        submission_digest(_submission())
+    )
+
+
 def test_request_dedup_digest_excludes_retry_identity_and_time() -> None:
     original = _submission()
     retry = _submission(
@@ -80,17 +105,62 @@ def test_request_dedup_digest_excludes_retry_identity_and_time() -> None:
         context=_context(trace_id="2" * 32),
         as_of=_AS_OF + dt.timedelta(hours=1),
     )
-    assert request_dedup_digest(original.envelope, original.context) == (
-        request_dedup_digest(retry.envelope, retry.context)
+    assert request_dedup_digest(
+        original.envelope, original.context, parent_task_id=None
+    ) == (
+        request_dedup_digest(retry.envelope, retry.context, parent_task_id=None)
     )
 
 
 def test_request_dedup_digest_includes_channel() -> None:
     original = _submission()
     changed = _submission(envelope=_envelope(channel=Channel.CLI))
-    assert request_dedup_digest(original.envelope, original.context) != (
-        request_dedup_digest(changed.envelope, changed.context)
+    assert request_dedup_digest(
+        original.envelope, original.context, parent_task_id=None
+    ) != (
+        request_dedup_digest(changed.envelope, changed.context, parent_task_id=None)
     )
+
+
+def test_request_dedup_parent_must_be_explicit_and_keyword_only() -> None:
+    submission = _submission()
+    with pytest.raises(TypeError):
+        request_dedup_digest(submission.envelope, submission.context)
+    with pytest.raises(TypeError):
+        request_dedup_digest(submission.envelope, submission.context, None)
+
+
+def test_parent_changes_semantic_and_submission_digests_but_not_scope() -> None:
+    without_parent = _submission()
+    first_parent = _submission(parent_task_id="task-parent-1")
+    second_parent = _submission(parent_task_id="task-parent-2")
+
+    assert request_dedup_digest(
+        without_parent.envelope,
+        without_parent.context,
+        parent_task_id=None,
+    ) != request_dedup_digest(
+        first_parent.envelope,
+        first_parent.context,
+        parent_task_id=first_parent.parent_task_id,
+    )
+    assert request_dedup_digest(
+        first_parent.envelope,
+        first_parent.context,
+        parent_task_id=first_parent.parent_task_id,
+    ) != request_dedup_digest(
+        second_parent.envelope,
+        second_parent.context,
+        parent_task_id=second_parent.parent_task_id,
+    )
+    assert submission_digest(without_parent) != submission_digest(first_parent)
+    assert submission_digest(first_parent) != submission_digest(second_parent)
+
+    assert set(inspect.signature(idempotency_scope_digest).parameters) == {
+        "tenant_id",
+        "environment_id",
+        "idempotency_key",
+    }
 
 
 def test_idempotency_key_accepts_exactly_two_hundred_characters() -> None:

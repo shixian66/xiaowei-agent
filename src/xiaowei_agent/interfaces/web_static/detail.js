@@ -28,6 +28,9 @@ const elements = Object.freeze({
   polling: document.querySelector("#detail-polling"),
   request: document.querySelector("#detail-request"),
   taskId: document.querySelector("#detail-task-id"),
+  parentRow: document.querySelector("#detail-parent-row"),
+  parent: document.querySelector("#detail-parent"),
+  continueTask: document.querySelector("#detail-continue-task"),
   submittedAt: document.querySelector("#detail-submitted-at"),
   version: document.querySelector("#detail-version"),
   timelineStatus: document.querySelector("#detail-timeline-status"),
@@ -99,11 +102,16 @@ function clearTaskDetail() {
   window.clearTimeout(pollTimer);
   elements.request.textContent = "";
   elements.taskId.textContent = "";
+  elements.parent.textContent = "";
+  elements.parent.href = "/app";
+  elements.continueTask.href = "/app";
   elements.submittedAt.textContent = "";
   elements.version.textContent = "";
   elements.timelineStatus.textContent = "";
   clearSafeResult();
   setVisible(elements.progress, false);
+  setVisible(elements.parentRow, false);
+  setVisible(elements.continueTask, false);
   setVisible(elements.content, false);
 }
 
@@ -166,9 +174,21 @@ function renderTask(task) {
   setStatus(task.status);
   elements.request.textContent = text(task.request_preview, "未提供任务摘要");
   elements.taskId.textContent = text(task.task_id);
+  const parentTaskId = typeof task.parent_task_id === "string" && task.parent_task_id.length > 0
+    ? task.parent_task_id
+    : null;
+  elements.parent.textContent = parentTaskId || "";
+  elements.parent.href = parentTaskId === null
+    ? "/app"
+    : `/app/tasks/${encodeURIComponent(parentTaskId)}`;
+  setVisible(elements.parentRow, parentTaskId !== null);
   elements.submittedAt.textContent = formatTime(task.submitted_at);
   elements.version.textContent = Number.isInteger(task.task_version) ? String(task.task_version) : "—";
   const terminal = TERMINAL_STATUSES.has(task.status);
+  elements.continueTask.href = terminal
+    ? `/app?parent_task_id=${encodeURIComponent(task.task_id)}`
+    : "/app";
+  setVisible(elements.continueTask, terminal);
   setVisible(elements.progress, !terminal);
   if (terminal) {
     elements.polling.textContent = "已停止同步";

@@ -16,6 +16,7 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
     ChannelBindingConflictError,
+    ChannelBindingLookup,
     ChannelBindingNotFoundError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
@@ -219,6 +220,63 @@ async def test_group_binding_lookup_is_scope_hidden_and_excludes_private_binding
     ):
         with pytest.raises(ChannelBindingNotFoundError):
             await channel_store.get_group_binding(lookup=lookup)
+
+
+async def test_binding_lookup_returns_any_channel_but_stays_scope_hidden(
+    channel_store: Any, store: Any, context: Any, clock: Any
+) -> None:
+    web_task = await _task(store, context, "generic-web-lookup")
+    private_task = await _task(store, context, "generic-private-lookup")
+    web = await channel_store.bind_task(
+        command=_binding(
+            web_task.task_id,
+            clock(),
+            source_event_ref="event-generic-web",
+            channel=ChannelKind.WEB,
+        )
+    )
+    private = await channel_store.bind_task(
+        command=_binding(
+            private_task.task_id,
+            clock(),
+            source_event_ref="event-generic-private",
+            channel=ChannelKind.FEISHU_PRIVATE,
+        )
+    )
+
+    assert await channel_store.get_binding(
+        lookup=ChannelBindingLookup(
+            task_id=web_task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        )
+    ) == web
+    assert await channel_store.get_binding(
+        lookup=ChannelBindingLookup(
+            task_id=private_task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        )
+    ) == private
+    for lookup in (
+        ChannelBindingLookup(
+            task_id=web_task.task_id,
+            tenant_id="other-tenant",
+            environment_id="dev",
+        ),
+        ChannelBindingLookup(
+            task_id=web_task.task_id,
+            tenant_id="dev-local",
+            environment_id="prod",
+        ),
+        ChannelBindingLookup(
+            task_id="missing-task",
+            tenant_id="dev-local",
+            environment_id="dev",
+        ),
+    ):
+        with pytest.raises(ChannelBindingNotFoundError):
+            await channel_store.get_binding(lookup=lookup)
 
 
 async def test_group_bound_task_ids_are_batched_and_scope_hidden(
@@ -819,6 +877,7 @@ CHANNEL_STORE_CASES = (
     test_binding_cannot_override_the_task_store_scope,
     test_binding_rolls_back_when_its_nested_subscription_conflicts,
     test_group_binding_lookup_is_scope_hidden_and_excludes_private_bindings,
+    test_binding_lookup_returns_any_channel_but_stays_scope_hidden,
     test_group_bound_task_ids_are_batched_and_scope_hidden,
     test_projection_creation_is_idempotent_but_semantic_conflicts_fail_closed,
     test_projection_subscription_cannot_reference_an_unknown_task,

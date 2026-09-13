@@ -8,6 +8,7 @@ from tests.conftest import make_envelope, make_submission
 
 from xiaowei_agent.application import channel_access as channel_access_module
 from xiaowei_agent.application.channel_access import (
+    AccessibleTask,
     TaskAccessNotFoundError,
     TaskAccessQuery,
     TaskAccessService,
@@ -80,7 +81,14 @@ def _service(store: Any, channel_store: Any, memory_state: Any, membership: Any)
     )
 
 
-async def _create_task(store: Any, context: Any, *, suffix: str, actor: str = "alice"):
+async def _create_task(
+    store: Any,
+    context: Any,
+    *,
+    suffix: str,
+    actor: str = "alice",
+    parent_task_id: str | None = None,
+):
     scoped = context.model_copy(update={"actor": actor})
     return await store.create_task(
         submission=make_submission(
@@ -91,6 +99,7 @@ async def _create_task(store: Any, context: Any, *, suffix: str, actor: str = "a
                 idempotency_key=f"access-{suffix}",
                 text=f"inspect {suffix}",
             ),
+            parent_task_id=parent_task_id,
         )
     )
 
@@ -129,6 +138,27 @@ async def test_owner_and_admin_can_read_without_a_membership_call(
     assert owner.task_view.task_id == task.task_id
     assert admin.task_view == owner.task_view
     assert membership.calls == []
+
+
+async def test_task_detail_returns_only_the_parent_reference(
+    store, channel_store, memory_state, context
+) -> None:
+    task = await _create_task(
+        store,
+        context,
+        suffix="parent-reference",
+        parent_task_id="parent-task",
+    )
+    service = _service(store, channel_store, memory_state, MembershipStub())
+
+    accessible = await service.get_task(
+        query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
+    )
+
+    assert accessible.parent_task_id == "parent-task"
+    assert not {"submission", "binding", "parent_submission"} & set(
+        AccessibleTask.model_fields
+    )
 
 
 async def test_current_group_member_can_read_and_is_checked_on_every_request(

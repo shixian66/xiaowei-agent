@@ -29,7 +29,7 @@ from xiaowei_agent.persistence.database import (
     create_database_engine,
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
-from xiaowei_agent.persistence.fake import InMemoryTaskStore
+from xiaowei_agent.persistence.fake import InMemoryChannelStore, InMemoryTaskStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.model_artifacts import (
     InMemoryModelArtifactStore,
@@ -397,6 +397,7 @@ def _assemble_local_stack(
     *,
     settings: Settings,
     task_store: TaskStore,
+    channel_store: ChannelStore,
     plan_store: PlanStore,
     ledger: EvidenceLedger,
     model_artifacts: ModelArtifactStore,
@@ -406,6 +407,7 @@ def _assemble_local_stack(
     monotonic: MonotonicClock,
     starrocks_live_assembly: StarRocksLiveAssembly | None,
 ) -> LocalStack:
+    from xiaowei_agent.application.context import ContextAssembler
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.capabilities.asset_inventory import (
         ASSET_INVENTORY_GATEWAY,
@@ -538,6 +540,14 @@ def _assemble_local_stack(
         sink=sink,
         lease_ttl_seconds=settings.lease_ttl_seconds,
     )
+    task_projector = TaskViewRuntime(
+        task_store=task_store,
+        plan_store=plan_store,
+        ledger=ledger,
+        bindings=bindings,
+        model_artifacts=model_artifacts,
+        model_profile=application_model_profile,
+    )
     runtime = XiaoweiRuntime(
         interpreter=RuleBasedIntentInterpreter(),
         resolver=DeterministicCapabilityResolver(),
@@ -553,6 +563,11 @@ def _assemble_local_stack(
         model_profile=application_model_profile,
         intent_model=model_adapter,
         slow_query_advisory=model_adapter,
+        context_assembler=ContextAssembler(
+            task_store=task_store,
+            channel_store=channel_store,
+            task_projector=task_projector,
+        ),
         model_monotonic=monotonic,
         lease_ttl_seconds=settings.lease_ttl_seconds,
         heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
@@ -602,6 +617,7 @@ def build_in_memory_local_stack(
     return _assemble_local_stack(
         settings=settings,
         task_store=task_store,
+        channel_store=InMemoryChannelStore(clock=clock, state=state),
         plan_store=plan_store,
         ledger=ledger,
         model_artifacts=model_artifacts,
@@ -883,6 +899,7 @@ async def build_postgres_web_stack(
         submission_service = ChannelSubmissionService(
             runtime=runtime,
             channel_store=channel_store,
+            web_parent_access=task_access_service,
         )
         auth = WebAuthService(
             sessions=web_session_store,
@@ -940,6 +957,7 @@ async def build_postgres_local_stack(
         return _assemble_local_stack(
             settings=settings,
             task_store=task_store,
+            channel_store=PostgresChannelStore(engine=engine, clock=clock),
             plan_store=PostgresPlanStore(engine=engine),
             ledger=PostgresEvidenceLedger(engine=engine),
             model_artifacts=PostgresModelArtifactStore(engine=engine, clock=clock),

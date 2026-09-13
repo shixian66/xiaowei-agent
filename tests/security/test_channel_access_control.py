@@ -50,6 +50,7 @@ def test_safe_access_models_cannot_return_submission_or_internal_task_facts() ->
         "request_preview",
         "submitted_at",
         "task_version",
+        "parent_task_id",
     }
     assert summary == {"task_id", "status", "request_preview", "submitted_at"}
     assert page == {"items", "next_created_seq"}
@@ -86,6 +87,7 @@ def test_submit_command_cannot_override_authenticated_scope_or_server_key() -> N
         "client_submission_ref",
         "conversation_ref",
         "submitted_at",
+        "parent_task_id",
     }
     assert not {
         "tenant_id",

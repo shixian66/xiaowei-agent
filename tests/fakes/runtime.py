@@ -91,6 +91,7 @@ class RuntimeHarness:
         clear_ledger_before_render: bool = False,
         intent_model: Any = None,
         slow_query_advisory: Any = None,
+        context_assembler: Any = None,
     ) -> None:
         self.clock = ManualClock(start=as_of)
         self.as_of = as_of
@@ -157,6 +158,7 @@ class RuntimeHarness:
             model_profile=ModelInvocationProfile(),
             intent_model=intent_model,
             slow_query_advisory=slow_query_advisory,
+            context_assembler=context_assembler,
         )
         self._injection: str | None = None
         self.task_id = ""

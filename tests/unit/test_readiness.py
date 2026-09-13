@@ -45,8 +45,12 @@ class _Engine:
 async def test_readiness_requires_database_head_and_assembly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(database, "_current_revision", lambda _: "0008_model_artifacts")
-    connection = _Connection(revision="0008_model_artifacts")
+    monkeypatch.setattr(
+        database,
+        "_current_revision",
+        lambda _: "0009_task_parent_context",
+    )
+    connection = _Connection(revision="0009_task_parent_context")
     probe = PostgresReadinessProbe(engine=_Engine(connection), assembled=True)
     report = await probe.check()
     assert report.database_ok is True

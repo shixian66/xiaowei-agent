@@ -33,11 +33,15 @@
       <section class="detail-summary">
         <div class="detail-title-row">
           <span class="status-badge" id="detail-status"><span aria-hidden="true">●</span><span>读取中</span></span>
-          <span class="live-indicator" id="detail-polling"><span aria-hidden="true"></span> 自动同步</span>
+          <div class="stage-actions">
+            <a class="button button-secondary is-hidden" id="detail-continue-task" href="/app">继续这个任务</a>
+            <span class="live-indicator" id="detail-polling"><span aria-hidden="true"></span> 自动同步</span>
+          </div>
         </div>
         <h2 id="detail-request">正在读取任务</h2>
         <dl class="detail-meta">
           <div><dt>任务 ID</dt><dd id="detail-task-id">—</dd></div>
+          <div class="is-hidden" id="detail-parent-row"><dt>来源任务</dt><dd><a id="detail-parent" href="/app">—</a></dd></div>
           <div><dt>提交时间</dt><dd id="detail-submitted-at">—</dd></div>
           <div><dt>任务版本</dt><dd id="detail-version">—</dd></div>
         </dl>

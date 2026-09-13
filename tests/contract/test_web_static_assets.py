@@ -44,3 +44,25 @@ def test_desktop_shell_contains_a_static_minimum_width_notice() -> None:
     assert "请使用宽度至少 1280px 的桌面浏览器" in index
     assert "1279px" in css
     assert "desktop-width-notice" in index
+
+
+def test_explicit_parent_controls_are_present_and_payload_is_opt_in() -> None:
+    index = (_STATIC / "index.html").read_text(encoding="utf-8")
+    detail = (_STATIC / "detail.html").read_text(encoding="utf-8")
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+    detail_script = (_STATIC / "detail.js").read_text(encoding="utf-8")
+
+    for control_id in (
+        'id="continue-task"',
+        'id="context-source"',
+        'id="clear-context"',
+        'id="task-parent"',
+    ):
+        assert control_id in index
+    for control_id in ('id="detail-continue-task"', 'id="detail-parent"'):
+        assert control_id in detail
+    assert "pendingSubmission.parentTaskId" in app_script
+    assert "body.parent_task_id = pendingSubmission.parentTaskId" in app_script
+    assert "encodeURIComponent" in app_script + detail_script
+    assert "parent_task_id: pendingParentTaskId" not in app_script
+    assert "innerHTML" not in app_script + detail_script

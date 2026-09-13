@@ -109,7 +109,12 @@ class UnscopedAuditEventError(ValueError):
     """
 
 
-def request_dedup_digest(envelope: RequestEnvelope, context: RequestContext) -> str:
+def request_dedup_digest(
+    envelope: RequestEnvelope,
+    context: RequestContext,
+    *,
+    parent_task_id: str | None,
+) -> str:
     """幂等去重摘要：只覆盖**语义**字段。
 
     刻意**排除** ``request_id``——同一 ``idempotency_key`` 的正常重试会带一个新的
@@ -124,6 +129,8 @@ def request_dedup_digest(envelope: RequestEnvelope, context: RequestContext) -> 
         "text": envelope.text,
         "idempotency_key": envelope.idempotency_key,
     }
+    if parent_task_id is not None:
+        payload["parent_task_id"] = parent_task_id
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
@@ -146,6 +153,8 @@ def submission_digest(submission: TaskSubmission) -> str:
         "context": dump_contract(submission.context),
         "as_of": submission.as_of.isoformat(),
     }
+    if submission.parent_task_id is not None:
+        payload["parent_task_id"] = submission.parent_task_id
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
@@ -158,7 +167,11 @@ def submission_matches_record(
     return (
         stored_digest == submission_digest(submission)
         and record.request_digest
-        == request_dedup_digest(submission.envelope, submission.context)
+        == request_dedup_digest(
+            submission.envelope,
+            submission.context,
+            parent_task_id=submission.parent_task_id,
+        )
         and context_matches_envelope(submission.envelope, submission.context)
         and record.tenant_id == submission.context.tenant_id
         and record.environment_id == submission.context.environment_id

@@ -1,6 +1,6 @@
 """Web/飞书共用的提交权限、服务端幂等与渠道绑定编排。"""
 
-from typing import NamedTuple, Self
+from typing import NamedTuple, Protocol, Self
 
 from pydantic import Field, model_validator
 
@@ -39,6 +39,18 @@ class ChannelSubmissionForbiddenError(PermissionError):
         super().__init__("submission forbidden")
 
 
+class WebParentAccessPort(Protocol):
+    """Web-only 父任务授权端口；飞书提交进程不装配该依赖。"""
+
+    async def require_web_parent_access(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        parent_task_id: str,
+    ) -> None:
+        """仅在父链满足同 scope、身份、owner 和终态约束时返回。"""
+
+
 class ChannelSubmitCommand(Contract):
     principal: AuthenticatedPrincipal
     channel: ChannelKind
@@ -49,17 +61,21 @@ class ChannelSubmitCommand(Contract):
     client_submission_ref: StrictStr
     conversation_ref: StrictStr | None = None
     submitted_at: AwareDatetime
+    parent_task_id: StrictStr | None = None
 
     @model_validator(mode="after")
-    def _group_has_a_conversation(self) -> Self:
+    def _shape_is_supported(self) -> Self:
         if self.channel is ChannelKind.FEISHU_GROUP and self.conversation_ref is None:
             raise ValueError("group submission requires conversation_ref")
+        if self.parent_task_id is not None and self.channel is not ChannelKind.WEB:
+            raise ValueError("parent task is only supported for web")
         return self
 
 
 class SubmittedTask(Contract):
     task_view: TaskView
     binding: ChannelBinding
+    parent_task_id: StrictStr | None = None
 
 
 class ChannelSubmissionReferences(NamedTuple):
@@ -125,15 +141,29 @@ def _projection_command(
 class ChannelSubmissionService:
     """授权后复用 TaskViewRuntime，并原子恢复渠道绑定与通知订阅。"""
 
-    def __init__(self, *, runtime: TaskViewRuntime, channel_store: ChannelStore) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: TaskViewRuntime,
+        channel_store: ChannelStore,
+        web_parent_access: WebParentAccessPort | None = None,
+    ) -> None:
         self._runtime = runtime
         self._channels = channel_store
+        self._web_parent_access = web_parent_access
 
     async def submit(self, *, command: ChannelSubmitCommand) -> SubmittedTask:
         """提交任务；Runtime 成功但绑定失败时由同一服务端幂等键安全重试。"""
         principal = command.principal
         if ChannelPermission.SUBMIT_READONLY_TASK not in principal.permissions:
             raise ChannelSubmissionForbiddenError
+        if command.parent_task_id is not None:
+            if self._web_parent_access is None:
+                raise ChannelSubmissionForbiddenError
+            await self._web_parent_access.require_web_parent_access(
+                principal=principal,
+                parent_task_id=command.parent_task_id,
+            )
         references = derive_channel_submission_references(command)
         task_view = await self._runtime.submit_task(
             submission=TaskSubmission(
@@ -156,6 +186,7 @@ class ChannelSubmissionService:
                     policy_revision=command.policy_revision,
                 ),
                 as_of=command.submitted_at,
+                parent_task_id=command.parent_task_id,
             )
         )
         binding = await self._channels.bind_task(
@@ -171,7 +202,11 @@ class ChannelSubmissionService:
                 projection=_projection_command(command, task_id=task_view.task_id),
             )
         )
-        return SubmittedTask(task_view=task_view, binding=binding)
+        return SubmittedTask(
+            task_view=task_view,
+            binding=binding,
+            parent_task_id=command.parent_task_id,
+        )
 
 
 __all__ = [
@@ -180,6 +215,7 @@ __all__ = [
     "ChannelSubmissionService",
     "ChannelSubmitCommand",
     "SubmittedTask",
+    "WebParentAccessPort",
     "channel_idempotency_key",
     "derive_channel_submission_references",
 ]

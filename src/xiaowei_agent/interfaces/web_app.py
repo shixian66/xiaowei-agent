@@ -685,9 +685,12 @@ def create_app(
                 client_submission_ref=body.client_submission_id,
                 conversation_ref=None,
                 submitted_at=clock(),
+                parent_task_id=body.parent_task_id,
             )
         )
-        return WebTaskAccepted.from_submission(submitted).model_dump(mode="json")
+        accepted = WebTaskAccepted.from_submission(submitted)
+        exclude = {"parent_task_id"} if accepted.parent_task_id is None else set()
+        return accepted.model_dump(mode="json", exclude=exclude)
 
     @app.get("/app/api/tasks/{task_id}")
     async def get_task(request: Request, task_id: str) -> dict[str, object]:
@@ -698,7 +701,9 @@ def create_app(
                 task_id=_task_id_or_not_found(task_id),
             )
         )
-        return WebTaskDetail.from_accessible(accessible).model_dump(mode="json")
+        detail = WebTaskDetail.from_accessible(accessible)
+        exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
+        return detail.model_dump(mode="json", exclude=exclude)
 
     @app.post("/app/api/logout", status_code=204)
     async def logout(request: Request) -> Response:

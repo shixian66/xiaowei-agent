@@ -3,7 +3,12 @@
 from typing import Any
 
 import pytest
+from tests.conftest import drive_to_terminal
 
+from xiaowei_agent.application.channel_access import (
+    TaskAccessNotFoundError,
+    TaskAccessService,
+)
 from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
@@ -18,6 +23,8 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
     ProjectionState,
+    TaskLookup,
+    TaskStatus,
 )
 from xiaowei_agent.persistence import IdempotencyConflictError
 from xiaowei_agent.persistence.channel import (
@@ -32,6 +39,7 @@ from xiaowei_agent.persistence.errors import (
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
+from xiaowei_agent.persistence.store import request_dedup_digest, submission_digest
 
 
 def _principal(
@@ -65,6 +73,7 @@ def _command(
     channel: ChannelKind = ChannelKind.FEISHU_GROUP,
     client_key: str = "event-1",
     text: str = "inspect slow queries",
+    parent_task_id: str | None = None,
 ) -> ChannelSubmitCommand:
     return ChannelSubmitCommand(
         principal=_principal() if principal is None else principal,
@@ -76,12 +85,18 @@ def _command(
         client_submission_ref=client_key,
         conversation_ref="chat-1" if channel is ChannelKind.FEISHU_GROUP else None,
         submitted_at=clock(),
+        parent_task_id=parent_task_id,
     )
 
 
 def test_group_submission_requires_a_conversation_reference(clock) -> None:
     with pytest.raises(ValueError, match="group submission requires conversation_ref"):
         _command(clock).model_copy(update={"conversation_ref": None})
+
+
+def test_only_web_submissions_can_name_a_parent(clock) -> None:
+    with pytest.raises(ValueError, match="parent task is only supported for web"):
+        _command(clock, parent_task_id="task-parent")
 
 
 @pytest.fixture
@@ -97,7 +112,228 @@ def service(store, channel_store, memory_state):
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
     )
-    return ChannelSubmissionService(runtime=runtime, channel_store=channel_store)
+    class NeverMembership:
+        async def is_current_group_member(self, **_: object) -> bool:
+            raise AssertionError("web parent ownership must not query group membership")
+
+    parent_access = TaskAccessService(
+        runtime=runtime,
+        task_store=store,
+        channel_store=channel_store,
+        membership=NeverMembership(),
+    )
+    return ChannelSubmissionService(
+        runtime=runtime,
+        channel_store=channel_store,
+        web_parent_access=parent_access,
+    )
+
+
+async def _terminal_web_parent(
+    service: ChannelSubmissionService,
+    store: Any,
+    clock: Any,
+    *,
+    principal: AuthenticatedPrincipal | None = None,
+    client_key: str = "web-parent",
+) -> Any:
+    submitted = await service.submit(
+        command=_command(
+            clock,
+            principal=principal,
+            channel=ChannelKind.WEB,
+            client_key=client_key,
+        )
+    )
+    await drive_to_terminal(
+        store,
+        TaskLookup(
+            task_id=submitted.task_view.task_id,
+            tenant_id=(principal or _principal()).tenant_id,
+            environment_id=(principal or _principal()).environment_id,
+        ),
+        TaskStatus.SUCCEEDED,
+    )
+    return submitted
+
+
+async def test_web_parent_must_be_terminal_and_owned_by_the_same_web_identity(
+    service, store, clock, memory_state
+) -> None:
+    parent = await _terminal_web_parent(service, store, clock)
+    child = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="web-child",
+            parent_task_id=parent.task_view.task_id,
+        )
+    )
+
+    submission = await store.get_submission(
+        lookup=TaskLookup(
+            task_id=child.task_view.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        )
+    )
+
+    assert submission.parent_task_id == parent.task_view.task_id
+    assert child.binding.channel is ChannelKind.WEB
+    assert len(memory_state.tasks) == 2
+
+
+async def test_web_parent_fails_closed_when_authorizer_is_not_assembled(
+    service, store, channel_store, memory_state, clock
+) -> None:
+    parent = await _terminal_web_parent(service, store, clock)
+    unconfigured = ChannelSubmissionService(
+        runtime=service._runtime,
+        channel_store=channel_store,
+    )
+    existing_task_ids = set(memory_state.tasks)
+
+    with pytest.raises(ChannelSubmissionForbiddenError, match="submission forbidden"):
+        await unconfigured.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="missing-parent-authorizer",
+                parent_task_id=parent.task_view.task_id,
+            )
+        )
+
+    assert set(memory_state.tasks) == existing_task_ids
+
+
+async def test_nonterminal_or_unknown_parent_is_hidden_without_creating_a_child(
+    service, clock, memory_state
+) -> None:
+    pending = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="pending-parent",
+        )
+    )
+    baseline = set(memory_state.tasks)
+
+    for index, parent_task_id in enumerate(
+        (pending.task_view.task_id, "missing-parent"), start=1
+    ):
+        with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+            await service.submit(
+                command=_command(
+                    clock,
+                    channel=ChannelKind.WEB,
+                    client_key=f"invalid-parent-child-{index}",
+                    parent_task_id=parent_task_id,
+                )
+            )
+
+    assert set(memory_state.tasks) == baseline
+
+
+@pytest.mark.parametrize(
+    "principal",
+    (
+        _principal(actor="bob"),
+        _principal().model_copy(update={"subject_ref": "subject-other"}),
+        _principal(tenant_id="other-tenant"),
+        _principal(environment_id="prod"),
+        _principal(
+            actor="root",
+            permissions=frozenset(
+                {
+                    ChannelPermission.VIEW_SAFE_TASK,
+                    ChannelPermission.SUBMIT_READONLY_TASK,
+                    ChannelPermission.ADMIN_ALL_SAFE_TASKS,
+                }
+            ),
+        ),
+    ),
+    ids=("actor", "web-subject", "tenant", "environment", "admin"),
+)
+async def test_parent_authority_mismatch_is_hidden_even_from_admin(
+    service, store, clock, memory_state, principal
+) -> None:
+    parent = await _terminal_web_parent(service, store, clock)
+    baseline = set(memory_state.tasks)
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.submit(
+            command=_command(
+                clock,
+                principal=principal,
+                channel=ChannelKind.WEB,
+                client_key=f"mismatched-parent-{principal.actor}",
+                parent_task_id=parent.task_view.task_id,
+            )
+        )
+
+    assert set(memory_state.tasks) == baseline
+
+
+async def test_feishu_task_cannot_be_used_as_a_web_parent(
+    service, store, clock, memory_state
+) -> None:
+    parent = await service.submit(command=_command(clock, client_key="feishu-parent"))
+    await drive_to_terminal(
+        store,
+        TaskLookup(
+            task_id=parent.task_view.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        ),
+        TaskStatus.SUCCEEDED,
+    )
+    baseline = set(memory_state.tasks)
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="web-child-of-feishu",
+                parent_task_id=parent.task_view.task_id,
+            )
+        )
+
+    assert set(memory_state.tasks) == baseline
+
+
+async def test_corrupt_parent_cycle_is_hidden_without_creating_a_child(
+    service, store, clock, memory_state
+) -> None:
+    parent = await _terminal_web_parent(service, store, clock)
+    task_id = parent.task_view.task_id
+    corrupt = memory_state.submissions[task_id].model_copy(
+        update={"parent_task_id": task_id}
+    )
+    memory_state.submissions[task_id] = corrupt
+    memory_state.submission_digests[task_id] = submission_digest(corrupt)
+    memory_state.tasks[task_id] = memory_state.tasks[task_id].model_copy(
+        update={
+            "request_digest": request_dedup_digest(
+                corrupt.envelope,
+                corrupt.context,
+                parent_task_id=task_id,
+            )
+        }
+    )
+    baseline = set(memory_state.tasks)
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="child-of-corrupt-cycle",
+                parent_task_id=task_id,
+            )
+        )
+
+    assert set(memory_state.tasks) == baseline
 
 
 async def test_submit_requires_the_explicit_readonly_submission_permission(
@@ -266,7 +502,10 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
     )
-    service = ChannelSubmissionService(runtime=runtime, channel_store=flaky)
+    service = ChannelSubmissionService(
+        runtime=runtime,
+        channel_store=flaky,
+    )
     command = _command(clock, client_key="recover-binding")
 
     with pytest.raises(PersistenceUnavailableError):

@@ -208,7 +208,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0008_model_artifacts"
+    assert revision == "0009_task_parent_context"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -276,7 +276,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         step_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_step_executions")
         )
-    assert revision == "0008_model_artifacts"
+    assert revision == "0009_task_parent_context"
     assert step_count == 1
 
     async with clean_database.begin() as connection:
@@ -417,7 +417,7 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
         advisory_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_model_advisories")
         )
-    assert revision == "0008_model_artifacts"
+    assert revision == "0009_task_parent_context"
     assert (intent_count, advisory_count) == (1, 1)
 
     async with clean_database.begin() as connection:
@@ -433,3 +433,132 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
         "task_accepted_intents",
         "task_model_advisories",
     } <= await _table_names(clean_database)
+
+
+async def test_rev_0009_upgrade_preserves_existing_submission_with_null_parent(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import lookup_for, make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    run_upgrade, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0008_model_artifacts")
+        columns = await connection.execute(
+            sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'task_submissions'"
+            )
+        )
+        assert "parent_task_id" not in {row[0] for row in columns}
+        await connection.run_sync(run_upgrade, "head")
+
+    restored = await store.get_submission(lookup=lookup_for(task))
+    assert restored.parent_task_id is None
+
+
+async def test_rev_0009_parent_fk_rejects_unknown_parent_and_restricts_delete(
+    clean_database: AsyncEngine,
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.persistence.errors import PersistenceIntegrityError
+
+    with pytest.raises(PersistenceIntegrityError):
+        await store.create_task(
+            submission=make_submission(
+                context,
+                envelope=make_envelope(
+                    request_id="unknown-parent-child",
+                    idempotency_key="unknown-parent-child",
+                ),
+                parent_task_id="unknown-parent",
+            )
+        )
+
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="restricted-parent",
+                idempotency_key="restricted-parent",
+            ),
+        )
+    )
+    await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="restricted-child",
+                idempotency_key="restricted-child",
+            ),
+            parent_task_id=parent.task_id,
+        )
+    )
+
+    with pytest.raises(sa.exc.IntegrityError):
+        async with clean_database.begin() as connection:
+            await connection.execute(
+                sa.text("DELETE FROM tasks WHERE task_id = :task_id"),
+                {"task_id": parent.task_id},
+            )
+
+
+async def test_rev_0009_downgrade_requires_authorization_for_parent_links(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_envelope, make_submission
+
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="downgrade-parent",
+                idempotency_key="downgrade-parent",
+            ),
+        )
+    )
+    child = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="downgrade-child",
+                idempotency_key="downgrade-child",
+            ),
+            parent_task_id=parent.task_id,
+        )
+    )
+    run_upgrade, run_downgrade = alembic_runners
+
+    with pytest.raises(MigrationSafetyError) as exc_info:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0008_model_artifacts")
+    assert exc_info.value.counts == (("task_parent_context", 1),)
+
+    async with clean_database.begin() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+        assert revision == "0009_task_parent_context"
+        await connection.run_sync(
+            run_downgrade,
+            "0008_model_artifacts",
+            True,
+        )
+        await connection.run_sync(run_upgrade, "head")
+        restored_parent = await connection.scalar(
+            sa.text(
+                "SELECT parent_task_id FROM task_submissions WHERE task_id = :task_id"
+            ),
+            {"task_id": child.task_id},
+        )
+    assert restored_parent is None

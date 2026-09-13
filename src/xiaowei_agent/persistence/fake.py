@@ -46,6 +46,7 @@ from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
     ChannelBinding,
     ChannelBindingConflictError,
+    ChannelBindingLookup,
     ChannelBindingNotFoundError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
@@ -246,6 +247,19 @@ class InMemoryChannelStore:
                 binding.tenant_id != lookup.tenant_id
                 or binding.environment_id != lookup.environment_id
                 or binding.channel is not ChannelKind.FEISHU_GROUP
+            ):
+                raise ChannelBindingNotFoundError
+            return binding
+
+    async def get_binding(self, *, lookup: ChannelBindingLookup) -> ChannelBinding:
+        async with self._lock:
+            binding_id = self._state.channel_binding_ids_by_task.get(lookup.task_id)
+            if binding_id is None:
+                raise ChannelBindingNotFoundError
+            binding = self._state.channel_bindings[binding_id]
+            if (
+                binding.tenant_id != lookup.tenant_id
+                or binding.environment_id != lookup.environment_id
             ):
                 raise ChannelBindingNotFoundError
             return binding
@@ -563,7 +577,11 @@ class InMemoryTaskStore:
         # 先校验上下文一致性，再谈幂等：不一致时连"属于哪个作用域"都不成立。
         if not context_matches_envelope(envelope, context):
             raise ContextMismatchError("envelope and context disagree on execution context")
-        digest = request_dedup_digest(envelope, context)
+        digest = request_dedup_digest(
+            envelope,
+            context,
+            parent_task_id=submission.parent_task_id,
+        )
         scope = (context.tenant_id, context.environment_id, envelope.idempotency_key)
         async with self._lock:
             existing_id = self._by_key.get(scope)

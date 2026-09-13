@@ -67,6 +67,7 @@ from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
     ChannelBinding,
     ChannelBindingConflictError,
+    ChannelBindingLookup,
     ChannelBindingNotFoundError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
@@ -623,6 +624,19 @@ class PostgresChannelStore:
         return row_to_channel_binding(row)
 
     @_persistence_boundary(write=False)
+    async def get_binding(self, *, lookup: ChannelBindingLookup) -> ChannelBinding:
+        statement = sa.select(CHANNEL_BINDINGS).where(
+            CHANNEL_BINDINGS.c.task_id == lookup.task_id,
+            CHANNEL_BINDINGS.c.tenant_id == lookup.tenant_id,
+            CHANNEL_BINDINGS.c.environment_id == lookup.environment_id,
+        )
+        async with self._engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().first()
+        if row is None:
+            raise ChannelBindingNotFoundError
+        return row_to_channel_binding(row)
+
+    @_persistence_boundary(write=False)
     async def list_group_bound_task_ids(
         self, *, query: GroupBoundTaskIdsQuery
     ) -> frozenset[str]:
@@ -1077,6 +1091,7 @@ class PostgresTaskStore:
                 envelope=load_contract(RequestEnvelope, row["submission_envelope"]),
                 context=load_contract(RequestContext, row["submission_context"]),
                 as_of=row["submission_as_of"],
+                parent_task_id=row["submission_parent_task_id"],
             )
         except ValueError as exc:
             raise TaskNotFoundError(task_id=record.task_id) from exc
@@ -1112,6 +1127,7 @@ class PostgresTaskStore:
                 TASK_SUBMISSIONS.c.context.label("submission_context"),
                 TASK_SUBMISSIONS.c.as_of.label("submission_as_of"),
                 TASK_SUBMISSIONS.c.submission_digest.label("submission_digest"),
+                TASK_SUBMISSIONS.c.parent_task_id.label("submission_parent_task_id"),
             )
             .join(TASK_SUBMISSIONS, TASK_SUBMISSIONS.c.task_id == TASKS.c.task_id)
             .where(*conditions)
@@ -1343,6 +1359,7 @@ class PostgresTaskStore:
                         envelope=load_contract(RequestEnvelope, stored["envelope"]),
                         context=load_contract(RequestContext, stored["context"]),
                         as_of=stored["as_of"],
+                        parent_task_id=stored["parent_task_id"],
                     )
                 except ValueError:
                     submission = None
@@ -1778,7 +1795,11 @@ class PostgresTaskStore:
         request_context = submission.context
         if not context_matches_envelope(envelope, request_context):
             raise ContextMismatchError("envelope and context disagree on execution context")
-        digest = request_dedup_digest(envelope, request_context)
+        digest = request_dedup_digest(
+            envelope,
+            request_context,
+            parent_task_id=submission.parent_task_id,
+        )
         scope_digest = idempotency_scope_digest(
             tenant_id=request_context.tenant_id,
             environment_id=request_context.environment_id,
@@ -1820,6 +1841,7 @@ class PostgresTaskStore:
                         context=dump_contract(submission.context),
                         as_of=submission.as_of,
                         submission_digest=submission_digest(submission),
+                        parent_task_id=submission.parent_task_id,
                     )
                 )
                 return row_to_record(_as_row(inserted))
