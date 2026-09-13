@@ -166,6 +166,14 @@ class GroupBindingLookup(Contract):
     environment_id: StrictStr
 
 
+class ChannelBindingLookup(Contract):
+    """按任务与作用域读取唯一渠道绑定，不对渠道种类做推断。"""
+
+    task_id: StrictStr
+    tenant_id: StrictStr
+    environment_id: StrictStr
+
+
 class GroupBoundTaskIdsQuery(Contract):
     tenant_id: StrictStr
     environment_id: StrictStr
@@ -514,6 +522,9 @@ class ChannelStore(Protocol):
     async def get_group_binding(self, *, lookup: GroupBindingLookup) -> ChannelBinding:
         """按 task 与 scope 读取群绑定；其余情形统一未找到。"""
 
+    async def get_binding(self, *, lookup: ChannelBindingLookup) -> ChannelBinding:
+        """按 task 与 scope 读取唯一绑定；不存在或错 scope 统一未找到。"""
+
     async def list_group_bound_task_ids(
         self, *, query: GroupBoundTaskIdsQuery
     ) -> frozenset[str]:
@@ -569,6 +580,7 @@ __all__ = [
     "BindTaskCommand",
     "ChannelBinding",
     "ChannelBindingConflictError",
+    "ChannelBindingLookup",
     "ChannelBindingNotFoundError",
     "ChannelStore",
     "ChannelStoreError",

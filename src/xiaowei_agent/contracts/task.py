@@ -5,13 +5,14 @@
 给出确定的拒绝。终态集合与迁移表由测试交叉校验，避免两处各写一份而悄悄漂移。
 """
 
+import re
 from collections.abc import Mapping
 from itertools import pairwise
 from types import MappingProxyType
-from typing import Final, Self
+from typing import Annotated, Final, Self
 from urllib.parse import quote
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, model_validator
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
@@ -34,6 +35,22 @@ TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
     }
 )
 
+TASK_ID_MAX_LENGTH: Final[int] = 200
+TASK_ID_PATTERN: Final[str] = (
+    rf"[A-Za-z0-9][A-Za-z0-9._:-]{{0,{TASK_ID_MAX_LENGTH - 1}}}"
+)
+_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
+
+
+def _task_id(value: str) -> str:
+    if _TASK_ID_RE.fullmatch(value) is None:
+        raise ValueError("task_id has an invalid shape")
+    return value
+
+
+TaskId = Annotated[StrictStr, AfterValidator(_task_id)]
+"""任务引用的统一字符串域；与 Web path selector 使用同一完整匹配规则。"""
+
 
 class TaskSubmission(Contract):
     """创建任务时不可变持久化的完整提交事实。"""
@@ -41,6 +58,7 @@ class TaskSubmission(Contract):
     envelope: RequestEnvelope
     context: RequestContext
     as_of: AwareDatetime
+    parent_task_id: TaskId | None = None
 
 
 class TaskLookup(Contract):

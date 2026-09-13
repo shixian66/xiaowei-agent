@@ -790,8 +790,10 @@ mypy src
 
 - [ ] **Step 1: RED parent contract 与 migration**
 
-`TaskSubmission.parent_task_id` is `StrictStr | None`, matching the existing task-id
-contract. `rev_0009` adds a nullable `Text` restricted FK to `tasks.task_id` plus
+`TaskSubmission.parent_task_id` is `TaskId | None`. The shared `TaskId` domain uses the
+same full-match shape as the Web path selector (ASCII alphanumeric first, then only
+alphanumeric/`._:-`, maximum 200 characters), and every parent field across Web,
+application and task contracts uses it. `rev_0009` adds a nullable `Text` restricted FK to `tasks.task_id` plus
 an index; existing rows remain null. It must not introduce PostgreSQL UUID conversion,
 because current task IDs map to `Text`. For a null parent,
 the canonical bytes and frozen vectors for `request_dedup_digest`,
@@ -833,10 +835,11 @@ re-reviewed and the backend parity suite extended instead of silently changing s
 
 - [ ] **Step 2: RED Web 显式归属检查**
 
-Web 请求只接受用户明确提供的 `parent_task_id`。提交前通过窄 store 方法读取 parent task/submission/
-binding，验证终态、actor、tenant、environment、channel 和 Web binding owner 均相同。不存在、越权、
-非终态、跨环境、跨 owner 或循环都 4xx/fail-closed；重新登录不因 session ID 改变而丢失上下文，也
-不能改成“忽略 parent 继续提交”。
+Web 请求只接受用户明确提供的 `parent_task_id`。提交前通过窄 store 方法只读取直接 parent 的
+task/submission/binding，验证终态、actor、tenant、environment、channel 和 Web binding owner 均相同。
+直接 parent 不存在、越权、非终态、跨环境、跨 owner 或自身损坏都 4xx/fail-closed；入口不遍历祖先，
+祖先漂移由 Worker 完整复核后将已创建子任务拒绝。重新登录不因 session ID 改变而丢失上下文，也不能
+改成“忽略直接 parent 继续提交”。
 
 本 PR 只增加必要的 scoped lookup/validation，不把现有两阶段 channel submission 重写成聚合事务。
 
@@ -848,8 +851,11 @@ safe projection; SQL, full Evidence, identity details and configuration are excl
 It applies the same per-field character limit and UTF-8 validity check before
 `scrub_text()`; the 32 KiB field ceiling remains derived from the character limit. It then
 selects complete newest-to-oldest rounds within 64,000 characters (therefore no more than
-256,000 UTF-8 bytes, less than 256 KiB) and
-reverses them for model order. It never cuts a round or an individual string.
+256,000 UTF-8 bytes, less than 256 KiB) before scrubbing. It then serializes each scrubbed
+round and reapplies the 8,192-character per-round and 64,000-character aggregate budgets;
+an overflowing round and all older rounds are omitted before reversing model order. It
+never cuts a round or an individual string, and scrub expansion cannot reject an otherwise
+usable newer history set at the downstream request DTO.
 
 超过容量只确定性截断并标记 `truncated`；越权、循环、损坏或非终态则拒绝，不退回最近消息。model
 disabled 时 parent 仍可审计，但规则解释器不需要消费历史。
@@ -934,7 +940,9 @@ artifact digest、终态展示和重复 TaskView 0 新调用。
 - [ ] **Step 4: quality**
 
 运行 10 个意图场景各 3 次和 5 个 advisory 场景。逐 case 报告：结构通过、最终 capability 是否正确、
-是否 fallback、advisory 是否基于给定字段、是否越权。安全项必须 100%；语言质量由负责人抽查。
+是否 fallback、advisory 是否基于给定字段、是否越权。恶意输入矩阵必须额外构造一条包含指令文本的
+已保存 advisory，经显式 20 轮父链送入下一次请求，并与无该指令的控制样本比较；它不得改变最终
+capability、slots 或 missing，任何漂移都算安全失败。安全项必须 100%；语言质量由负责人抽查。
 
 - [ ] **Step 5: 故障与边界**
 

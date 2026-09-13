@@ -195,6 +195,85 @@ async def test_same_key_with_a_different_request_is_rejected(store, context) -> 
         )
 
 
+async def test_same_key_with_a_different_parent_is_rejected(store, context) -> None:
+    first_parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="parent-1",
+                idempotency_key="parent-1",
+            ),
+        )
+    )
+    second_parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="parent-2",
+                idempotency_key="parent-2",
+            ),
+        )
+    )
+    child_envelope = make_envelope(
+        request_id="child-1",
+        idempotency_key="parent-aware-child",
+        text="continue diagnosis",
+    )
+    await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=child_envelope,
+            parent_task_id=first_parent.task_id,
+        )
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await store.create_task(
+            submission=make_submission(
+                context,
+                envelope=child_envelope.model_copy(update={"request_id": "child-2"}),
+                parent_task_id=second_parent.task_id,
+            )
+        )
+
+
+async def test_same_parent_and_key_with_different_text_is_rejected(
+    store, context
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="parent-stable",
+                idempotency_key="parent-stable",
+            ),
+        )
+    )
+    child_envelope = make_envelope(
+        request_id="child-text-1",
+        idempotency_key="parent-aware-text",
+        text="continue diagnosis",
+    )
+    await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=child_envelope,
+            parent_task_id=parent.task_id,
+        )
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await store.create_task(
+            submission=make_submission(
+                context,
+                envelope=child_envelope.model_copy(
+                    update={"request_id": "child-text-2", "text": "change diagnosis"}
+                ),
+                parent_task_id=parent.task_id,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("tenant_id", "other-tenant"), ("actor", "mallory"), ("environment_id", "prod")],
@@ -295,6 +374,56 @@ async def test_get_submission_is_scoped_and_returns_the_original_fact(
         wrong_scope = lookup_for(record).model_copy(update={field: value})
         with pytest.raises(TaskNotFoundError):
             await store.get_submission(lookup=wrong_scope)
+
+
+async def test_parented_submission_survives_create_read_retry_and_attempt(
+    store, context
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="parent-round",
+                idempotency_key="parent-round",
+            ),
+        )
+    )
+    envelope = make_envelope(
+        request_id="parented-child-1",
+        idempotency_key="parented-child",
+        text="continue the same diagnosis",
+    )
+    submission = make_submission(
+        context,
+        envelope=envelope,
+        parent_task_id=parent.task_id,
+    )
+
+    created = await store.create_task(submission=submission)
+    retry = await store.create_task(
+        submission=make_submission(
+            context.model_copy(update={"trace_id": "9" * 32}),
+            envelope=envelope.model_copy(update={"request_id": "parented-child-2"}),
+            as_of=_APPROVAL_AT + _dt.timedelta(hours=1),
+            parent_task_id=parent.task_id,
+        )
+    )
+    loaded = await store.get_submission(lookup=lookup_for(created))
+    attempt = await store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=created.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="parent-context-worker",
+            ttl_seconds=30,
+            trace_id="8" * 32,
+        )
+    )
+
+    assert retry.task_id == created.task_id
+    assert loaded == submission
+    assert attempt.applied
+    assert attempt.submission == submission
+    assert attempt.submission.parent_task_id == parent.task_id
 
 
 async def test_actor_page_filters_before_limit_and_is_strictly_descending(
@@ -1738,6 +1867,8 @@ CONTRACT_CASES = (
     test_idempotency_key_is_scoped_per_tenant,
     test_idempotency_key_is_scoped_per_environment,
     test_same_key_with_a_different_request_is_rejected,
+    test_same_key_with_a_different_parent_is_rejected,
+    test_same_parent_and_key_with_different_text_is_rejected,
     test_envelope_context_mismatch_is_rejected,
     test_envelope_without_environment_id_is_accepted,
     test_get_unknown_task_raises,
@@ -1805,6 +1936,7 @@ TERMINAL_PROTECTION_CASES = (
 )
 
 DISPATCH_ATTEMPT_CASES = (
+    test_parented_submission_survives_create_read_retry_and_attempt,
     test_dispatch_filters_before_applying_the_limit,
     test_dispatch_is_scope_isolated_and_stably_ordered,
     test_begin_attempt_returns_the_original_submission_and_one_grant,

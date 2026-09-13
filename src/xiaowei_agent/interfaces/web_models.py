@@ -20,6 +20,7 @@ from xiaowei_agent.contracts import (
     RenderPayload,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskStatus,
 )
 from xiaowei_agent.interfaces.web_auth import AuthenticatedWebSession
@@ -40,7 +41,7 @@ def web_task_detail_path(task_id: str) -> str:
 
 
 class WebTaskSubmitRequest(_WebModel):
-    """浏览器唯一可提交的两个字段；身份与作用域只取服务端 session。"""
+    """浏览器可提交正文、幂等引用和可选显式父任务。"""
 
     text: NonEmptyText = Field(max_length=8192)
     client_submission_id: StrictStr = Field(
@@ -48,6 +49,7 @@ class WebTaskSubmitRequest(_WebModel):
         max_length=200,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
+    parent_task_id: TaskId | None = None
 
 
 class WebCurrentUser(_WebModel):
@@ -106,6 +108,7 @@ class WebTaskAccepted(_WebModel):
     task_id: StrictStr
     status: TaskStatus
     detail_path: StrictStr
+    parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:
@@ -120,6 +123,7 @@ class WebTaskAccepted(_WebModel):
             task_id=view.task_id,
             status=view.status,
             detail_path=web_task_detail_path(view.task_id),
+            parent_task_id=submission.parent_task_id,
         )
 
 
@@ -131,6 +135,7 @@ class WebTaskDetail(_WebModel):
     task_version: StrictInt = Field(ge=0)
     detail_path: StrictStr
     render: RenderPayload | None = None
+    parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:
@@ -149,6 +154,7 @@ class WebTaskDetail(_WebModel):
             task_version=accessible.task_version,
             detail_path=web_task_detail_path(view.task_id),
             render=view.render,
+            parent_task_id=accessible.parent_task_id,
         )
 
 

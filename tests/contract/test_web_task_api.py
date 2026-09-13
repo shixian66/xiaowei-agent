@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 
 from xiaowei_agent.application.channel_access import (
     TASK_DETAIL_PREVIEW_LIMIT,
@@ -41,7 +42,11 @@ from xiaowei_agent.interfaces.web_auth import (
     WebCsrfError,
     WebOriginError,
 )
-from xiaowei_agent.interfaces.web_models import WebTaskDetail, WebTaskSummary
+from xiaowei_agent.interfaces.web_models import (
+    WebTaskDetail,
+    WebTaskSubmitRequest,
+    WebTaskSummary,
+)
 from xiaowei_agent.persistence import IdempotencyConflictError
 from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableCategory,
@@ -160,7 +165,10 @@ class _Submissions:
         self.calls.append(command)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(task_view=self.view)
+        return SimpleNamespace(
+            task_view=self.view,
+            parent_task_id=command.parent_task_id,
+        )
 
 
 def _view(status: TaskStatus = TaskStatus.CREATED) -> TaskView:
@@ -282,6 +290,41 @@ def test_web_preview_models_share_the_application_length_contract() -> None:
     )
 
 
+def test_web_submit_parent_is_optional_and_strict() -> None:
+    assert WebTaskSubmitRequest(
+        text="继续分析",
+        client_submission_id="browser-parent-0001",
+    ).parent_task_id is None
+    assert WebTaskSubmitRequest(
+        text="继续分析",
+        client_submission_id="browser-parent-0001",
+        parent_task_id="task-parent",
+    ).parent_task_id == "task-parent"
+    assert WebTaskSubmitRequest(
+        text="继续分析",
+        client_submission_id="browser-parent-0001",
+        parent_task_id="a" + ("-" * 199),
+    ).parent_task_id == "a" + ("-" * 199)
+    for invalid in (
+        "",
+        " task-parent ",
+        "_task-parent",
+        "-task-parent",
+        "task/parent",
+        "task?parent",
+        "a" * 201,
+        ("a" * 200) + "\n",
+        1,
+        b"task-parent",
+    ):
+        with pytest.raises(ValueError):
+            WebTaskSubmitRequest(
+                text="继续分析",
+                client_submission_id="browser-parent-0001",
+                parent_task_id=invalid,
+            )
+
+
 async def test_detail_preserves_complete_safe_render_without_internal_query_path() -> None:
     access = _Access()
     access.detail_result = AccessibleTask(
@@ -322,6 +365,26 @@ async def test_detail_preserves_complete_safe_render_without_internal_query_path
     ]
     assert "query_path" not in response.text
     assert "facts" not in response.text
+
+
+async def test_child_detail_exposes_only_its_parent_task_reference() -> None:
+    access = _Access()
+    access.detail_result = AccessibleTask(
+        task_view=_view(TaskStatus.SUCCEEDED),
+        request_preview="继续分析",
+        submitted_at=_NOW,
+        task_version=8,
+        parent_task_id="task-parent",
+    )
+    client, _, _ = _client(access=access)
+
+    async with client:
+        response = await client.get("/app/api/tasks/task-1")
+
+    assert response.status_code == 200
+    assert response.json()["parent_task_id"] == "task-parent"
+    assert "parent_submission" not in response.text
+    assert "parent_binding" not in response.text
 
 
 async def test_submit_constructs_web_command_from_server_authority(caplog) -> None:
@@ -371,6 +434,34 @@ async def test_submit_constructs_web_command_from_server_authority(caplog) -> No
     assert records[0].route_class == "task_api"
     assert records[0].outcome == "ok"
     assert records[0].trace_id == command.trace_id
+
+
+async def test_submit_forwards_explicit_parent_and_returns_its_source() -> None:
+    submissions = _Submissions(_view(TaskStatus.CREATED))
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await client.post(
+            "/app/api/tasks",
+            json={
+                "text": "继续分析这个任务",
+                "client_submission_id": "browser-parent-0002",
+                "parent_task_id": "task-parent",
+            },
+            headers={
+                "origin": "https://ops.example.test",
+                "x-csrf-token": _CSRF,
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "task_id": "task-1",
+        "status": "created",
+        "detail_path": "/app/tasks/task-1",
+        "parent_task_id": "task-parent",
+    }
+    assert submissions.calls[0].parent_task_id == "task-parent"
 
 
 async def test_submit_rejects_non_json_media_type_before_submission() -> None:

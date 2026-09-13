@@ -90,12 +90,16 @@
           </div>
 
           <div class="composer-card">
+            <div class="context-banner is-hidden" id="context-source">
+              <span>正在继续任务 <strong id="context-task-id"></strong></span>
+              <button class="button-link" id="clear-context" type="button">取消续接</button>
+            </div>
             <label class="sr-only" for="task-input">运维任务描述</label>
             <textarea id="task-input" maxlength="8192" rows="4" placeholder="例如：检查最近三十分钟的慢查询，并说明证据和限制"></textarea>
             <div class="composer-footer">
               <div class="composer-hint">
                 <span class="keyboard-key">⌘</span><span class="keyboard-key">Enter</span>
-                <span>发送 · 每次发送是独立任务</span>
+                <span>发送 · 默认每次发送是独立任务</span>
               </div>
               <button class="button button-primary" id="submit-task" type="button">
                 <span>发送任务</span><span aria-hidden="true">→</span>
@@ -118,7 +122,10 @@
               <p class="eyebrow">CURRENT TASK</p>
               <h2 id="current-task-title">当前任务</h2>
             </div>
-            <a class="button button-secondary is-hidden" id="open-detail" href="/app">独立详情页</a>
+            <div class="stage-actions">
+              <button class="button button-secondary is-hidden" id="continue-task" type="button">继续这个任务</button>
+              <a class="button button-secondary is-hidden" id="open-detail" href="/app">独立详情页</a>
+            </div>
           </div>
 
           <div class="empty-stage" id="task-empty">
@@ -137,6 +144,7 @@
               </div>
               <dl class="task-meta">
                 <div><dt>任务 ID</dt><dd id="task-id">—</dd></div>
+                <div class="is-hidden" id="task-parent-row"><dt>来源任务</dt><dd><a id="task-parent" href="/app">—</a></dd></div>
                 <div><dt>提交时间</dt><dd id="task-submitted-at">—</dd></div>
                 <div><dt>版本</dt><dd id="task-version">—</dd></div>
               </dl>

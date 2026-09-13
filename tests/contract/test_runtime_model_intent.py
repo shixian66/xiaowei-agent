@@ -12,6 +12,7 @@ from tests.conftest import make_submission
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.context import AssembledContext
 from xiaowei_agent.application.model_intent import (
     RULE_INTENT_PROMPT_REVISION,
     RULE_INTENT_SCHEMA_REVISION,
@@ -21,6 +22,7 @@ from xiaowei_agent.application.model_ports import ModelPortError
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.contracts import (
     AttemptIntent,
+    Channel,
     IntentDraft,
     IntentModelResult,
     IntentSource,
@@ -50,12 +52,23 @@ class _IntentPort:
     def __init__(self, result: IntentModelResult | ModelErrorCode) -> None:
         self.result = result
         self.calls = 0
+        self.requests: list[Any] = []
 
     async def generate_intent(self, request: Any) -> IntentModelResult:
-        del request
+        self.requests.append(request)
         self.calls += 1
         if isinstance(self.result, ModelErrorCode):
             raise ModelPortError(self.result)
+        return self.result
+
+
+class _ContextAssembler:
+    def __init__(self, result: AssembledContext) -> None:
+        self.result = result
+        self.calls: list[tuple[str, Any]] = []
+
+    async def assemble(self, *, task_id: str, submission: Any) -> AssembledContext:
+        self.calls.append((task_id, submission))
         return self.result
 
 
@@ -133,6 +146,85 @@ async def _durable_attempt(harness: RuntimeHarness, text: str) -> tuple[Any, Any
     )
     assert attempted.grant is not None and attempted.submission is not None
     return attempted.grant, attempted.submission
+
+
+async def test_runtime_passes_assembled_parent_history_and_truncation_to_model() -> None:
+    assembler = _ContextAssembler(
+        AssembledContext(history=("safe parent round",), truncated=True)
+    )
+    port = _IntentPort(_result())
+    harness = RuntimeHarness(
+        GOLDEN,
+        intent_model=port,
+        context_assembler=assembler,
+    )
+    base = harness.submission("最近30分钟有哪些慢查询")
+    submission = base.model_copy(
+        update={
+            "envelope": base.envelope.model_copy(update={"channel": Channel.WEB}),
+            "parent_task_id": "parent-task",
+        }
+    )
+    view = await harness.runtime.submit_task(submission=submission)
+    attempted = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempted.grant is not None and attempted.submission is not None
+
+    await harness.runtime.execute_task(
+        grant=attempted.grant,
+        submission=attempted.submission,
+    )
+
+    assert assembler.calls == [(view.task_id, submission)]
+    assert len(port.requests) == 1
+    assert port.requests[0].history == ("safe parent round",)
+    assert port.requests[0].context_truncated is True
+
+
+async def test_runtime_still_validates_parent_context_when_model_is_disabled() -> None:
+    assembler = _ContextAssembler(
+        AssembledContext(history=("safe parent round",), truncated=False)
+    )
+    harness = RuntimeHarness(
+        GOLDEN,
+        intent_model=None,
+        context_assembler=assembler,
+    )
+    base = harness.submission("最近30分钟有哪些慢查询")
+    submission = base.model_copy(
+        update={
+            "envelope": base.envelope.model_copy(update={"channel": Channel.WEB}),
+            "parent_task_id": "parent-task",
+        }
+    )
+    view = await harness.runtime.submit_task(submission=submission)
+    attempted = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-disabled-model",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempted.grant is not None and attempted.submission is not None
+
+    outcome = await harness.runtime.execute_task(
+        grant=attempted.grant,
+        submission=attempted.submission,
+    )
+    artifact = await harness.model_artifacts.load_intent(task_id=view.task_id)
+
+    assert outcome.status is TaskStatus.SUCCEEDED
+    assert assembler.calls == [(view.task_id, submission)]
+    assert artifact is not None and artifact.origin == "rule"
 
 
 @pytest.mark.asyncio

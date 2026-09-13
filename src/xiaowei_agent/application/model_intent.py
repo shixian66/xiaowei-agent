@@ -91,11 +91,14 @@ def _require_model_text(value: str) -> None:
 
 
 def build_model_intent_request(
-    *, user_text: str, history: tuple[str, ...]
+    *,
+    user_text: str,
+    history: tuple[str, ...],
+    context_truncated: bool = False,
 ) -> ModelIntentRequest:
     """先验原始边界，再整轮截断、脱敏并复验最终 typed request。"""
     _require_model_text(user_text)
-    truncated = len(history) > MAX_MODEL_HISTORY_ITEMS
+    truncated = context_truncated or len(history) > MAX_MODEL_HISTORY_ITEMS
     retained = list(history[-MAX_MODEL_HISTORY_ITEMS:])
     for item in retained:
         _require_model_text(item)
@@ -196,17 +199,21 @@ def intent_input_digest(
 
 
 def _rejected_intent_input_digest(
-    *, envelope: RequestEnvelope, history: tuple[str, ...]
+    *,
+    envelope: RequestEnvelope,
+    history: tuple[str, ...],
+    context_truncated: bool,
 ) -> str:
     """规则降级的拒绝输入事实不依赖任何模型 profile。"""
-    return _digest(
-        {
-            "rejected_input": True,
-            "intent_origin": "rule",
-            "user_text_digest": _opaque_text_digest(envelope.text),
-            "history_digests": tuple(_opaque_text_digest(item) for item in history),
-        }
-    )
+    payload: dict[str, object] = {
+        "rejected_input": True,
+        "intent_origin": "rule",
+        "user_text_digest": _opaque_text_digest(envelope.text),
+        "history_digests": tuple(_opaque_text_digest(item) for item in history),
+    }
+    if context_truncated:
+        payload["context_truncated"] = True
+    return _digest(payload)
 
 
 def intent_result_digest(draft: IntentDraft) -> str:
@@ -322,6 +329,7 @@ async def load_or_accept_intent(
     envelope: RequestEnvelope,
     context: RequestContext,
     history: tuple[str, ...],
+    context_truncated: bool = False,
     interpreter: IntentInterpreter,
     model: IntentModelPort | None,
     profile: ModelInvocationProfile,
@@ -335,6 +343,7 @@ async def load_or_accept_intent(
         built_request = build_model_intent_request(
             user_text=envelope.text,
             history=history,
+            context_truncated=context_truncated,
         )
     except ModelInputRejectedError:
         # 合法 RequestEnvelope 的文本可以超过模型单字段上限。该分支仍需要一个可重建
@@ -346,7 +355,11 @@ async def load_or_accept_intent(
     existing = await artifacts.load_intent(task_id=grant.task_id)
     if existing is not None:
         input_digest = (
-            _rejected_intent_input_digest(envelope=envelope, history=history)
+            _rejected_intent_input_digest(
+                envelope=envelope,
+                history=history,
+                context_truncated=context_truncated,
+            )
             if request is None
             else intent_input_digest(
                 request,
@@ -392,7 +405,11 @@ async def load_or_accept_intent(
     is_model = stage.draft.source is IntentSource.MODEL
     artifact_origin: Literal["model", "rule"] = "model" if is_model else "rule"
     input_digest = (
-        _rejected_intent_input_digest(envelope=envelope, history=history)
+        _rejected_intent_input_digest(
+            envelope=envelope,
+            history=history,
+            context_truncated=context_truncated,
+        )
         if request is None
         else intent_input_digest(
             request,

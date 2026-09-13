@@ -424,9 +424,11 @@ No provider chat/session, tools, function calling, search, code execution, files
 Raw typed limits run before total `redaction.scrub_text()`: current text and each history
 text field allow at most 8,192 characters, which implies at most 32 KiB UTF-8; selected
 history allows 20 complete parents and 64,000 characters, which implies at most 256,000
-UTF-8 bytes (less than 256 KiB). After scrubbing, the complete typed request is serialized
-again and must fit the independent 512 KiB cap; whole old rounds are
-dropped first, and an oversized current request yields zero calls. There is no artificial
+UTF-8 bytes (less than 256 KiB). Because replacement can expand text, each scrubbed
+history round and the retained aggregate are rechecked against the same
+8,192/64,000-character budgets; an overflowing round and all older rounds are omitted.
+The complete typed request is then serialized again and must fit the independent 512 KiB
+cap; an oversized current request yields zero calls. There is no artificial
 redaction-failure path.
 
 Slow-query advisory takes at most 20 successful Evidence rows and derives its exact
@@ -438,8 +440,11 @@ The typed projector lives in `application/model_advisory.py`, where capability s
 are an allowed dependency. `rendering/` only consumes its validated display result and
 does not import `capabilities` or read the surface.
 
-The second migration adds explicit `parent_task_id`; Web validates ownership and Worker
-revalidates each hop. Null-parent request/submission/scope digest bytes stay frozen.
+The second migration adds explicit `parent_task_id`; Web validates only the directly
+selected parent's ownership/scope/terminal state and Worker revalidates every persisted
+hop before execution. Ancestor drift therefore rejects the created child rather than
+turning a still-valid direct parent into an entry-time 404. Null-parent
+request/submission/scope digest bytes stay frozen.
 Non-null parent enters the semantic request digest and stored submission digest, not the
 scope digest, so any semantic difference (including a different parent) conflicts while
 the same semantic request and normal request_id/trace_id/`as_of` retry changes still reuse.

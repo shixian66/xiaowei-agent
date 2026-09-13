@@ -16,8 +16,9 @@
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
 > 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A/3B/3C 已合入；当前源码已有严格
 > DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only Compose secret、
-> durable Runtime、持久模型 artifact、MODEL trace 和慢查询 advisory。PR 3D 尚未开始，真实 key
-> 读取与 Gemini 网络调用均为 0。
+> durable Runtime、持久模型 artifact、MODEL trace 和慢查询 advisory。PR 3D 已提交
+> [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 审查，尚未合入；真实 key 读取与
+> Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host

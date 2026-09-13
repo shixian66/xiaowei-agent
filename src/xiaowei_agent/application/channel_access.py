@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     StoredTaskRead,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskLookup,
     TaskRecord,
     TaskStatus,
@@ -75,6 +76,7 @@ class AccessibleTask(Contract):
     request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     task_version: StrictInt = Field(ge=0)
+    parent_task_id: TaskId | None = None
 
 
 class TaskSummary(Contract):
@@ -126,6 +128,34 @@ class TaskAccessService:
         self._tasks = task_store
         self._channels = channel_store
         self._membership = membership
+
+    async def require_web_parent_access(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        parent_task_id: str,
+    ) -> None:
+        """父任务必须属于同一 Web 身份；所有拒绝统一隐藏存在性。"""
+        if ChannelPermission.VIEW_SAFE_TASK not in principal.permissions:
+            raise TaskAccessNotFoundError
+        from xiaowei_agent.application.context import (
+            ParentContextRejectedError,
+            load_web_parent_chain,
+        )
+
+        try:
+            await load_web_parent_chain(
+                task_store=self._tasks,
+                channel_store=self._channels,
+                parent_task_id=parent_task_id,
+                tenant_id=principal.tenant_id,
+                environment_id=principal.environment_id,
+                actor=principal.actor,
+                binding_owner=principal.subject_ref,
+                max_parent_tasks=1,
+            )
+        except ParentContextRejectedError:
+            raise TaskAccessNotFoundError from None
 
     @staticmethod
     def _lookup(principal: AuthenticatedPrincipal, task_id: str) -> TaskLookup:
@@ -200,6 +230,7 @@ class TaskAccessService:
             ),
             submitted_at=submission.as_of,
             task_version=record.version,
+            parent_task_id=submission.parent_task_id,
         )
 
     @staticmethod

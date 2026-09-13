@@ -87,7 +87,7 @@ def test_each_table_ddl_matches_the_schema_module() -> None:
     emitted = _create_table_statements(_offline_upgrade_sql())
     dialect = postgresql.dialect()
     for table in ALL_TABLES:
-        if table is TASKS:
+        if table in {TASKS, TASK_SUBMISSIONS}:
             continue
         expected = _normalise(str(CreateTable(table).compile(dialect=dialect)))
         assert emitted[table.name] == expected, f"{table.name} 的迁移 DDL 与 schema.py 不一致"
@@ -145,6 +145,15 @@ def test_rev_0003_has_the_expected_revision_chain() -> None:
 
     assert revision.revision == "0003_task_submissions"
     assert revision.down_revision == "0002_task_execution_columns"
+
+
+def test_rev_0009_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0009_task_parent_context as revision,
+    )
+
+    assert revision.revision == "0009_task_parent_context"
+    assert revision.down_revision == "0008_model_artifacts"
 
 
 def test_rev_0004_has_the_expected_revision_chain() -> None:
@@ -209,11 +218,32 @@ def test_submission_table_has_one_row_per_task_and_complete_facts() -> None:
         "context",
         "as_of",
         "submission_digest",
+        "parent_task_id",
     }
     assert TASK_SUBMISSIONS.c.envelope.nullable is False
     assert TASK_SUBMISSIONS.c.context.nullable is False
     assert TASK_SUBMISSIONS.c.as_of.nullable is False
     assert TASK_SUBMISSIONS.c.submission_digest.nullable is False
+    assert isinstance(TASK_SUBMISSIONS.c.parent_task_id.type, sa.Text)
+    assert TASK_SUBMISSIONS.c.parent_task_id.nullable is True
+    foreign_keys = list(TASK_SUBMISSIONS.c.parent_task_id.foreign_keys)
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0].target_fullname == "tasks.task_id"
+    assert foreign_keys[0].ondelete == "RESTRICT"
+    assert "ix_task_submissions_parent_task_id" in {
+        index.name for index in TASK_SUBMISSIONS.indexes
+    }
+
+
+def test_task_submission_head_migration_adds_the_declared_parent_shape() -> None:
+    sql = _offline_upgrade_sql()
+    assert "ADD COLUMN parent_task_id TEXT" in sql
+    assert "CONSTRAINT fk_task_submissions_parent_task" in sql
+    assert "FOREIGN KEY(parent_task_id) REFERENCES tasks (task_id) ON DELETE RESTRICT" in sql
+    assert (
+        "CREATE INDEX ix_task_submissions_parent_task_id "
+        "ON task_submissions (parent_task_id)"
+    ) in sql
 
 
 def test_rev_0002_backfills_before_enforcing_constraints() -> None:

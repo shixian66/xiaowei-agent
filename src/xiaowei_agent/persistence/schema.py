@@ -117,6 +117,14 @@ TASK_SUBMISSIONS: Final = sa.Table(
     sa.Column("context", JSONB, nullable=False),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=False),
     sa.Column("submission_digest", sa.CHAR(64), nullable=False),
+    sa.Column("parent_task_id", sa.Text, nullable=True),
+    sa.ForeignKeyConstraint(
+        ["parent_task_id"],
+        ["tasks.task_id"],
+        name="fk_task_submissions_parent_task",
+        ondelete="RESTRICT",
+    ),
+    sa.Index("ix_task_submissions_parent_task_id", "parent_task_id"),
 )
 """不可变提交事实；终态 M4 历史任务是唯一允许缺少该行的任务。"""
 

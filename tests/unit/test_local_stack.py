@@ -15,6 +15,7 @@ from xiaowei_agent.application.capability_runtime import CapabilityBindingRegist
 from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
 from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+from xiaowei_agent.application.context import ContextAssembler
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
@@ -47,6 +48,7 @@ from xiaowei_agent.interfaces.local_stack import (
 )
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.persistence.database import DatabaseConfigurationError
+from xiaowei_agent.persistence.fake import InMemoryChannelStore
 from xiaowei_agent.persistence.postgres import (
     PostgresChannelStore,
     PostgresTaskStore,
@@ -69,6 +71,16 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         "asset_inventory",
     }
     assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
+    assert isinstance(stack.runtime._context_assembler, ContextAssembler)
+    assert stack.runtime._context_assembler._tasks is stack.task_store
+    assert isinstance(
+        stack.runtime._context_assembler._channels,
+        InMemoryChannelStore,
+    )
+    assert isinstance(
+        stack.runtime._context_assembler._projector,
+        TaskViewRuntime,
+    )
     assert stack.intent_model is None
     assert stack.slow_query_advisory is None
     assert stack.model_profile is None
@@ -486,6 +498,17 @@ async def test_postgres_stack_uses_one_engine_and_disposes_it(
     )
     stack = await build_postgres_local_stack(settings=Settings(environment_id="dev"))
     assert isinstance(stack.task_store, PostgresTaskStore)
+    assert isinstance(stack.runtime._context_assembler, ContextAssembler)
+    assert stack.runtime._context_assembler._tasks is stack.task_store
+    assert isinstance(
+        stack.runtime._context_assembler._channels,
+        PostgresChannelStore,
+    )
+    assert stack.runtime._context_assembler._channels._engine is engine
+    assert isinstance(
+        stack.runtime._context_assembler._projector,
+        TaskViewRuntime,
+    )
     assert stack.task_store._engine is engine
     assert stack.plan_store._engine is engine
     assert stack.evidence_ledger._engine is engine
@@ -733,6 +756,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     assert stack.membership is membership
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
+    assert stack.submission_service._web_parent_access is stack.task_access_service
     assert stack.web_session_store._engine is engine
     assert stack.task_access_service._runtime is stack.runtime
     assert stack.submission_service._runtime is stack.runtime
@@ -900,6 +924,7 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     assert stack.transport is fake_transport
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
+    assert stack.submission_service._web_parent_access is None
     await stack.aclose()
     assert engine.disposed is True
 

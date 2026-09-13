@@ -40,6 +40,11 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
+from xiaowei_agent.application.context import (
+    AssembledContext,
+    ContextAssemblyPort,
+    ParentContextRejectedError,
+)
 from xiaowei_agent.application.model_advisory import load_or_accept_advisory
 from xiaowei_agent.application.model_intent import load_or_accept_intent
 from xiaowei_agent.application.model_ports import (
@@ -178,6 +183,7 @@ class XiaoweiRuntime:
         model_profile: ModelInvocationProfile,
         intent_model: IntentModelPort | None = None,
         slow_query_advisory: SlowQueryAdvisoryPort | None = None,
+        context_assembler: ContextAssemblyPort | None = None,
         model_monotonic: Callable[[], float] = time.monotonic,
         model_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         lease_ttl_seconds: int = 60,
@@ -198,6 +204,7 @@ class XiaoweiRuntime:
         self._model_profile = model_profile
         self._intent_model = intent_model
         self._slow_query_advisory = slow_query_advisory
+        self._context_assembler = context_assembler
         self._model_monotonic = model_monotonic
         self._model_sleep = model_sleep
         self._lease_ttl_seconds = lease_ttl_seconds
@@ -293,11 +300,21 @@ class XiaoweiRuntime:
         recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
+            if submission.parent_task_id is None:
+                assembled_context = AssembledContext(history=(), truncated=False)
+            elif self._context_assembler is None:
+                raise ParentContextRejectedError
+            else:
+                assembled_context = await self._context_assembler.assemble(
+                    task_id=grant.task_id,
+                    submission=submission,
+                )
             accepted = await load_or_accept_intent(
                 grant=grant,
                 envelope=submission.envelope,
                 context=context,
-                history=(),
+                history=assembled_context.history,
+                context_truncated=assembled_context.truncated,
                 interpreter=self._interpreter,
                 model=self._intent_model,
                 profile=self._model_profile,

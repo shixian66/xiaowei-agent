@@ -41,7 +41,7 @@ from xiaowei_agent.config import (
     canonical_non_ip_hostname,
     load_settings,
 )
-from xiaowei_agent.contracts import ChannelKind, ReadinessProbe
+from xiaowei_agent.contracts import TASK_ID_PATTERN, ChannelKind, ReadinessProbe
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
@@ -81,7 +81,7 @@ _CSP: Final[str] = (
     "object-src 'none'"
 )
 _HSTS: Final[bytes] = b"max-age=31536000"
-_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
 _POSITIVE_INT_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_CREATED_SEQ: Final[int] = 9_223_372_036_854_775_807
 _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
@@ -685,9 +685,12 @@ def create_app(
                 client_submission_ref=body.client_submission_id,
                 conversation_ref=None,
                 submitted_at=clock(),
+                parent_task_id=body.parent_task_id,
             )
         )
-        return WebTaskAccepted.from_submission(submitted).model_dump(mode="json")
+        accepted = WebTaskAccepted.from_submission(submitted)
+        exclude = {"parent_task_id"} if accepted.parent_task_id is None else set()
+        return accepted.model_dump(mode="json", exclude=exclude)
 
     @app.get("/app/api/tasks/{task_id}")
     async def get_task(request: Request, task_id: str) -> dict[str, object]:
@@ -698,7 +701,9 @@ def create_app(
                 task_id=_task_id_or_not_found(task_id),
             )
         )
-        return WebTaskDetail.from_accessible(accessible).model_dump(mode="json")
+        detail = WebTaskDetail.from_accessible(accessible)
+        exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
+        return detail.model_dump(mode="json", exclude=exclude)
 
     @app.post("/app/api/logout", status_code=204)
     async def logout(request: Request) -> Response:

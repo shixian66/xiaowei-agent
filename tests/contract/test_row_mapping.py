@@ -190,6 +190,12 @@ def test_jsonb_payload_round_trips(column: tuple[str, str], model: Contract) -> 
     assert load_contract(type(model), dump_contract(model)) == model
 
 
+def test_parented_submission_contract_round_trips_as_strict_json() -> None:
+    parented = _SUBMISSION.model_copy(update={"parent_task_id": "task-parent"})
+
+    assert load_contract(TaskSubmission, dump_contract(parented)) == parented
+
+
 def test_dumped_payload_is_plain_json_types() -> None:
     """写进 JSONB 的必须是普通 JSON 类型。
 

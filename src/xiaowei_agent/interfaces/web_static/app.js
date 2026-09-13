@@ -34,11 +34,16 @@ const elements = Object.freeze({
   input: document.querySelector("#task-input"),
   submit: document.querySelector("#submit-task"),
   submitMessage: document.querySelector("#submit-message"),
+  contextSource: document.querySelector("#context-source"),
+  contextTaskId: document.querySelector("#context-task-id"),
+  clearContext: document.querySelector("#clear-context"),
   taskEmpty: document.querySelector("#task-empty"),
   taskDetail: document.querySelector("#task-detail"),
   status: document.querySelector("#task-status"),
   request: document.querySelector("#task-request"),
   taskId: document.querySelector("#task-id"),
+  parentRow: document.querySelector("#task-parent-row"),
+  parent: document.querySelector("#task-parent"),
   submittedAt: document.querySelector("#task-submitted-at"),
   version: document.querySelector("#task-version"),
   timelineStatus: document.querySelector("#timeline-status"),
@@ -54,6 +59,7 @@ const elements = Object.freeze({
   readError: document.querySelector("#read-error"),
   retryDetail: document.querySelector("#retry-detail"),
   openDetail: document.querySelector("#open-detail"),
+  continueTask: document.querySelector("#continue-task"),
 });
 
 let csrfToken = null;
@@ -64,6 +70,8 @@ let activeFilter = "all";
 let pollTimer = null;
 let pollDelay = 2000;
 let pendingSubmission = null;
+let pendingParentTaskId = null;
+let requestedParentTaskId = null;
 
 function text(value, fallback = "—") {
   return typeof value === "string" && value.length > 0 ? value : fallback;
@@ -101,6 +109,23 @@ function setStatusBadge(element, status) {
   label.textContent = presentation.label;
   element.append(icon, label);
   element.dataset.status = status;
+}
+
+function setParentContext(taskId) {
+  pendingParentTaskId = typeof taskId === "string" && taskId.length > 0 ? taskId : null;
+  elements.contextTaskId.textContent = pendingParentTaskId || "";
+  setVisible(elements.contextSource, pendingParentTaskId !== null);
+}
+
+function renderParentReference(task) {
+  const parentTaskId = typeof task.parent_task_id === "string" && task.parent_task_id.length > 0
+    ? task.parent_task_id
+    : null;
+  elements.parent.textContent = parentTaskId || "";
+  elements.parent.href = parentTaskId === null
+    ? "/app"
+    : `/app/tasks/${encodeURIComponent(parentTaskId)}`;
+  setVisible(elements.parentRow, parentTaskId !== null);
 }
 
 async function requestJson(path, options = {}) {
@@ -281,16 +306,23 @@ function renderTaskDetail(task) {
   setStatusBadge(elements.status, task.status);
   elements.request.textContent = text(task.request_preview, "未提供任务摘要");
   elements.taskId.textContent = text(task.task_id);
+  renderParentReference(task);
   elements.submittedAt.textContent = formatTime(task.submitted_at);
   elements.version.textContent = Number.isInteger(task.task_version) ? String(task.task_version) : "—";
   elements.timelineStatus.textContent = statusInfo(task.status).label;
   elements.openDetail.href = text(task.detail_path, "/app");
   setVisible(elements.openDetail, true);
   const terminal = TERMINAL_STATUSES.has(task.status);
+  setVisible(elements.continueTask, terminal);
   setVisible(elements.progress, !terminal);
   if (terminal) {
     elements.pollingState.textContent = "已停止轮询";
     renderSafeResult(task.render);
+    if (requestedParentTaskId === task.task_id) {
+      setParentContext(task.task_id);
+      requestedParentTaskId = null;
+      elements.input.focus();
+    }
   } else {
     elements.pollingState.textContent = document.visibilityState === "hidden" ? "后台低频同步" : "自动同步";
     clearResult();
@@ -356,6 +388,8 @@ function selectTask(taskId) {
 function setSubmitState({ busy, ambiguous = false, message = "" }) {
   elements.submit.disabled = busy;
   elements.input.disabled = busy || ambiguous;
+  elements.clearContext.disabled = busy || ambiguous;
+  elements.continueTask.disabled = busy || ambiguous;
   elements.submit.querySelector("span").textContent = ambiguous ? "重试发送" : busy ? "正在发送" : "发送任务";
   elements.submitMessage.textContent = message;
   setVisible(elements.submitMessage, message.length > 0);
@@ -368,22 +402,31 @@ async function submitTask() {
     return;
   }
   if (pendingSubmission === null) {
-    pendingSubmission = { id: crypto.randomUUID(), text: draft };
+    pendingSubmission = {
+      id: crypto.randomUUID(),
+      text: draft,
+      parentTaskId: pendingParentTaskId,
+    };
   }
   setSubmitState({ busy: true });
   try {
+    const body = {
+      text: pendingSubmission.text,
+      client_submission_id: pendingSubmission.id,
+    };
+    if (pendingSubmission.parentTaskId !== null) {
+      body.parent_task_id = pendingSubmission.parentTaskId;
+    }
     const accepted = await requestJson("/app/api/tasks", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-CSRF-Token": csrfToken,
       },
-      body: JSON.stringify({
-        text: pendingSubmission.text,
-        client_submission_id: pendingSubmission.id,
-      }),
+      body: JSON.stringify(body),
     });
     pendingSubmission = null;
+    setParentContext(null);
     elements.input.value = "";
     setSubmitState({ busy: false });
     await loadTasks();
@@ -455,6 +498,13 @@ elements.logout.addEventListener("click", logout);
 elements.refreshList.addEventListener("click", () => loadTasks());
 elements.loadMore.addEventListener("click", () => loadTasks({ append: true }));
 elements.retryDetail.addEventListener("click", () => readSelectedTask({ immediate: true }));
+elements.continueTask.addEventListener("click", () => {
+  if (selectedTaskId !== null) {
+    setParentContext(selectedTaskId);
+    elements.input.focus();
+  }
+});
+elements.clearContext.addEventListener("click", () => setParentContext(null));
 document.addEventListener("visibilitychange", () => {
   if (selectedTaskId !== null && document.visibilityState === "visible") {
     pollDelay = 2000;
@@ -468,7 +518,11 @@ async function start() {
   try {
     await loadIdentity();
     await loadTasks();
-    if (tasks.length > 0) {
+    const requested = new URLSearchParams(window.location.search).get("parent_task_id");
+    if (typeof requested === "string" && requested.length > 0) {
+      requestedParentTaskId = requested;
+      selectTask(requested);
+    } else if (tasks.length > 0) {
       selectTask(tasks[0].task_id);
     }
   } catch (error) {

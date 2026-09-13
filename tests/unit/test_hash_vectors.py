@@ -4,16 +4,26 @@
 数字格式一并钉死，任何 canonicalization 改动都会在这里立刻可读地暴露出来。
 """
 
+import datetime as dt
 import hashlib
 
 import pytest
 from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET, FIXTURE_TOOL_CALL
 
 from xiaowei_agent.contracts import (
+    Channel,
     EffectClass,
     ExecutionPlan,
+    RequestContext,
+    RequestEnvelope,
     StepCondition,
     StepConditionKind,
+    TaskSubmission,
+)
+from xiaowei_agent.persistence.store import (
+    idempotency_scope_digest,
+    request_dedup_digest,
+    submission_digest,
 )
 from xiaowei_agent.planning import (
     compute_plan_hash,
@@ -42,6 +52,64 @@ _TOOL_CALL_CANONICAL = (
     b'"operation":"list_slow_queries","step_id":"s1","timeout_seconds":30.0,'
     b'"typed_args":{"window_minutes":30}}'
 )
+
+_REQUEST_DEDUP_CANONICAL = (
+    b'{"actor":"alice","channel":"api","environment_id":"dev",'
+    b'"idempotency_key":"idem-1","tenant_id":"tenant-a",'
+    b'"text":"why is the query slow"}'
+)
+_IDEMPOTENCY_SCOPE_CANONICAL = (
+    b'{"environment_id":"dev","idempotency_key":"idem-1",'
+    b'"tenant_id":"tenant-a"}'
+)
+_SUBMISSION_CANONICAL = (
+    b'{"as_of":"2026-09-05T09:30:00+00:00","context":{"actor":"alice",'
+    b'"environment_id":"dev","policy_revision":"policy-1",'
+    b'"tenant_id":"tenant-a","trace_id":"00000000000000000000000000000000"},'
+    b'"envelope":{"actor":"alice","channel":"api","environment_id":"dev",'
+    b'"idempotency_key":"idem-1","request_id":"request-1",'
+    b'"tenant_id":"tenant-a","text":"why is the query slow"}}'
+)
+
+
+def _null_parent_submission() -> TaskSubmission:
+    return TaskSubmission(
+        envelope=RequestEnvelope(
+            request_id="request-1",
+            tenant_id="tenant-a",
+            actor="alice",
+            channel=Channel.API,
+            text="why is the query slow",
+            idempotency_key="idem-1",
+            environment_id="dev",
+        ),
+        context=RequestContext(
+            tenant_id="tenant-a",
+            actor="alice",
+            environment_id="dev",
+            trace_id="0" * 32,
+            policy_revision="policy-1",
+        ),
+        as_of=dt.datetime(2026, 9, 5, 9, 30, tzinfo=dt.UTC),
+        parent_task_id=None,
+    )
+
+
+def test_null_parent_keeps_all_pre_ri3_digest_bytes_frozen() -> None:
+    submission = _null_parent_submission()
+    assert request_dedup_digest(
+        submission.envelope,
+        submission.context,
+        parent_task_id=None,
+    ) == hashlib.sha256(_REQUEST_DEDUP_CANONICAL).hexdigest()
+    assert submission_digest(submission) == hashlib.sha256(
+        _SUBMISSION_CANONICAL
+    ).hexdigest()
+    assert idempotency_scope_digest(
+        tenant_id="tenant-a",
+        environment_id="dev",
+        idempotency_key="idem-1",
+    ) == hashlib.sha256(_IDEMPOTENCY_SCOPE_CANONICAL).hexdigest()
 
 
 def test_plan_hash_matches_the_frozen_canonical_form() -> None:

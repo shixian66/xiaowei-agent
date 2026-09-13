@@ -24,7 +24,9 @@ pytestmark = pytest.mark.security
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 
 # 三档别名 + 已有的窄类型。裸 ``str`` 不在其中,这正是本测试的要点。
-APPROVED = frozenset({"StrictStr", "NonEmptyText", "FreeText", "TraceId", "Sha256Hex"})
+APPROVED = frozenset(
+    {"StrictStr", "NonEmptyText", "FreeText", "TraceId", "Sha256Hex", "TaskId"}
+)
 
 
 def _contract_fields(source: str) -> list[tuple[str, str, set[str]]]:
@@ -136,6 +138,36 @@ def test_every_contract_string_field_uses_an_approved_alias() -> None:
             seen |= used & APPROVED
     # 三档都必须真的有人在用,否则说明分档只是摆设
     assert {"StrictStr", "NonEmptyText", "FreeText"} <= seen
+
+
+def test_every_parent_task_field_uses_the_shared_task_id_domain() -> None:
+    """所有跨层 parent 字段共享同一域，不能只在某个 HTTP 路由补正则。"""
+    found: list[str] = []
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for cls in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+            for stmt in cls.body:
+                if not (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "parent_task_id"
+                ):
+                    continue
+                location = f"{path.relative_to(SRC)}::{cls.name}.parent_task_id"
+                found.append(location)
+                names = {
+                    node.id
+                    for node in ast.walk(stmt.annotation)
+                    if isinstance(node, ast.Name)
+                }
+                if "TaskId" not in names:
+                    offenders.append(location)
+
+    assert len(found) == 7, f"parent_task_id 字段集合发生变化，需复核契约：{found}"
+    assert offenders == [], "以下 parent_task_id 未使用 TaskId：\n" + "\n".join(
+        offenders
+    )
 
 
 @pytest.mark.parametrize(

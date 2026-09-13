@@ -137,6 +137,17 @@ def test_request_builder_scrubs_and_drops_oldest_complete_history() -> None:
     assert request.history[-1] == "20" * 4_000
 
 
+def test_request_builder_preserves_upstream_complete_round_truncation() -> None:
+    request = build_model_intent_request(
+        user_text="检查慢查询",
+        history=("retained parent round",),
+        context_truncated=True,
+    )
+
+    assert request.history == ("retained parent round",)
+    assert request.context_truncated is True
+
+
 @pytest.mark.parametrize(
     "text",
     ["x" * 8_193, "bad-surrogate-\ud800"],
