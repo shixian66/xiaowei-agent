@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from tests.conftest import drive_to_terminal, lookup_for, make_envelope, make_submission
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingError
 from xiaowei_agent.application.context import (
     ContextAssembler,
     ParentContextRejectedError,
@@ -21,6 +22,8 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.persistence.channel import BindTaskCommand
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
+from xiaowei_agent.persistence.plans import PlanNotFoundError
+from xiaowei_agent.persistence.store import TaskNotFoundError
 
 
 class _Projector:
@@ -42,6 +45,14 @@ class _Projector:
             status=record.status,
             refs=(f"root:{record.task_id}",),
         )
+
+
+class _FailingProjector:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def project_recorded(self, *, record: Any) -> RenderPayload:
+        raise self._error
 
 
 async def _bound_task(
@@ -235,6 +246,123 @@ async def test_history_capacity_drops_old_rounds_whole(
     assert retained_indices == list(range(10 - len(retained_indices), 10))
     assert sum(map(len, assembled.history)) <= MAX_MODEL_HISTORY_CHARACTERS
     assert assembled.truncated is True
+
+
+async def test_scrub_expansion_drops_the_old_round_before_model_validation(
+    assembler, store, channels, context, clock
+) -> None:
+    expanding_text = ("token=" + "a,") * 820
+    root, _ = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="scrub-expanding-root",
+        text=expanding_text,
+        terminal=True,
+    )
+    parent, _ = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="scrub-expanding-parent",
+        parent_task_id=root.task_id,
+        terminal=True,
+    )
+    child, child_submission = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="scrub-expanding-child",
+        parent_task_id=parent.task_id,
+    )
+
+    assembled = await assembler.assemble(
+        task_id=child.task_id,
+        submission=child_submission,
+    )
+
+    assert [json.loads(item)["user"] for item in assembled.history] == [
+        "user text scrub-expanding-parent"
+    ]
+    assert all(len(item) <= 8_192 for item in assembled.history)
+    assert assembled.truncated is True
+
+
+@pytest.mark.parametrize(
+    "projection_error",
+    (
+        PlanNotFoundError("plan not found", task_id="parent"),
+        TaskNotFoundError(task_id="parent"),
+        CapabilityBindingError("capability binding unavailable"),
+    ),
+    ids=("missing-plan", "damaged-task-read", "retired-capability-binding"),
+)
+async def test_deterministic_parent_projection_damage_is_rejected_without_retry(
+    store, channels, context, clock, projection_error
+) -> None:
+    parent, _ = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix=f"projection-damage-{type(projection_error).__name__}",
+        terminal=True,
+    )
+    child, child_submission = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix=f"projection-damage-child-{type(projection_error).__name__}",
+        parent_task_id=parent.task_id,
+    )
+    assembler = ContextAssembler(
+        task_store=store,
+        channel_store=channels,
+        task_projector=_FailingProjector(projection_error),
+    )
+
+    with pytest.raises(ParentContextRejectedError):
+        await assembler.assemble(task_id=child.task_id, submission=child_submission)
+
+
+async def test_worker_still_rejects_a_nonterminal_ancestor_beyond_the_direct_parent(
+    assembler, store, channels, context, clock, memory_state
+) -> None:
+    root, _ = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="nonterminal-ancestor-root",
+        terminal=True,
+    )
+    parent, _ = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="nonterminal-ancestor-parent",
+        parent_task_id=root.task_id,
+        terminal=True,
+    )
+    child, child_submission = await _bound_task(
+        store=store,
+        channels=channels,
+        context=context,
+        clock=clock,
+        suffix="nonterminal-ancestor-child",
+        parent_task_id=parent.task_id,
+    )
+    memory_state.tasks[root.task_id] = memory_state.tasks[root.task_id].model_copy(
+        update={"status": TaskStatus.CREATED, "terminal_reason": None}
+    )
+
+    with pytest.raises(ParentContextRejectedError):
+        await assembler.assemble(task_id=child.task_id, submission=child_submission)
 
 
 async def test_missing_child_binding_retries_but_missing_parent_binding_rejects(

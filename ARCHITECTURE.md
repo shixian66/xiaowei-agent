@@ -233,10 +233,11 @@ its post-grant attempt. Each attempt has exactly one owner; the public Runtime s
 和 Web binding owner；重新登录不因 session ID 变化丢失上下文。最多 20 个父任务、64,000 字符；
 超出按确定性规则截断。
 
-`parent_task_id` 是不可信 selector。Web 入口先做 scoped lookup，Worker 的 `ContextAssembler` 再从
-持久化 submission/binding 逐跳验证终态和完整作用域，避免只靠入口判断。RI3 只增加必要的窄读取和
-校验，不顺带重写当前 task/submission/binding/projection 的提交事务。飞书 reply/thread 上下文等待
-RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
+`parent_task_id` 是不可信 selector。Web 入口只对用户选择的直接 parent 做 scoped lookup；Worker 的
+`ContextAssembler` 再从持久化 submission/binding 逐跳验证整个有界父链的终态和完整作用域。祖先
+后来漂移不把直接 parent 隐藏成入口 404，但会让已创建子任务在执行前确定性 `REJECTED`。RI3 只增加
+必要的窄读取和校验，不顺带重写当前 task/submission/binding/projection 的提交事务。飞书 reply/thread
+上下文等待 RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
 
 Model context is bounded by field count, row count, Unicode character count and
 serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
@@ -247,9 +248,11 @@ there is no redaction-exception branch. Model ports never receive `RequestEnvelo
 The 8,192-character current/history field limit itself implies a 32 KiB UTF-8 ceiling;
 it is not duplicated as an unreachable second guard. The 64,000-character history limit
 likewise implies at most 256,000 UTF-8 bytes (less than 256 KiB), so there is no duplicate
-history-byte branch. After scrubbing, the complete typed request is serialized again and
-must fit the independent 512 KiB cap; otherwise whole old
-rounds are dropped or, if the current request alone cannot fit, the call is rejected.
+history-byte branch. Because replacement can expand text, every scrubbed history round
+and the retained aggregate are rechecked against the same 8,192/64,000-character budgets;
+an overflowing round and all older rounds are omitted. The complete typed request is then
+serialized again and must fit the independent 512 KiB cap. If the current request alone
+cannot fit, the call is rejected.
 
 The StarRocks advisory projector derives names and order directly from
 `SLOW_QUERY_SURFACE.allowed_columns`, takes at most 20 rows, and applies closed type

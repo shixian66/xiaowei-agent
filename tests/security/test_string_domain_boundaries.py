@@ -7,7 +7,7 @@
 import datetime as _dt
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from tests.conftest import make_envelope
 
 from xiaowei_agent.contracts import (
@@ -19,6 +19,7 @@ from xiaowei_agent.contracts import (
     ExternalSource,
     RenderPayload,
     RenderSection,
+    TaskId,
     TaskStatus,
 )
 
@@ -73,6 +74,27 @@ def test_padded_reference_is_not_silently_stripped() -> None:
     """
     with pytest.raises(ValidationError):
         AgentError(**_ERR, cause_ref="  r1  ")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    (
+        "_task",
+        "-task",
+        "task/path",
+        "task?query",
+        "a" * 201,
+        ("a" * 200) + "\n",
+        b"task",
+    ),
+)
+def test_task_id_domain_matches_the_web_selector_and_rejects_aliases(bad: object) -> None:
+    adapter = TypeAdapter(TaskId)
+    assert adapter.validate_python("a" + ("-" * 199), strict=True) == (
+        "a" + ("-" * 199)
+    )
+    with pytest.raises(ValidationError):
+        adapter.validate_python(bad, strict=True)
 
 
 # --- NonEmptyText:本系统生成的文本 -----------------------------------------

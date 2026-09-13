@@ -18,6 +18,7 @@ from xiaowei_agent.contracts import (
     RequestContext,
     RequestEnvelope,
     StrictStr,
+    TaskId,
     TaskSubmission,
     TaskView,
     TraceId,
@@ -61,7 +62,7 @@ class ChannelSubmitCommand(Contract):
     client_submission_ref: StrictStr
     conversation_ref: StrictStr | None = None
     submitted_at: AwareDatetime
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _shape_is_supported(self) -> Self:
@@ -75,7 +76,7 @@ class ChannelSubmitCommand(Contract):
 class SubmittedTask(Contract):
     task_view: TaskView
     binding: ChannelBinding
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
 
 class ChannelSubmissionReferences(NamedTuple):

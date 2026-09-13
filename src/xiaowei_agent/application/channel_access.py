@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     StoredTaskRead,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskLookup,
     TaskRecord,
     TaskStatus,
@@ -75,7 +76,7 @@ class AccessibleTask(Contract):
     request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     task_version: StrictInt = Field(ge=0)
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
 
 class TaskSummary(Contract):
@@ -151,6 +152,7 @@ class TaskAccessService:
                 environment_id=principal.environment_id,
                 actor=principal.actor,
                 binding_owner=principal.subject_ref,
+                max_parent_tasks=1,
             )
         except ParentContextRejectedError:
             raise TaskAccessNotFoundError from None

@@ -1,8 +1,9 @@
 """从显式 Web 父任务链组装有界、脱敏的模型历史。"""
 
 from dataclasses import dataclass
-from typing import Final, Protocol, TypedDict
+from typing import Protocol, TypedDict
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingError
 from xiaowei_agent.contracts import (
     MAX_MODEL_HISTORY_CHARACTERS,
     MAX_MODEL_HISTORY_ITEMS,
@@ -24,8 +25,6 @@ from xiaowei_agent.persistence.plans import PlanNotFoundError
 from xiaowei_agent.persistence.store import TaskNotFoundError, TaskStore
 from xiaowei_agent.planning import canonical_json
 from xiaowei_agent.redaction import scrub_text
-
-_SAFE_ROUND_KEYS: Final[frozenset[str]] = frozenset({"user", "assistant"})
 
 
 class _SafeSection(TypedDict):
@@ -93,8 +92,11 @@ async def load_web_parent_chain(
     actor: str,
     binding_owner: str,
     seen_task_ids: frozenset[str] = frozenset(),
+    max_parent_tasks: int = MAX_MODEL_HISTORY_ITEMS,
 ) -> tuple[tuple[ParentTaskSnapshot, ...], bool]:
-    """按新到旧读取并复核父链；返回完整快照和是否因数量上限截断。"""
+    """按新到旧复核至指定深度；Worker 默认验证完整的有界父链。"""
+    if not 1 <= max_parent_tasks <= MAX_MODEL_HISTORY_ITEMS:
+        raise ValueError("max_parent_tasks is outside the supported range")
     seen = set(seen_task_ids)
     snapshots: list[ParentTaskSnapshot] = []
     truncated = False
@@ -132,7 +134,7 @@ async def load_web_parent_chain(
         current_id = submission.parent_task_id
         if current_id is not None and current_id in seen:
             raise ParentContextRejectedError
-        if len(snapshots) == MAX_MODEL_HISTORY_ITEMS:
+        if len(snapshots) == max_parent_tasks:
             truncated = current_id is not None
             break
     return tuple(snapshots), truncated
@@ -168,8 +170,6 @@ def _round_payload(*, user_text: str, render: RenderPayload) -> _SafeRound:
 
 
 def _scrub_round(payload: _SafeRound) -> str:
-    if payload.keys() != _SAFE_ROUND_KEYS:
-        raise ParentContextRejectedError
     assistant = payload["assistant"]
     scrubbed = {
         "user": scrub_text(payload["user"]),
@@ -245,8 +245,9 @@ class ContextAssembler:
 
         owner = current_binding.initiator_subject_ref
         actor = submission.context.actor
-        newest_first: list[_SafeRound] = []
+        newest_first: list[str] = []
         raw_character_count = 0
+        scrubbed_character_count = 0
         snapshots, truncated = await load_web_parent_chain(
             task_store=self._tasks,
             channel_store=self._channels,
@@ -263,7 +264,7 @@ class ContextAssembler:
                 render = await self._projector.project_recorded(
                     record=snapshot.record
                 )
-            except PlanNotFoundError:
+            except (PlanNotFoundError, TaskNotFoundError, CapabilityBindingError):
                 raise ParentContextRejectedError from None
             payload = _round_payload(
                 user_text=snapshot.submission.envelope.text,
@@ -277,10 +278,19 @@ class ContextAssembler:
             ):
                 truncated = True
                 break
-            newest_first.append(payload)
+            scrubbed_round = _scrub_round(payload)
+            if (
+                len(scrubbed_round) > MAX_MODEL_TEXT_CHARACTERS
+                or scrubbed_character_count + len(scrubbed_round)
+                > MAX_MODEL_HISTORY_CHARACTERS
+            ):
+                truncated = True
+                break
+            newest_first.append(scrubbed_round)
             raw_character_count += len(raw_round)
+            scrubbed_character_count += len(scrubbed_round)
 
-        history = tuple(_scrub_round(item) for item in reversed(newest_first))
+        history = tuple(reversed(newest_first))
         return AssembledContext(history=history, truncated=truncated)
 
 

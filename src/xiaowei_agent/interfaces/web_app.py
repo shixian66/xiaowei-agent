@@ -41,7 +41,7 @@ from xiaowei_agent.config import (
     canonical_non_ip_hostname,
     load_settings,
 )
-from xiaowei_agent.contracts import ChannelKind, ReadinessProbe
+from xiaowei_agent.contracts import TASK_ID_PATTERN, ChannelKind, ReadinessProbe
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
@@ -81,7 +81,7 @@ _CSP: Final[str] = (
     "object-src 'none'"
 )
 _HSTS: Final[bytes] = b"max-age=31536000"
-_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
 _POSITIVE_INT_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_CREATED_SEQ: Final[int] = 9_223_372_036_854_775_807
 _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {

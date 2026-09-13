@@ -99,18 +99,22 @@ UTF-8 bytes, so the 8,192-character field limit itself proves the stated 32 KiB 
 ceiling; this is a derived guarantee, not a second independently reachable rejection
 branch. The 64,000-character history limit similarly proves at most 256,000 UTF-8 bytes
 (less than 256 KiB), so a separate 256 KiB history check would also be unreachable. After
-scrubbing, builders reserialize the complete typed request and enforce the independently
-reachable 512 KiB final cap. Oversize or invalid input prevents a model call;
-there is no fictional redaction-exception branch.
+scrubbing, each serialized history round and the retained aggregate are checked against
+the same 8,192/64,000-character budgets again, because redaction replacement can expand
+text. This is distinct from the unreachable derived 256 KiB check. Builders then
+reserialize the complete typed request and enforce the independently reachable 512 KiB
+final cap. Oversize or invalid input prevents a model call; there is no fictional
+redaction-exception branch.
 
 For the intent request, the current user text and each retained history text field are
 each capped at 8,192 characters, which implies at most 32 KiB of UTF-8 before scrubbing.
 Selected history is capped at 20 complete parent tasks and 64,000 characters, which
-implies at most 256,000 UTF-8 bytes (less than 256 KiB). After all
-retained strings have been scrubbed, the complete typed request is serialized again and
-must fit 512 KiB. Old history is omitted only as complete rounds; if the current request
-alone cannot satisfy its field limits or the final serialized cap, the provider call count
-is zero.
+implies at most 256,000 UTF-8 bytes (less than 256 KiB) before scrubbing. A scrubbed round
+that would exceed the per-round or aggregate character budget is omitted together with
+all older rounds, so redaction expansion cannot turn otherwise usable newer history into
+a whole-request rejection. The complete typed request is then serialized again and must
+fit 512 KiB. Old history is omitted only as complete rounds; if the current request alone
+cannot satisfy its field limits or the final serialized cap, the provider call count is zero.
 
 意图请求只包含：
 
@@ -264,15 +268,18 @@ artifact is hidden if recovery later ends failed/rejected/indeterminate or detec
 
 首版只在 Web 提供“继续这个任务”：
 
-- parent 必须存在且已经终态；
-- actor、tenant、environment、channel 与 Web binding owner 必须一致；重新登录不会仅因 session ID
-  变化而丢失上下文；
+- Web 提交前只对用户明确选择的直接 parent 做 scoped lookup；它必须存在且已经终态，actor、tenant、
+  environment、channel 与 Web binding owner 必须一致。入口不扫描祖先链，避免一次提交重复执行最多
+  60 次查询，也避免祖先后来漂移时把仍合法的直接 parent 伪装成 404；
+- Worker 不信任入口结果，执行前从持久化 submission/binding 逐跳复核整个有界父链；祖先发生循环、
+  越权、损坏或变成非终态时，已经创建的子任务确定性进入 `REJECTED`，不调用模型；重新登录不会仅因
+  session ID 变化而丢失上下文；
 - 最多追溯 20 个完整父任务；每个历史文本字段最多 8,192 字符，由此保证不超过 32 KiB UTF-8；
 - 只读取持久化用户文本和确定性渲染结果/已保存 advisory；
 - 脱敏前选中的历史总量最多 64,000 字符，由此保证最多 256,000 UTF-8 字节（小于 256 KiB）；
-  超量按确定性规则从旧到新整轮丢弃；
+  脱敏后每轮与累计历史再分别复核 8,192/64,000 字符，超限轮及更早历史整轮丢弃；
 - 脱敏后连同当前请求和固定 schema 重新序列化，完整 typed request 最多 512 KiB；
-- 循环、越权、损坏或非终态 parent 一律拒绝，不退回“猜最近消息”。
+- Worker 发现循环、越权、损坏或非终态祖先一律拒绝，不退回“猜最近消息”。
 
 With no parent, canonical JSON bytes for `request_dedup_digest`,
 `submission_digest` and `idempotency_scope_digest` stay unchanged and are pinned by

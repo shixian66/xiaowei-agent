@@ -20,6 +20,7 @@ from xiaowei_agent.contracts import (
     RenderPayload,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskStatus,
 )
 from xiaowei_agent.interfaces.web_auth import AuthenticatedWebSession
@@ -48,7 +49,7 @@ class WebTaskSubmitRequest(_WebModel):
         max_length=200,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
 
 class WebCurrentUser(_WebModel):
@@ -107,7 +108,7 @@ class WebTaskAccepted(_WebModel):
     task_id: StrictStr
     status: TaskStatus
     detail_path: StrictStr
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:
@@ -134,7 +135,7 @@ class WebTaskDetail(_WebModel):
     task_version: StrictInt = Field(ge=0)
     detail_path: StrictStr
     render: RenderPayload | None = None
-    parent_task_id: StrictStr | None = None
+    parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:

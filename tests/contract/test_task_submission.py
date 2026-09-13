@@ -64,7 +64,18 @@ def test_submission_parent_is_optional_strict_text() -> None:
     }
     assert _submission().parent_task_id is None
     assert _submission(parent_task_id="task-parent").parent_task_id == "task-parent"
-    for invalid in (1, True, b"task-parent"):
+    assert _submission(parent_task_id="a" + ("-" * 199)).parent_task_id == (
+        "a" + ("-" * 199)
+    )
+    for invalid in (
+        "_task-parent",
+        "task/parent",
+        "a" * 201,
+        ("a" * 200) + "\n",
+        1,
+        True,
+        b"task-parent",
+    ):
         with pytest.raises(ValidationError):
             _submission(parent_task_id=invalid)
 

@@ -300,7 +300,23 @@ def test_web_submit_parent_is_optional_and_strict() -> None:
         client_submission_id="browser-parent-0001",
         parent_task_id="task-parent",
     ).parent_task_id == "task-parent"
-    for invalid in ("", " task-parent ", 1, b"task-parent"):
+    assert WebTaskSubmitRequest(
+        text="继续分析",
+        client_submission_id="browser-parent-0001",
+        parent_task_id="a" + ("-" * 199),
+    ).parent_task_id == "a" + ("-" * 199)
+    for invalid in (
+        "",
+        " task-parent ",
+        "_task-parent",
+        "-task-parent",
+        "task/parent",
+        "task?parent",
+        "a" * 201,
+        ("a" * 200) + "\n",
+        1,
+        b"task-parent",
+    ):
         with pytest.raises(ValueError):
             WebTaskSubmitRequest(
                 text="继续分析",

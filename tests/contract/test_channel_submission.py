@@ -336,6 +336,50 @@ async def test_corrupt_parent_cycle_is_hidden_without_creating_a_child(
     assert set(memory_state.tasks) == baseline
 
 
+async def test_web_precheck_only_reads_the_direct_parent_and_worker_owns_ancestry(
+    service, store, clock, memory_state
+) -> None:
+    root = await _terminal_web_parent(
+        service,
+        store,
+        clock,
+        client_key="ancestor-drift-root",
+    )
+    parent = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="ancestor-drift-parent",
+            parent_task_id=root.task_view.task_id,
+        )
+    )
+    await drive_to_terminal(
+        store,
+        TaskLookup(
+            task_id=parent.task_view.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        ),
+        TaskStatus.SUCCEEDED,
+    )
+    root_id = root.task_view.task_id
+    memory_state.tasks[root_id] = memory_state.tasks[root_id].model_copy(
+        update={"status": TaskStatus.CREATED, "terminal_reason": None}
+    )
+
+    child = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="ancestor-drift-child",
+            parent_task_id=parent.task_view.task_id,
+        )
+    )
+
+    assert child.parent_task_id == parent.task_view.task_id
+    assert len(memory_state.tasks) == 3
+
+
 async def test_submit_requires_the_explicit_readonly_submission_permission(
     service, clock
 ) -> None:
