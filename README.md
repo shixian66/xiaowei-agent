@@ -14,11 +14,10 @@
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A/3B/3C 已合入；当前源码已有严格
+> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
 > DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only Compose secret、
-> durable Runtime、持久模型 artifact、MODEL trace 和慢查询 advisory。PR 3D 已提交
-> [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 审查，尚未合入；真实 key 读取与
-> Gemini 网络调用均为 0。
+> durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
+> PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host
@@ -402,9 +401,9 @@ CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、ca
 ### 尚未完成与能力边界
 
 当前默认装配仍使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B/3C 已离线新增
+与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B–3D 已离线新增
 固定 Gemini SDK adapter、严格 DTO/窄 port、worker-only secret override、durable 模型编排、持久 artifact、
-MODEL trace 与慢查询 advisory，但未读取真实 key，也未进行真实 provider 调用。M6a 增加了
+MODEL trace、慢查询 advisory 与显式 Web 父任务上下文，但未读取真实 key，也未进行真实 provider 调用。M6a 增加了
 Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
 已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
 PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离

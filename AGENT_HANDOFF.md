@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 顺序实施 RI3；分支 `claude/ri3-pr3d-web-parent-context` 基于 `origin/main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`，PR 3D 实现候选为 `0c17e9defe305a7ae871376d04762d541f19d147`，已通过 [PR #38](https://github.com/shixian66/xiaowei-agent/pull/38) 提交独立审查。`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 完成 RI3 PR 3D 合并后交接；分支 `claude/ri3-pr3d-handoff` 基于 `origin/main@fb6718cc6f295206c7c125a887b34d2ee762e71f`。`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-13（Asia/Shanghai） |
-| 阶段 | **RI3 PR 3A/3B/3C 已合入；PR 3D 已形成离线实现候选，等待独立审查，尚未合入。候选分支新增 Web 显式父任务、受限历史组装和 `rev_0009_task_parent_context`；没有读取真实 secret、发起 Gemini 网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **RI3 PR 3A–3D 已合入；PR 3D 交付 Web 显式父任务、受限历史组装和 `rev_0009_task_parent_context`，最强证据仍为 `tests`。PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”；没有读取真实 secret、发起 Gemini 网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -54,10 +54,10 @@
 | RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7.1 已获批准。该行只记录规划批准，不是源码或运行证据 |
 | RI3 PR 3B 合入 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，最终受审 head `79675aeed895899282e6f4f697463f8b6b27e29b`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703681866`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703681866) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main` |
 | RI3 PR 3C 合入 | 基于 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`；最终受审 head `bc1812e72dada63a83776bfb159a04c970153c66`。PR [#36](https://github.com/shixian66/xiaowei-agent/pull/36) 的 run [`34730018472`](https://github.com/shixian66/xiaowei-agent/actions/runs/34730018472) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`，且合入树与受审 head 无差异。交付 grant-fenced insert-once intent/advisory、`rev_0008_model_artifacts`、entry-scoped heartbeat、MODEL trace、surface-derived 慢查询投影与终态 readback，证据等级仍为 `tests` |
-| RI3 PR 3D 修订候选 | 基于 `origin/main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；初始实现 `0c17e9defe305a7ae871376d04762d541f19d147`，独立审查确认无阻断后提出的五项同路径问题已在 `c61f90d5bfd7f2615078de6c2915175c38d4ca64` 按根因修复，审查入口为 [PR #38](https://github.com/shixian66/xiaowei-agent/pull/38)。新增统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核和确定性投影损坏拒绝；死分支已删除，PR 3E 的历史 advisory 恶意输入矩阵已写入计划。旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。当前 checkout 四门为 3531 passed / 227 skipped、security 1290 passed / 80 skipped / 2388 deselected、Ruff 和 mypy 通过；证据等级仅为 `tests`，最新远程 CI 仍须绑定最终 PR head |
-| 下一步 | **将修订推送至 PR #38，并在最终 head 的 CI 全绿后按项目负责人本轮授权合入；随后只做合并后 handoff。** 首次 Gemini 网络调用仍需 PR 3E 独立现场 GO；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI3 PR 3D 合入 | 基于 `main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3`。PR [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 的 run [`34736983148`](https://github.com/shixian66/xiaowei-agent/actions/runs/34736983148) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `fb6718cc6f295206c7c125a887b34d2ee762e71f` 合入 `main`，且合入树与受审 head 无差异。交付统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核、确定性投影损坏拒绝、`rev_0009_task_parent_context` 与显式 Web 继续交互；旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。证据等级仍为 `tests` |
+| 下一步 | **等待项目负责人单独下达“RI3 Gemini test-env GO”，再从最新 `main` 开始 PR 3E；未获口令前不读取 key、不连接 Gemini、不启动现场验证。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B/3C 的默认关闭 Gemini adapter 与 durable 模型编排。PR 3D 仅存在于候选分支并通过本地 fake/临时 PostgreSQL 验证；仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
@@ -213,7 +213,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     正反例，并闭合超时层级、credential reader 公共 API 和容量风险口径。没有读取或保存真实 secret，
     也没有发起飞书网络调用。精确实现 SHA 见 §1；交付不解锁 RI2、H 层生产只读、部署、canary、用户
     验收或 M8。
-14. **RI3 Gemini 已进入顺序离线实施，PR 3A/3B/3C 已合入，PR 3D 已形成待审候选**：项目负责人已批准 ADR-015/V7.1 计划并于
+14. **RI3 Gemini 的离线 PR 3A–3D 已顺序合入，PR 3E 等待独立现场 GO**：项目负责人已批准 ADR-015/V7.1 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
     Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
     文件到 worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
@@ -226,13 +226,14 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main`。PR 3C 已补齐 durable-only
     model/rule intent、grant-fenced insert-once artifact、单一 application heartbeat、MODEL trace、
     surface-derived 慢查询 advisory 及 TaskView readback；独立审查问题按根因补修后，PR #36 已以
-    `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`。PR 3D 候选在
-    `0c17e9defe305a7ae871376d04762d541f19d147` 实现：父任务只可由 Web 用户显式选择，提交前只检查
+    `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`。PR 3D 从
+    `0c17e9defe305a7ae871376d04762d541f19d147` 起实现：父任务只可由 Web 用户显式选择，提交前只检查
     直接 parent 的终态、租户/环境/actor 与绑定所有权，worker 再基于持久记录逐跳复核并组装最多 20 轮、64,000 字符/
     256 KiB 的清洗历史；缺失 child binding 可重试，其余范围漂移 fail-closed。`parent_task_id=None`
     保持既有 canonical/hash 字节，父任务不进入 idempotency scope；`rev_0009` 只新增可空外键和索引。
     独立审查确认无阻断后提出的五项同路径问题已在 `c61f90d5bfd7f2615078de6c2915175c38d4ca64`
-    根因修复；最终 PR head 的 CI 尚待复核，当前仍未合入。
+    根因修复；最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3` 的八项 CI 全绿，PR #38
+    已以 `fb6718cc6f295206c7c125a887b34d2ee762e71f` 合入且树一致。
     全程没有读取真实 key、真实调用、部署或归档；真实 Gemini 调用仍需 PR 3E 的独立现场 GO。
     Independent review V7 fixes the current-timeout fact, parent idempotency predicate,
     Settings versus host Compose env boundary, complete storage/protocol/suite/SDK/trace
@@ -304,15 +305,16 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 已验证
 
-- **RI3 PR 3D 已形成离线实现候选并完成本地根因/边界验证**：候选
-  `0c17e9defe305a7ae871376d04762d541f19d147` 新增显式 Web 父任务、持久化外键、两阶段访问复核、
+- **RI3 PR 3D 已完成本地根因/边界验证、独立审查、CI 与合入**：从
+  `0c17e9defe305a7ae871376d04762d541f19d147` 起新增显式 Web 父任务、持久化外键、两阶段访问复核、
   安全历史投影和 Web “继续这个任务”交互；没有从最近任务猜父任务，飞书没有获得隐式上下文。
-  本地全量为 3517 passed / 227 skipped；security gate 为 1282 passed / 80 skipped /
-  2382 deselected；Ruff 通过，mypy 164 个源文件通过，Web JavaScript 两个入口的 `node --check`
+  审查补修后的本地全量为 3531 passed / 227 skipped；security gate 为 1290 passed / 80 skipped /
+  2388 deselected；Ruff 通过，mypy 164 个源文件通过；初始候选的 Web JavaScript 两个入口 `node --check`
   均通过。另以一次性 PostgreSQL 16 容器在 `127.0.0.1:55439` 实跑任务存储、渠道存储和迁移路径，
   66 passed，随后容器已停止并自动移除。分别删除 null-parent hash 兼容、内存/PostgreSQL parent digest、
   共享 readback 和 worker actor 复核后，对应隔离变异用例均按预期转红，恢复后通过。以上仅证明
-  本地 `tests`；候选已由 PR #38 提交审查，CI 状态以 PR 当前页面为准，尚未完成独立审查或合入。
+  本地 `tests`。最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3` 的 run
+  `34736983148` 八项全绿，已 squash 为 `fb6718cc6f295206c7c125a887b34d2ee762e71f`，树一致。
 
 - **RI3 PR 3C 已按独立审查沿同一 durable 调用链完成根因补修、自审、CI 与合入**：原候选已用
   失败测试覆盖 application 外层 timeout、SDK close、model/rule accepted intent、grant/fencing
@@ -470,10 +472,10 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **RI3 PR 3C 已合入、PR 3D 仍是候选，两者证据都只到离线 `tests`**：durable Runtime、
+- **RI3 PR 3C/3D 已合入，但证据仍只到离线 `tests`**：durable Runtime、
   `rev_0008`、artifact、MODEL trace、fallback/retry service 和慢查询 advisory 已在 fake/临时
   PostgreSQL 与隔离 CI 路径验证；PR 3D 的 Web 显式父任务、`rev_0009` 和安全历史组装已在本地
-  fake 与一次性 PostgreSQL 路径验证；PR #38 的 CI 状态以当前页面为准，候选尚未完成独立审查或合入。
+  fake、一次性 PostgreSQL 与隔离 CI 路径验证；这仍不等于真实模型或人工 Web 验收。
   未读取 `GEMINI_API_KEY`，Gemini 网络调用为 0；固定 10 个 intent/5 个 advisory corpus 只证明离线
   安全矩阵，不证明真实模型质量、配额、延迟、usage 字段或 preview 模型稳定性，也没有 test-env、
   部署、canary 或用户验收证据。Web 交互目前只由自动化测试验证，未做真实浏览器人工验收。
