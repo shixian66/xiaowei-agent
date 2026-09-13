@@ -1,4 +1,6 @@
-# M7c：局域网 Web 登录与第三方配置闭环设计
+# M7c：局域网 Web 登录与第三方配置闭环设计（已取代）
+
+> 本文已被 [RI5 本地 Web Admin 简化设计](RI5-local-web-admin-simplified-design.md) 取代，不再作为实现依据。保留本文仅用于记录上一版设计审查结果。
 
 ## 状态
 
