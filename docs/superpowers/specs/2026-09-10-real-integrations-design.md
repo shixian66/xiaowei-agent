@@ -1,9 +1,16 @@
 # 小维 Agent 2.0 真实接入总体设计
 
 - 状态：Accepted V3；RI3 精简实现方案于 2026-09-12 获批离线开工，真实调用仍需独立现场 GO
+  + **RI5 Proposed Amendment（2026-09-14，与 ADR-007/014/015 的 2026-09-13 修订成套，待一并重新接受）**
 - 规划与 PR 3A 开工基线：`ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；后续 PR 基线由 `AGENT_HANDOFF.md` 记录
 - 证据等级：源码事实 + 只读设计；没有真实调用、部署、canary 或用户验收
-- 日期：2026-09-12
+- 日期：2026-09-12；RI5 候选修订 2026-09-14
+
+> **RI5 修订状态说明**：RI5 的实现方案已由
+> [RI5 简化设计](../../plans/RI5-local-web-admin-simplified-design.md)取代。本文中所有 RI5/Admin
+> 相关段落已按新方案同步，并与 ADR-007 / ADR-014 / ADR-015 的 RI5 修订成套，状态同为
+> **Proposed**；四份文档必须一并复核并重新接受，任一份未被接受，RI5 都不得开工。RI1–RI4、RI6
+> 的口径不受本次同步影响。
 
 ## 1. 大白话结论
 
@@ -15,11 +22,11 @@
 2. RI2：测试环境真实飞书联调；
 3. RI3：真实模型 API；
 4. RI4：StarRocks 真实只读查询；
-5. RI5：最小 Web Admin 配置中心；
+5. RI5：本地 Web Admin 简化配置；
 6. RI6：正式部署、canary 与产品用户验收。
 
 编号表达交付路线，不表示所有阶段机械串行。RI2 是飞书现场验证；RI3 和 RI4 的离线实现不依赖它，
-项目负责人本轮已选择先评审 RI3。RI5 等待三类配置契约稳定，RI6 才汇总前序实际要启用能力的现场
+项目负责人本轮已选择先评审 RI3。RI5 等待 RI1/RI3 的配置契约稳定，RI6 才汇总前序实际要启用能力的现场
 证据。任何阶段都不能借另一阶段的证据宣布成功；测试环境联调只能叫 `test-env verified`，不能叫
 canary。
 
@@ -66,7 +73,8 @@ canary。
 - 真实飞书 OAuth 登录、长连接收消息、消息发送/更新、群成员查询。
 - 真实模型只做结构化理解与解释；模型失败时可回退确定性规则。
 - 接入第一个真实系统 StarRocks，只复用已有两个只读 operation。
-- 提供最小 Admin 页面管理飞书、模型和 StarRocks 的非秘密配置与 secret reference。
+- 提供本地 Web Admin：单管理员在本机 Compose、局域网范围内配置 Gemini 与飞书两个闭集集成，
+  并执行显式连接测试。不含 StarRocks 配置、不含通用配置中心、不含版本发布与回滚。
 - 所有真实接入均具备超时、限流、审计、证据、开关和回滚。
 - 用精确部署 SHA 分开记录测试环境、部署、canary 和用户验收证据。
 
@@ -105,7 +113,7 @@ application/ Runtime 与任务生命周期
       +--> persistence/ + evidence/ + observability/  状态、接受意图、证据、诊断、审计
 
 模型 API --> 只产出受 schema 约束的 IntentDraft/Advisory --> 回到确定性链路
-Admin   --> 只管理版本化配置和 secret reference --> 显式发布后 composition root readback
+Admin   --> 只管理 Gemini/飞书两个闭集配置 --> 宿主机重启后各服务上报加载回执
 ```
 
 具体约束：
@@ -120,14 +128,18 @@ Admin   --> 只管理版本化配置和 secret reference --> 显式发布后 com
   端口失败只抛 provider-neutral `ModelPortError`；意图重试闭集精确为 429、5xx 与明确 transport
   error，application 不 import Gemini concrete exception。
 - StarRocks 仍只由 `ToolGateway` 调用现有 target-bound readonly adapter；真实连接配置不能出现在 `ToolCall`、模型输出或用户请求中。
-- Admin 发布配置不等于激活真实调用。composition root 只有在对应 feature flag、配置版本和健康检查全部通过时才注册 provider。
-- Admin application service 不能 import/调用 `ToolGateway`，不能构造 `PlanStep`、`ToolCall` 或
-  `AdmissionCertificate`。它只持久化配置与测试请求；StarRocks 测试由默认关闭的独立测试 worker
-  复用完整 `XiaoweiRuntime → DeterministicStepRunner → StepAdmission → ToolGateway` 主链。只有
-  `interfaces/local_stack.py` 能 import tools 并装配该候选栈；worker 入口只消费窄 stack。候选任务
-  使用持久化 `configuration_test` dispatch lane；TaskStore 对普通/候选暴露两组无 lane 入参的窄
-  方法，内部固定期望 lane，active task-worker 只能查询/领取 `user` lane。列表过滤与领取事务内的
-  lane 二次核对都由 TaskStore 承重，用户 task page 不投影候选任务。
+- Admin 保存配置不等于激活真实调用。配置落盘后必须由宿主机重启 Compose，各服务在启动时自行
+  加载并上报加载回执；Web 不自动重启，不挂载 `docker.sock`。
+- Admin 不新增执行进程、不新增 dispatch lane、不纳入 StarRocks 配置或 StarRocks 测试请求。
+  M7“只有 task worker 装配完整执行 Runtime”的口径不被修改。
+- 连接测试是**控制面探针**：Web 在管理员明确点击且对应真实测试开关已打开时，执行
+  `gemini_connection`、`feishu_credentials`、`feishu_oauth` 三个连通性探针。它们不创建 Task、
+  TaskSubmission、Evidence 或 capability，不产生 `ToolResult`，不进入 Policy/SQLGuard/
+  ApprovalGate/`ToolGateway`，也不改变任何服务的 readiness。Web 不得由此取得模型端口、任意
+  endpoint/路径或任何运维目标访问权。边界见
+  [ADR-007](../../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
+  §RI5 Proposed Amendment、[ADR-014](../../adr/ADR-014-real-feishu-oauth-and-web-activation.md) R4 与
+  [ADR-015](../../adr/ADR-015-real-model-provider-boundary.md) R3。
 - PostgreSQL 继续作为任务、session、accepted intent、advisory、证据和审计事实真源；secret 字节
   不进入 PostgreSQL。现有 heartbeat 提成 application helper：task-worker 包住
   `execute_task()`/retry scheduling，兼容 `handle()` 包自己的 attempt，每条入口一份；Runner 不再启动
@@ -260,24 +272,36 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 
 ### 6.5 Admin 配置
 
-1. admin 创建 draft，只能选择部署者预登记的 `target_ref` 与 `credential_ref` 等逻辑名；API
-   不接受 host、port、任意 endpoint、绝对路径或相对路径。
-2. “测试连接”只创建有频率限制、可审计且绑定 draft digest 的测试请求。飞书候选由独立测试 worker
-   使用窄 provider port；StarRocks 请求由该 worker 通过正常任务生命周期执行固定只读 count，
-   Admin application/API 不直接探测网络。候选任务只进入 `configuration_test` lane；普通 worker
-   即使与测试 worker 并发或知道 task_id，也不能列出、领取或恢复该任务。
-   Gemini 独立处理：configuration-test worker 不挂 key；固定、无用户数据的 probe 只由已有
-   task-worker 在没有 USER candidate 时通过窄 control port 领取和执行；生产 worker 入口必须显式
-   装配该 port，不能只在直接构造 WorkerLoop 的测试中存在。stale probe 标为 indeterminate，不自动
-   重发。成功结果绑定当前 task-worker 的随机、非 secret 启动代次和 loaded_at；worker recreate 后旧
-   结果失效，避免轮换 key 后沿用旧测试证据。
-3. admin 显式发布后生成不可变版本和审计记录。
-4. composition root 读取 active version，校验 readback 后才激活对应 provider。
-5. 回滚指向上一已发布版本；旧版本和审计保留，secret 始终由只读文件挂载提供。
-6. Gemini key 是例外的 bootstrap secret：用户只在部署主机固定受限文件
-   `.secrets/gemini_api_key` 中修改它，模型开启命令显式叠加 model override，转成只挂
-   task-worker 的 file-backed secret；不提供 `.env` 路径覆盖。Admin 只能显示 safe
-   readback，不能保存、读取或一键回滚 key；现场禁用会打印环境内容的 `config --environment`。
+闭环是：本地管理员登录 → Web 保存第三方配置 → 宿主机重启 Compose → 服务加载回执 → 管理员手动
+测试。
+
+1. **本地管理员**：管理员表最多一行，数据库为空时由 Web 在 migration-head 检查通过后幂等 seed
+   `admin/admin` 并置 `must_change_password=true`（migration 不写口令或哈希）。首次改密前只开放
+   登录、改密和退出。口令用标准库 `hashlib.scrypt`，不新增认证依赖。身份来源闭集增加
+   `LOCAL_ADMIN`，固定映射 `tenant_id=dev-local`、`environment_id=dev`、`actor=admin`。
+   首启保护只由 Compose 端口绑定承重：基础 Compose 只发布 `127.0.0.1:8080`，改密完成后才由独立
+   override 开放局域网。
+2. **配置保存**：`.config/integrations.json` 是 Gemini API key 与飞书 App ID/Secret 的唯一宿主机
+   明文真源，取代 `.secrets/gemini_api_key`、`.secrets/feishu_app_secret` 及其 Compose secret 类型
+   与容器路径，不保留双读或回退。Web 读写挂载其所在目录，task worker 与实际需要飞书配置的进程
+   只读挂载，**API 不挂载**。保存用同目录临时文件加原子替换，不保存历史版本。Secret 永不回显，
+   页面只显示“已配置/未配置”。API 不接受 host、port、任意 endpoint、模型名或任意路径。
+3. **generation 与加载回执**：文件顶层保存正整数 `generation`，每次成功替换写入 `previous + 1`。
+   `service_config_state(service_name, provider)` 记录各服务启动时实际加载到的 generation 与闭集
+   加载状态；它只是加载回执，不表示服务存活，也不是服务注册中心。`healthz` 只答进程存活，
+   `readyz` 保留数据库、migration head 与装配检查，不把外部 Provider 纳入整体 readiness。
+4. **连接测试**：`provider_test_state` 只保存每个测试项当前 generation 的最新结果（含
+   `duration_ms`）。页面刷新不调用外部服务，只有管理员点击才发起真实请求；失败只持久化闭集
+   `error_code`、本地安全提示与耗时，不保存 Provider 原始正文、Secret 或 Token。
+   `gemini_connection` 用固定模型与固定最小 synthetic 输入，不创建任务、不保存对话或响应正文；
+   `feishu_credentials` 只取应用凭证，不发消息、不操作群聊；`feishu_oauth` 是 callback 连通性
+   测试，启动需 `LOCAL_ADMIN` 加 Origin/CSRF，callback 需仍持有有效 `LOCAL_ADMIN` Session，
+   测试分支绝不签发或替换任何 Session。三者开关独立且默认关闭。
+5. **重启与回滚边界**：Web 只保存配置，不自动重启；宿主机统一执行 Compose 重启脚本。首版不做
+   自动回滚，配置校验失败时不替换当前有效文件；连接测试不改变服务 readiness，也不自动改写配置。
+   功能回滚是关闭相应 Compose 开关并重建服务，不需要回退数据库。
+6. **不做**：不做 StarRocks Admin 配置、不可变配置版本、显式发布、审批、审计历史、
+   readback/rollback 状态机、通用 provider registry、配置热加载、多用户与 RBAC。
 
 ## 7. 配置与 secret
 
@@ -309,20 +333,26 @@ OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一�
 
 ### 7.2 RI5 以后
 
-- PostgreSQL 只保存非秘密配置、逻辑 `credential_ref`、版本、状态、操作者、时间和测试结果摘要。
-- 逻辑凭证名和目标名都来自进程启动时加载的闭集 registry。路径解析、host/port/TLS/user 解析只在
-  composition root 内发生；未知名、路径分隔符、点段或 registry revision 漂移全部 fail-closed。
-- StarRocks 目标 registry 由部署者只读维护；Admin 只能选择其中已批准目标，不能新增或修改 endpoint。
-- API 和 UI 不提供 Gemini key 的明文写入、读取、回显、版本或 rollback；宿主 key 文件由部署者管理。
-- 发布和回滚使用 CAS，避免两个 admin 互相覆盖；每次操作产生 append-only 审计事件。
-- 环境变量只保留 bootstrap 能力；发布配置的优先级和可覆盖字段由 ADR 固定，禁止同一字段有两个隐式真源。
+- Gemini 与飞书的凭据只保存在宿主机 Git-ignored 的 `.config/integrations.json`（容器内
+  `/run/xiaowei-config/integrations.json`），宿主目录 `0700`、文件 `0600`；secret 字节不进入
+  PostgreSQL、日志、trace、异常或页面。
+- PostgreSQL 只保存本地管理员行、Session、服务加载回执和连接测试结果摘要，不保存任何 secret。
+- provider、model、API version、endpoint 与 SDK 仍是代码内固定常量；Web 只读展示当前固定模型，
+  不提供模型、API 版本、endpoint、代理或任意路径的编辑入口。
+- 启用规则只有两层：`.env`/Compose 决定进程是否装配该功能，JSON 中的 `enabled` 决定已装配功能
+  是否消费对应配置，两者同时为真才启用；JSON 不能反向启动未装配的进程。真实测试还须额外满足
+  对应 `*_REAL_TEST_ENABLED=true`，默认关闭。不引入第三层优先级，同一字段不得有两个隐式真源。
+- 单 Web 写进程串行执行“读取当前 generation → 校验 → 原子替换”，不支持多写实例，不保存历史版本，
+  不提供 CAS 发布或一键回滚。
 
 ## 8. 身份与权限
 
 - OAuth `open_id` 是外部身份键，不是 actor、tenant、environment 或 role。
 - 当前身份目录每次登录和每次受保护请求都重新解析；删除映射即撤权。
-- 新增独立的 `manage_configuration` 权限，不复用 `admin_all_safe_tasks` 作为隐式 Admin 开关。
-- admin 只能管理配置，不能因此获得 E1、任意 SQL、越租户查看或跳过 Policy 的权限。
+- RI5 不新增配置 RBAC 权限。配置读取、保存与连接测试接口**只接受 `IdentitySource.LOCAL_ADMIN`**；
+  飞书 principal 即使持有 `ADMIN_ALL_SAFE_TASKS` 也不得读取配置状态、修改凭据或发起测试。
+- 本地管理员只能管理上述两个闭集集成的配置，不能因此获得 E1、任意 SQL、越租户查看、跳过 Policy
+  或访问任何运维目标的权限。
 - 飞书群只用于上下文和成员确认；群主、群管理员或“在群里”都不自动成为系统 admin。
 
 ## 9. 超时、重试和限流
@@ -364,21 +394,23 @@ binding 的独立 `tool_timeout_seconds`、ADR 和测试。Runner 不得再从 p
 RI1 OAuth/Web 代码门 ──> RI2 飞书 test-env 证据 ───────────────┐
         │                                                      │
         ├──> RI3 Gemini（独立 ADR/离线实现/现场 GO）──┐         │
-        │                                             ├──> RI5 Admin ──> RI6
+        │                                             ├──> RI5 本地 Web Admin ──> RI6
         └──> RI4 StarRocks（独立 DBA/目标/现场 GO）────┘         │
                                                                │
 RI6 只启用实际具备对应 test-env + H 层 GO 的能力 <──────────────┘
 ```
 
 RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负责人逐项下令。RI3 已获顺序离线开工
-授权并从纯文档 PR 3A 开始；RI2 没有被完成、取消或自动跳过。RI5 必须等 RI1/RI3/RI4 的配置契约
-稳定；RI6 对每个拟启用 provider 分别检查其现场证据，未启用项可以保持关闭。
+授权并从纯文档 PR 3A 开始；RI2 没有被完成、取消或自动跳过。RI5 只等 RI1/RI3 的配置契约稳定
+（不含 StarRocks，因此不依赖 RI4），并须先完成 ADR-007/014/015 的 RI5 修订与重新接受；
+RI6 对每个拟启用 provider 分别检查其现场证据，未启用项可以保持关闭。
 
 共同硬门：
 
 - 每个阶段从当时最新 `main` 重新入职和取精确 SHA，不沿用本文 SHA 作为未来事实。
-- 每个阶段默认关闭；缺配置、未知配置或权限不足均启动失败或调用失败。需要 readback 的后续 Admin/
-  部署阶段必须由自己的 ADR 和证据定义，不能假定 RI3 已提供。
+- 每个阶段默认关闭；缺配置、未知配置或权限不足均启动失败或调用失败。例外是 RI5 的 Provider
+  配置：缺失或无效只标记该 Provider 不可用，不阻止 Web 启动、本地管理员登录和配置页访问。
+  需要 readback 的后续部署阶段必须由自己的 ADR 和证据定义，不能假定 RI3 已提供。
 - RI2 直接以既有 [M7 计划 §0.3.2](../../plans/M7-web-feishu-channels.md#032-真实渠道激活部署与-canary-门)
   为真实渠道授权真源；RI4 直接以既有 M6b 计划与 handoff 的延期现场条件为真源。分阶段计划只记录
   如何取得证据，不复制第二份授权清单。
@@ -387,6 +419,9 @@ RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负�
   不能证明飞书 reply/thread，后者等待 RI2 的真实事件语义。
 - RI6 部署制品不等于允许生产联网。每个要在正式环境启用的 provider/只读目标还必须按 ADR-007
   H 层逐项批准；未批准项保持关闭，生产写仍不在范围内。
+- RI5 的连接测试不取得任何真实调用许可：Gemini 探针仍属 ADR-007 B2 层，须 RI3 PR 3E 现场 GO；
+  飞书两个探针仍属 F 层，须 RI2 现场 GO。RI5 的局域网 `lan_http` 只是本地体验模式，不适用于
+  RI6 生产发布——生产仍只接受已批准 HTTPS SSO Host/Origin。
 - RI6 的正式环境若经独立 GO 启用 Gemini，部署和普通镜像回滚都必须叠加
   `docker-compose.model.yml`；未取得 GO 时只用 base+production。紧急关闭 Gemini 改用
   base+production 并 `--force-recreate worker`，再证明 secret mount 已消失且后续调用数为 0。
@@ -399,7 +434,8 @@ RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负�
 - 模型：普通版本回滚若继续启用模型，使用 base+production+model 三文件组合；紧急关闭时改用
   base+production 强制重建 worker，确认 secret mount 消失且后续调用数为 0 后回到规则解释器。
 - StarRocks：移除 target-bound 注册并恢复 recording；capability 和 E1 闸门不变。
-- Admin：CAS 切回上一发布版本并 readback；必要时关闭 Admin 写入口。
+- Admin：关闭局域网端口发布 override 与相关 Compose 开关并重建服务，回到 loopback + 默认关闭；
+  本地管理员表与 Provider 状态表保留只读兼容，不需要回退数据库。首版没有配置版本回滚。
 - 部署：Compose 使用上一镜像 digest 和上一配置版本重建；数据库迁移必须在各阶段计划中注明向前兼容或独立回退办法。
 
 ## 13. 分阶段计划索引
@@ -408,7 +444,8 @@ RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负�
 2. RI2：[飞书测试环境真实验证](../plans/2026-09-10-feishu-test-environment-validation.md)
 3. RI3：[真实模型供应商接入](../plans/2026-09-10-model-provider-adapter.md)
 4. RI4：[StarRocks 只读真实接入](../plans/2026-09-10-starrocks-readonly-live-validation.md)
-5. RI5：[最小 Web Admin 配置中心](../plans/2026-09-10-web-admin-config-center.md)
+5. RI5：[本地 Web Admin 与第三方配置简化设计](../../plans/RI5-local-web-admin-simplified-design.md)
+   （取代已废止的[最小 Web Admin 配置中心](../plans/2026-09-10-web-admin-config-center.md)）
 6. RI6：[Compose 正式部署、canary 与用户验收](../plans/2026-09-10-compose-deployment-canary-uat.md)
 
 ## 14. 当前未决项
@@ -429,8 +466,8 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 
 | 问题根因 | 实际影响 | 系统性修复与证明 |
 | --- | --- | --- |
-| Admin application 拟自行构造 plan/admission/Gateway | 产生第二条执行真源，并直接违反 application AST 硬门 | application 只持久化测试请求；默认关闭的接口层 worker 复用完整任务链；保留并扩充 `test_runtime_bypass.py` 反例 |
-| draft 可提交 host/port/任意 secret path | 配置管理员可借测试连接做 SSRF、端口探测或读取挂载文件 | DTO 只接收闭集逻辑 `target_ref`/`credential_ref`；路径与 endpoint 只在 composition root 从只读 registry 解析；未知名/路径形状/registry 漂移零网络调用 |
+| Admin application 拟自行构造 plan/admission/Gateway | 产生第二条执行真源，并直接违反 application AST 硬门 | **RI5 修订后**：Admin 不再产生任何任务，风险机制被整体移除。连接测试是控制面探针，不创建 Task/Evidence、不构造 `PlanStep`/`ToolCall`/`AdmissionCertificate`、不进入 `ToolGateway`；`test_runtime_bypass.py` 反例保留并扩充到探针路径 |
+| draft 可提交 host/port/任意 secret path | 配置管理员可借测试连接做 SSRF、端口探测或读取挂载文件 | **RI5 修订后**：配置面只暴露 Gemini/飞书两个闭集 Provider 的固定字段，不接受 host、port、endpoint、模型名或任意路径；provider/model/API version/endpoint 仍是代码内常量，探针目标不可由请求影响，未知或越界字段零网络调用 |
 | 六阶段只存在于临时计划 | 总体里程碑、ADR 授权和实现计划会各说各话 | 先做纯文档 V2.4，把路线映射为 RI1–RI6，并同步修订 ADR-007；未批准前不实施 |
 | RI2/RI4 复制已有真实调用清单 | 两份硬门会随时间漂移，执行者可能选择较弱版本 | RI2 直接引用 M7 §0.3.2；RI4 直接引用 M6b §3.3、ADR-012 与 handoff 未完成项，分计划只记录执行证据 |
 | Treat host key material as an application setting | It would break the exact `.env.example` = `_FIELD_TO_ENV` contract and could leak into containers | Keep plaintext only in a Git-ignored host file; `.env.example` documents only actual `XIAOWEI_*` settings; merged-config tests prove the declaration/no-value boundary, while a split-fake Linux-container preflight separately proves worker-only mount and non-worker absence |
@@ -457,10 +494,10 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 | 为 Web 上下文顺带重写全部渠道提交事务 | 会把独立的 M7 半聚合债务和飞书语义绑进 RI3，扩大故障面 | 只加 scoped parent lookup 与 worker 二次核验；渠道原子性另立项，不作为首个模型闭环前置 |
 | 按最近消息或同时猜 Web/飞书回复作为模型记忆 | 易串人、串环境或误把普通回复当 parent | 首版只支持 Web 显式终态 task id；逐跳校验作用域，20 轮/64,000 字符；飞书等待 RI2 真实事件语义 |
 | Add nullable parent by dumping the whole object into every hash | Null parents drift old bytes; using full submission digest for conflict would reject normal retries because `as_of` changes | Preserve null-parent vectors; add non-null parent to semantic request and full stored submission digests only; conflict uses semantic request digest, while scope digest remains unchanged |
-| 新 configuration-test worker 自行 import tools | 破坏“只有 local_stack 是工具装配根”的静态等式，最容易诱发修改安全测试白名单的 workaround | worker 只消费 `local_stack.py` 返回的窄 `ConfigurationTestStack`；`test_only_local_stack_can_import_the_tools_layer` 期望集合保持原样并增加反例 |
-| 候选配置测试悄悄增加第二个完整执行进程 | 与 M7“只有 task-worker 装配完整 Runtime”冲突，且没有解释为何不能复用 active worker | ADR-016 显式记录唯一例外：候选凭证/目标不能热切换 active Gateway、进入普通任务协议或影响用户任务；默认关闭、单请求 claim、无端口、完成即关闭候选连接 |
-| 独立测试进程仍把候选任务放入普通 dispatch 池 | active task-worker 可能抢先用已发布配置执行，导致错误目标调用和伪造候选测试证据 | TaskStore 增加不可变 `user/configuration_test` lane；普通/候选窄方法不接收 lane 参数，内部按 lane 过滤并在领取事务再核对；并发、崩溃恢复、retry、普通 `acquire_lease`、已知 task_id 和用户任务列表均做跨 lane 反例 |
-| 给幂等 scope payload 无条件加入 `lane` | 既有 USER digest 全部漂移，旧 key 会静默创建第二个任务 | USER 继续使用当前三键 canonical JSON；仅 configuration-test 追加 lane，冻结既有 USER 向量 |
-| 让独立 configuration-test worker 读取 Gemini key | 直接打破“Gemini secret 只挂 task-worker”的既定边界，并扩大 secret 暴露进程 | 独立 worker 只测飞书/StarRocks；固定无用户数据 Gemini probe 由已有 task-worker 的窄 control port 在无 USER candidate 时执行，stale claim 不自动重发 |
+| 新 configuration-test worker 自行 import tools | 破坏“只有 local_stack 是工具装配根”的静态等式，最容易诱发修改安全测试白名单的 workaround | **RI5 修订后**：该 worker 不再存在，风险机制整体消失；`test_only_local_stack_can_import_the_tools_layer` 期望集合保持原样，不因 RI5 放宽 |
+| 候选配置测试悄悄增加第二个完整执行进程 | 与 M7“只有 task-worker 装配完整 Runtime”冲突，且没有解释为何不能复用 active worker | **RI5 修订后**：不新增任何执行进程，因此 **ADR-016 不再需要**，M7“只有 task worker 装配完整执行 Runtime”的口径不被修改；结论写入 ADR-007 §RI5 Proposed Amendment R2 |
+| 独立测试进程仍把候选任务放入普通 dispatch 池 | active task-worker 可能抢先用已发布配置执行，导致错误目标调用和伪造候选测试证据 | **RI5 修订后**：不存在候选任务，因此不新增 `configuration_test` dispatch lane、不改 TaskStore 窄方法、不改列表过滤与领取事务。配置生效改由宿主机重启 + `service_config_state` 加载回执承担 |
+| 给幂等 scope payload 无条件加入 `lane` | 既有 USER digest 全部漂移，旧 key 会静默创建第二个任务 | **RI5 修订后**：不引入 lane，幂等 scope payload 完全不变，既有 USER canonical JSON 与向量原样保留 |
+| 让独立 configuration-test worker 读取 Gemini key | 直接打破“Gemini secret 只挂 task-worker”的既定边界，并扩大 secret 暴露进程 | **RI5 修订后**：不再有 task-worker 的 Gemini probe control port。Web 读取 Key 仅用于配置管理与固定最小 synthetic 输入的 `gemini_connection` 探针；任务模型调用仍严格 worker-only，Web 不得取得模型端口。该窄例外由 ADR-007 §RI5 Proposed Amendment R1 承载，真实调用仍须 RI3 PR 3E 现场 GO |
 | RI6 只叠 base+production 就声称启用模型，或紧急关闭时仍叠 model override | 前者会形成假启用证据；后者会让 key mount 留在重建后的 worker | runbook 分开“继续启用模型的三文件部署/版本回滚”和“移除模型的两文件紧急关闭”；后者 force-recreate 并反证 mount 消失、后续调用为 0 |
 | 把生产连接禁令拆成 H 生产只读授权与 E2 生产写禁令 | 如果作为编号整理合并，可能在负责人未意识到时实质扩大生产网络权限 | ADR-007 增加单独签认框；未签认时 RI6 只能 provider 全关闭或沿用 test-env 目标，不能建立/宣称生产只读能力 |
