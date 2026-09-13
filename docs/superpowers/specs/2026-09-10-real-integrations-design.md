@@ -8,9 +8,9 @@
 
 > **RI5 修订状态说明**：RI5 的实现方案已由
 > [RI5 简化设计](../../plans/RI5-local-web-admin-simplified-design.md)取代。本文中所有 RI5/Admin
-> 相关段落已按新方案同步，并与 ADR-007 / ADR-014 / ADR-015 的 RI5 修订成套，状态同为
-> **Proposed**；四份文档必须一并复核并重新接受，任一份未被接受，RI5 都不得开工。RI1–RI4、RI6
-> 的口径不受本次同步影响。
+> 相关段落已按新方案同步，状态为 **Proposed**。
+> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> RI1–RI4、RI6 的口径不受本次同步影响。
 
 ## 1. 大白话结论
 
@@ -33,10 +33,18 @@ canary。
 ## 2. 已确认前提
 
 - 全部服务使用 Docker Compose；继续使用同一个应用镜像、多进程服务，不拆微服务。
-- 容器中的 Web 服务监听普通 HTTP；基础 `docker-compose.yml` 继续只发布
-  `127.0.0.1:8080`。只有 RI6 的生产 override 才可发布宿主 `IP:8080`；项目不新增 TLS、Ingress
-  或反向代理。
-- 浏览器 OAuth 的公网回调继续使用用户已有的 HTTPS SSO 域名。SSO 域名到 Compose Web 端口的既有转发属于环境前提，不在本项目中重建。
+- 容器中的 Web 服务监听普通 HTTP；**基础 `docker-compose.yml` 始终只发布 `127.0.0.1:8080`**，
+  任何阶段都不改基础文件。项目不新增 TLS、Ingress 或反向代理。发布宿主端口只能由独立 override
+  承担，且分两种互不混用的用途：
+  - **RI5 局域网 override**：仅在本地体验场景，且必须在首次强制改密（loopback 阶段完成）之后
+    才可启用，配合显式 `lan_http` 模式发布局域网端口；
+  - **RI6 生产 override**：正式部署才可发布宿主 `IP:8080`，OAuth/session 仍只接受已批准的
+    HTTPS SSO Host/Origin。
+- 浏览器 OAuth 回调有两种模式，**HTTPS SSO 是正式模式**：公网回调继续使用用户已有的 HTTPS SSO
+  域名；SSO 域名到 Compose Web 端口的既有转发属于环境前提，不在本项目中重建。`lan_http` 是
+  **RI5 的本地体验例外**，只接受显式配置的 canonical loopback 或 RFC1918 IPv4 字面量加显式端口；
+  飞书平台是否接受具体局域网 HTTP 回调，只能由飞书后台配置和真实 OAuth 回调测试确认，应用端
+  只承诺兼容该模式。该例外不适用于 RI6 生产发布。
 - 复用旧小维的飞书应用；切换时先停旧小维，再启动 2.0，绝不同时消费同一个机器人事件流。
 - 飞书 `open_id` 只证明“是谁”；租户、环境和权限仍由 2.0 的服务端身份目录决定。
 - 普通用户只能查看或提交只读任务；只有明确标记的 admin 可以管理配置。群成员身份不能自动推导 admin。
@@ -149,13 +157,23 @@ Admin   --> 只管理 Gemini/飞书两个闭集配置 --> 宿主机重启后各�
 
 ### 6.1 Web OAuth
 
+下列步骤描述**正式模式（HTTPS SSO）**。RI5 的 `lan_http` 本地体验例外见本节末尾。
+
 1. 浏览器访问已有 HTTPS SSO 域名的登录入口。
 2. 2.0 生成一次性 OAuth state，只在 PostgreSQL 保存摘要，并用临时 cookie 绑定当前浏览器。
 3. 飞书回调后，adapter 用 code 换取 `open_id`；provider 原始响应不进入日志和页面。
 4. 服务端按当前身份目录重新解析租户、环境、actor 和权限。
 5. 成功后轮换随机 session；未知用户、重放 state、超时或身份已撤销均失败关闭。
 
-Compose 内部仍是 HTTP；浏览器安全 origin 与 OAuth redirect 使用现有 HTTPS SSO 域名。计划不新增证书或代理服务。
+Compose 内部仍是 HTTP；正式模式下浏览器安全 origin 与 OAuth redirect 使用现有 HTTPS SSO 域名。
+计划不新增证书或代理服务。
+
+**RI5 `lan_http` 例外**：本地体验模式下，public origin 是显式配置的局域网 HTTP origin，OAuth
+callback、Origin 校验与 Cookie 决策统一消费该值，仍不动态信任 `Host`、`Forwarded` 或请求 URL。
+该模式使用普通 Cookie 名且不设 `Secure`，不设 HSTS，Cookie 以明文 HTTP 经局域网传输，只用于
+受信局域网。协议放开只作用于本方 public origin——飞书授权/token URL 的 HTTPS 约束不变。
+Session 绑定 canonical public origin digest，切换模式或 origin 等同于全体登出。
+RI5 还有一条不建立登录态的 `feishu_oauth` callback 连通性探针，见 §6.5。
 OAuth state 的过期清理、容量检查和插入必须由 PostgreSQL 同一事务内的固定锁串行化；普通
 `count → insert` 事务不能抵抗并发穿透，应用进程锁也不能承载多进程正确性。
 
@@ -379,14 +397,14 @@ binding 的独立 `tool_timeout_seconds`、ADR 和测试。Runner 不得再从 p
 | --- | --- | --- |
 | 源码审查事实（非能力状态） | 精确 SHA 的真实 diff 审查 | 测试通过、可运行 |
 | declared | capability/config 契约已声明且默认关闭 | 已配置、已测试或可调用 |
-| configured | 获批配置已保存为版本，secret reference 可解析且不泄露 | 进程已加载或真实调用可用 |
+| configured | 获批配置已按该阶段既定方式持久化（不可变版本，或 RI5 的单配置文件加 `generation`），凭据引用可解析且不泄露 | 进程已加载或真实调用可用 |
 | tests | 四条基线命令和相关契约/eval 通过 | 真实服务可用 |
 | test-env verified | 获批测试环境、精确 SHA、真实调用清单与脱敏 evidence | 已部署、canary、生产可用 |
 | deployed SHA | 指定环境运行指定镜像/SHA，健康检查与回滚材料齐全 | 产品行为已验收 |
 | canary | 生产环境小范围真实用户/流量，明确窗口和观测结果 | 全量用户验收 |
 | user-accepted | 产品负责人按验收清单确认 | 未列出的能力也可用 |
 
-每阶段证据必须记录：代码 SHA、镜像 digest、配置版本、启用开关、目标环境、执行时间、操作者、验证命令/场景、脱敏结果和回滚结果。PR 描述不能代替这些事实。
+每阶段证据必须记录：代码 SHA、镜像 digest、配置标识（版本号或 RI5 的 `generation`）、启用开关、目标环境、执行时间、操作者、验证命令/场景、脱敏结果和回滚结果。PR 描述不能代替这些事实。
 
 ## 11. 阶段依赖与硬门
 
@@ -402,7 +420,7 @@ RI6 只启用实际具备对应 test-env + H 层 GO 的能力 <─────�
 
 RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负责人逐项下令。RI3 已获顺序离线开工
 授权并从纯文档 PR 3A 开始；RI2 没有被完成、取消或自动跳过。RI5 只等 RI1/RI3 的配置契约稳定
-（不含 StarRocks，因此不依赖 RI4），并须先完成 ADR-007/014/015 的 RI5 修订与重新接受；
+（不含 StarRocks，因此不依赖 RI4）；ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
 RI6 对每个拟启用 provider 分别检查其现场证据，未启用项可以保持关闭。
 
 共同硬门：
@@ -478,7 +496,7 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 | 把全部 file credential hardening 塞进 RI3 | 会同时触碰飞书、StarRocks、PostgreSQL 和分层契约，把模型接入变成全项目安全重构 | Gemini 复用现有 `interfaces.secret_file`；共同 owner/mode/中间目录 hardening 由对应真实接入阶段单独修复并保留风险记录 |
 | Normal ToolCall equals Policy maximum | The rejection boundary becomes unprovable | RI3 preserves the current query-timeout upper bound of 25 and read-only Policy ceiling of 30; RI4 separately introduces and tests 195/200 while other reads remain capped by their own profiles |
 | Policy 语义变化但 revision 不变 | 旧 admission/approval 可能继续被视为有效 | RI4 强制递增 `POLICY_REVISION`，更新精确 fixture，并验证旧 certificate/approval 漂移拒绝 |
-| 在 RI1 修改基础 Compose 为全网卡发布 | 提前扩大本地/离线攻击面，并混淆 HTTP 可达与 OAuth 安全 origin | base 保持 `127.0.0.1:8080`；RI6 override 才发布 `0.0.0.0:8080`；直接 IP/伪 Host 不能完成 OAuth/session |
+| 在 RI1 修改基础 Compose 为全网卡发布 | 提前扩大本地/离线攻击面，并混淆 HTTP 可达与 OAuth 安全 origin | base 始终保持 `127.0.0.1:8080`，任何阶段都不改基础文件；发布宿主端口只能由独立 override 承担——RI5 局域网 override 仅限本地体验且须在首次改密后启用，RI6 生产 override 才用于正式部署。正式 HTTPS 模式下直接 IP/伪 Host 不能完成 OAuth/session；`lan_http` 例外只接受显式配置的 loopback/RFC1918 origin，且不适用于 RI6 |
 | 新 Protocol 实现只靠运行时 duck typing | `mypy src` 看不到实现与 Protocol 漂移 | 每个新生产实现同步加入 `src/xiaowei_agent/_conformance.py` 类型锚和 Protocol 方法/关键字参数测试 |
 | Register a shared artifact suite or implementation incompletely | Tests can look present while one backend never runs them | Register model-artifact suite plus both memory/PostgreSQL bindings in `test_suite_bindings.py`; anchor model ports/store implementations in `_conformance.py` and runtime signature tests |
 | Import `google.genai` outside the adapter seam | Application code could bypass the narrow data/permission boundary | AST-scan all production imports and dynamic imports; only `interfaces/gemini_model.py` may import the SDK |

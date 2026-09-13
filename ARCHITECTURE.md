@@ -845,7 +845,6 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
   控制面探针，因此 **ADR-016 不再立项**；相应结论写入
   [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
   §RI5 Proposed Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
-  固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 三份修订均为 Proposed，须**一并**重新接受；
-  任一份未被接受，RI5 都不得开工。
+  固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

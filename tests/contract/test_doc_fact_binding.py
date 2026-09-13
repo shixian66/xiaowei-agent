@@ -63,3 +63,76 @@ def test_the_binding_is_discriminating() -> None:
     )
     assert probe is not None and probe.group(1) == "9.9"
     assert plan_version() != "9.9"
+
+
+# --- RI5 成套接受门 -----------------------------------------------------------
+#
+# 同一个根因的第二个实例。RI5 的"哪几份文档必须一并重新接受"这句话，被复述在
+# ADR-007、ADR-014、ADR-015、总体 spec、RI5 设计（两处）、DEVELOPMENT_PLAN 和
+# ARCHITECTURE 里。集合前后扩大过两次（先补 ADR-007，再补 spec），每次都只改了
+# 当时想起来的那几处——复审两轮分别抓到漏网的 2 处和 4 处。
+#
+# 措辞是散文，判不了；但"这句话在每份枚举它的文档里逐字一致"可以判，而这正是
+# 两次漂移的形状。
+
+_RI5_ACCEPTANCE_SET = (
+    "ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；"
+    "任一份未被接受，RI5 都不得开工。"
+)
+
+# 每一份都在正文里独立复述过这个集合，因此每一份都必须逐字带上它。
+_RI5_GATE_DOCS = (
+    "ARCHITECTURE.md",
+    "DEVELOPMENT_PLAN.md",
+    "docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md",
+    "docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md",
+    "docs/adr/ADR-015-real-model-provider-boundary.md",
+    "docs/plans/RI5-local-web-admin-simplified-design.md",
+    "docs/superpowers/specs/2026-09-10-real-integrations-design.md",
+)
+
+# 集合曾经写成这些形状；任何一处复活都说明又漏改了一份。
+_STALE_RI5_GATE_PHRASES = (
+    "ADR-014、ADR-015 修订并重新接受",
+    "ADR-014、ADR-015 已按 RI5 设计修订并重新接受",
+    "三份 ADR 必须",
+    "三份修订均为 Proposed",
+    "ADR-007/014/015 的 RI5 修订与重新接受",
+)
+
+
+def test_every_ri5_gate_doc_states_the_same_acceptance_set() -> None:
+    missing = [
+        name
+        for name in _RI5_GATE_DOCS
+        if _RI5_ACCEPTANCE_SET not in (_ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not missing, (
+        f"这些文档复述了 RI5 接受门却与 canonical 措辞不一致：{missing}。"
+        "集合变化时必须同时改全部枚举点，不能只改正在编辑的那一份"
+    )
+
+
+def test_no_document_still_carries_a_superseded_acceptance_set() -> None:
+    """正向断言挡不住"新句子加上了、旧句子忘了删"，所以再钉一次旧形状。"""
+    found = [
+        (name, phrase)
+        for name in _RI5_GATE_DOCS
+        for phrase in _STALE_RI5_GATE_PHRASES
+        if phrase in (_ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not found, f"仍在使用被取代的 RI5 接受集合措辞：{found}"
+
+
+def test_the_ri5_gate_binding_is_discriminating() -> None:
+    """反例：确认上面两条不是空洞通过。
+
+    canonical 句必须真的能在文本里被判定，且旧形状确实与它不同——否则
+    "全都包含"和"全都不包含"可以同时因为写错常量而恒真。
+    """
+    assert _RI5_ACCEPTANCE_SET not in "任意无关文本"
+    assert _RI5_GATE_DOCS, "枚举点集合为空，两条断言会恒真"
+    for phrase in _STALE_RI5_GATE_PHRASES:
+        assert phrase not in _RI5_ACCEPTANCE_SET, (
+            f"旧形状 {phrase!r} 是 canonical 句的子串，禁用断言会恒假"
+        )

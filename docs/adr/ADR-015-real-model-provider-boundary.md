@@ -8,8 +8,9 @@
 - 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
 
 > **修订状态说明**：下文 §决策 D1–D8 是已接受口径，保持原样。§RI5 修订只改变 RI5 范围内的
-> 配置与凭据落点，尚未被接受；未经项目负责人重新接受前，已接受口径继续有效。接受本修订
-> **不**授予真实 Gemini 网络调用许可——D8 的 PR 3E 现场 GO 仍是独立硬门。
+> 配置与凭据落点，尚未被接受；未经项目负责人重新接受前，已接受口径继续有效。
+> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 接受本修订**不**授予真实 Gemini 网络调用许可——D8 的 PR 3E 现场 GO 仍是独立硬门。
 
 ## 背景
 

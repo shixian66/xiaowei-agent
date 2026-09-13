@@ -7,8 +7,8 @@
 
 > **修订状态说明**：下文 §决策 D1–D5 是 2026-09-10 已接受的口径，保持原样。§RI5 修订
 > 只在 RI5 本地 Web Admin 范围内增补或收窄，尚未被接受；未经项目负责人重新接受前，
-> 已接受口径继续有效，RI5 不得开工。接受本修订也**不**授予真实飞书调用许可——
-> RI2 现场 GO 仍是独立硬门。
+> 已接受口径继续有效，RI5 不得开工。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 接受本修订也**不**授予真实飞书调用许可——RI2 现场 GO 仍是独立硬门。
 
 ## 背景
 
@@ -184,7 +184,7 @@ readiness。该边界必须同步写入 `ARCHITECTURE.md`，不得由实现自�
 部署与 canary 仍须 ADR-007 F 层与 **RI2 的独立现场 GO**；真实 Gemini 网络调用仍须
 **RI3 PR 3E 的独立 test-env GO**。ADR-007 H 层生产只读仍未单独签认，E1/生产写仍未授权。
 
-### R6 尚未处理、须由复核决定的外部冲突
+### R6 已处理的跨 ADR 冲突：ADR-007 D4 的 B2 与 G
 
 [ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
 D4 权限表 **G 行**记录的是**旧** RI5 设计（独立 `configuration_test` worker、复用完整
@@ -196,8 +196,10 @@ Runtime/Runner/Admission/Gateway 链、须经 ADR-016 修订、"独立 worker �
 key 执行探针冲突。
 
 ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007，因此两行必须一并处理。相应的
-**RI5 Proposed Amendment 已在 ADR-007 中起草**（R1 修订 B2、R2 修订 G、R3 声明未放宽项），
-状态同为 Proposed。三份 ADR 必须**一并**复核并重新接受；任一份未被接受，RI5 都不得开工。
+**RI5 Proposed Amendment 已在 ADR-007 中起草并完成**（R1 修订 B2、R2 修订 G、R3 声明未放宽项），
+状态同为 Proposed；本行不再有待决项。
+
+ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
 
 ## 后果
 

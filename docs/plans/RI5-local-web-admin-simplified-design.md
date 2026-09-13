@@ -25,7 +25,18 @@
 
 ## 必须先修订的 ADR
 
-这不是对现有 ADR 的静默例外。进入实现前必须修订并重新接受：
+这不是对现有 ADR 的静默例外。进入实现前必须修订并重新接受下列**四份**文档；
+ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+
+- **ADR-007**（真实调用许可真源）：修订 D4 表的 **B2** 与 **G** 两行。B2——任务模型调用仍
+  worker-only，Web 不得取得模型端口；仅开窄例外允许 Web 为配置管理与固定最小 synthetic 输入的
+  `gemini_connection` 探针读取 Key。G——取消独立 configuration-test worker、dispatch lane 与
+  ADR-016，不纳入 StarRocks，M7「只有 task worker 装配完整执行 Runtime」口径不变。真实调用仍
+  分别受 PR 3E / RI2 现场 GO 限制。
+- **总体 spec**（[真实接入总体设计](../superpowers/specs/2026-09-10-real-integrations-design.md)）：
+  §2 前提、§5 模块边界、§6.5 Admin 数据流、§7.2 配置、§8 权限、§11 依赖与硬门、§12 回滚、
+  §13 索引与 §15 风险表的 RI5 段落，以及 §2/§6.1 中「只有 RI6 可发布宿主 IP、OAuth 只走 HTTPS」
+  的旧口径。
 
 - **ADR-014**：
   - 把 Web 定义为受信的本地配置管理进程；飞书 OAuth 变为可选登录插件，不再是 Web 启动条件；
@@ -254,7 +265,7 @@ error_message      nullable, local safe message
 必须先完成：
 
 1. 本设计复审通过；
-2. ADR-014、ADR-015 修订并重新接受；
+2. ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
 3. 明确 RI3 PR 3E 与 RI2 真实连接 GO 仍是独立现场门；
 4. 从最新 `main` 创建实现分支；
 5. 再单独编写实现计划。

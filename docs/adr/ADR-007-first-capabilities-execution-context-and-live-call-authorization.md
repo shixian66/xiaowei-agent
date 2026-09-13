@@ -7,8 +7,9 @@
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
 
 > **修订状态说明**：§RI5 Proposed Amendment 尚未被接受。未经项目负责人重新接受前，D4 表中
-> B2 与 G 的已接受口径继续有效，RI5 不得开工。接受该修订**不**授予任何真实网络调用许可——
-> B2 的 RI3 PR 3E 现场 GO 与 F 的 RI2 现场 GO 仍是各自独立的硬门。
+> B2 与 G 的已接受口径继续有效，RI5 不得开工。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 接受该修订**不**授予任何真实网络调用许可——B2 的 RI3 PR 3E 现场 GO 与 F 的 RI2 现场 GO
+> 仍是各自独立的硬门。
 
 ## 背景
 
