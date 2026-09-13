@@ -54,8 +54,8 @@
 | RI3 规划 | 基于 `origin/main@ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) V7.1 已获批准。该行只记录规划批准，不是源码或运行证据 |
 | RI3 PR 3B 合入 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，最终受审 head `79675aeed895899282e6f4f697463f8b6b27e29b`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703681866`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703681866) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main` |
 | RI3 PR 3C 合入 | 基于 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`；最终受审 head `bc1812e72dada63a83776bfb159a04c970153c66`。PR [#36](https://github.com/shixian66/xiaowei-agent/pull/36) 的 run [`34730018472`](https://github.com/shixian66/xiaowei-agent/actions/runs/34730018472) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`，且合入树与受审 head 无差异。交付 grant-fenced insert-once intent/advisory、`rev_0008_model_artifacts`、entry-scoped heartbeat、MODEL trace、surface-derived 慢查询投影与终态 readback，证据等级仍为 `tests` |
-| RI3 PR 3D 候选 | 基于 `origin/main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；实现候选 `0c17e9defe305a7ae871376d04762d541f19d147`，审查入口为 [PR #38](https://github.com/shixian66/xiaowei-agent/pull/38)。新增可空且显式的 `parent_task_id`、`rev_0009_task_parent_context`、Web 提交前所有权/范围预检、worker 持久记录复核、最多 20 轮且经过清洗与整轮截断的安全历史，以及只由用户点击“继续这个任务”触发的 Web 交互；飞书仍不接隐式上下文。旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。证据等级仅为 `tests`；CI 状态以 PR 当前页面为准，尚未完成独立审查或合入 |
-| 下一步 | **完成 PR #38 的独立审查与 CI；两者通过后，仍需项目负责人明确批准才能合入。** 首次 Gemini 网络调用仍需 PR 3E 独立现场 GO；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI3 PR 3D 修订候选 | 基于 `origin/main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；初始实现 `0c17e9defe305a7ae871376d04762d541f19d147`，独立审查确认无阻断后提出的五项同路径问题已在 `c61f90d5bfd7f2615078de6c2915175c38d4ca64` 按根因修复，审查入口为 [PR #38](https://github.com/shixian66/xiaowei-agent/pull/38)。新增统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核和确定性投影损坏拒绝；死分支已删除，PR 3E 的历史 advisory 恶意输入矩阵已写入计划。旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。当前 checkout 四门为 3531 passed / 227 skipped、security 1290 passed / 80 skipped / 2388 deselected、Ruff 和 mypy 通过；证据等级仅为 `tests`，最新远程 CI 仍须绑定最终 PR head |
+| 下一步 | **将修订推送至 PR #38，并在最终 head 的 CI 全绿后按项目负责人本轮授权合入；随后只做合并后 handoff。** 首次 Gemini 网络调用仍需 PR 3E 独立现场 GO；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B/3C 的默认关闭 Gemini adapter 与 durable 模型编排。PR 3D 仅存在于候选分支并通过本地 fake/临时 PostgreSQL 验证；仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -94,8 +94,9 @@
   Only durable `execute_task()` calls the model/artifact store. Advisory is pre-terminal,
   so RUNNING may last 180 seconds longer; committed StarRocks steps recover from the
   journal without Gateway replay. Trace gains a typed MODEL stage.
-  Model text is raw-size-bounded before total `scrub_text()`, then reserialized and checked
-  against the final cap; there is no redaction-failure branch. Parent history is explicit Web-only, ownership-checked, limited to 20 complete
+  Model text is raw-size-bounded before total `scrub_text()`, then scrubbed history rounds
+  and their aggregate are rechecked against the same character budgets before the final
+  request cap; there is no redaction-failure branch. Parent history is explicit Web-only, ownership-checked, limited to 20 complete
   tasks/64,000 characters, which itself guarantees at most 256,000 UTF-8 bytes
   (less than 256 KiB). Null-parent digest bytes stay frozen; non-null
   parent enters semantic request and stored submission digests, not the scope digest.
@@ -226,11 +227,12 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     model/rule intent、grant-fenced insert-once artifact、单一 application heartbeat、MODEL trace、
     surface-derived 慢查询 advisory 及 TaskView readback；独立审查问题按根因补修后，PR #36 已以
     `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`。PR 3D 候选在
-    `0c17e9defe305a7ae871376d04762d541f19d147` 实现：父任务只可由 Web 用户显式选择，提交前检查
-    终态、租户/环境/actor 与绑定所有权，worker 再基于持久记录复核并组装最多 20 轮、64,000 字符/
+    `0c17e9defe305a7ae871376d04762d541f19d147` 实现：父任务只可由 Web 用户显式选择，提交前只检查
+    直接 parent 的终态、租户/环境/actor 与绑定所有权，worker 再基于持久记录逐跳复核并组装最多 20 轮、64,000 字符/
     256 KiB 的清洗历史；缺失 child binding 可重试，其余范围漂移 fail-closed。`parent_task_id=None`
     保持既有 canonical/hash 字节，父任务不进入 idempotency scope；`rev_0009` 只新增可空外键和索引。
-    候选已由 PR #38 提交审查；CI 状态以 PR 当前页面为准，尚未完成独立审查或合入。
+    独立审查确认无阻断后提出的五项同路径问题已在 `c61f90d5bfd7f2615078de6c2915175c38d4ca64`
+    根因修复；最终 PR head 的 CI 尚待复核，当前仍未合入。
     全程没有读取真实 key、真实调用、部署或归档；真实 Gemini 调用仍需 PR 3E 的独立现场 GO。
     Independent review V7 fixes the current-timeout fact, parent idempotency predicate,
     Settings versus host Compose env boundary, complete storage/protocol/suite/SDK/trace
@@ -523,6 +525,11 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   调用，且该次 usage 可能无法完整落库，这是当前明确接受的体验优先取舍。`WorkerLoop` 单进程逐任务
   执行，真实吞吐和排队尚无证据；需要扩 worker 时必须单独设计 provider 限流与运行验证，不能现场
   workaround 后冒充已验收。上述任一现场门未闭合时 model override 必须保持关闭。
+
+- **RI3 的已保存 advisory 可作为后续显式父链的模型输入**：它经过严格 schema、再次脱敏和总量限制，
+  且模型仍无执行权，但这是 RI3 唯一一条模型文本进入后续模型请求的路径。PR 3E 必须用含指令文本的
+  已保存 advisory 做 20 轮恶意输入矩阵，并证明相对控制样本不能改变 capability、slots 或 missing；
+  在该现场反证前，这项只具备源码边界与离线推理，不是 test-env 证据。
 
 - **M7 PR 4 虽已合入，但只验证了锁定 wheel 的源码形状与 fake SDK 对象**：尚未验证测试企业的真实长连接握手、
   回调对象、应用权限、成员可见性与分页返回形状；这些只能在 RI2 现场门齐备后先取得
