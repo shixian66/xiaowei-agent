@@ -30,8 +30,8 @@
 - **ADR-014**：
   - 把 Web 定义为受信的本地配置管理进程；飞书 OAuth 变为可选登录插件，不再是 Web 启动条件；
   - 将现有 `web_detail_base_url`/`XIAOWEI_WEB_DETAIL_BASE_URL` **重命名并迁移**为唯一的 `web_public_origin`/`XIAOWEI_WEB_PUBLIC_ORIGIN`，不并存第二个 Origin 真源；Web Session、OAuth callback、Origin 校验和飞书卡片深链统一消费该值；
-  - 仅在显式 `lan_http` 模式放开 canonical loopback 或 RFC1918 IPv4 字面量、HTTP 协议和显式端口；HTTPS 模式继续沿用现有受信 HTTPS hostname 约束；
-  - 解除 ADR-014 D3 的“无表、列、索引或 migration”限制，允许本地管理员、Provider 当前状态和 `web_sessions` 认证来源/public-origin 绑定所需的最小 schema 变更；
+  - 仅在显式 `lan_http` 模式放开 canonical loopback 或 RFC1918 IPv4 字面量、HTTP 协议和显式端口；HTTPS 模式继续沿用现有受信 HTTPS hostname 约束；该放开只作用于本方 public origin，飞书授权/token URL 的 HTTPS 约束不变；
+  - 解除 ADR-014 D3 的“无表、列、索引或 migration”限制，允许本地管理员、Provider 当前状态和 `web_sessions` 认证来源/public-origin 绑定所需的最小 schema 变更；该解除**不包含** `web_oauth_states`，OAuth 连通测试不得为此新增列或新表；
   - 允许 Web 读取本地第三方配置，并在管理员明确点击且对应真实测试开关已打开时执行连接测试。
 - **ADR-015**：
   - `.config/integrations.json` 取代现有 Gemini/飞书明文来源、Compose secret 类型和容器目标路径；旧 Gemini Key、飞书 App Secret 文件不与它并存；
@@ -86,6 +86,8 @@ XIAOWEI_FEISHU_REAL_TEST_ENABLED=false
 - HTTPS 使用 `Secure` 和 `__Host-` Cookie；HTTP 使用普通 Cookie 名称，不设置 `Secure`。
 - 只有 HTTPS 模式设置 HSTS。
 - RI5 只新增 `lan_http` 支持，不建设 TLS、Ingress 或证书管理；现有 HTTPS 行为保留并做回归验证。
+- 协议放开必须是外科手术式的。当前代码有两道彼此独立的 HTTPS 闸门：`config.py` 的 `HttpsOrigin`/非 IP 主机名校验，以及 `interfaces/web_auth.py` 的 `_split_https_url()`。后者同时被本方 public origin 校验（`_public_origin_is_safe()`）和**飞书授权 URL 校验**（`_authorization_url_is_safe()`）复用，因此实现必须把它拆成两个 helper：只有 public origin 那一侧按模式放开 `http`，provider 授权/token URL 永远保持 HTTPS-only。禁止直接放宽共用 helper。
+- 该拆分必须有承重测试：`lan_http` 模式下，一个 `http` 的飞书授权 URL 仍须被拒绝；撤掉拆分后该测试必须变红。
 - 修改 Web 模式或 public origin 后必须重启 Web；Session 在创建时保存 canonical public origin digest，认证时必须与当前值匹配，因此旧 Session 不再被接受，用户需要重新登录。登录与退出路径清理两种已知 Cookie 名称，不做跨模式 Session 迁移。
 - 飞书平台是否接受具体局域网 HTTP callback，只能由飞书后台配置和真实 OAuth 回调测试确认；应用端只承诺兼容该模式。
 - 两个真实测试开关彼此独立且默认关闭：Gemini 开关只控制 `gemini_connection`，飞书开关控制 `feishu_credentials` 与 `feishu_oauth`。开关关闭时页面禁用按钮，接口也必须在本地返回闭集 `REAL_TEST_DISABLED`，不得发起外部网络请求。
@@ -110,6 +112,8 @@ XIAOWEI_FEISHU_REAL_TEST_ENABLED=false
 4. 旧 Cookie 失效，管理员使用新密码从局域网地址重新登录。
 
 首启保护只由 Compose 端口绑定承重，不在应用内增加来源 IP 判断、安装令牌或随机口令机制。`lan_http` 的 Cookie 会以明文 HTTP 传输，只用于受信局域网体验；正式部署仍走 RI6 的 HTTPS 边界。
+
+**残余风险**：上述顺序由 runbook 承重，应用内没有强制。若部署者在第一次改密前就套用 LAN 端口发布 override，`admin/admin` 会在该窗口内暴露给同网段。README/runbook 必须把“先 loopback 改密、后开放局域网”写成不可跳过的步骤，并说明跳步后的补救是改密后重建 Web 并撤销全部 `local_admin` Session。
 
 ## 本地管理员契约
 
@@ -216,9 +220,10 @@ error_message      nullable, local safe message
 - `gemini_connection` 使用固定模型和固定的最小 synthetic 输入，只验证一次 Developer API 请求能否成功；不创建任务、不读取或保存对话、不保存模型响应正文，只记录状态、脱敏原因和耗时。
 - `feishu_credentials` 只验证 App ID/Secret 能否取得应用凭证；不发送消息、不读取或操作群聊，不保存 Token。
 - `feishu_oauth` 是独立的 callback 连通性测试，不等同于飞书登录验收：
-  - 只有当前 generation 的 `feishu_credentials=passed` 后才能开始；
+  - 只有当 OAuth 插件已在 Compose 中装配（`feishu_oauth_enabled=true`，callback 路由已注册）、且当前 generation 的 `feishu_credentials=passed` 之后，才能开始；
   - 从已认证的 `LOCAL_ADMIN` Session 发起，测试 state 在服务端绑定当前 Session 与 generation；
-  - callback 成功消费 state、完成 code exchange 并取得 `open_id` 后写入 `passed`，随后返回配置页；
+  - 测试 state 与登录 state 使用**不同的 digest domain 常量**（登录沿用 `oauth-state:v1`，测试另取一个），落在互不相交的摘要命名空间，因此一类 state 不可能被另一条路径消费。该隔离不新增 `web_oauth_states` 的列，也不新增表；
+  - callback 按 state 的 digest domain 分流；命中测试域时走测试分支，成功消费 state、完成 code exchange 并取得 `open_id` 后写入 `passed`，随后返回配置页。测试分支**绝不签发、替换或延长任何 Session**，也不设置任何 Cookie；
   - 测试不创建或替换本地管理员 Session，不要求 `feishu_identity_file` 映射，也不证明该账号已经获准使用正式飞书登录；正式身份映射与飞书登录验收仍属于 RI2。
 
 以上三个测试都是管理面连接探针，不进入 Task、TaskSubmission、Evidence、capability 或业务 `ToolGateway`。Gemini 与飞书测试开关仍独立、默认关闭；没有对应现场 GO 时，页面和接口都只能返回本地禁用状态，外部调用数必须为零。
