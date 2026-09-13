@@ -14,9 +14,10 @@
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。当前 PR 3B 已离线实现严格 DTO、两个窄
-> port、固定 Gemini SDK adapter、默认关闭装配与 worker-only Compose secret；durable Runtime
-> 尚未接入，真实 key 读取与 Gemini 网络调用均为 0。
+> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A/3B/3C 已合入；当前源码已有严格
+> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only Compose secret、
+> durable Runtime、持久模型 artifact、MODEL trace 和慢查询 advisory。PR 3D 尚未开始，真实 key
+> 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host
@@ -112,7 +113,7 @@
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
 截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
-`lark-oapi` 也已合入；当前 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
+`lark-oapi` 也已合入；RI3 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
 提升为生产直接依赖。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
 兼容性仍需独立部署与运行证据。
 
@@ -399,9 +400,10 @@ CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、ca
 
 ### 尚未完成与能力边界
 
-当前 Runtime 仍只使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B 只离线新增了
-固定 Gemini SDK adapter、严格 DTO/窄 port 与 worker-only secret override，未接入 durable Runtime，也未进行真实 provider 调用。M6a 增加了
+当前默认装配仍使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
+与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B/3C 已离线新增
+固定 Gemini SDK adapter、严格 DTO/窄 port、worker-only secret override、durable 模型编排、持久 artifact、
+MODEL trace 与慢查询 advisory，但未读取真实 key，也未进行真实 provider 调用。M6a 增加了
 Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
 已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
 PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离
