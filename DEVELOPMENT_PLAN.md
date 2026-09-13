@@ -73,7 +73,7 @@ M7 的离线实现范围可以由项目负责人单独验收并归档，但该�
 **V2.4 已批准真实接入路线**：RI1–RI6 是 M7/M6b 延期真实验证以及模型、Admin、部署的独立
 里程碑映射，不是把六类风险塞进一个 PR。RI1 完成 M7 的真实 OAuth/Web 激活代码门；RI2 按
 M7 §0.3.2 取得真实飞书测试环境证据；RI3 单独开放一个真实模型供应商；RI4 完成 M6b 延期的
-StarRocks 现场只读验证；RI5 在前三类配置契约稳定后实现最小 Admin；RI6 才处理正式部署、
+StarRocks 现场只读验证；RI5 在 RI1/RI3 配置契约稳定后实现本地 Web Admin 简化配置；RI6 才处理正式部署、
 canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人已批准 RI1 仅按默认关闭、离线实现门开工，
 不授权真实应用、secret、网络调用、部署或 canary。
 
@@ -137,7 +137,7 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 | RI2 飞书测试环境验证 | Real Integration | 直接满足 M7 §0.3.2，真实验证 OAuth、长连接、消息、群成员与身份，最高 `test-env verified` |
 | RI3 Gemini 真实模型供应商 | Real Integration | 模型只产严格结构化草案/解释；数据、凭证、超时、重试、usage 与 fallback 有界，最高按实际证据标记 |
 | RI4 StarRocks 真实只读 | Real Integration | 完成 M6b 延期现场门；只验证已有 operation，最高 `test-env verified` |
-| RI5 最小 Web Admin | Real Integration | admin 只管理闭集逻辑目标/凭证引用；版本、测试请求、发布、readback、审计和回滚可证明 |
+| RI5 本地 Web Admin 简化配置 | Real Integration | 单管理员在局域网 Web 中配置 Gemini/飞书；配置原子保存、宿主机重启、服务加载回执和显式连接测试可证明；不含 StarRocks、版本中心、审批或回滚 |
 | RI6 Compose 部署 / canary / UAT | Real Integration | 生产 override、部署 SHA、回滚、canary 与产品验收分级记录 |
 | M8 受控写闭环 | Phase 5 | 测试环境中一条低风险写能力完成审批、恢复、readback 和故障注入验收 |
 | M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter；**不授予 Multi-Agent 权限** |
@@ -493,22 +493,18 @@ digest、只读授权、逻辑凭证名、数据处置、窗口、actor 与现�
 200 秒和 policy revision 变更均有承重测试；真实证据最高为 `test-env verified`。超时后可能继续的
 PyMySQL worker thread/服务端会话作为残余风险记录，不新增 `KILL`。
 
-### RI5：最小 Web Admin 配置中心
+### RI5：本地 Web Admin 简化配置
 
-**目标**：只有独立 `manage_configuration` 权限可管理飞书、模型和 StarRocks 的不可变配置版本、
-逻辑凭证引用、测试请求、显式发布、readback、审计和回滚。
+**目标**：在本机 Docker Compose、局域网访问范围内提供单管理员 Web 登录、Gemini/飞书配置保存、
+宿主机重启后的服务加载回执和管理员明确触发的连接测试。
 
-**进入条件**：RI1/RI3/RI4 的配置契约已稳定。StarRocks draft 只能选择部署者预登记的
-`target_ref` 和 `credential_ref`，不能提交 host、port、任意 endpoint 或文件路径。
+**进入条件**：RI1/RI3 的离线配置契约稳定；ADR-014、ADR-015 已按 RI5 设计修订并重新接受；
+RI2 飞书真实测试与 RI3 PR 3E Gemini test-env 测试仍分别需要独立现场 GO。
 
-**退出标准**：Admin application 不 import/调用 Gateway，也不构造准入/计划/工具 DTO；StarRocks
-测试请求由默认关闭的独立 worker 通过完整 Runtime/Runner/Admission/Gateway 执行，但只有
-`interfaces/local_stack.py` 可以 import tools，worker 入口只能消费其窄 stack。ADR-016 必须明确该
-进程是对 M7“只有 task-worker 装配完整执行 Runtime”口径的唯一例外，并记录不能让 active worker
-热切换候选凭证/目标的理由。TaskStore 以不可变 `user/configuration_test` dispatch lane、普通/候选
-两组无 lane 入参的窄方法、列表过滤和领取事务二次核对阻止 active worker 抢候选任务；用户任务
-列表不投影候选任务，崩溃恢复和 retry 不能换 lane。测试请求有持久限流、审计和 draft digest 绑定；
-新增 Protocol 实现均有 conformance 锚。
+**退出标准**：Web 未配置 Provider 仍可启动并登录；API 不挂载第三方配置；Web 配置目录原子写入和
+Compose 权限预检可证明；`service_config_state` 按服务/Provider 记录当前加载 generation；真实
+Gemini 与飞书测试开关独立、默认关闭，未获 GO 时按钮和接口均不联网。RI5 不包含 StarRocks、
+不可变配置版本、审批、发布、审计历史、readback/rollback 状态机或配置中心通用抽象。
 
 ### RI6：Compose 正式部署、canary 与用户验收
 
@@ -517,7 +513,8 @@ PyMySQL worker thread/服务端会话作为残余风险记录，不新增 `KILL`
 
 **进入条件**：前序必需 provider 达到各自退出门；项目负责人指定主机、窗口、canary 范围、
 验收人、旧小维恢复和回滚责任。生产 override 才可发布 `IP:8080`，而 OAuth/session 路由仍只接受
-已批准 HTTPS SSO Host/Origin；直接 HTTP IP 不能完成登录或受保护 session。StarRocks canary 若
+已批准 HTTPS SSO Host/Origin；直接 HTTP IP 不能完成生产登录或受保护 session。RI5 的局域网 `lan_http`
+仅属于本地体验模式，不适用于 RI6 生产发布。StarRocks canary 若
 沿用 RI4 test-env 目标，仍不得宣称生产能力；若换成新的生产只读目标，必须重新完整执行 M6b §3.3
 与 ADR-012 的 canonical target、四类 digest、physical identity/DDL preflight、证据处置和现场 GO，
 不能只打开 H 层开关。

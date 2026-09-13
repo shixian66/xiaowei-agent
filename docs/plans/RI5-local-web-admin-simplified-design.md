@@ -2,7 +2,9 @@
 
 ## 状态与基线
 
-这是对上一版 [M7c 设计](M7c-local-lan-web-config-redesign.md) 的修订，取代其实现口径；设计尚未批准进入实现计划。
+这是对上一版 M7c 设计的修订，取代其实现口径；设计尚未批准进入实现计划。
+本文同时明确取代当前 `main` 中的旧 RI5 实现计划
+[`docs/superpowers/plans/2026-09-10-web-admin-config-center.md`](../superpowers/plans/2026-09-10-web-admin-config-center.md)。
 
 设计基于当前 `main` 的里程碑状态：M7 离线范围已归档，RI1 Web/飞书 OAuth 代码已合入，RI3 PR 3A–3D 已合入，PR 3E 真实 Gemini 测试环境验证尚未开始，RI5 是后续的最小 Web Admin 里程碑。本文不把这些源码或离线测试事实升级为真实渠道、真实 Provider、部署或用户验收证据。
 
@@ -27,6 +29,8 @@
 
 - **ADR-014**：把 Web 定义为受信的本地配置管理进程；允许显式 `lan_http` origin；HTTPS 与 HTTP 的 Cookie/安全头差异由配置决定；飞书 Secret 可由 Web 从本地私有配置文件读取并执行凭据测试；飞书 OAuth 变为可选 Web 登录插件，不再是 Web 启动条件。
 - **ADR-015**：允许 Web 只为管理员明确点击的 Gemini 连接测试读取 Gemini Key；Worker 只消费 Gemini 配置执行已批准的模型调用；API 不接触 Gemini Key；Web 不把 Key 回传给浏览器、API、任务、日志或 Provider 测试结果。为保持单文件方案简单，Worker 的只读挂载可能技术上看到其他 Provider 字段，该信任扩大在本地 RI5 范围内明确接受。
+
+ADR-015 中的 Gemini provider、model、API version、endpoint 和 SDK 仍是固定常量。RI5 不把 `model`、endpoint 或 API version 作为可编辑配置；页面只读展示当前固定模型。
 
 ADR 修订只改变本地 RI5 配置管理边界，不授予 PR 3E 真实 Gemini 网络调用许可，也不授予 RI2 真实飞书调用许可。真实调用仍分别需要：
 
@@ -59,6 +63,8 @@ Gemini、飞书配置缺失、格式无效或 Provider 暂不可用，都不能�
 ```text
 XIAOWEI_WEB_MODE=lan_http
 XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
+XIAOWEI_GEMINI_REAL_TEST_ENABLED=false
+XIAOWEI_FEISHU_REAL_TEST_ENABLED=false
 ```
 
 - 容器监听 `0.0.0.0:8080`，Compose 发布到宿主机局域网。
@@ -69,6 +75,7 @@ XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
 - HTTPS 使用 `Secure` 和 `__Host-` Cookie；HTTP 使用普通 Cookie 名称，不设置 `Secure`。
 - 只有 HTTPS 模式设置 HSTS。
 - 飞书平台是否接受具体局域网 HTTP callback，只能由飞书后台配置和真实 OAuth 回调测试确认；应用端只承诺兼容该模式。
+- 两个真实测试开关彼此独立且默认关闭：Gemini 开关只控制 `gemini_connection`，飞书开关控制 `feishu_credentials` 与 `feishu_oauth`。开关关闭时页面禁用按钮，接口也必须在本地返回闭集 `REAL_TEST_DISABLED`，不得发起外部网络请求。
 
 `.env` 只保存部署启动参数，不保存 Gemini Key 或飞书 App Secret；局域网地址通过静态地址或 DHCP 保留保持稳定。
 
@@ -89,7 +96,9 @@ XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
 第一版保留一个宿主机 Git-ignored 配置文件以保持实现简单，但明确接受其信任边界：
 
 - `.config/integrations.json` 由 Web 读写，保存第三方配置和当前 `generation`。
-- Web 对该文件读写挂载；Worker 和实际需要飞书配置的 Feishu 进程只读挂载；API 不挂载第三方配置。
+- Web 读写挂载整个宿主机 `.config/` 目录；Worker 和实际需要飞书配置的 Feishu 进程只读挂载该目录；API 不挂载第三方配置。
+- 临时文件与正式文件必须位于同一个 `.config/` 目录中，再通过原子替换更新正式文件；不能把单个文件直接作为 bind-mount 目标后调用 `os.replace()`。
+- 宿主机重启脚本必须先以镜像内 `xiaowei` 用户的数值 UID/GID 做 Compose 写入预检；目录由宿主部署用户创建，并映射为容器用户可读写。预检失败时不启动 Web。
 - 该选择意味着挂载该文件的 Worker/Feishu 进程技术上可以读取另一 Provider 的 Secret，这是 RI5 单机本地信任边界内的明确取舍，不向公网或多租户场景推广。
 - 宿主目录权限为 `0700`，配置文件权限为 `0600`。
 - Secret 永不通过查询接口回显；页面只显示“已配置/未配置”。
@@ -103,8 +112,7 @@ XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
   "generation": 1,
   "gemini": {
     "enabled": true,
-    "api_key": "...",
-    "model": "..."
+    "api_key": "..."
   },
   "feishu": {
     "enabled": true,
@@ -124,13 +132,17 @@ XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
 - `service_config_state` 只表示服务启动时读取配置的回执，不表示服务当前存活，也不是服务注册中心：
 
 ```text
-service_name       primary key
+service_name
+provider
 loaded_generation
 load_status
 loaded_at
+
+primary key (service_name, provider)
 ```
 
 - 服务只为自己实际启用且需要的 Provider 写入加载回执；未启用服务不会造成永久“待应用”。
+- `service_name` 与 `provider` 联合标识一条加载回执；一个 Web 服务可以分别报告 Gemini 和飞书的加载状态。
 - 配置缺失或某个 Provider 无效时，相关服务记录该 Provider 的闭集加载失败状态，其他服务和 Web 仍可运行。
 - `healthz` 只表示进程存活。
 - `readyz` 保留当前数据库可用、migration head 匹配和 composition assembled 等核心检查；不把 Gemini、飞书外部 Provider 纳入整体 readiness。
