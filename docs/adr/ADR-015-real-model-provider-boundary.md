@@ -2,9 +2,14 @@
 
 - 状态：Accepted（2026-09-12；PR 3B 复审澄清独立 nullable usage、派生字段字节上限与固定宿主路径；
   仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
-- 日期：2026-09-12
-- 适用阶段：RI3
-- 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)
+  + **RI5 修订提案（2026-09-13，Proposed，待项目负责人重新接受）**
+- 日期：2026-09-12；候选修订 2026-09-13
+- 适用阶段：RI3；RI5 修订适用于 RI5 的本地配置管理边界
+- 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
+
+> **修订状态说明**：下文 §决策 D1–D8 是已接受口径，保持原样。§RI5 修订只改变 RI5 范围内的
+> 配置与凭据落点，尚未被接受；未经项目负责人重新接受前，已接受口径继续有效。接受本修订
+> **不**授予真实 Gemini 网络调用许可——D8 的 PR 3E 现场 GO 仍是独立硬门。
 
 ## 背景
 
@@ -370,6 +375,73 @@ RI3 不实现 Admin readback、`worker_start_id` 或运行时代次聚合。RI5 
 完成后最高只能标记 `test-env verified`。它不等于 deployed、canary 或 user-accepted，也不自动授权
 RI6 的生产模型调用。
 
+## RI5 修订（2026-09-13，Proposed，待重新接受）
+
+D7 末尾已预留归属："RI5 如确需这类能力，应按自己的配置发布问题设计，不能反向扩大 RI3。"
+本节即该设计的 ADR 侧结论，范围严格限定在 RI5 的本地单机配置管理，不改变 D1–D6 的 provider、
+模型、端口、出站白名单、超时、生命周期与无执行权边界。
+
+### R1 修订 D7：配置与凭据的唯一明文真源改为本地配置文件
+
+`.config/integrations.json` 成为 Gemini API key 与飞书 App ID/Secret 的唯一宿主机明文真源，
+**取代** `./.secrets/gemini_api_key` 与 `./.secrets/feishu_app_secret`、对应的 file-backed
+Compose secret 类型，以及 `/run/secrets/gemini_api_key` 容器目标路径。容器内新目标路径固定为
+`/run/xiaowei-config/integrations.json`。
+
+实现迁移时**删除**这两条 Provider 旧读取路径，不提供双读、回退或优先级兼容——同一凭据不得有
+两个真源。PostgreSQL 与 StarRocks 等其他既有 file secret 不在本次迁移范围内，继续由
+`interfaces.secret_file.read_secret_file()` 服务。
+
+新增一个面向严格 JSON schema 的 integration config loader。现有 `read_secret_file()` 只支持
+单行 secret，不读取该 JSON；新 loader 必须保留同等加固：`O_NOFOLLOW`、`S_ISREG`、尺寸上限，
+且取出的字段值仍须拒绝控制字符。
+
+挂载与权限：Web 读写挂载宿主 `.config/` 目录；task worker 与实际需要飞书配置的进程只读挂载；
+**API 不挂载第三方配置**。宿主目录 `0700`、文件 `0600`；临时文件与正式文件同目录，经原子替换
+更新，不把单个文件作为 bind-mount 目标后调用 `os.replace()`。镜像内非 root `xiaowei` 用户固定
+为数值 UID/GID `10001:10001`，避免重建漂移；宿主启动脚本以该用户执行"创建临时文件 → 权限设置
+→ 原子替换 → 重新读取"预检，预检不输出文件内容，失败时不启动 Web。首版同时支持 Linux Docker
+Engine 与 macOS Docker Desktop，两种平台的 UID 语义不作相同假设，可用性以同一容器内预检为准。
+
+本修订明确接受一个信任扩大：挂载该单文件的 worker 与飞书进程技术上可以看到另一 Provider 的
+字段。该取舍只在 RI5 单机本地范围内成立，不向公网或多租户推广；若后续需要缩小进程间信任范围，
+再单独拆分 Provider 文件，本版不扩大范围。
+
+### R2 修订 D7：启用开关的两层语义
+
+`XIAOWEI_GEMINI_ENABLED` 保留为 Settings 字段与 Compose 装配开关，D7 "只在
+`services.worker.environment` 声明"的约束**在 worker 侧不变**。JSON 中的 `gemini.enabled` /
+`feishu.enabled` 不是第二个装配开关，只决定已装配功能是否消费对应配置。
+
+最终启用条件是两层同时为真，且 JSON **不能反向启动** Compose 中未装配的 worker、飞书监听器、
+渠道 worker 或 OAuth。Web 侧的真实探针还须额外满足对应 `*_REAL_TEST_ENABLED=true`，该开关
+默认关闭。不引入第三层优先级系统。
+
+回滚方式不变且不需要回退数据库：关闭相应 Compose 开关并重建相关服务。
+
+### R3 补充 D2/D7：Web 可为控制面探针读取 Key，但不获得模型调用权
+
+Web 只为两件事读取 Secret：配置管理本身，以及管理员明确点击的连接测试。Web **不**获得
+`IntentModelPort` / `SlowQueryAdvisoryPort`，不参与任何任务的模型调用；D2 的两个窄端口仍只由
+task worker 装配。
+
+`gemini_connection` 探针使用 D1 固定的 provider、model、API version 与 canonical origin，输入
+是固定的最小 synthetic 文本：不创建 Task、不读取或保存对话、不保存模型响应正文，只记录闭集
+状态、脱敏原因与耗时。它不消费 D3 的出站白名单，也不产生 D5 的模型事实行。
+
+`feishu_credentials` 只验证 App ID/Secret 能否取得应用凭证，不发送消息、不操作群聊、不保存
+Token。三个探针都属于控制面：不进入 Task、TaskSubmission、Evidence、capability 或数据面
+`ToolGateway`，也不改变任何服务的 readiness。该边界须同步写入 `ARCHITECTURE.md`。
+
+Secret 永不回显：查询接口只返回"已配置/未配置"，保存请求未携带某 Secret 字段时保留原值，
+清除凭据使用显式动作，不用空字符串暗示。Key 不回传浏览器、API、任务、日志、trace 或测试结果。
+
+### R4 D8 不变
+
+接受本修订**不**授予真实 Gemini 网络调用许可。首次真实调用仍须 D8 的 PR 3E 独立 test-env GO，
+以及该节列出的全部前置证据。探针开关默认关闭；未获 GO 时页面与接口只返回本地禁用状态，
+外部调用数必须为零。
+
 ## 后果
 
 ### 正面
@@ -418,11 +490,17 @@ RI6 的生产模型调用。
 
 - 增加供应商、模型、endpoint、API 形态或工具调用；
 - 改变宿主 key 明文来源、Compose secret 类型、容器目标路径或 worker-only 授权范围；
+  （RI5 修订已就此作出一次性变更，见 §RI5 修订 R1；此后再变仍须修订本 ADR）
 - 扩大出站字段、任一字符/UTF-8/最终序列化字节上限、历史容量或支持新诊断 capability；
 - 让模型影响 plan、target、SQL、approval、tool 或 next_steps；
 - 修改调用次数、阶段 timeout、fallback 或持久化语义；
 - 增加飞书上下文、后台并发、worker 扩容或 provider session；
 - 将真实调用从 test-env 升级为部署/canary/生产用户验收。
+
+RI5 修订接受后，以下任一变化同样必须先修订本 ADR：让 Web 取得模型端口或参与任务模型调用、
+让控制面探针创建 Task/Evidence 或进入数据面 `ToolGateway`、扩大探针输入超出固定最小 synthetic
+文本、为凭据恢复双读或回退路径、把单配置文件的信任范围推广到公网或多租户，或新增第三个
+Provider 字段族。
 
 ## 参考资料
 

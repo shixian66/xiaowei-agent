@@ -1,9 +1,14 @@
 # ADR-014：真实飞书 OAuth 与 Web 激活安全契约
 
-- 状态：Accepted
-- 日期：2026-09-10
+- 状态：Accepted（2026-09-10）+ **RI5 修订提案（2026-09-13，Proposed，待项目负责人重新接受）**
+- 日期：2026-09-10；候选修订 2026-09-13
 - 决策人：项目负责人
-- 相关：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-013](ADR-013-m7-channel-boundary.md)、[真实接入总体设计](../superpowers/specs/2026-09-10-real-integrations-design.md)
+- 相关：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-013](ADR-013-m7-channel-boundary.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[真实接入总体设计](../superpowers/specs/2026-09-10-real-integrations-design.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
+
+> **修订状态说明**：下文 §决策 D1–D5 是 2026-09-10 已接受的口径，保持原样。§RI5 修订
+> 只在 RI5 本地 Web Admin 范围内增补或收窄，尚未被接受；未经项目负责人重新接受前，
+> 已接受口径继续有效，RI5 不得开工。接受本修订也**不**授予真实飞书调用许可——
+> RI2 现场 GO 仍是独立硬门。
 
 ## 背景
 
@@ -77,6 +82,104 @@ RI1 只允许实现默认关闭的 adapter/composition root 与离线 fake/recor
 真实应用、secret、飞书网络调用、公开部署和 canary 仍须 ADR-007 F 层与 RI2 的独立现场 GO。
 ADR-007 H 层生产只读授权尚未单独签认；生产连接与任何 E1/生产写均未授权。
 
+## RI5 修订（2026-09-13，Proposed，待重新接受）
+
+RI5 交付本机 Compose、局域网范围内的最小 Web Admin：一个本地管理员、Gemini 与飞书两个闭集
+集成、`lan_http` 与 HTTPS 两种显式 Web 模式。完整范围见
+[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)。以下条目按 D 编号增补或
+收窄，不改写已接受条文本身。
+
+### R1 修订 D1：Web 成为受信的本地配置管理进程
+
+飞书 App Secret 的来源由"受信 composition root 取得的绝对**只读**文件"扩展为本地私有配置文件
+`.config/integrations.json`：Web 读写挂载其所在目录，实际需要飞书配置的进程只读挂载，API 不
+挂载。其余 D1 约束不变——secret 仍不接受明文环境变量，不进入数据库、日志、trace、异常或页面。
+
+飞书 OAuth 由 Web 的启动条件降级为**可选登录插件**：配置缺失、无效或装配失败只标记
+`feishu_oauth` 不可用，不阻止 Web 启动、本地管理员登录或配置页访问。
+
+D1 的"每次受保护请求用当前只读身份目录重新解析授权"继续适用于 `FEISHU` principal。新增的
+`LOCAL_ADMIN` principal 不查身份目录，使用固定映射 `tenant_id=dev-local`、
+`environment_id=dev`、`actor=admin`，权限取现有闭集中的管理员三项。配置读取、保存与 Provider
+测试接口**只接受 `LOCAL_ADMIN`**；飞书 principal 即使持有 `ADMIN_ALL_SAFE_TASKS` 也不得读取
+配置状态、修改凭据或发起连接测试。本修订不新增配置 RBAC 权限。
+
+### R2 修订 D2：单一 public origin 与外科手术式的协议放开
+
+现有 `web_detail_base_url` / `XIAOWEI_WEB_DETAIL_BASE_URL` **重命名并迁移**为唯一的
+`web_public_origin` / `XIAOWEI_WEB_PUBLIC_ORIGIN`，不并存第二个 Origin 真源；Web Session、
+OAuth callback、Origin 校验与飞书卡片深链统一消费该值。
+
+新增显式 `lan_http` 模式，且只在该模式下放开：`http` 协议、canonical loopback 或 RFC1918
+IPv4 字面量、显式端口。HTTPS 模式继续沿用现有受信 HTTPS hostname 约束。
+
+**该放开只作用于本方 public origin。** 实现必须把 `interfaces/web_auth.py` 中同时服务于本方
+public origin 校验与**飞书授权 URL 校验**的共用 HTTPS helper 拆成两个：provider 授权/token URL
+的 HTTPS 约束不变，且须有承重测试证明 `lan_http` 模式下 `http` 授权 URL 仍被拒绝。直接放宽
+共用 helper 属于违反本修订。
+
+D2 的"不从 `Host`、`Forwarded`、`X-Forwarded-*` 或请求 URL 推导 origin/callback/cookie/安全
+决策"不变。Cookie 在 HTTPS 模式继续使用 `Secure` 与 `__Host-`；`lan_http` 模式使用普通 Cookie
+名且不设 `Secure`，仅 HTTPS 模式设置 HSTS。Session 在创建时绑定 canonical public origin digest，
+认证时必须匹配，因此切换模式或 origin 等同于全体登出，不做跨模式 Session 迁移。
+
+`lan_http` 的 Cookie 以明文 HTTP 传输，只用于受信局域网体验；正式部署仍走 RI6 的 HTTPS 边界。
+D2"基础 Compose 继续只把 Web 端口发布到 `127.0.0.1:8080`"保持不变——局域网发布只能由独立
+override 打开，且首次强制改密必须在 loopback 阶段完成。
+
+### R3 修订 D3：有限解除 schema 冻结，但 `web_oauth_states` 不在其内
+
+解除 D3 的"本 ADR 不新增表、列、索引或 migration"，允许且仅允许 RI5 所需的最小 schema 变更：
+
+- 本地管理员表（最多一行）；
+- Provider 当前状态（服务加载回执与连接测试结果）；
+- `web_sessions` 的认证来源与 canonical public origin digest 绑定。
+
+**该解除不包含 `web_oauth_states`。** OAuth 连通测试不得为此新增列或新表；测试 state 与登录
+state 通过**不同的 digest domain 常量**落在互不相交的摘要命名空间（登录沿用 `oauth-state:v1`），
+一类 state 不可能被另一条路径消费。
+
+D3 的其余约束不变：state 与 session 仍只保存 SHA-256 digest 与时效事实，不保存原文；1024 全局
+未完成 state 上限、固定 advisory lock 与清理顺序不变。
+
+本地管理员的初始化只由 Web 在 migration-head 检查通过后幂等 seed（行不存在才插入），
+**migration 不写入口令或口令哈希**。口令使用标准库 `hashlib.scrypt`（随机 16-byte salt，
+`n=2**14`、`r=8`、`p=1`、`dklen=32`，保存带版本与参数的封装，校验用 `hmac.compare_digest`），
+不新增认证依赖。
+
+### R4 补充 D4：连接测试是控制面探针，不是数据面工具调用
+
+Web 在管理员明确点击、且对应真实测试开关已打开时，可执行 `gemini_connection`、
+`feishu_credentials`、`feishu_oauth` 三个连通性探针。它们属于控制面：不创建 Task、
+TaskSubmission、Evidence 或 capability，不经过数据面 `ToolGateway`，也不改变任何服务的
+readiness。该边界必须同步写入 `ARCHITECTURE.md`，不得由实现自行推断。
+
+`feishu_oauth` 是 callback 连通性测试，**不等同于飞书登录验收**：需 OAuth 插件已装配且当前
+generation 的 `feishu_credentials` 已通过才能开始；从已认证的 `LOCAL_ADMIN` Session 发起；
+callback 命中测试 digest domain 时走测试分支，**绝不签发、替换或延长任何 Session**，也不设置
+任何 Cookie；不要求 `feishu_identity_file` 映射。正式身份映射与飞书登录验收仍属于 RI2。
+
+探针开关默认关闭且彼此独立。关闭时页面禁用按钮，接口在本地返回闭集 `REAL_TEST_DISABLED`，
+外部调用数必须为零。D4 关于 provider 正文不得成为控制信号或用户可见错误的约束继续适用：失败
+只持久化闭集 `error_code`、本地安全提示与耗时，不保存原始响应、Secret 或 Token。
+
+### R5 修订 D5：RI5 同样不携带任何真实调用许可
+
+接受本修订只解锁 RI5 的离线实现与本地 Compose 验证。真实飞书应用注册、凭据、网络调用、公开
+部署与 canary 仍须 ADR-007 F 层与 **RI2 的独立现场 GO**；真实 Gemini 网络调用仍须
+**RI3 PR 3E 的独立 test-env GO**。ADR-007 H 层生产只读仍未单独签认，E1/生产写仍未授权。
+
+### R6 尚未处理、须由复核决定的外部冲突
+
+[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
+D4 权限表 **G 行**记录的是**旧** RI5 设计（独立 `configuration_test` worker、复用完整
+Runtime/Runner/Admission/Gateway 链、须经 ADR-016 修订、"独立 worker 不取得 Gemini key；固定
+无用户数据 Gemini probe 只由既有 task-worker 的窄 control port 执行"）。新 RI5 设计取消了该
+独立 worker，由 Web 自身读取配置并执行控制面探针，与 G 行直接冲突。
+
+ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007。本修订**不擅自改写 ADR-007**；G 行的
+处置必须在 RI5 开工前由项目负责人单独决定并记录。未处置前 RI5 不得开工。
+
 ## 后果
 
 - 并发 Web 进程共享同一个数据库容量裁决，不会各自越过 state 上限。
@@ -99,3 +202,11 @@ ADR-007 H 层生产只读授权尚未单独签认；生产连接与任何 E1/生
 关闭 Web feature flag 并停止 Web 进程即可回滚；既有 session/state schema 不变，不删除已持久化事实。
 若未来要修改默认容量、开放容量配置、改变 provider origin 或增加 endpoint、信任代理 header、改变身份字段、
 迁移 state/session 真源、在登录期创建 task/audit 行，或由应用承担 HTTP 请求限流，必须先修订本 ADR。
+
+RI5 修订接受后，以下任一变化同样必须先修订本 ADR：放开 `lan_http` 之外的协议/地址形态、把协议
+放开扩散到 provider 授权或 token URL、为 OAuth state 新增列或表、让 `LOCAL_ADMIN` 之外的
+principal 读写配置或发起连接测试、让连接测试创建 Task/Evidence 或进入数据面 `ToolGateway`、
+让测试分支签发 Session，或新增第三个 Provider、第二个本地账号与任何配置 RBAC。
+
+RI5 的功能回滚不需要回退数据库：关闭 Compose 中的 LAN 端口发布与相关 feature flag 并重建服务，
+即回到 loopback + 默认关闭状态；本地管理员表与 Provider 状态表保留只读兼容。

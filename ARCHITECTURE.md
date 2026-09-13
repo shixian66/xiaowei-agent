@@ -358,6 +358,16 @@ ToolGateway 是数据面唯一工具入口，负责超时、重试策略、凭�
 
 adapter 返回内部 `AdapterResponse`，由 Gateway 私有工厂创建公开的 `ToolResult`，这样调用方在类型边界上不能把原始 SDK 响应伪装成可信结果。Python 无法提供绝对的语言级私有性，因此同时使用模块可见性约定、静态检查和绕过契约测试；不把“私有”描述成超出语言能力的强保证。
 
+ToolGateway 是**数据面**唯一工具入口。控制面的配置管理连通性探针不属于它：RI5 本地 Web Admin
+中由管理员明确点击触发的 Gemini/飞书连接测试只验证凭据可用性，不创建 Task、TaskSubmission、
+Evidence 或 capability，不产生 `ToolResult`，不进入 Policy/SQLGuard/ApprovalGate 链，也不改变
+任何服务的 readiness；它们既不是 capability 执行，也不得成为绕过 Gateway 访问运维目标的通道。
+该边界是显式决策而非实现推断，见
+[ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md) §RI5 修订 R4 与
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R3（两者均为 Proposed，
+待项目负责人重新接受；未接受前 RI5 不得开工）。任何让探针顺手做真实工作的扩展——执行查询、
+读取业务数据、写入运维目标——都必须回到完整安全链，或先修订上述 ADR。
+
 真实 connector 必须注册为 target-bound adapter，由 Gateway 按
 `(gateway, target_fingerprint)` 精确选择；同一 gateway 不得同时注册 generic 与
 target-bound adapter，错目标不得回退 recording。Gateway 在连接前还会复核 tenant、environment、
@@ -665,6 +675,15 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
+**待重新接受的 RI5 修订**：上述 Gemini secret 段落描述的是当前已实现口径
+（`./.secrets/gemini_api_key` → file-backed Compose secret → `/run/secrets/gemini_api_key`）。
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R1 提议由本地配置文件
+`.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`）取代该路径与飞书
+App Secret 文件，并把镜像内 `xiaowei` 用户固定为 UID/GID `10001:10001`。该提案尚未被接受，
+也尚未实现；本节在 RI5 实现 PR 落地时才随真实代码更新，在此之前以上述已实现口径为准。
+同理，基础 Compose 继续只发布 loopback 端口；RI5 的局域网发布只能由独立 override 打开，
+且首次强制改密必须在 loopback 阶段完成。
+
 `.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
 结果。
@@ -820,7 +839,10 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-011：M6a capability binding、operation gateway 与 PromQL 固定模板准入（已记录：[docs/adr/ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)）。
 - ADR-012：M6b StarRocks 真实只读 adapter 的精确目标绑定（已记录：[docs/adr/ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)）。
 - ADR-013：M7 Web/飞书薄渠道与身份投影边界（已记录：[docs/adr/ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)）。
-- ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)）。
-- ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)）。
+- ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)；**RI5 修订 Proposed，待重新接受**）。
+- ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)；**RI5 修订 Proposed，待重新接受**）。
+- ADR-016：曾计划用于 RI5 独立配置测试 worker 的进程边界例外。新 RI5 设计取消该 worker，改为
+  控制面探针，因此 ADR-016 不再立项；[ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
+  D4 权限表 G 行仍记录旧口径，其处置须在 RI5 开工前单独决定。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。
