@@ -23,6 +23,7 @@ from xiaowei_agent.persistence.model_artifacts import (
     IntentArtifactCandidate,
     ModelArtifactConflictError,
     ModelArtifactGrantError,
+    ModelArtifactStateError,
 )
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
 
@@ -227,9 +228,22 @@ async def test_terminal_task_cannot_gain_a_late_intent_artifact(
     )
     assert result.applied
 
-    with pytest.raises(ModelArtifactGrantError):
+    with pytest.raises(ModelArtifactStateError):
         await model_artifact_store.save_intent(
             grant=grant, candidate=_intent_candidate()
+        )
+
+
+async def test_unknown_task_is_a_state_error_not_a_grant_loser(
+    model_artifact_store: Any, store: Any, context: Any
+) -> None:
+    grant = await _grant(store, context)
+    unknown_lease = grant.lease.model_copy(update={"task_id": "unknown-task"})
+    unknown_grant = grant.model_copy(update={"lease": unknown_lease})
+
+    with pytest.raises(ModelArtifactStateError):
+        await model_artifact_store.save_intent(
+            grant=unknown_grant, candidate=_intent_candidate()
         )
 
 
@@ -245,6 +259,17 @@ async def test_advisory_requires_running_and_round_trips(
     )
     assert await model_artifact_store.load_advisory(task_id=grant.task_id) == saved
     assert saved.advisory == candidate.advisory
+
+
+async def test_advisory_rejects_a_live_grant_in_the_wrong_task_status(
+    model_artifact_store: Any, store: Any, context: Any
+) -> None:
+    grant = await _grant(store, context)
+
+    with pytest.raises(ModelArtifactStateError):
+        await model_artifact_store.save_advisory(
+            grant=grant, candidate=_advisory_candidate()
+        )
 
 
 async def test_advisory_exact_replay_is_idempotent_and_drift_is_rejected(
@@ -349,7 +374,7 @@ async def test_terminal_task_cannot_gain_a_late_advisory_artifact(
     )
     assert result.applied
 
-    with pytest.raises(ModelArtifactGrantError):
+    with pytest.raises(ModelArtifactStateError):
         await model_artifact_store.save_advisory(
             grant=grant, candidate=_advisory_candidate()
         )
@@ -366,7 +391,9 @@ MODEL_ARTIFACT_CASES = (
     test_intent_artifact_refuses_metadata_drift_with_same_digests,
     test_stale_grant_cannot_write_an_intent_artifact,
     test_terminal_task_cannot_gain_a_late_intent_artifact,
+    test_unknown_task_is_a_state_error_not_a_grant_loser,
     test_advisory_requires_running_and_round_trips,
+    test_advisory_rejects_a_live_grant_in_the_wrong_task_status,
     test_advisory_exact_replay_is_idempotent_and_drift_is_rejected,
     test_advisory_refuses_metadata_drift_with_same_digests,
     test_stale_grant_cannot_write_an_advisory_artifact,

@@ -123,7 +123,8 @@ is zero.
 Slow-query analysis consumes at most the first 20 rows of successful evidence. The exact
 outbound names and serialization order are derived directly from
 `SLOW_QUERY_SURFACE.allowed_columns`, not copied into a second field tuple in this ADR,
-the projector or tests. Field-type rules remain closed and keyed by those derived names.
+the projector or tests. Text and numeric type partitions are both explicit; an exact
+disjoint-union gate forces every surface addition, deletion or rename through a type review.
 The projector belongs to `application/model_advisory.py`, because application may consume
 the capability surface and Evidence contracts. `rendering/model_advisory.py` and
 `rendering/slow_query.py` consume only already-validated display data and must not import
@@ -177,6 +178,9 @@ code. The exact intent retry set is `RATE_LIMITED` / `SERVER_ERROR` / `TRANSPORT
 `httpx.TransportError` / `OSError` to transport error. 401/403, timeout, invalid response,
 local construction failure and other 4xx are not retryable. `httpx` is therefore a direct
 runtime dependency rather than a dev-only tool; no new resolved package is introduced.
+Every `ModelErrorCode` has one explicit `ModelFallbackCode` mapping guarded by exact-set
+tests. A bypassed or future unknown value degrades to `UNAVAILABLE`; it cannot raise from
+the error handler and reverse a model fallback into a task retry.
 
 RI3 does not add a persistent 450-second whole-task deadline. Current source uses a
 25-second StarRocks query-timeout upper bound under a 30-second read-only policy maximum, and RI3
@@ -217,10 +221,17 @@ projection plus capability/surface/evidence/profile/schema revisions and sampled
 not `RenderPayload` or display prose. TaskView/`handle()` render once after terminal
 facts are available.
 
-input digest 只覆盖对应的已脱敏 typed request 与固定 profile/schema revision，不含 key、原始文本或
-时间；result digest 覆盖规范化结构化结果。写入必须绑定当前 task grant、lease token 和 fencing
-token，采用 insert-once/CAS。恢复时重建 input digest 并与已保存值比较：相同才复用，不同则
-fail-closed，不能把旧分析套给新证据，也不能覆盖原行。
+model-origin intent 与 advisory 的 input digest 覆盖对应的已脱敏 typed request 和固定
+profile/schema revision，不含 key、原始文本或时间。rule-origin intent 从未由模型生成，其 digest
+只绑定相同的 typed 输入与 `origin=rule`；provider/model/provider_origin metadata 保持空值，非空数据库 revision
+列写入稳定的 rule-owned 标签，恢复 identity 不比较 Gemini prompt/schema revision。因此模型版本升级
+不会把未完成的纯规则任务误判为 drift。result digest 覆盖规范化结构化结果。写入必须绑定当前 task
+grant、lease token 和 fencing token，采用 insert-once/CAS。恢复时重建 input digest 并与已保存值
+比较：相同才复用，不同则 fail-closed，不能把旧分析套给新证据，也不能覆盖原行。
+
+存储共享判定必须把 `LEASE_NOT_HELD`/`STALE_FENCING` 与 task 不存在、终态保护、状态不允许分开：
+前两者是正常竞争丢失，映射为 `LeaseLostError`；后者是生命周期不变量错误，worker 必须 fail-stop，
+不得伪装成正常 loser 后静默等待 stale recovery。
 
 如果进程在 provider 已收到请求、但本地尚未保存结果时崩溃，恢复后允许再次调用模型。这是明确接受的
 at-least-once 语义：模型没有工具和执行副作用，用户已选择体验优先、暂不设置本地费用硬封顶。不能为

@@ -99,6 +99,7 @@ from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.model_artifacts import (
     ModelArtifactConflictError,
     ModelArtifactGrantError,
+    ModelArtifactStateError,
     ModelArtifactStore,
 )
 from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError, PlanStore
@@ -391,6 +392,10 @@ class XiaoweiRuntime:
         except LookupError:
             # gateway adapter 缺失是装配故障，不能写坏当前任务。
             raise
+        except ModelArtifactStateError as exc:
+            raise LifecycleError(
+                "task status does not allow the model artifact write"
+            ) from exc
         except ModelArtifactGrantError as exc:
             raise LeaseLostError("model artifact grant is no longer current") from exc
         except (
@@ -711,19 +716,6 @@ class XiaoweiRuntime:
             task_id=task_id
         )
         verdict = assess_evidence(binding=binding, evidences=evidences)
-        # REFLECTION 只在**执行本身没出问题、却仍然证据不足**时记为 REJECTED。
-        # 上游已经失败（超时、格式错误、预算耗尽）时，证据不足是那次失败的**后果**，
-        # 不是第二个根因；两个阶段都标红会让"一次失败指向唯一一个阶段"失效。
-        executed_cleanly = outcome.status is TaskStatus.SUCCEEDED
-        reflection_event = self._event(
-            stage=PipelineStage.REFLECTION,
-            outcome=StageOutcome.OK
-            if verdict.sufficient or not executed_cleanly
-            else StageOutcome.REJECTED,
-            context=context,
-            task_id=task_id,
-            attempt_number=grant.attempt_number,
-        )
         advisory: ModelAdvisory | None = None
         model_event: TraceEvent | None = None
         if allow_advisory and binding is not None and plan is not None:
@@ -747,6 +739,10 @@ class XiaoweiRuntime:
                     status=TaskStatus.FAILED,
                     terminal_reason=RECOVERY_DRIFT_REASON,
                 )
+            except ModelArtifactStateError as exc:
+                raise LifecycleError(
+                    "task status does not allow the model artifact write"
+                ) from exc
             except ModelArtifactGrantError as exc:
                 raise LeaseLostError(
                     "model artifact grant is no longer current"
@@ -770,6 +766,19 @@ class XiaoweiRuntime:
                         attempt_number=grant.attempt_number,
                         model=accepted.observation,
                     )
+        # Advisory 恢复冲突可以把 outcome 改为 FAILED；Reflection 必须基于最终结果。
+        # 它只在执行本身没出问题、却仍证据不足时记为 REJECTED。上游失败时，证据
+        # 不足是该失败的后果，不应制造第二个根因。
+        executed_cleanly = outcome.status is TaskStatus.SUCCEEDED
+        reflection_event = self._event(
+            stage=PipelineStage.REFLECTION,
+            outcome=StageOutcome.OK
+            if verdict.sufficient or not executed_cleanly
+            else StageOutcome.REJECTED,
+            context=context,
+            task_id=task_id,
+            attempt_number=grant.attempt_number,
+        )
         status = _terminal_status(outcome=outcome, verdict=verdict)
         current = await self._tasks.get(
             lookup=TaskLookup(

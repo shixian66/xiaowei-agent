@@ -468,7 +468,7 @@ worker 取得固定 secret。还没有 Runtime 调用模型，更没有真实网
 - Modify: `src/xiaowei_agent/persistence/postgres.py`
 - Modify: `src/xiaowei_agent/persistence/memory.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
-- Modify: `src/xiaowei_agent/rendering/slow_query.py`
+- Inspect unchanged: `src/xiaowei_agent/rendering/slow_query.py`（既有最多三段的确定性投影无需改限额）
 - Create: `tests/suites/model_artifacts.py`
 - Create: `tests/unit/test_model_intent_service.py`
 - Create: `tests/unit/test_slow_query_model_projection.py`
@@ -497,9 +497,9 @@ worker 取得固定 secret。还没有 Runtime 调用模型，更没有真实网
 - Create: `tests/security/test_model_context_boundary.py`
 - Modify: `tests/security/test_trace_event_redaction.py`
 - Modify: `tests/security/test_temporal_and_trace_hygiene.py`
-- Modify: `tests/security/test_runtime_bypass.py`
-- Modify: `tests/security/test_intent_pollution.py`
-- Modify: `tests/security/test_reflection_has_no_authority.py`
+- Run unchanged: `tests/security/test_runtime_bypass.py`
+- Run unchanged: `tests/security/test_intent_pollution.py`
+- Run unchanged: `tests/security/test_reflection_has_no_authority.py`
 - Modify: `tests/security/test_web_xss.py`
 - Run unchanged: `tests/security/test_module_layering.py`
 
@@ -510,8 +510,10 @@ worker 取得固定 secret。还没有 Runtime 调用模型，更没有真实网
 usage、created_at 和写入
 时 fencing token；禁止 prompt、原始 response、key、path、provider error 正文或完整 Evidence。
 
-The intent input digest covers scrubbed current text, scrubbed explicit-parent context,
-truncation flags and fixed profile/schema revisions. The advisory input digest covers
+The model-origin intent input digest covers scrubbed current text, scrubbed explicit-parent
+context, truncation flags and fixed profile/schema revisions. A rule-origin intent instead
+binds only that scrubbed typed input plus `origin=rule`; it carries no provider identity and
+must survive a Gemini prompt/schema revision change. The advisory input digest covers
 the typed projection, sampled flag, capability version,
 `SLOW_QUERY_SURFACE`/Evidence-contract revision and fixed profile/schema revisions.
 Neither digest includes a `RenderPayload`, display prose, a second deterministic
@@ -613,6 +615,10 @@ test asserts exact equality. Field type rules are keyed against that derived clo
 and the input digest carries the surface/evidence schema revision. Any RI4 live
 `SHOW CREATE TABLE` correction must update the surface, projector schema, digest
 revision and tests together.
+
+Both text and numeric partitions are explicit literals. Their disjoint union must equal
+the derived surface exactly, so adding a field cannot silently classify it as numeric by
+subtraction; changing only the surface must make the pairing test fail.
 
 The typed projector is implemented in `application/model_advisory.py`, where the existing
 module-layer contract permits access to `capabilities` and Evidence contracts.

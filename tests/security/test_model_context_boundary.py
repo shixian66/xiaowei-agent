@@ -13,8 +13,10 @@ from xiaowei_agent.application.model_advisory import (
 )
 from xiaowei_agent.application.model_intent import build_model_intent_request
 from xiaowei_agent.application.model_ports import (
+    MODEL_ERROR_FALLBACK_CODES,
     IntentModelPort,
     SlowQueryAdvisoryPort,
+    fallback_code_for_model_error,
 )
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
@@ -26,6 +28,8 @@ from xiaowei_agent.contracts import (
     IntentDraft,
     IntentSource,
     ModelAdvisory,
+    ModelErrorCode,
+    ModelFallbackCode,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     TaskOutcome,
@@ -42,6 +46,16 @@ from xiaowei_agent.persistence.schema import (
 from xiaowei_agent.redaction import scrub_text
 
 pytestmark = pytest.mark.security
+
+
+def test_every_model_error_has_one_explicit_total_fallback_mapping() -> None:
+    assert set(MODEL_ERROR_FALLBACK_CODES) == set(ModelErrorCode)
+    assert set(MODEL_ERROR_FALLBACK_CODES.values()) <= set(ModelFallbackCode)
+    assert (
+        MODEL_ERROR_FALLBACK_CODES[ModelErrorCode.TIMEOUT]
+        is ModelFallbackCode.PROVIDER_TIMEOUT
+    )
+    assert fallback_code_for_model_error(object()) is ModelFallbackCode.UNAVAILABLE
 
 
 def test_model_ports_expose_only_the_two_narrow_typed_calls() -> None:

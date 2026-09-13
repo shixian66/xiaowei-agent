@@ -15,6 +15,7 @@ from xiaowei_agent.application.model_ports import (
     ADVISORY_OUTPUT_TOKEN_LIMIT,
     ModelPortError,
     SlowQueryAdvisoryPort,
+    fallback_code_for_model_error,
     validate_advisory_output_tokens,
 )
 from xiaowei_agent.capabilities.specs import (
@@ -60,7 +61,15 @@ _TEXT_COLUMNS: Final[frozenset[str]] = frozenset(
     {"queryId", "timestamp", "state", "errorCode", "db", "user"}
 )
 _NUMBER_COLUMNS: Final[frozenset[str]] = frozenset(
-    set(SLOW_QUERY_SURFACE.allowed_columns) - _TEXT_COLUMNS
+    {
+        "queryTime",
+        "scanRows",
+        "returnRows",
+        "scanBytes",
+        "memCostBytes",
+        "pendingTimeMs",
+        "cpuCostNs",
+    }
 )
 _stage_timeout = asyncio.timeout
 _SIGNED_BIGINT_MAX: Final[int] = 2**63 - 1
@@ -188,7 +197,7 @@ async def request_model_advisory(
     except TimeoutError:
         fallback = ModelFallbackCode.APPLICATION_TIMEOUT
     except ModelPortError as exc:
-        fallback = ModelFallbackCode(exc.code.value)
+        fallback = fallback_code_for_model_error(exc.code)
     else:
         return AdvisoryStageResult(
             result=result,

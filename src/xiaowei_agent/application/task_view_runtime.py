@@ -145,7 +145,11 @@ class TaskViewRuntime:
         verdict: AnswerabilityVerdict,
     ) -> ModelAdvisory | None:
         """只展示与当前终态事实完全匹配的已保存 advisory。"""
-        if self._model_artifacts is None or self._model_profile is None:
+        if (
+            record.status is not TaskStatus.SUCCEEDED
+            or self._model_artifacts is None
+            or self._model_profile is None
+        ):
             return None
         stored = await self._model_artifacts.load_advisory(task_id=record.task_id)
         if stored is None or binding.advisory_projector is None:

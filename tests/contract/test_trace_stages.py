@@ -47,7 +47,7 @@ def _model_observation(**updates: object) -> ModelCallObservation:
 
 
 def test_every_provider_error_has_a_trace_fallback_code() -> None:
-    """Application 按枚举值归一；新增 provider 错误不能漏掉 trace 对应项。"""
+    """公开错误值保持 trace 兼容；显式映射完整性由 security gate 承重。"""
     assert {code.value for code in ModelErrorCode} <= {
         code.value for code in ModelFallbackCode
     }

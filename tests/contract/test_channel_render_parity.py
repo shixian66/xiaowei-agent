@@ -26,7 +26,11 @@ from xiaowei_agent.rendering.feishu import render_feishu_card
 _NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
 
 
-def _view(*, answer: str = "查询完成，未发现越界结果。") -> TaskView:
+def _view(
+    *,
+    answer: str = "查询完成，未发现越界结果。",
+    advisory_body: str = "扫描行数偏高，建议检查分区裁剪。",
+) -> TaskView:
     task_id = "task-channel-parity"
     return TaskView(
         task_id=task_id,
@@ -43,6 +47,16 @@ def _view(*, answer: str = "查询完成，未发现越界结果。") -> TaskVie
                     title="安全边界",
                     body="这里只展示安全摘要，不展示数据库真实结果行。",
                     refs=("policy:database-result-boundary",),
+                ),
+                RenderSection(
+                    title="限制",
+                    body="结论仅覆盖当前时间窗与只读证据。",
+                    refs=("evidence:query-count",),
+                ),
+                RenderSection(
+                    title="模型分析（仅供参考）",
+                    body=advisory_body,
+                    refs=(),
                 ),
             ),
             next_steps=("继续观察指标变化。",),
@@ -162,6 +176,8 @@ async def test_all_thin_channels_preserve_one_terminal_render_payload() -> None:
     assert "任务状态：已完成" in card_text
     assert view.task_id in card_text
     assert view.render is not None
+    assert len(view.render.sections) == 4
+    assert view.render.sections[3].title == "模型分析（仅供参考）"
     for value in (
         view.render.answer,
         *(section.title for section in view.render.sections),
@@ -173,8 +189,9 @@ async def test_all_thin_channels_preserve_one_terminal_render_payload() -> None:
         assert value in card_text
 
 
-def test_feishu_only_truncates_for_its_explicit_provider_budget() -> None:
-    view = _view(answer="安全证据" * 400)
+def test_feishu_clips_the_fourth_advisory_but_web_keeps_the_full_payload() -> None:
+    advisory_body = "模型建议" * 200
+    view = _view(advisory_body=advisory_body)
     rendered = render_feishu_card(
         FeishuProjectionInput(
             task_view=view,
@@ -187,16 +204,22 @@ def test_feishu_only_truncates_for_its_explicit_provider_budget() -> None:
     assert rendered.truncated is True
     card = json.loads(rendered.content_json)
     text = _plain_card_text(card)
+    assert "模型分析（仅供参考）" in text
+    assert advisory_body not in text
+    assert "模型建议" in text
     assert "还有更多证据，请打开详情查看完整结果。" in text
     action = card["elements"][-1]["actions"][0]
     assert action["url"] == (
         "https://ops.example.test/app/tasks/task-channel-parity"
     )
-    assert WebTaskDetail.from_accessible(
+    web = WebTaskDetail.from_accessible(
         AccessibleTask(
             task_view=view,
             request_preview="检查最近三十分钟慢查询",
             submitted_at=_NOW,
             task_version=7,
         )
-    ).render == view.render
+    )
+    assert web.render == view.render
+    assert web.render is not None
+    assert web.render.sections[3].body == advisory_body

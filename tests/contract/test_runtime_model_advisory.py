@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from enum import StrEnum
 from typing import Any
 
 import pytest
@@ -11,8 +13,10 @@ from tests.fakes.recordings import EMPTY_WITHOUT_TRAFFIC, GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
 from xiaowei_agent.application import model_advisory as model_advisory_module
+from xiaowei_agent.application import runtime as runtime_module
 from xiaowei_agent.application.model_advisory import request_model_advisory
 from xiaowei_agent.application.model_ports import ModelPortError
+from xiaowei_agent.application.task_view_runtime import assess_evidence
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     AdvisoryModelResult,
@@ -26,6 +30,7 @@ from xiaowei_agent.contracts import (
     PlanBudget,
     SlowQueryAdvisoryRequest,
     StageOutcome,
+    TaskOutcome,
     TaskStatus,
 )
 from xiaowei_agent.persistence import (
@@ -33,6 +38,7 @@ from xiaowei_agent.persistence import (
     PersistenceUnavailableError,
     PersistenceWriteOutcome,
 )
+from xiaowei_agent.persistence.model_artifacts import ModelArtifactConflictError
 from xiaowei_agent.persistence.store import TaskAttemptCommand
 
 
@@ -71,6 +77,25 @@ class _BlockingAdvisoryPort:
         finally:
             self.cancelled.set()
         raise AssertionError("unreachable")
+
+
+class _FutureModelErrorCode(StrEnum):
+    FUTURE_PROVIDER_ERROR = "model_future_provider_error"
+
+
+class _UnknownErrorAdvisoryPort:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_advisory(
+        self,
+        request: SlowQueryAdvisoryRequest,
+        *,
+        max_output_tokens: int,
+    ) -> AdvisoryModelResult:
+        del request, max_output_tokens
+        self.calls += 1
+        raise ModelPortError(_FutureModelErrorCode.FUTURE_PROVIDER_ERROR)  # type: ignore[arg-type]
 
 
 def _result() -> AdvisoryModelResult:
@@ -133,6 +158,23 @@ async def test_advisory_provider_failure_has_no_result_and_no_retry() -> None:
     assert stage.result is None
     assert len(port.calls) == 1
     assert stage.observation.fallback_code.value == "model_server_error"
+
+
+@pytest.mark.asyncio
+async def test_unknown_advisory_error_degrades_without_escaping_the_stage() -> None:
+    port = _UnknownErrorAdvisoryPort()
+
+    stage = await request_model_advisory(
+        request=_request(),
+        model=port,
+        profile=ModelInvocationProfile(),
+        plan=slow_query_plan(),
+    )
+
+    assert stage.result is None
+    assert port.calls == 1
+    assert stage.observation.fallback_code is not None
+    assert stage.observation.fallback_code.value == "model_unavailable"
 
 
 @pytest.mark.asyncio
@@ -508,3 +550,79 @@ async def test_task_view_hides_saved_advisory_for_a_non_success_terminal() -> No
         for section in view.render.sections
     )
     assert len(port.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_task_view_status_gate_does_not_trust_a_capability_projector() -> None:
+    port = _AdvisoryPort(_result())
+    harness = RuntimeHarness(GOLDEN, slow_query_advisory=port)
+    await _execute(harness)
+    stored_plan = await harness.plan_store.load(task_id=harness.task_id)
+    evidences = await harness.ledger.load(task_id=harness.task_id)
+    binding = harness.runtime._bindings.runtime_for_plan(plan=stored_plan.plan)
+    verdict = assess_evidence(binding=binding, evidences=evidences)
+    assert binding.advisory_projector is not None
+    request = binding.advisory_projector(
+        task_id=harness.task_id,
+        plan=stored_plan.plan,
+        outcome=TaskOutcome(
+            task_id=harness.task_id,
+            status=TaskStatus.SUCCEEDED,
+            terminal_reason=None,
+            evidence_refs=tuple(item.evidence_id for item in evidences),
+            render_ref=None,
+        ),
+        evidences=evidences,
+        verdict=verdict,
+    )
+    assert request is not None
+
+    permissive = replace(binding, advisory_projector=lambda **_: request)
+
+    class _PermissiveBindings:
+        def runtime_for_plan(self, *, plan: Any) -> Any:
+            del plan
+            return permissive
+
+    harness.runtime._task_views._bindings = _PermissiveBindings()  # type: ignore[assignment]
+    record = harness.state.tasks[harness.task_id]
+    harness.state.tasks[harness.task_id] = record.model_copy(
+        update={"status": TaskStatus.FAILED, "terminal_reason": "test_failure"}
+    )
+
+    view = await harness.runtime.query_task(lookup=harness.lookup)
+
+    assert view.status is TaskStatus.FAILED
+    assert view.render is not None
+    assert all(
+        section.title != "模型分析（仅供参考）"
+        for section in view.render.sections
+    )
+
+
+@pytest.mark.asyncio
+async def test_advisory_conflict_is_reflected_from_the_final_failed_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def conflict(**kwargs: Any) -> Any:
+        raise ModelArtifactConflictError(
+            "stored model advisory conflicts with rebuilt input",
+            task_id=kwargs["task_id"],
+        )
+
+    monkeypatch.setattr(runtime_module, "load_or_accept_advisory", conflict)
+    harness = RuntimeHarness(
+        EMPTY_WITHOUT_TRAFFIC,
+        slow_query_advisory=_AdvisoryPort(_result()),
+    )
+
+    outcome = await _execute(harness)
+
+    assert outcome.status is TaskStatus.FAILED
+    assert outcome.terminal_reason == "recovery_drift"
+    reflection = next(
+        event
+        for event in reversed(harness.sink.events)
+        if event.stage is PipelineStage.REFLECTION
+    )
+    assert reflection.outcome is StageOutcome.OK

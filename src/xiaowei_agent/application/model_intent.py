@@ -7,7 +7,7 @@ import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Final, Literal, TypeAlias
 
 from pydantic import ValidationError
 
@@ -15,6 +15,7 @@ from xiaowei_agent.application.model_ports import (
     INTENT_RETRYABLE_ERROR_CODES,
     IntentModelPort,
     ModelPortError,
+    fallback_code_for_model_error,
 )
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.contracts import (
@@ -25,7 +26,6 @@ from xiaowei_agent.contracts import (
     IntentSource,
     ModelCallKind,
     ModelCallObservation,
-    ModelErrorCode,
     ModelFallbackCode,
     ModelIntentRequest,
     ModelInvocationProfile,
@@ -56,6 +56,8 @@ IntentFallback: TypeAlias = Callable[[], IntentDraft]
 # 生产构造面。真实调用始终取固定 ModelInvocationProfile 的 60 秒。
 _stage_timeout = asyncio.timeout
 _SIGNED_BIGINT_MAX = 2**63 - 1
+RULE_INTENT_PROMPT_REVISION: Final[str] = "rule-intent-prompt-not-applicable-v1"
+RULE_INTENT_SCHEMA_REVISION: Final[str] = "rule-intent-schema-v1"
 
 
 @dataclass(frozen=True)
@@ -122,10 +124,6 @@ def _elapsed_ms(started: float, monotonic: MonotonicClock) -> int:
     return min(_SIGNED_BIGINT_MAX, max(0, int((monotonic() - started) * 1_000)))
 
 
-def _fallback_code(code: ModelErrorCode) -> ModelFallbackCode:
-    return ModelFallbackCode(code.value)
-
-
 def _observation(
     *,
     started: float,
@@ -175,18 +173,38 @@ def _opaque_text_digest(value: str) -> str:
 
 
 def intent_input_digest(
-    request: ModelIntentRequest, *, profile: ModelInvocationProfile
+    request: ModelIntentRequest,
+    *,
+    profile: ModelInvocationProfile,
+    origin: Literal["model", "rule"] = "model",
 ) -> str:
-    """绑定脱敏 typed request 与固定供应商/profile/schema 身份。"""
-    return _digest(
-        {
-            "request": dump_contract(request),
+    """模型结果绑定 provider profile；规则结果只绑定其真实输入。"""
+    payload: dict[str, object] = {
+        "request": dump_contract(request),
+        "intent_origin": origin,
+    }
+    if origin == "model":
+        payload["model_identity"] = {
             "provider": profile.provider,
             "model": profile.model,
             "origin": profile.origin,
             "api_version": profile.api_version,
             "prompt_revision": profile.intent_prompt_revision,
             "schema_revision": profile.intent_schema_revision,
+        }
+    return _digest(payload)
+
+
+def _rejected_intent_input_digest(
+    *, envelope: RequestEnvelope, history: tuple[str, ...]
+) -> str:
+    """规则降级的拒绝输入事实不依赖任何模型 profile。"""
+    return _digest(
+        {
+            "rejected_input": True,
+            "intent_origin": "rule",
+            "user_text_digest": _opaque_text_digest(envelope.text),
+            "history_digests": tuple(_opaque_text_digest(item) for item in history),
         }
     )
 
@@ -199,17 +217,20 @@ def intent_artifact_identity_matches(
     artifact: AcceptedIntentArtifact, *, profile: ModelInvocationProfile
 ) -> bool:
     """复验持久化 identity；不能只相信一个可与元数据分别漂移的 digest。"""
-    if (
-        artifact.prompt_revision != profile.intent_prompt_revision
-        or artifact.schema_revision != profile.intent_schema_revision
-    ):
-        return False
     if artifact.origin == "model":
         return (
             artifact.provider,
             artifact.model,
             artifact.provider_origin,
-        ) == (profile.provider, profile.model, profile.origin)
+            artifact.prompt_revision,
+            artifact.schema_revision,
+        ) == (
+            profile.provider,
+            profile.model,
+            profile.origin,
+            profile.intent_prompt_revision,
+            profile.intent_schema_revision,
+        )
     return (
         artifact.origin == "rule"
         and artifact.provider is None
@@ -259,7 +280,7 @@ async def request_intent_draft(
                         # 60 秒 deadline 约束。
                         await sleep(0)
                         continue
-                    failure = _fallback_code(exc.code)
+                    failure = fallback_code_for_model_error(exc.code)
                     break
                 if not _accepted_model_draft(candidate.draft):
                     failure = ModelFallbackCode.INVALID_RESPONSE
@@ -319,23 +340,23 @@ async def load_or_accept_intent(
         # 合法 RequestEnvelope 的文本可以超过模型单字段上限。该分支仍需要一个可重建
         # digest，但不得把被拒绝的原文写入 artifact。
         request = None
-        input_digest = _digest(
-            {
-                "rejected_input": True,
-                "user_text_digest": _opaque_text_digest(envelope.text),
-                "history_digests": tuple(_opaque_text_digest(item) for item in history),
-                "prompt_revision": profile.intent_prompt_revision,
-                "schema_revision": profile.intent_schema_revision,
-            }
-        )
     else:
         request = built_request
-        input_digest = intent_input_digest(built_request, profile=profile)
 
     existing = await artifacts.load_intent(task_id=grant.task_id)
     if existing is not None:
+        input_digest = (
+            _rejected_intent_input_digest(envelope=envelope, history=history)
+            if request is None
+            else intent_input_digest(
+                request,
+                profile=profile,
+                origin=existing.origin,
+            )
+        )
         if (
-            not intent_artifact_identity_matches(existing, profile=profile)
+            (request is None and existing.origin != "rule")
+            or not intent_artifact_identity_matches(existing, profile=profile)
             or existing.input_digest != input_digest
             or existing.result_digest != intent_result_digest(existing.draft)
         ):
@@ -369,14 +390,32 @@ async def load_or_accept_intent(
             sleep=sleep,
         )
     is_model = stage.draft.source is IntentSource.MODEL
+    artifact_origin: Literal["model", "rule"] = "model" if is_model else "rule"
+    input_digest = (
+        _rejected_intent_input_digest(envelope=envelope, history=history)
+        if request is None
+        else intent_input_digest(
+            request,
+            profile=profile,
+            origin=artifact_origin,
+        )
+    )
     candidate = IntentArtifactCandidate(
         draft=stage.draft,
-        origin="model" if is_model else "rule",
+        origin=artifact_origin,
         provider=profile.provider if is_model else None,
         model=profile.model if is_model else None,
         provider_origin=profile.origin if is_model else None,
-        prompt_revision=profile.intent_prompt_revision,
-        schema_revision=profile.intent_schema_revision,
+        prompt_revision=(
+            profile.intent_prompt_revision
+            if is_model
+            else RULE_INTENT_PROMPT_REVISION
+        ),
+        schema_revision=(
+            profile.intent_schema_revision
+            if is_model
+            else RULE_INTENT_SCHEMA_REVISION
+        ),
         input_digest=input_digest,
         result_digest=intent_result_digest(stage.draft),
         usage=stage.usage,
@@ -386,6 +425,8 @@ async def load_or_accept_intent(
 
 
 __all__ = [
+    "RULE_INTENT_PROMPT_REVISION",
+    "RULE_INTENT_SCHEMA_REVISION",
     "AcceptedIntentResult",
     "IntentStageResult",
     "ModelInputRejectedError",

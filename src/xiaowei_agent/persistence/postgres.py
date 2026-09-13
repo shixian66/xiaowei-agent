@@ -126,9 +126,9 @@ from xiaowei_agent.persistence.model_artifacts import (
     AdvisoryArtifactCandidate,
     IntentArtifactCandidate,
     ModelArtifactConflictError,
-    ModelArtifactGrantError,
     StoredModelAdvisory,
     artifact_matches_candidate,
+    require_model_artifact_grant,
 )
 from xiaowei_agent.persistence.plans import (
     PlanConflictError,
@@ -2152,15 +2152,12 @@ class PostgresModelArtifactStore:
         now: _dt.datetime,
         allowed_statuses: frozenset[TaskStatus],
     ) -> None:
-        if current is None or grant_is_current(
+        require_model_artifact_grant(
             current,
             grant,
             now=now,
             allowed_statuses=allowed_statuses,
-        ) is not None:
-            raise ModelArtifactGrantError(
-                "model artifact grant is not current", task_id=grant.task_id
-            )
+        )
 
     async def _load_intent_row(
         self, connection: AsyncConnection, *, task_id: str

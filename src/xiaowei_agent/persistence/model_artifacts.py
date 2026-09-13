@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, Self, cast
+from typing import Final, Literal, Protocol, Self, cast
 
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts import (
     AwareDatetime,
     Contract,
+    GrantRejection,
     IntentDraft,
     IntentSource,
     ModelAdvisory,
@@ -16,6 +17,7 @@ from xiaowei_agent.contracts import (
     Sha256Hex,
     StrictInt,
     StrictStr,
+    TaskRecord,
     TaskStatus,
 )
 from xiaowei_agent.persistence.decisions import grant_is_current
@@ -34,7 +36,45 @@ class ModelArtifactConflictError(ModelArtifactError):
 
 
 class ModelArtifactGrantError(ModelArtifactError):
-    """保存者不再持有当前 task grant，或状态不允许写入。"""
+    """保存者不再持有当前 task grant。"""
+
+
+class ModelArtifactStateError(ModelArtifactError):
+    """任务不存在、已终态或当前状态不允许写入该类模型事实。"""
+
+
+_GRANT_LOSS_REJECTIONS: Final[frozenset[GrantRejection]] = frozenset(
+    {GrantRejection.LEASE_NOT_HELD, GrantRejection.STALE_FENCING}
+)
+
+
+def require_model_artifact_grant(
+    current: TaskRecord | None,
+    grant: TaskAttemptGrant,
+    *,
+    now: AwareDatetime,
+    allowed_statuses: frozenset[TaskStatus],
+) -> None:
+    """共享内存/PostgreSQL 的模型事实写入拒绝分类。"""
+    if current is None:
+        raise ModelArtifactStateError(
+            "model artifact task does not exist", task_id=grant.task_id
+        )
+    rejection = grant_is_current(
+        current,
+        grant,
+        now=now,
+        allowed_statuses=allowed_statuses,
+    )
+    if rejection is None:
+        return
+    if rejection in _GRANT_LOSS_REJECTIONS:
+        raise ModelArtifactGrantError(
+            "model artifact grant is not current", task_id=grant.task_id
+        )
+    raise ModelArtifactStateError(
+        "task status does not allow this model artifact", task_id=grant.task_id
+    )
 
 
 class IntentArtifactCandidate(Contract):
@@ -138,17 +178,14 @@ class InMemoryModelArtifactStore:
     ) -> AcceptedIntentArtifact:
         async with self._state.lock:
             current = self._state.tasks.get(grant.task_id)
-            if current is None or grant_is_current(
+            require_model_artifact_grant(
                 current,
                 grant,
                 now=self._clock(),
                 allowed_statuses=frozenset(
                     {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
                 ),
-            ) is not None:
-                raise ModelArtifactGrantError(
-                    "model artifact grant is not current", task_id=grant.task_id
-                )
+            )
             existing = self._state.accepted_intents.get(grant.task_id)
             if existing is not None:
                 stored = cast(AcceptedIntentArtifact, existing)
@@ -179,15 +216,12 @@ class InMemoryModelArtifactStore:
     ) -> StoredModelAdvisory:
         async with self._state.lock:
             current = self._state.tasks.get(grant.task_id)
-            if current is None or grant_is_current(
+            require_model_artifact_grant(
                 current,
                 grant,
                 now=self._clock(),
                 allowed_statuses=frozenset({TaskStatus.RUNNING}),
-            ) is not None:
-                raise ModelArtifactGrantError(
-                    "model artifact grant is not current", task_id=grant.task_id
-                )
+            )
             existing = self._state.model_advisories.get(grant.task_id)
             if existing is not None:
                 stored = cast(StoredModelAdvisory, existing)
@@ -215,7 +249,9 @@ __all__ = [
     "IntentArtifactCandidate",
     "ModelArtifactConflictError",
     "ModelArtifactGrantError",
+    "ModelArtifactStateError",
     "ModelArtifactStore",
     "StoredModelAdvisory",
     "artifact_matches_candidate",
+    "require_model_artifact_grant",
 ]
