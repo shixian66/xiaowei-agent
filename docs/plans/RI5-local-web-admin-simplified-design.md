@@ -221,9 +221,11 @@ error_message      nullable, local safe message
 - `feishu_credentials` 只验证 App ID/Secret 能否取得应用凭证；不发送消息、不读取或操作群聊，不保存 Token。
 - `feishu_oauth` 是独立的 callback 连通性测试，不等同于飞书登录验收：
   - 只有当 OAuth 插件已在 Compose 中装配（`feishu_oauth_enabled=true`，callback 路由已注册）、且当前 generation 的 `feishu_credentials=passed` 之后，才能开始；
-  - 从已认证的 `LOCAL_ADMIN` Session 发起，测试 state 在服务端绑定当前 Session 与 generation；
+  - 启动接口是状态变更 POST，必须同时通过 `LOCAL_ADMIN` 认证与既有的 Origin + CSRF token 检查；
   - 测试 state 与登录 state 使用**不同的 digest domain 常量**（登录沿用 `oauth-state:v1`，测试另取一个），落在互不相交的摘要命名空间，因此一类 state 不可能被另一条路径消费。该隔离不新增 `web_oauth_states` 的列，也不新增表；
-  - callback 按 state 的 digest domain 分流；命中测试域时走测试分支，成功消费 state、完成 code exchange 并取得 `open_id` 后写入 `passed`，随后返回配置页。测试分支**绝不签发、替换或延长任何 Session**，也不设置任何 Cookie；
+  - **digest domain 只做路径隔离，不做上下文绑定**。现有 state 行只有 digest 与三个时间字段，承载不了发起者身份或配置代次，因此本版**不承诺**把测试 state 绑定到发起 Session 或某个 generation；所需上下文由下面两条承担。若将来确需在 state 行内精确绑定，必须先修订 ADR-014 放开 state schema，不得由实现自行加列；
+  - callback 按 state 的 digest domain 分流；命中测试域时走测试分支，并且必须验证请求仍持有**当前有效的 `LOCAL_ADMIN` Session**，否则拒绝且不写入任何结果。测试分支**绝不签发、替换或延长任何 Session**，也不设置任何 Cookie；
+  - code exchange 时读取**当时的当前配置**，并把**当时的当前 generation** 写入测试结果行，因此结果永远标注它实际验证过的那一代；期间若配置已改写，新代次自然回到“待测试”，旧结果不会被冒充为新配置的证据；
   - 测试不创建或替换本地管理员 Session，不要求 `feishu_identity_file` 映射，也不证明该账号已经获准使用正式飞书登录；正式身份映射与飞书登录验收仍属于 RI2。
 
 以上三个测试都是管理面连接探针，不进入 Task、TaskSubmission、Evidence、capability 或业务 `ToolGateway`。Gemini 与飞书测试开关仍独立、默认关闭；没有对应现场 GO 时，页面和接口都只能返回本地禁用状态，外部调用数必须为零。

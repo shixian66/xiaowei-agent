@@ -842,7 +842,10 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)；**RI5 修订 Proposed，待重新接受**）。
 - ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)；**RI5 修订 Proposed，待重新接受**）。
 - ADR-016：曾计划用于 RI5 独立配置测试 worker 的进程边界例外。新 RI5 设计取消该 worker，改为
-  控制面探针，因此 ADR-016 不再立项；[ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
-  D4 权限表 G 行仍记录旧口径，其处置须在 RI5 开工前单独决定。
+  控制面探针，因此 **ADR-016 不再立项**；相应结论写入
+  [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
+  §RI5 Proposed Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
+  固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 三份修订均为 Proposed，须**一并**重新接受；
+  任一份未被接受，RI5 都不得开工。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

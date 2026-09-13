@@ -139,6 +139,11 @@ override 打开，且首次强制改密必须在 loopback 阶段完成。
 state 通过**不同的 digest domain 常量**落在互不相交的摘要命名空间（登录沿用 `oauth-state:v1`），
 一类 state 不可能被另一条路径消费。
 
+**digest domain 只提供路径隔离，不提供上下文绑定。** 现有 state 行只有 digest 与三个时间字段，
+无法承载发起者身份或配置代次；因此本修订**不承诺**把测试 state 绑定到发起 Session 或某个
+`generation`。所需的上下文改由请求侧与写入侧承担，见 R4。若将来确需在 state 行内做精确绑定，
+必须先修订本 ADR 放开 state schema，不得由实现自行加列。
+
 D3 的其余约束不变：state 与 session 仍只保存 SHA-256 digest 与时效事实，不保存原文；1024 全局
 未完成 state 上限、固定 advisory lock 与清理顺序不变。
 
@@ -154,10 +159,20 @@ Web 在管理员明确点击、且对应真实测试开关已打开时，可执�
 TaskSubmission、Evidence 或 capability，不经过数据面 `ToolGateway`，也不改变任何服务的
 readiness。该边界必须同步写入 `ARCHITECTURE.md`，不得由实现自行推断。
 
-`feishu_oauth` 是 callback 连通性测试，**不等同于飞书登录验收**：需 OAuth 插件已装配且当前
-generation 的 `feishu_credentials` 已通过才能开始；从已认证的 `LOCAL_ADMIN` Session 发起；
-callback 命中测试 digest domain 时走测试分支，**绝不签发、替换或延长任何 Session**，也不设置
-任何 Cookie；不要求 `feishu_identity_file` 映射。正式身份映射与飞书登录验收仍属于 RI2。
+`feishu_oauth` 是 callback 连通性测试，**不等同于飞书登录验收**。它采用不新增 state schema 的
+最小方案：
+
+- **启动**：需 OAuth 插件已装配、且当前 `generation` 的 `feishu_credentials` 已通过；启动接口
+  是状态变更 POST，必须同时通过 `LOCAL_ADMIN` 认证与 D2/§7.2 既有的 Origin + CSRF token 检查；
+- **state**：只写入测试 digest domain，不携带发起者身份或代次；
+- **callback**：命中测试 domain 时走测试分支，且必须验证请求仍持有**当前有效的 `LOCAL_ADMIN`
+  Session**，否则拒绝并不写入任何结果；
+- **结果**：code exchange 时读取**当时的当前配置**，并把**当时的当前 `generation`** 写入测试
+  结果行。因此结果永远标注它实际验证过的那一代配置；若期间配置已被改写，新代次自然回到
+  “待测试”，不会把旧结果冒充为新配置的证据。
+
+测试分支**绝不签发、替换或延长任何 Session**，也不设置任何 Cookie，不要求
+`feishu_identity_file` 映射。正式身份映射与飞书登录验收仍属于 RI2。
 
 探针开关默认关闭且彼此独立。关闭时页面禁用按钮，接口在本地返回闭集 `REAL_TEST_DISABLED`，
 外部调用数必须为零。D4 关于 provider 正文不得成为控制信号或用户可见错误的约束继续适用：失败
@@ -177,8 +192,12 @@ Runtime/Runner/Admission/Gateway 链、须经 ADR-016 修订、"独立 worker �
 无用户数据 Gemini probe 只由既有 task-worker 的窄 control port 执行"）。新 RI5 设计取消了该
 独立 worker，由 Web 自身读取配置并执行控制面探针，与 G 行直接冲突。
 
-ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007。本修订**不擅自改写 ADR-007**；G 行的
-处置必须在 RI5 开工前由项目负责人单独决定并记录。未处置前 RI5 不得开工。
+复核另指出：**冲突不止 G 行**。D4 的 **B2 行**写有 worker-only secret，同样与 Web 读取 Gemini
+key 执行探针冲突。
+
+ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007，因此两行必须一并处理。相应的
+**RI5 Proposed Amendment 已在 ADR-007 中起草**（R1 修订 B2、R2 修订 G、R3 声明未放宽项），
+状态同为 Proposed。三份 ADR 必须**一并**复核并重新接受；任一份未被接受，RI5 都不得开工。
 
 ## 后果
 
