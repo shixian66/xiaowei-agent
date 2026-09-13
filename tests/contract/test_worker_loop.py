@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 from tests.conftest import make_submission
 from tests.fakes.clock import ManualClock
+from tests.fakes.recordings import GOLDEN
+from tests.fakes.runtime import RuntimeHarness
 
 from xiaowei_agent.application.runtime import RetryableTaskError
 from xiaowei_agent.application.worker import (
@@ -17,6 +19,12 @@ from xiaowei_agent.application.worker import (
 )
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
+    AdvisoryModelResult,
+    IntentDraft,
+    IntentModelResult,
+    IntentSource,
+    ModelAdvisory,
+    ModelUsage,
     RequestContext,
     RetryReason,
     TaskLookup,
@@ -58,6 +66,46 @@ class _Runtime:
     async def execute_task(self, *, grant: TaskAttemptGrant, submission: Any) -> None:
         self.grants.append(grant)
         await self._action(grant)
+
+
+class _BlockingIntentModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate_intent(self, request: Any) -> IntentModelResult:
+        del request
+        self.entered.set()
+        await self.release.wait()
+        return IntentModelResult(
+            draft=IntentDraft(
+                intent="starrocks.slow_query.diagnose",
+                slots={"window_minutes": "30"},
+                missing=(),
+                confidence=0.8,
+                source=IntentSource.MODEL,
+            ),
+            usage=ModelUsage(),
+        )
+
+
+class _BlockingAdvisoryModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate_advisory(
+        self, request: Any, *, max_output_tokens: int
+    ) -> AdvisoryModelResult:
+        del request, max_output_tokens
+        self.entered.set()
+        await self.release.wait()
+        return AdvisoryModelResult(
+            advisory=ModelAdvisory(
+                analysis="合成分析", suggestions=(), uncertainties=()
+            ),
+            usage=ModelUsage(),
+        )
 
 
 async def _ready_store(clock: ManualClock) -> tuple[InMemoryTaskStore, str]:
@@ -128,6 +176,170 @@ async def test_retryable_task_failure_schedules_retry_with_the_original_grant() 
     assert winner.task_failure_count == 1
     assert winner.retry_scheduled_by_attempt == 1
     assert winner.next_attempt_at == _NOW + dt.timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_one_worker_heartbeat_covers_a_blocked_runtime_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock(start=_NOW)
+    store, _ = await _ready_store(clock)
+    runtime_entered = asyncio.Event()
+    release_runtime = asyncio.Event()
+    tick = asyncio.Event()
+    renewed = asyncio.Event()
+    renewals = 0
+    original_renew = store.renew_lease
+
+    async def block(_: TaskAttemptGrant) -> None:
+        runtime_entered.set()
+        await release_runtime.wait()
+
+    async def controlled_sleep(_: float) -> None:
+        await tick.wait()
+        tick.clear()
+
+    async def count_renewal(**kwargs: Any) -> Any:
+        nonlocal renewals
+        renewals += 1
+        result = await original_renew(**kwargs)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr(store, "renew_lease", count_renewal)
+    worker = WorkerLoop(
+        runtime=_Runtime(block),
+        task_store=store,
+        clock=clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=controlled_sleep,
+    )
+    polling = asyncio.create_task(worker.poll_once())
+    await runtime_entered.wait()
+    tick.set()
+    await renewed.wait()
+
+    assert renewals == 1
+    release_runtime.set()
+    assert await polling == 1
+    assert renewals == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "runner_renewals"),
+    [("intent", 0), ("advisory", 1)],
+)
+async def test_worker_heartbeat_covers_actual_model_waits_with_one_periodic_owner(
+    stage: str,
+    runner_renewals: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _BlockingIntentModel() if stage == "intent" else _BlockingAdvisoryModel()
+    harness = RuntimeHarness(
+        GOLDEN,
+        intent_model=model if stage == "intent" else None,
+        slow_query_advisory=model if stage == "advisory" else None,
+    )
+    await harness.runtime.submit_task(
+        submission=harness.submission("最近30分钟有哪些慢查询")
+    )
+    tick = asyncio.Event()
+    renewed = asyncio.Event()
+    original_renew = harness.store.renew_lease
+
+    async def controlled_sleep(_: float) -> None:
+        await tick.wait()
+        tick.clear()
+
+    async def observe_renewal(**kwargs: Any) -> Any:
+        result = await original_renew(**kwargs)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr(harness.store, "renew_lease", observe_renewal)
+    worker = WorkerLoop(
+        runtime=harness.runtime,
+        task_store=harness.store,
+        clock=harness.clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=controlled_sleep,
+    )
+    polling = asyncio.create_task(worker.poll_once())
+    await model.entered.wait()
+
+    assert len(harness.store.renewals) == runner_renewals
+    renewed.clear()
+    tick.set()
+    await renewed.wait()
+    assert len(harness.store.renewals) == runner_renewals + 1
+
+    model.release.set()
+    assert await polling == 1
+    # 每条路径最终都是一次 Runner 开工校验 + 本次唯一周期续租。
+    assert len(harness.store.renewals) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_continues_through_retry_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock(start=_NOW)
+    store, task_id = await _ready_store(clock)
+    scheduling = asyncio.Event()
+    release_schedule = asyncio.Event()
+    tick = asyncio.Event()
+    renewed = asyncio.Event()
+    original_schedule = store.schedule_retry
+    original_renew = store.renew_lease
+
+    async def fail(grant: TaskAttemptGrant) -> None:
+        raise RetryableTaskError(
+            task_id=grant.task_id,
+            reason=RetryReason.UNCLASSIFIED_ERROR,
+        )
+
+    async def block_schedule(*, command: Any) -> Any:
+        scheduling.set()
+        await release_schedule.wait()
+        return await original_schedule(command=command)
+
+    async def controlled_sleep(_: float) -> None:
+        await tick.wait()
+        tick.clear()
+
+    async def observe_renewal(**kwargs: Any) -> Any:
+        result = await original_renew(**kwargs)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr(store, "schedule_retry", block_schedule)
+    monkeypatch.setattr(store, "renew_lease", observe_renewal)
+    worker = WorkerLoop(
+        runtime=_Runtime(fail),
+        task_store=store,
+        clock=clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=controlled_sleep,
+    )
+    polling = asyncio.create_task(worker.poll_once())
+    await scheduling.wait()
+    tick.set()
+    await renewed.wait()
+    release_schedule.set()
+
+    assert await polling == 1
+    winner = await store.get(
+        lookup=TaskLookup(
+            task_id=task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+        )
+    )
+    assert winner.retry_scheduled_by_attempt == 1
 
 
 @pytest.mark.asyncio

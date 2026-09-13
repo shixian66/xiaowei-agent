@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final, Protocol
 
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentModelResult,
     ModelErrorCode,
+    ModelFallbackCode,
     ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
@@ -21,6 +24,24 @@ INTENT_RETRYABLE_ERROR_CODES: Final[frozenset[ModelErrorCode]] = frozenset(
         ModelErrorCode.TRANSPORT_ERROR,
     }
 )
+MODEL_ERROR_FALLBACK_CODES: Final[Mapping[ModelErrorCode, ModelFallbackCode]] = (
+    MappingProxyType(
+        {
+            ModelErrorCode.CREDENTIAL_UNAVAILABLE: (
+                ModelFallbackCode.CREDENTIAL_UNAVAILABLE
+            ),
+            ModelErrorCode.AMBIENT_PROXY: ModelFallbackCode.AMBIENT_PROXY,
+            ModelErrorCode.UNAUTHORIZED: ModelFallbackCode.UNAUTHORIZED,
+            ModelErrorCode.FORBIDDEN: ModelFallbackCode.FORBIDDEN,
+            ModelErrorCode.RATE_LIMITED: ModelFallbackCode.RATE_LIMITED,
+            ModelErrorCode.SERVER_ERROR: ModelFallbackCode.SERVER_ERROR,
+            ModelErrorCode.TRANSPORT_ERROR: ModelFallbackCode.TRANSPORT_ERROR,
+            ModelErrorCode.TIMEOUT: ModelFallbackCode.PROVIDER_TIMEOUT,
+            ModelErrorCode.INVALID_RESPONSE: ModelFallbackCode.INVALID_RESPONSE,
+            ModelErrorCode.UNAVAILABLE: ModelFallbackCode.UNAVAILABLE,
+        }
+    )
+)
 
 
 class ModelPortError(RuntimeError):
@@ -29,6 +50,13 @@ class ModelPortError(RuntimeError):
     def __init__(self, code: ModelErrorCode) -> None:
         self.code = code
         super().__init__(code.value)
+
+
+def fallback_code_for_model_error(code: object) -> ModelFallbackCode:
+    """总函数：已知 provider 错误显式映射，未知值安全降级。"""
+    if not isinstance(code, ModelErrorCode):
+        return ModelFallbackCode.UNAVAILABLE
+    return MODEL_ERROR_FALLBACK_CODES.get(code, ModelFallbackCode.UNAVAILABLE)
 
 
 def validate_advisory_output_tokens(value: StrictInt) -> StrictInt:
@@ -58,8 +86,10 @@ class SlowQueryAdvisoryPort(Protocol):
 __all__ = [
     "ADVISORY_OUTPUT_TOKEN_LIMIT",
     "INTENT_RETRYABLE_ERROR_CODES",
+    "MODEL_ERROR_FALLBACK_CODES",
     "IntentModelPort",
     "ModelPortError",
     "SlowQueryAdvisoryPort",
+    "fallback_code_for_model_error",
     "validate_advisory_output_tokens",
 ]

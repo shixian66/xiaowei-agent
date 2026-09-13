@@ -82,3 +82,40 @@ async def test_untrusted_render_text_remains_json_data_not_html_response() -> No
     assert response.headers["content-type"].startswith("application/json")
     assert response.json()["render"]["answer"] == injected
     assert "<script>alert(2)</script>" in response.text
+
+
+async def test_model_advisory_remains_plain_json_data() -> None:
+    injected = '[运行命令](javascript:alert(1)) <img src=x onerror="alert(2)">'
+    view = TaskView(
+        task_id="task-model-xss",
+        status=TaskStatus.SUCCEEDED,
+        render=RenderPayload(
+            answer="确定性结论",
+            sections=(
+                RenderSection(
+                    title="模型分析（仅供参考）",
+                    body=injected,
+                    refs=(),
+                ),
+            ),
+            next_steps=(),
+            status=TaskStatus.SUCCEEDED,
+            refs=(),
+        ),
+        query_path=task_query_path("task-model-xss"),
+    )
+    access = _Access()
+    access.detail_result = AccessibleTask(
+        task_view=view,
+        request_preview="模型安全展示",
+        submitted_at=dt.datetime(2026, 9, 9, tzinfo=dt.UTC),
+        task_version=2,
+    )
+    client, _, _ = _client(access=access)
+
+    async with client:
+        response = await client.get("/app/api/tasks/task-model-xss")
+
+    assert response.status_code == 200
+    section = response.json()["render"]["sections"][0]
+    assert section == {"title": "模型分析（仅供参考）", "body": injected, "refs": []}

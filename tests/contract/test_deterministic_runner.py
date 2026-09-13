@@ -228,57 +228,41 @@ async def test_expired_grant_is_rejected_before_plan_or_gateway_work() -> None:
         await harness.plan_store.load(task_id=harness.task_id)
 
 
-async def test_heartbeat_loss_cancels_in_flight_gateway_without_committing() -> None:
+async def test_resume_immediately_renews_only_the_supplied_grant() -> None:
     harness = RunnerHarness(GOLDEN)
-    gateway_entered = asyncio.Event()
-    never_finishes = asyncio.Event()
+    await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.clock.advance(seconds=61)
+    grant = await _begin(harness)
+    harness.store.renewals.clear()
 
-    class _BlockingGateway:
-        cancelled = False
+    await harness.runner.resume(
+        grant,
+        plan=harness.plan,
+        context=harness.context,
+        target=harness.target,
+    )
 
-        async def invoke(self, *args: object, **kwargs: object) -> object:
-            gateway_entered.set()
-            try:
-                await never_finishes.wait()
-            except asyncio.CancelledError:
-                self.cancelled = True
-                raise
-            raise AssertionError("unreachable")
+    assert harness.store.renewals == [
+        (grant.task_id, grant.lease.owner, grant.fencing_token, 60)
+    ]
 
-    blocking = _BlockingGateway()
-    original_renew = harness.store.renew_lease
-    renewals: list[tuple[str, str, int, int]] = []
 
-    async def _lose_after_validation(
-        *, task_id: str, owner: str, fencing_token: int, ttl_seconds: int
-    ) -> object:
-        renewals.append((task_id, owner, fencing_token, ttl_seconds))
-        if len(renewals) == 1:
-            return await original_renew(
-                task_id=task_id,
-                owner=owner,
-                fencing_token=fencing_token,
-                ttl_seconds=ttl_seconds,
-            )
-        return None
+async def test_resume_rejects_an_expired_grant_before_gateway_or_new_transition() -> None:
+    harness = RunnerHarness(GOLDEN)
+    grant = await _prepare_status(harness, TaskStatus.PLANNING)
+    harness.store.transitions.clear()
+    harness.clock.advance(seconds=60)
 
-    async def _wake_heartbeat_after_gateway_starts(_: float) -> None:
-        await gateway_entered.wait()
+    with pytest.raises(LifecycleError, match="no longer current"):
+        await harness.runner.resume(
+            grant,
+            plan=harness.plan,
+            context=harness.context,
+            target=harness.target,
+        )
 
-    harness.store.renew_lease = _lose_after_validation  # type: ignore[method-assign]
-    harness.runner._gateway = blocking  # type: ignore[assignment]
-    harness.runner._sleep = _wake_heartbeat_after_gateway_starts
-
-    with pytest.raises(LifecycleError, match="heartbeat was lost"):
-        await harness.start()
-
-    assert blocking.cancelled
-    assert len(renewals) == 2
-    assert {item[1:3] for item in renewals} == {("worker-1", harness.grant.fencing_token)}
-    journal = await harness.store.load_step_executions(task_id=harness.task_id)
-    assert len(journal) == 1
-    assert journal[0].result_status is None
-    assert await harness.ledger.load(task_id=harness.task_id) == ()
+    assert harness.gateway.invocations == 0
+    assert harness.store.transitions == []
 
 
 async def test_cancelling_the_run_also_cancels_gateway_without_late_commit() -> None:

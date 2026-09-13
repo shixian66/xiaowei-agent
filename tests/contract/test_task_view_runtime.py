@@ -16,6 +16,8 @@ from xiaowei_agent.application.task_view_runtime import (
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     EvidenceEnvelope,
+    ModelAdvisory,
+    ModelInvocationProfile,
     RenderPayload,
     TaskRecord,
     TaskStatus,
@@ -28,6 +30,8 @@ def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
         plan_store=harness.plan_store,
         ledger=harness.ledger,
         bindings=harness.runtime._bindings,
+        model_artifacts=harness.model_artifacts,
+        model_profile=ModelInvocationProfile(),
     )
 
 
@@ -67,6 +71,7 @@ async def test_full_and_narrow_runtimes_share_the_terminal_projection(
         evidences: tuple[EvidenceEnvelope, ...],
         verdict: AnswerabilityVerdict,
         binding: CapabilityRuntimeBinding,
+        advisory: ModelAdvisory | None = None,
     ) -> RenderPayload:
         nonlocal calls
         calls += 1
@@ -75,6 +80,7 @@ async def test_full_and_narrow_runtimes_share_the_terminal_projection(
             evidences=evidences,
             verdict=verdict,
             binding=binding,
+            advisory=advisory,
         )
 
     monkeypatch.setattr(task_view_module, "project_terminal", counting_projection)

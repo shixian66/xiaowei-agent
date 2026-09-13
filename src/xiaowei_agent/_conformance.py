@@ -17,12 +17,13 @@ M3 补齐了五个此前只有形状、没有实现的 Protocol 锚点：``Capab
 它一旦偏离契约，调用方要么改签名要么绕过 Protocol，而后者不会有任何静态检查失败。
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from tests.fakes.model import ScriptedModelAdapter
 
     from xiaowei_agent.application.capability_runtime import (
+        CapabilityAdvisoryProjector,
         CapabilityAssessor,
         CapabilityBindingRegistry,
         CapabilityPlanner,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         IntentModelPort,
         SlowQueryAdvisoryPort,
     )
+    from xiaowei_agent.application.task_heartbeat import LeaseRenewalPort
     from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
     from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
     from xiaowei_agent.capabilities.resolver import (
@@ -68,10 +70,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         InMemoryTaskStore,
         InMemoryWebSessionStore,
     )
+    from xiaowei_agent.persistence.model_artifacts import (
+        InMemoryModelArtifactStore,
+        ModelArtifactStore,
+    )
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
         PostgresChannelStore,
         PostgresEvidenceLedger,
+        PostgresModelArtifactStore,
         PostgresPlanStore,
         PostgresTaskStore,
         PostgresWebSessionStore,
@@ -126,6 +133,20 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """
         anchored: TaskStore = store
         _ = anchored
+
+    def _model_artifact_store_anchors(
+        memory: "InMemoryModelArtifactStore",
+        postgres: "PostgresModelArtifactStore",
+    ) -> None:
+        """两种模型事实存储都必须保持同一 grant-fenced 窄协议。"""
+        memory_port: ModelArtifactStore = memory
+        postgres_port: ModelArtifactStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _lease_renewal_anchor(store: "PostgresTaskStore") -> None:
+        """入口 heartbeat 只能要求 TaskStore 的续租窄面。"""
+        renewal: LeaseRenewalPort = store
+        _ = renewal
 
     def _postgres_channel_store_anchor(store: "PostgresChannelStore") -> None:
         """PostgreSQL 渠道实现必须保持与内存实现相同的 ``ChannelStore`` 端口。"""
@@ -195,7 +216,17 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         planner: CapabilityPlanner = SLOW_QUERY_BINDING.planner
         assessor: CapabilityAssessor = SLOW_QUERY_BINDING.assessor
         renderer: CapabilityRenderer = SLOW_QUERY_BINDING.renderer
+        advisory_projector: CapabilityAdvisoryProjector = (
+            cast(CapabilityAdvisoryProjector, SLOW_QUERY_BINDING.advisory_projector)
+        )
         evidence_builder: StepEvidenceBuilder = (
             SLOW_QUERY_BINDING.execution.evidence_builder
         )
-        _ = (provider, planner, assessor, renderer, evidence_builder)
+        _ = (
+            provider,
+            planner,
+            assessor,
+            renderer,
+            advisory_projector,
+            evidence_builder,
+        )

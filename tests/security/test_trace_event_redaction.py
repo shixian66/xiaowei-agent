@@ -64,9 +64,10 @@ def test_redaction_survives_a_copy() -> None:
         copied.detail["k"] = "x"  # type: ignore[index]
 
 
-def test_stage_enum_covers_the_nine_architecture_stages() -> None:
+def test_stage_enum_covers_the_ten_architecture_stages() -> None:
     assert {s.value for s in PipelineStage} == {
         "intent",
+        "model",
         "resolver",
         "planner",
         "admission",

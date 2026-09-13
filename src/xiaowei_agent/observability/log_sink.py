@@ -73,6 +73,23 @@ class StructuredLogTraceSink:
                 "cause_ref": error.cause_ref,
             }
         )
+        model = event.model
+        model_summary = (
+            None
+            if model is None
+            else {
+                "call_kind": model.call_kind.value,
+                "elapsed_ms": model.elapsed_ms,
+                "request_count": model.request_count,
+                "input_tokens": model.input_tokens,
+                "output_tokens": model.output_tokens,
+                "fallback_code": (
+                    None
+                    if model.fallback_code is None
+                    else model.fallback_code.value
+                ),
+            }
+        )
         try:
             self._logger.info(
                 "trace event",
@@ -88,6 +105,7 @@ class StructuredLogTraceSink:
                     "attempt_number": event.attempt_number,
                     "delivery_state": state,
                     "error": error_summary,
+                    "model": model_summary,
                     # detail 已在契约层脱敏；这里原样透出，不再二次拼装。
                     "detail": dict(event.detail),
                     "worker_instance": (

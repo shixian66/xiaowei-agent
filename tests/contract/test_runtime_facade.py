@@ -94,11 +94,11 @@ async def test_identical_request_twice_yields_one_task_and_identical_payload() -
     assert len(harness.store.created_task_ids) == 1
 
 
-async def test_a_successful_run_emits_all_nine_stages_in_order() -> None:
+async def test_compatibility_handle_emits_every_non_model_stage_in_order() -> None:
     harness = RuntimeHarness(GOLDEN)
     await harness.handle("最近30分钟有哪些慢查询")
     stages = [event.stage for event in harness.sink.events]
-    assert set(stages) == set(PipelineStage)
+    assert set(stages) == set(PipelineStage) - {PipelineStage.MODEL}
 
     # 八个单次阶段按链路顺序首次出现。
     ordered = [

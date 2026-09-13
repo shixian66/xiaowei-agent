@@ -208,7 +208,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0007_web_sessions"
+    assert revision == "0008_model_artifacts"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -276,7 +276,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         step_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_step_executions")
         )
-    assert revision == "0007_web_sessions"
+    assert revision == "0008_model_artifacts"
     assert step_count == 1
 
     async with clean_database.begin() as connection:
@@ -347,3 +347,89 @@ async def test_rev_0004_retry_columns_round_trip_without_changing_task_facts(
             )
         ).one()
     assert after == before
+
+
+async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    """默认降级不能静默删除 intent/advisory；显式授权后可完整往返。"""
+    from tests.conftest import make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    async with clean_database.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO task_accepted_intents "
+                "(task_id, artifact_version, draft, origin, provider, model, "
+                "provider_origin, prompt_revision, schema_revision, input_digest, "
+                "result_digest, usage, created_at, fencing_token) VALUES "
+                "(:task_id, 1, CAST(:draft AS jsonb), 'rule', NULL, NULL, NULL, "
+                "'intent-p1', 'intent-s1', :input_digest, :result_digest, "
+                "CAST(:usage AS jsonb), now(), 1)"
+            ),
+            {
+                "task_id": task.task_id,
+                "draft": '{"source":"user","operation":"inspect"}',
+                "input_digest": "a" * 64,
+                "result_digest": "b" * 64,
+                "usage": '{"input_tokens":0,"output_tokens":0}',
+            },
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO task_model_advisories "
+                "(task_id, artifact_version, advisory, origin, provider, model, "
+                "provider_origin, prompt_revision, schema_revision, input_digest, "
+                "result_digest, usage, created_at, fencing_token) VALUES "
+                "(:task_id, 1, CAST(:advisory AS jsonb), 'model', 'gemini', "
+                "'gemini-test', 'https://example.invalid', 'advisory-p1', "
+                "'advisory-s1', :input_digest, :result_digest, "
+                "CAST(:usage AS jsonb), now(), 1)"
+            ),
+            {
+                "task_id": task.task_id,
+                "advisory": '{"summary":"safe test advisory"}',
+                "input_digest": "c" * 64,
+                "result_digest": "d" * 64,
+                "usage": '{"input_tokens":1,"output_tokens":1}',
+            },
+        )
+
+    run_upgrade, run_downgrade = alembic_runners
+    with pytest.raises(MigrationSafetyError) as exc_info:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0007_web_sessions")
+
+    assert exc_info.value.counts == (
+        ("task_model_advisories", 1),
+        ("task_accepted_intents", 1),
+    )
+    async with clean_database.connect() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+        intent_count = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_accepted_intents")
+        )
+        advisory_count = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_model_advisories")
+        )
+    assert revision == "0008_model_artifacts"
+    assert (intent_count, advisory_count) == (1, 1)
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0007_web_sessions", True)
+    assert not {
+        "task_accepted_intents",
+        "task_model_advisories",
+    } & await _table_names(clean_database)
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_upgrade)
+    assert {
+        "task_accepted_intents",
+        "task_model_advisories",
+    } <= await _table_names(clean_database)

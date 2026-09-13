@@ -20,6 +20,7 @@ from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
 from xiaowei_agent.persistence.channel import ChannelStore
+from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
 from xiaowei_agent.persistence.store import TaskStore
 from xiaowei_agent.persistence.web_session import WebSessionStore
 from xiaowei_agent.runners.binding import ExecutionBindingProvider, StepEvidenceBuilder
@@ -31,6 +32,7 @@ from xiaowei_agent.tools.gateway import DeterministicToolGateway, ToolGateway
 # CapabilityResolver 只冻结形状，落地实现时再补锚点。
 _ANCHORED = {
     "CapabilityAssessor",
+    "CapabilityAdvisoryProjector",
     "CapabilityPlanner",
     "CapabilityRenderer",
     "ExecutionBindingProvider",
@@ -47,6 +49,8 @@ _ANCHORED = {
     "TraceSink",
     "WebSessionStore",
     "IntentModelPort",
+    "LeaseRenewalPort",
+    "ModelArtifactStore",
     "SlowQueryAdvisoryPort",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
@@ -144,6 +148,29 @@ def test_model_conformance_anchor_assigns_both_real_and_fake_to_both_ports() -> 
         ("fake_intent", "IntentModelPort"),
         ("fake_advisory", "SlowQueryAdvisoryPort"),
     }
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.model_artifacts:InMemoryModelArtifactStore",
+        "xiaowei_agent.persistence.postgres:PostgresModelArtifactStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_model_artifact_stores_keep_protocol_keywords(
+    implementation_path: str,
+) -> None:
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(ModelArtifactStore)
+    assert len(methods) == 4, f"ModelArtifactStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(ModelArtifactStore, method)
+        ), f"{class_name}.{method}"
+
+
 def test_binding_registry_keeps_the_execution_provider_signature() -> None:
     assert _keyword_params(
         CapabilityBindingRegistry.execution_for

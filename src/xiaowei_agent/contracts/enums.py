@@ -112,6 +112,31 @@ class ModelErrorCode(StrEnum):
     UNAVAILABLE = "model_unavailable"
 
 
+class ModelCallKind(StrEnum):
+    """模型 trace 的调用种类闭集。"""
+
+    INTENT = "intent"
+    ADVISORY = "advisory"
+
+
+class ModelFallbackCode(StrEnum):
+    """模型没有产出可用结果时的安全、可聚合原因。"""
+
+    DISABLED = "model_disabled"
+    INPUT_REJECTED = "model_input_rejected"
+    APPLICATION_TIMEOUT = "model_application_timeout"
+    CREDENTIAL_UNAVAILABLE = "model_credential_unavailable"
+    AMBIENT_PROXY = "model_ambient_proxy"
+    UNAUTHORIZED = "model_unauthorized"
+    FORBIDDEN = "model_forbidden"
+    RATE_LIMITED = "model_rate_limited"
+    SERVER_ERROR = "model_server_error"
+    TRANSPORT_ERROR = "model_transport_error"
+    PROVIDER_TIMEOUT = "model_timeout"
+    INVALID_RESPONSE = "model_invalid_response"
+    UNAVAILABLE = "model_unavailable"
+
+
 class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
@@ -240,6 +265,7 @@ class PipelineStage(StrEnum):
     """与 ARCHITECTURE §13.1 的错误归因阶段逐一对应。"""
 
     INTENT = "intent"
+    MODEL = "model"
     RESOLVER = "resolver"
     PLANNER = "planner"
     ADMISSION = "admission"

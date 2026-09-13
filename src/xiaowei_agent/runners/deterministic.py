@@ -18,11 +18,9 @@ Runner 拥有租约、CAS 推进、可选分支求值、预算与暂停；它**�
    Runtime 完成。
 """
 
-import asyncio
-import contextlib
 import datetime as _dt
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final, Protocol
 
@@ -92,8 +90,6 @@ DEFAULT_LEASE_TTL_SECONDS: Final[int] = 60
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
 RECOVERY_DRIFT_REASON: Final[str] = "recovery_drift"
 
-AsyncSleep = Callable[[float], Awaitable[None]]
-
 _STEP_RESULT_STATUS: Final[Mapping[ToolCallStatus, StepResultStatus]] = MappingProxyType(
     {
         ToolCallStatus.OK: StepResultStatus.OK,
@@ -160,8 +156,6 @@ class DeterministicStepRunner:
         clock: Clock,
         sink: TraceSink,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
-        heartbeat_interval_seconds: float | None = None,
-        sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
         self._tasks = task_store
         self._plans = plan_store
@@ -174,14 +168,6 @@ class DeterministicStepRunner:
         self._clock = clock
         self._sink = sink
         self._lease_ttl_seconds = lease_ttl_seconds
-        self._heartbeat_interval_seconds = (
-            lease_ttl_seconds / 3
-            if heartbeat_interval_seconds is None
-            else heartbeat_interval_seconds
-        )
-        if not 0 < self._heartbeat_interval_seconds < lease_ttl_seconds / 2:
-            raise ValueError("heartbeat interval must be below half the lease ttl")
-        self._sleep = sleep
 
     # --- trace --------------------------------------------------------------
 
@@ -267,9 +253,8 @@ class DeterministicStepRunner:
         :raises WorkflowPaused: 遇到需要审批的副作用步骤。
         """
         await self._require_current_grant(grant)
-        return await self._run_with_heartbeat(
-            grant,
-            self._start(grant=grant, plan=plan, target=target, context=context),
+        return await self._start(
+            grant=grant, plan=plan, target=target, context=context
         )
 
     async def _start(
@@ -329,16 +314,13 @@ class DeterministicStepRunner:
         :raises WorkflowPaused: 仍然缺少有效审批。
         """
         await self._require_current_grant(grant)
-        return await self._run_with_heartbeat(
-            grant,
-            self._resume(
-                grant=grant,
-                external_input=external_input,
-                plan=plan,
-                context=context,
-                target=target,
-                approval=approval,
-            ),
+        return await self._resume(
+            grant=grant,
+            external_input=external_input,
+            plan=plan,
+            context=context,
+            target=target,
+            approval=approval,
         )
 
     async def _resume(
@@ -476,18 +458,6 @@ class DeterministicStepRunner:
             raise LifecycleError("transition rejected", rejection=result.rejection)
         return result.winner
 
-    async def _heartbeat(self, grant: TaskAttemptGrant) -> None:
-        while True:
-            await self._sleep(self._heartbeat_interval_seconds)
-            renewed = await self._tasks.renew_lease(
-                task_id=grant.task_id,
-                owner=grant.lease.owner,
-                fencing_token=grant.fencing_token,
-                ttl_seconds=self._lease_ttl_seconds,
-            )
-            if renewed is None:
-                raise LeaseLostError("task lease heartbeat was lost")
-
     async def _require_current_grant(self, grant: TaskAttemptGrant) -> None:
         renewed = await self._tasks.renew_lease(
             task_id=grant.task_id,
@@ -497,32 +467,6 @@ class DeterministicStepRunner:
         )
         if renewed is None:
             raise LeaseLostError("task attempt grant is no longer current")
-
-    async def _run_with_heartbeat(
-        self, grant: TaskAttemptGrant, execution: Coroutine[object, object, TaskOutcome]
-    ) -> TaskOutcome:
-        work: asyncio.Task[TaskOutcome] = asyncio.create_task(execution)
-        heartbeat = asyncio.create_task(self._heartbeat(grant))
-        try:
-            done, _ = await asyncio.wait(
-                {work, heartbeat}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if heartbeat in done:
-                failure = heartbeat.exception()
-                if failure is not None:
-                    work.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await work
-                    raise failure
-            return await work
-        finally:
-            if not work.done():
-                work.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await work
-            heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat
 
     # --- 步骤循环 -----------------------------------------------------------
 

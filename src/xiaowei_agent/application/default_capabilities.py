@@ -10,6 +10,9 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
+from xiaowei_agent.application.model_advisory import (
+    project_slow_query_advisory_request,
+)
 from xiaowei_agent.capabilities.asset_inventory import (
     ASSET_INVENTORY_CAPABILITY_ID,
     ASSET_INVENTORY_CAPABILITY_VERSION,
@@ -197,6 +200,7 @@ SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
         promql_surface=None,
         evidence_builder=_build_slow_query_evidence,
     ),
+    advisory_projector=project_slow_query_advisory_request,
 )
 
 

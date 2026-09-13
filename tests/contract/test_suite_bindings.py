@@ -12,7 +12,8 @@
 ``test_module_layering.py::test_every_existing_package_is_registered`` 相同：覆盖
 完整性必须由机制保证，否则漏登记与"检查通过"无法区分。
 
-五个套件（TaskStore / ChannelStore / PlanStore / EvidenceLedger / WebSessionStore）共用这一套
+六个套件（TaskStore / ChannelStore / PlanStore / EvidenceLedger / ModelArtifactStore /
+WebSessionStore）共用这一套
 检查。**登记表是按套件
 分层的**，因为"每一组必须被同一批实现绑定"只在**同一个套件内部**成立：TaskStore 有
 memory 与 postgres 两种，将来若某个套件只有一种实现，跨套件比较会误报。
@@ -25,6 +26,7 @@ from types import ModuleType
 
 from tests.suites import channel_store as channel_suite
 from tests.suites import evidence_ledger as evidence_suite
+from tests.suites import model_artifacts as model_artifact_suite
 from tests.suites import plan_store as plan_suite
 from tests.suites import task_store as task_suite
 from tests.suites import web_session_store as web_session_suite
@@ -35,6 +37,7 @@ _SUITES: dict[str, ModuleType] = {
     "channel_store": channel_suite,
     "task_store": task_suite,
     "plan_store": plan_suite,
+    "model_artifacts": model_artifact_suite,
     "evidence_ledger": evidence_suite,
     "web_session_store": web_session_suite,
 }
@@ -114,6 +117,16 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
     "tests.integration.test_evidence_ledger_postgres": (
         "evidence_ledger",
         "evidence_ledger",
+        "postgres",
+    ),
+    "tests.contract.test_model_artifact_store": (
+        "model_artifacts",
+        "model_artifacts",
+        "memory",
+    ),
+    "tests.integration.test_model_artifact_store_postgres": (
+        "model_artifacts",
+        "model_artifacts",
         "postgres",
     ),
     "tests.contract.test_web_session_store": (

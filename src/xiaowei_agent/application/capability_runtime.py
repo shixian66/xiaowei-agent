@@ -18,6 +18,8 @@ from xiaowei_agent.contracts import (
     RenderPayload,
     RequestContext,
     ResolvedTarget,
+    SlowQueryAdvisoryRequest,
+    TaskOutcome,
     TaskStatus,
 )
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
@@ -69,6 +71,20 @@ class CapabilityRenderer(Protocol):
     ) -> RenderPayload: ...
 
 
+class CapabilityAdvisoryProjector(Protocol):
+    """把 capability 证据收窄成无执行权的模型请求；不满足条件时拒绝。"""
+
+    def __call__(
+        self,
+        *,
+        task_id: str,
+        plan: ExecutionPlan,
+        outcome: TaskOutcome,
+        evidences: tuple[EvidenceEnvelope, ...],
+        verdict: AnswerabilityVerdict,
+    ) -> SlowQueryAdvisoryRequest | None: ...
+
+
 @dataclass(frozen=True)
 class CapabilityRuntimeBinding:
     """应用编排与 Runner 执行共同使用的一项显式能力装配。"""
@@ -80,6 +96,7 @@ class CapabilityRuntimeBinding:
     assessor: CapabilityAssessor
     renderer: CapabilityRenderer
     execution: CapabilityExecutionBinding
+    advisory_projector: CapabilityAdvisoryProjector | None = None
 
 
 class CapabilityBindingRegistry:

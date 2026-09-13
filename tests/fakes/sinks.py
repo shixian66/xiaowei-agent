@@ -4,7 +4,12 @@ import datetime as dt
 from collections.abc import Mapping
 from typing import Any
 
-from xiaowei_agent.contracts import PipelineStage, StageOutcome, TraceEvent
+from xiaowei_agent.contracts import (
+    ModelCallObservation,
+    PipelineStage,
+    StageOutcome,
+    TraceEvent,
+)
 from xiaowei_agent.observability.sink import Delivery
 
 _AT = dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC)
@@ -17,6 +22,7 @@ def make_event(
     detail: Mapping[str, str] | None = None,
     task_id: str | None = "task-1",
     event_id: str = "e1",
+    model: ModelCallObservation | None = None,
 ) -> TraceEvent:
     """``task_id`` 可以显式传 ``None``：契约允许没有任务归属的事件（任务创建之前
     就失败的请求），而审计表要求 NOT NULL，落差必须能被构造出来才能被测试。"""
@@ -32,6 +38,7 @@ def make_event(
         policy_revision="policy-2026-09-01",
         error=None,
         detail=dict(detail or {}),
+        model=model,
     )
 
 

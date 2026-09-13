@@ -261,6 +261,11 @@ The projector runs only after successful deterministic execution and a sufficien
 Answerability verdict. Rendering includes a stored advisory only for a `SUCCEEDED` task
 whose rebuilt typed input digest still matches.
 
+Accepted model intents bind provider/model/prompt/schema identity in their input digest
+and recovery check. Rule-origin intents have no causal relationship to that model profile:
+their digest binds only the scrubbed typed input plus `origin=rule`, provider identity stays
+empty, and model prompt/schema upgrades must not invalidate an unfinished rule task.
+
 RI3 places that typed projector in `application/model_advisory.py`: application is the
 layer allowed to consume both capability surfaces and Evidence. `rendering/` receives
 only already-validated display data, does not import `capabilities` or read
@@ -385,7 +390,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `TaskSubmission` | envelope、context、as_of、parent_task_id（可选） | parent 由 Web scoped lookup 与 Worker 逐跳复核；无父链时旧 request/submission/idempotency digest 字节不漂移 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
-| `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
+| `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；model origin 绑定模型 profile，rule origin 不绑定 Gemini revision；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
 | `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
