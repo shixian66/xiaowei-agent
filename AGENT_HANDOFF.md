@@ -57,7 +57,7 @@
 | RI3 PR 3D 合入 | 基于 `main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3`。PR [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 的 run [`34736983148`](https://github.com/shixian66/xiaowei-agent/actions/runs/34736983148) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `fb6718cc6f295206c7c125a887b34d2ee762e71f` 合入 `main`，且合入树与受审 head 无差异。交付统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核、确定性投影损坏拒绝、`rev_0009_task_parent_context` 与显式 Web 继续交互；旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。证据等级仍为 `tests` |
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
-| RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id 夹具漂移补修。证据等级 **`tests`**：`python -m pytest -q` 3785 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
+| RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
 | 下一步 | **PR #42 CI 全绿后合入；合入后由项目负责人在真机按 README 首启 runbook 实跑一次本地闭环（本轮未执行，见下方 RI5 未验证项）。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务。RI5 实现以 PR #42 / 当前 `main` 实时状态为准 |
@@ -308,7 +308,7 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 已验证
 
-- **RI5 本地管理面已离线实现完毕，证据等级 `tests`**：`claude/ri5-implementation` 上 12 个实现提交
+- **RI5 本地管理面已离线实现完毕，证据等级 `tests`**：`claude/ri5-implementation` 上 16 个实现提交
   交付 `.config/integrations.json` 单一明文真源、本地管理员登录与强制改密、`lan_http` / `https`
   两种 Web 模式、配置读写 API、加载回执与五态页面模型、三个控制面探针，以及 Compose/Dockerfile/
   前端面板/首启 runbook。四条基线全绿（数字见上表）。
@@ -339,10 +339,14 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   spy 驱动过；两个真实 transport 只在被 monkeypatch 的情况下走过错误映射分支，没有构造过任何
   SDK client。RI3 PR 3E 与 RI2 的现场 GO 仍未下达。
 - **未部署、未 canary、未用户验收。** TLS/Ingress/证书属 RI6，本轮不涉及。
-- **PR #42 已打开并跑过 CI。** CI 暴露过两项仅在真机 CI 路径出现的阻断：Alembic revision ID
+- **PR #42 已打开并跑过 CI。** CI 暴露过四项仅在真机 CI 路径出现的阻断：Alembic revision ID
   超过默认 `alembic_version.version_num varchar(32)`；smoke 合成 `integrations.json` 的飞书
-  `app_id` 与 OAuth URL 校验常量漂移。已分别补 `test_revision_ids_fit_the_default_alembic_version_column`
-  与 `test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke`。最终 CI 与合入状态以 GitHub
+  `app_id` 与 OAuth URL 校验常量漂移；smoke 只启用 `XIAOWEI_FEISHU_OAUTH_ENABLED` 却未启用
+  JSON Provider 消费层；以及 listener 在注入 fake transport 时未先取得 `app_id`，导致事件 scope
+  校验用 `None` 拒绝合法事件。已分别补 `test_revision_ids_fit_the_default_alembic_version_column`、
+  `test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke`、
+  `test_synthetic_feishu_config_enables_the_oauth_smoke_provider` 与
+  `test_feishu_listener_stack_requires_credentials_even_with_fake_transport`。最终 CI 与合入状态以 GitHub
   实时状态为准。
 
 - **RI3 PR 3D 已完成本地根因/边界验证、独立审查、CI 与合入**：从

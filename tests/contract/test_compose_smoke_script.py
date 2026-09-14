@@ -642,6 +642,18 @@ def test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke() -> No
     assert value["feishu"]["app_id"] == compose_smoke._WEB_APP_ID
 
 
+def test_synthetic_feishu_config_enables_the_oauth_smoke_provider() -> None:
+    """Smoke enables both RI5 layers before expecting /oauth/feishu/start to work."""
+    value = json.loads(
+        compose_smoke._synthetic_integration_config(
+            gemini_value="AIza" + "fake-smoke-key",
+            feishu_value="fake-feishu-secret",
+        )
+    )
+
+    assert value["feishu"]["enabled"] is True
+
+
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

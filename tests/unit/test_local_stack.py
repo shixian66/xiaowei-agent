@@ -961,6 +961,10 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     stack = await build_postgres_feishu_listener_stack(
         settings=_feishu_settings(identity_file, tmp_path / "missing-secret"),
         transport=fake_transport,
+        credentials=ProviderCredentials(
+            feishu_app_id="cli_listener",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
     )
 
     assert isinstance(stack, FeishuListenerStack)
@@ -996,6 +1000,29 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     assert stack.submission_service._web_parent_access is None
     await stack.aclose()
     assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_feishu_listener_stack_requires_credentials_even_with_fake_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """事件 scope 校验仍要用 app_id；fake transport 不能让 listener 带 None 启动。"""
+    identity_file = tmp_path / "identities.json"
+    _write_identity(identity_file)
+
+    def fail_engine(_: object) -> object:
+        raise AssertionError("missing credentials must stop before database assembly")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine", fail_engine
+    )
+
+    with pytest.raises(ValueError, match="feishu credentials are not configured"):
+        await build_postgres_feishu_listener_stack(
+            settings=_feishu_settings(identity_file, tmp_path / "missing-secret"),
+            transport=RecordingFeishuInboundTransport(),
+            credentials=ProviderCredentials(),
+        )
 
 
 @pytest.mark.asyncio
@@ -1037,6 +1064,10 @@ async def test_feishu_stack_disposes_engine_when_identity_loading_fails(
                 tmp_path / "missing-identities.json", tmp_path / "missing-secret"
             ),
             transport=RecordingFeishuInboundTransport(),
+            credentials=ProviderCredentials(
+                feishu_app_id="cli_listener",
+                feishu_app_secret="listener-" + "fixture-secret",
+            ),
         )
     assert engine.disposed is True
 

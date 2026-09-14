@@ -103,6 +103,7 @@ from tempfile import TemporaryDirectory
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 from xiaowei_agent.config import Settings
 from xiaowei_agent.interfaces.local_stack import build_postgres_feishu_listener_stack
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 
 async def main():
     with TemporaryDirectory() as directory:
@@ -126,6 +127,10 @@ async def main():
                 feishu_identity_file=str(identity),
             ),
             transport=RecordingFeishuInboundTransport(),
+            credentials=ProviderCredentials(
+                feishu_app_id="cli_listener",
+                feishu_app_secret="listener-" + "fixture-secret",
+            ),
         )
         await stack.aclose()
 

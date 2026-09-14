@@ -20,6 +20,7 @@ from xiaowei_agent.interfaces.local_stack import (
     build_postgres_local_stack,
     build_postgres_web_stack,
 )
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import create_app, session_cookie_name
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
@@ -191,6 +192,10 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
         settings=settings,
         clock=clock,
         transport=RecordingFeishuInboundTransport(),
+        credentials=ProviderCredentials(
+            feishu_app_id="offline_test_app",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
     )
     projection = await build_postgres_channel_worker_stack(
         settings=settings,

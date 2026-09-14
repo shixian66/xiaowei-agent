@@ -783,6 +783,7 @@ async def build_postgres_feishu_listener_stack(
     credentials, load_receipts = _resolved_credentials(
         settings, credentials, service_name=SERVICE_FEISHU_LISTENER
     )
+    app_id, app_secret = _feishu_credentials_or_fail(credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -818,10 +819,9 @@ async def build_postgres_feishu_listener_stack(
         )
         inbound = transport
         if inbound is None:
-            app_id, app_secret = _feishu_credentials_or_fail(credentials)
             inbound = FeishuSdkInboundTransport(app_id=app_id, app_secret=app_secret)
         listener = FeishuListener(
-            app_id=cast(str, credentials.feishu_app_id),
+            app_id=app_id,
             tenant_key=cast(str, settings.feishu_tenant_key),
             bot_open_id=cast(str, settings.feishu_bot_open_id),
             tenant_id=settings.tenant_id,
