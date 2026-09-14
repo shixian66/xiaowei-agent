@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在隔离 worktree `/Users/kloenguyen/.codex/worktrees/ffaf/agent` 完成 RI3 PR 3D 合并后交接；分支 `claude/ri3-pr3d-handoff` 基于 `origin/main@fb6718cc6f295206c7c125a887b34d2ee762e71f`。`/Users/kloenguyen/Desktop/agent` 主 checkout 本轮未触碰；M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
-| 截止时间 | 2026-09-13（Asia/Shanghai） |
-| 阶段 | **RI3 PR 3A–3D 已合入；PR 3D 交付 Web 显式父任务、受限历史组装和 `rev_0009_task_parent_context`，最强证据仍为 `tests`。PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”；没有读取真实 secret、发起 Gemini 网络调用、部署、canary 或用户验收证据。** |
+| 项目目录 | 当前在主 checkout `/Users/kloenguyen/Desktop/agent`，分支 `claude/ri5-local-web-admin` 基于 `origin/main@28f193200651ea4df4925b1481b971687f1003a5`。M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 截止时间 | 2026-09-14（Asia/Shanghai） |
+| 阶段 | **RI3 PR 3A–3D 已合入，PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”。RI5 的设计与 ADR 修订已于 2026-09-14 成套接受并合入 `main`（PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40)，ff 合并，无合并提交）；RI5 实现计划已写出、等待复审，源码尚未开始。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -55,9 +55,11 @@
 | RI3 PR 3B 合入 | 实现基线 `b31f7c464c75f0c3191060fceb040e61cb54131c`，最终受审 head `79675aeed895899282e6f4f697463f8b6b27e29b`；PR [#34](https://github.com/shixian66/xiaowei-agent/pull/34) 的 run [`34703681866`](https://github.com/shixian66/xiaowei-agent/actions/runs/34703681866) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `8374dc4255e88949cf5e638371b393bb01f6ed1c` 合入 `main` |
 | RI3 PR 3C 合入 | 基于 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`；最终受审 head `bc1812e72dada63a83776bfb159a04c970153c66`。PR [#36](https://github.com/shixian66/xiaowei-agent/pull/36) 的 run [`34730018472`](https://github.com/shixian66/xiaowei-agent/actions/runs/34730018472) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`，且合入树与受审 head 无差异。交付 grant-fenced insert-once intent/advisory、`rev_0008_model_artifacts`、entry-scoped heartbeat、MODEL trace、surface-derived 慢查询投影与终态 readback，证据等级仍为 `tests` |
 | RI3 PR 3D 合入 | 基于 `main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3`。PR [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 的 run [`34736983148`](https://github.com/shixian66/xiaowei-agent/actions/runs/34736983148) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `fb6718cc6f295206c7c125a887b34d2ee762e71f` 合入 `main`，且合入树与受审 head 无差异。交付统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核、确定性投影损坏拒绝、`rev_0009_task_parent_context` 与显式 Web 继续交互；旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。证据等级仍为 `tests` |
-| 下一步 | **等待项目负责人单独下达“RI3 Gemini test-env GO”，再从最新 `main` 开始 PR 3E；未获口令前不读取 key、不连接 Gemini、不启动现场验证。** RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
+| RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，9 个 Task。**等待复审，未获通过前不写源码。** 计划要求在 Task 9 之前不同步依赖、不联网；Gemini/飞书两个真实测试开关默认 `false`，实现与本地验收全程外部调用数为 0 |
+| 下一步 | **复审 RI5 实现计划；通过后才在 `claude/ri5-local-web-admin` 上按 TDD 写源码，并在源码开工前执行 `uv sync --extra dev --frozen` 与 ADR-008 四条完整基线。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务。**RI5 目前只有文档与计划，零行实现源码** |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
