@@ -62,6 +62,13 @@ class IdentitySource(StrEnum):
     FEISHU = "feishu"
 
 
+class ProviderName(StrEnum):
+    """`integrations.json` 里可配置的 Provider 闭集。"""
+
+    GEMINI = "gemini"
+    FEISHU = "feishu"
+
+
 class WebMode(StrEnum):
     """Web 对外暴露方式。决定 public origin 允许的协议与主机形态。
 

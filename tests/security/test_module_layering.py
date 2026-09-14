@@ -117,6 +117,9 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
+    "interfaces/integration_config_file.py": {
+        "xiaowei_agent.contracts",
+    },
     "interfaces/feishu_identity.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",

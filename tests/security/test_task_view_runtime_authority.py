@@ -45,6 +45,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.contracts.evidence
     xiaowei_agent.contracts.external
     xiaowei_agent.contracts.external_input
+    xiaowei_agent.contracts.integration_config
     xiaowei_agent.contracts.intent
     xiaowei_agent.contracts.model
     xiaowei_agent.contracts.plan

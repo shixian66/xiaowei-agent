@@ -409,7 +409,7 @@ git commit -m "feat(ri5): add web mode and rename web origin to a single source"
 
 `SecretRef` 是本 Task 新增的 `Annotated[StrictStr, AfterValidator(...)]`：非空、无控制字符、长度 ≤ 4096，且其 `__repr__`/序列化不参与 `model_dump()` 的默认输出（用 `Field(exclude=True)` 在 `IntegrationConfig.model_dump()` 时排除，另给显式 `secret_values()` 访问器）。
 
-- [ ] **Step 1: 写失败测试——契约与脱敏**
+- [x] **Step 1: 写失败测试——契约与脱敏**
 
 `tests/unit/test_integration_config.py`：
 
@@ -462,7 +462,7 @@ def test_secret_rejects_control_characters_and_oversize() -> None:
         GeminiIntegration(enabled=True, api_key="x" * 4097)
 ```
 
-- [ ] **Step 2: 写失败测试——加固读取与原子写入**
+- [x] **Step 2: 写失败测试——加固读取与原子写入**
 
 `tests/security/test_integration_config_boundary.py`：
 
@@ -610,13 +610,13 @@ def test_read_secret_file_still_refuses_this_json(tmp_path: Path) -> None:
         read_secret_file(str(target))
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `python -m pytest tests/unit/test_integration_config.py tests/security/test_integration_config_boundary.py -q`
 
 Expected: FAIL —— 模块不存在。
 
-- [ ] **Step 4: 实现契约与文件层**
+- [x] **Step 4: 实现契约与文件层**
 
 `contracts/integration_config.py` 按 Interfaces 定义模型，全部继承既有 `Contract` 基类（`extra="forbid"`、`frozen=True`、`hide_input_in_errors=True` 由基类提供）。Secret 字段用 `Field(default=None, exclude=True)`，并各自提供 `secret_value() -> str` 访问器，缺失时抛 `ValueError`。
 
@@ -673,13 +673,13 @@ def read_integration_config(path: str) -> IntegrationConfig:
 
 `write_integration_config()` 在**同目录**创建 `tempfile.mkstemp(dir=os.path.dirname(path))` 临时文件，`os.fchmod(fd, 0o600)`，写入 `json.dumps(..., ensure_ascii=False, sort_keys=True)`（含 secret，用一个内部 `_to_document(config)` 而非 `model_dump()`），`os.fsync(fd)`，关闭后 `os.replace(tmp, path)`，并 `os.fsync` 目录 fd。任何异常路径都 `os.unlink(tmp)`。异常文本固定为两条常量，不回填内容。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `python -m pytest tests/unit/test_integration_config.py tests/security/test_integration_config_boundary.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 6: 反证承重**
+- [x] **Step 6: 反证承重**
 
 临时把 `read_integration_config` 里的 `O_NOFOLLOW` 去掉，确认 `test_symlink_is_refused` 变红；把 `except FileNotFoundError` 那一支删掉（让断链与缺失都落到 `failed`），确认 `test_only_a_truly_absent_path_reports_missing` 变红；反过来把它挪到 `except (OSError, ValueError)` 之后，确认同一条仍然变红（Python 按顺序匹配，排在后面永远不会命中）；再把 `exclude=True` 去掉，确认 `test_model_dump_never_carries_secret_values` 变红。四处都恢复后重跑全绿。
 
@@ -687,12 +687,46 @@ Expected: PASS。
 PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_integration_config_boundary.py -q -p no:cacheprovider
 ```
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/xiaowei_agent/contracts/integration_config.py src/xiaowei_agent/contracts/enums.py src/xiaowei_agent/contracts/__init__.py src/xiaowei_agent/interfaces/integration_config_file.py tests/unit/test_integration_config.py tests/security/test_integration_config_boundary.py
 git commit -m "feat(ri5): add the integration config contract and hardened file layer"
 ```
+
+**Task 2 执行记录（2026-09-14）：** 四条基线全绿——`3573 passed, 227 skipped`（Task 1 后 3552）、
+`1307 security passed`、`ruff` 通过、`mypy` 166 files 通过。四条反证全部按预期变红后恢复：
+
+```text
+去掉 O_NOFOLLOW                     -> test_symlink_is_refused                        1 failed
+删掉 except FileNotFoundError       -> test_only_a_truly_absent_path_reports_missing  1 failed
+把它挪到 except (OSError, ...) 之后 -> test_only_a_truly_absent_path_reports_missing  1 failed
+去掉 exclude=True                   -> test_model_dump_never_carries_secret_values    1 failed
+恢复后                                                                               20 passed
+```
+
+三处与计划文字不同：
+
+1. **`test_error_text_never_repeats_file_content` 的 payload 原本是合法的**，
+   `{"generation": 1, "gemini": {...}, "feishu": {}}` 会通过校验（`feishu: {}` 就是全默认值），
+   于是 `pytest.raises` 直接 `DID NOT RAISE`——这条断言等于没跑。改成在同一棵 gemini 子树里
+   多放一个 `model` 键触发 `extra="forbid"`，让 payload **既非法又携带 secret**，并追加断言
+   `fake not in str(excinfo.value.__context__)`：`from None` 只设 `__suppress_context__`，
+   原始 `ValidationError` 仍挂在异常上，真正挡住原文的是 `Contract` 基类的
+   `hide_input_in_errors=True`。
+
+2. **落盘用 `indent=2`。** 计划只写了 `ensure_ascii=False, sort_keys=True`，但那样是单行 JSON，
+   `read_secret_file()` 会把它当成一个合法的单行 credential 原样读出来，
+   `test_read_secret_file_still_refuses_this_json` 必然失败。多行文档必含换行，旧 reader 的
+   控制字符检查因此一定拒绝它——「旧 reader 不得成为第二条读取路径」这条属性由格式本身保证。
+
+3. **三份闭集守卫需要登记新模块**（都是刻意设计成「新增即转红」的人工审查点）：
+   `tests/security/test_module_layering.py` 的 `_ALLOWED_INTERNAL_BY_FILE` 登记
+   `interfaces/integration_config_file.py`（只依赖 `xiaowei_agent.contracts`）；
+   `tests/security/test_task_view_runtime_authority.py` 的 `_TASK_VIEW_PROCESS_ALLOWED_MODULES`
+   登记 `xiaowei_agent.contracts.integration_config`（经 `contracts/__init__` 进入全部进程，
+   是纯契约模块，无 I/O 无 SDK）。后者被 web / listener / channel worker 三个 surface 测试共用，
+   一处登记同时修好四个失败。这两个文件已按 `git status` 补进 `git add`。
 
 ---
 

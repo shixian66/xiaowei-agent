@@ -57,6 +57,7 @@ from xiaowei_agent.contracts.enums import (
     ProjectionErrorCode,
     ProjectionState,
     PromqlGuardRejection,
+    ProviderName,
     RetryDecision,
     RetryReason,
     RiskLevel,
@@ -79,6 +80,12 @@ from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.external_input import ExternalInput
+from xiaowei_agent.contracts.integration_config import (
+    FeishuIntegration,
+    GeminiIntegration,
+    IntegrationConfig,
+    SecretRef,
+)
 from xiaowei_agent.contracts.intent import IntentDraft
 from xiaowei_agent.contracts.model import (
     MAX_ADVISORY_ROWS,
@@ -191,13 +198,16 @@ __all__ = [
     "ExternalInput",
     "ExternalInputKind",
     "ExternalSource",
+    "FeishuIntegration",
     "FeishuProjectionInput",
     "FiniteFloat",
     "FreeText",
     "FrozenMap",
     "FrozenStrMap",
+    "GeminiIntegration",
     "GrantRejection",
     "IdentitySource",
+    "IntegrationConfig",
     "IntentDraft",
     "IntentModelResult",
     "IntentSource",
@@ -227,6 +237,7 @@ __all__ = [
     "PromqlSurface",
     "ProviderIntentResponse",
     "ProviderIntentSlots",
+    "ProviderName",
     "ReadinessProbe",
     "ReadinessReport",
     "Rejection",
@@ -239,6 +250,7 @@ __all__ = [
     "RetryReason",
     "RiskLevel",
     "ScopeTaskPageQuery",
+    "SecretRef",
     "Sha256Hex",
     "SlowQueryAdvisoryRequest",
     "SqlGuardRejection",
