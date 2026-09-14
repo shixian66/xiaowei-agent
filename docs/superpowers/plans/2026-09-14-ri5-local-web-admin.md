@@ -44,7 +44,7 @@
 - Consumes: 无
 - Produces: 一份「开工前基线」记录，供后续 Task 判断某个失败是不是自己引入的
 
-- [ ] **Step 1: 同步依赖并激活虚拟环境**
+- [x] **Step 1: 同步依赖并激活虚拟环境**
 
 本机**没有裸 `python` 命令**，`.venv` 也不会自动激活。四条基线命令里的 `python` 全部指
 `.venv` 里那个，所以必须先激活（或全程用 `.venv/bin/python` 显式调用）：
@@ -59,7 +59,7 @@ which python         # 应指向 <repo>/.venv/bin/python
 后续所有 Task 的 `python -m pytest ...` 都默认在这个已激活的 shell 里执行。新开终端要重新
 `source`，否则会命中「command not found: python」而不是真正的测试失败。
 
-- [ ] **Step 2: 跑四条基线并记录**
+- [x] **Step 2: 跑四条基线并记录**
 
 ```bash
 python -m pytest -q
@@ -70,9 +70,25 @@ mypy src
 
 Expected: 四条全绿。若仍有失败，**先修环境或停下来报告，不要开工**——后续 Task 的「全绿」判据建立在这一步之上。
 
-- [ ] **Step 3: 记录基线**
+- [x] **Step 3: 记录基线**
 
 把四条命令的尾部输出记进本 Task 的执行记录。后续任一 Task 出现失败时，先与这份基线对比，确认是本轮引入而非既有。
+
+**开工前基线（2026-09-14，`main@c9b3cae`，分支 `claude/ri5-implementation`）：**
+
+```text
+uv sync --extra dev --frozen   # 补入 google-genai==2.23.0、lark-oapi==1.7.3 等 14 个包
+python -V                      Python 3.11.16  (<repo>/.venv/bin/python)
+
+python -m pytest -q            3534 passed, 227 skipped, 5 warnings in 21.44s
+python -m pytest -m security -q 1290 passed, 80 skipped, 2391 deselected, 5 warnings in 9.90s
+ruff check .                   All checks passed!
+mypy src                       Success: no issues found in 164 source files
+```
+
+同步前的 4 个收集错误（`test_gemini_sdk_seam.py`、`test_protocol_conformance.py`、
+`test_gemini_credential_boundary.py` 等）与 8 个失败用例全部消失，确认它们只是缺依赖。
+四条基线全绿，可以开工。
 
 ---
 
