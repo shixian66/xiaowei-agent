@@ -34,6 +34,7 @@ from xiaowei_agent.persistence.database import (
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryChannelStore, InMemoryTaskStore
+from xiaowei_agent.persistence.local_admin import PostgresLocalAdminStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.model_artifacts import (
     InMemoryModelArtifactStore,
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
     from xiaowei_agent.interfaces.feishu_identity import FeishuIdentityDirectory
     from xiaowei_agent.interfaces.feishu_listener import FeishuListener
     from xiaowei_agent.interfaces.feishu_sdk import FeishuInboundTransport
+    from xiaowei_agent.interfaces.local_admin_auth import LocalAdminAuthService
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort, WebAuthService
     from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.web_session import WebSessionStore
@@ -188,16 +190,22 @@ class ChannelWorkerStack:
 
 @dataclass(frozen=True)
 class WebStack:
-    """无执行权的 Web 认证与任务投影进程装配。"""
+    """无执行权的 Web 认证与任务投影进程装配。
 
-    auth: WebAuthService
-    oauth_port: FeishuOAuthPort
-    membership: FeishuMembershipPort
+    飞书那一组全部可选：本地管理员登录是 Web 的必备入口，飞书 OAuth 是插件。
+    ``oauth_available`` 恒等于 ``auth is not None``，不是第二个真源。
+    """
+
+    local_admin_auth: LocalAdminAuthService
+    oauth_available: bool
+    auth: WebAuthService | None
+    oauth_port: FeishuOAuthPort | None
+    membership: FeishuMembershipPort | None
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
     web_session_store: WebSessionStore
-    identity_directory: FeishuIdentityDirectory
+    identity_directory: FeishuIdentityDirectory | None
     task_access_service: TaskAccessService
     submission_service: ChannelSubmissionService
     clock: Clock
@@ -868,23 +876,36 @@ async def build_postgres_channel_worker_stack(
 async def build_postgres_web_stack(
     *,
     settings: Settings,
-    oauth: FeishuOAuthPort,
-    membership: FeishuMembershipPort,
+    oauth: FeishuOAuthPort | None = None,
+    membership: FeishuMembershipPort | None = None,
     clock: Clock = _utc_now,
 ) -> WebStack:
-    """用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端。"""
+    """用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端。
+
+    **本函数不读 `integrations.json`，也不看 ``settings.feishu_oauth_enabled``。**
+    读配置、判双层开关、构造真实 adapter 全部属于 composition root
+    （``web_app.serve_web``）。这里只反映传进来的事实：两个端口都在就装配飞书那一组，
+    否则不装配。谁传端口谁负责判断。
+    """
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.interfaces.feishu_identity import (
         FeishuIdentityConfigurationError,
         load_feishu_identity_directory,
     )
+    from xiaowei_agent.interfaces.local_admin_auth import (
+        INITIAL_LOCAL_ADMIN_PASSWORD,
+        LocalAdminAuthService,
+        hash_password,
+    )
     from xiaowei_agent.interfaces.web_auth import (
         FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         WebAuthService,
+        public_origin_is_safe,
+        web_origin_digest,
     )
 
-    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
+    if not settings.web_app_enabled:
         raise ValueError("Web app is disabled")
     engine = None
     database_invalid = False
@@ -918,11 +939,6 @@ async def build_postgres_web_stack(
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
-        identity_directory = load_feishu_identity_directory(
-            path=cast(str, settings.feishu_identity_file),
-            tenant_id=settings.tenant_id,
-            environment_id=settings.environment_id,
-        )
         task_access_service = TaskAccessService(
             runtime=runtime,
             task_store=task_store,
@@ -934,20 +950,54 @@ async def build_postgres_web_stack(
             channel_store=channel_store,
             web_parent_access=task_access_service,
         )
-        auth = WebAuthService(
-            sessions=web_session_store,
-            identities=identity_directory,
-            oauth=oauth,
-            public_origin=cast(str, settings.web_public_origin),
-            mode=settings.web_mode,
-            oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
-            session_ttl_seconds=settings.web_session_ttl_seconds,
-            oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
+        # 本地管理员是**必填**：store 构造或 seed 失败走下面的
+        # `except Exception: await engine.dispose(); raise`，使 composition 不成立、
+        # Web 不进入 ready——这正是设计要求的「seed 失败时 Web 不 ready」。
+        public_origin = cast(str, settings.web_public_origin)
+        if not public_origin_is_safe(public_origin, mode=settings.web_mode):
+            raise WebStackConfigurationError("web stack configuration invalid")
+        local_admin_store = PostgresLocalAdminStore(engine=engine, clock=clock)
+        await local_admin_store.seed_if_absent(
+            password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD)
         )
+        local_admin_auth = LocalAdminAuthService(
+            admins=local_admin_store,
+            sessions=web_session_store,
+            public_origin_digest=web_origin_digest(public_origin.rstrip("/")),
+            session_ttl_seconds=settings.web_session_ttl_seconds,
+        )
+
+        auth: WebAuthService | None = None
+        identity_directory: FeishuIdentityDirectory | None = None
+        if oauth is not None and membership is not None:
+            try:
+                identity_directory = load_feishu_identity_directory(
+                    path=cast(str, settings.feishu_identity_file),
+                    tenant_id=settings.tenant_id,
+                    environment_id=settings.environment_id,
+                )
+                auth = WebAuthService(
+                    sessions=web_session_store,
+                    identities=identity_directory,
+                    oauth=oauth,
+                    public_origin=public_origin,
+                    mode=settings.web_mode,
+                    oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
+                    session_ttl_seconds=settings.web_session_ttl_seconds,
+                    oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
+                )
+            except (FeishuIdentityConfigurationError, ValueError):
+                # 只标记不可用；不 dispose engine，不抛出，Web 进程照常起来。
+                # 捕获集合必须含 ValueError——WebAuthService.__init__ 对 origin/ttl
+                # 非法抛的就是它，不能让它把整个 Web 打挂。
+                auth = None
+                identity_directory = None
         return WebStack(
+            local_admin_auth=local_admin_auth,
+            oauth_available=auth is not None,
             auth=auth,
-            oauth_port=oauth,
-            membership=membership,
+            oauth_port=oauth if auth is not None else None,
+            membership=membership if auth is not None else None,
             runtime=runtime,
             task_store=task_store,
             channel_store=channel_store,
@@ -961,12 +1011,9 @@ async def build_postgres_web_stack(
             aclose=close,
             policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
         )
-    except FeishuIdentityConfigurationError:
-        await engine.dispose()
     except Exception:
         await engine.dispose()
         raise
-    raise WebStackConfigurationError("web stack configuration invalid")
 
 
 async def build_postgres_local_stack(

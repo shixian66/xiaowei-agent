@@ -27,17 +27,6 @@ pytestmark = pytest.mark.security
 _SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 
 
-def _contract_classes(tree: ast.Module) -> set[str]:
-    """同一文件内 ``Contract`` 子类的传递闭包。"""
-    kinds = {"Contract"}
-    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-    for _ in range(len(classes) + 1):
-        for cls in classes:
-            if {b.id for b in cls.bases if isinstance(b, ast.Name)} & kinds:
-                kinds.add(cls.name)
-    return kinds
-
-
 def _field_flags(value: ast.expr | None) -> dict[str, object]:
     """从 ``Field(...)`` 调用里取出关键字实参；不是 ``Field(...)`` 就返回空。"""
     if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
@@ -52,14 +41,15 @@ def _field_flags(value: ast.expr | None) -> dict[str, object]:
 
 
 def secret_fields() -> list[tuple[str, str, str, dict[str, object]]]:
-    """全部标注为 ``Secret*`` 的契约字段：(文件, 类名, 字段名, Field 关键字)。"""
+    """全部标注为 ``Secret*`` 的模型字段：(文件, 类名, 字段名, Field 关键字)。"""
     found: list[tuple[str, str, str, dict[str, object]]] = []
     for path in sorted(_SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        kinds = _contract_classes(tree)
+        # **不限定基类**：``Contract``、``_WebModel`` 还是别的 BaseModel 子类都一样
+        # 会通过 ``repr()`` 与 ``model_dump()`` 泄漏。第一版按 ``Contract`` 子类扫，
+        # 结果 ``web_models.py`` 的口令字段整组漏网——基类是实现细节，
+        # 标记类型才是作者写下"这是凭据"的地方。
         for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
-            if not ({b.id for b in cls.bases if isinstance(b, ast.Name)} & kinds):
-                continue
             for stmt in cls.body:
                 if not isinstance(stmt, ast.AnnAssign) or not isinstance(
                     stmt.target, ast.Name
@@ -89,6 +79,9 @@ def test_the_scan_actually_finds_the_known_secret_fields() -> None:
         ("FeishuIntegration", "app_secret"),
         ("LocalAdminRecord", "password_hash"),
         ("ChangePasswordCommand", "password_hash"),
+        ("WebLoginRequest", "password"),
+        ("WebChangePasswordRequest", "current_password"),
+        ("WebChangePasswordRequest", "new_password"),
     } <= names
 
 

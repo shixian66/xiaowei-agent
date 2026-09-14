@@ -40,6 +40,14 @@ from xiaowei_agent.persistence.web_session import (
     WebSessionStore,
 )
 
+INITIAL_LOCAL_ADMIN_PASSWORD: Final[str] = "adm" + "in"
+"""首次 seed 的初始口令。
+
+写成常量而不是随机值：运维必须能在没有任何带外通道的情况下完成第一次登录。
+配套约束是 ``must_change_password=True``——在改密之前，除登录/改密/退出以外的
+所有接口一律拒绝，因此这个众所周知的口令不构成一个可用的长期凭据。
+"""
+
 _SCRYPT_N: Final[int] = 2**14
 _SCRYPT_R: Final[int] = 8
 _SCRYPT_P: Final[int] = 1

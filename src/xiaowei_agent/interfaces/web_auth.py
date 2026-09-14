@@ -186,6 +186,51 @@ def web_origin_digest(public_origin: str) -> str:
     return _digest(domain="web-origin:v1", secret=public_origin)
 
 
+def validate_unauthenticated_origin(
+    *, public_origin: str, origin: str | None, content_type: str | None
+) -> None:
+    """未登录状态变更的窄校验；**不派生也不检查 CSRF token**。
+
+    首次登录必然没有 session cookie，而 CSRF token 是从 session cookie 派生的——
+    让登录复用 :func:`validate_state_change` 等于要求用户先有 session 才能登录，
+    第一次登录会稳定 403，整条闭环卡死在第一步。
+
+    放宽的只有 CSRF 这一项，且仅限登录：``Origin`` 精确等于固定 public origin
+    已足以挡住跨站表单提交（跨站脚本无法伪造 ``Origin``），而此刻浏览器里还不存在
+    任何 ``SameSite=Lax`` 的凭据，因此没有可被 CSRF 滥用的既有权限。
+    """
+    if not _constant_time_ascii_equal(origin, public_origin):
+        raise WebOriginError
+    if (
+        content_type is None
+        or content_type.split(";")[0].strip().lower() != "application/json"
+    ):
+        raise WebCsrfError
+
+
+def validate_state_change(
+    *,
+    public_origin: str,
+    session_cookie: str,
+    origin: str | None,
+    csrf_token: str | None,
+) -> None:
+    """校验严格同源和当前 session 派生的 CSRF token。
+
+    做成模块级函数：本地管理员路径没有 ``WebAuthService``（飞书可能整个不装配），
+    但它写的是同一张 session 表、用同一个 CSRF 域，判定必须是同一份实现。
+    """
+    if not _constant_time_ascii_equal(origin, public_origin):
+        raise WebOriginError
+    if not _secret_is_valid(session_cookie):
+        raise WebCsrfError
+    expected = web_csrf_token(session_cookie)
+    if not _secret_is_valid(csrf_token) or not _constant_time_ascii_equal(
+        csrf_token, expected
+    ):
+        raise WebCsrfError
+
+
 def _provider_https_url(value: str) -> SplitResult | None:
     """Provider 侧 URL 的 HTTPS 硬门。
 
@@ -434,15 +479,12 @@ class WebAuthService:
         csrf_token: str | None,
     ) -> None:
         """校验严格同源和当前 session 派生的 CSRF token。"""
-        if not _constant_time_ascii_equal(origin, self._public_origin):
-            raise WebOriginError
-        if not _secret_is_valid(session_cookie):
-            raise WebCsrfError
-        expected = web_csrf_token(session_cookie)
-        if not _secret_is_valid(csrf_token) or not _constant_time_ascii_equal(
-            csrf_token, expected
-        ):
-            raise WebCsrfError
+        validate_state_change(
+            public_origin=self._public_origin,
+            session_cookie=session_cookie,
+            origin=origin,
+            csrf_token=csrf_token,
+        )
 
     async def logout(self, *, session_cookie: str | None) -> None:
         """幂等撤销当前 session；无效 cookie 不泄露其存在性。"""
@@ -473,6 +515,8 @@ __all__ = [
     "WebOAuthUnavailableError",
     "WebOriginError",
     "public_origin_is_safe",
+    "validate_state_change",
+    "validate_unauthenticated_origin",
     "web_csrf_token",
     "web_origin_digest",
     "web_session_digest",

@@ -5,21 +5,23 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass, field
 from importlib.resources import files
-from typing import Annotated, Final, cast
+from typing import Annotated, Final, TypeVar, cast
 from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from xiaowei_agent.application.channel_access import (
+    FeishuMembershipPort,
     TaskAccessNotFoundError,
     TaskAccessQuery,
     TaskAccessService,
@@ -39,15 +41,26 @@ from xiaowei_agent.config import (
     ConfigError,
     Settings,
     canonical_non_ip_hostname,
+    canonical_web_public_origin,
     load_settings,
 )
-from xiaowei_agent.contracts import TASK_ID_PATTERN, ChannelKind, ReadinessProbe
+from xiaowei_agent.contracts import (
+    TASK_ID_PATTERN,
+    AuthenticatedPrincipal,
+    ChannelKind,
+    ReadinessProbe,
+    WebMode,
+)
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
+from xiaowei_agent.interfaces.local_admin_auth import (
+    LocalAdminAuthenticationError,
+    LocalAdminAuthService,
+)
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
-    AuthenticatedWebSession,
+    FeishuOAuthPort,
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
@@ -55,9 +68,13 @@ from xiaowei_agent.interfaces.web_auth import (
     WebOAuthStateError,
     WebOAuthUnavailableError,
     WebOriginError,
+    validate_state_change,
+    validate_unauthenticated_origin,
 )
 from xiaowei_agent.interfaces.web_models import (
+    WebChangePasswordRequest,
     WebCurrentUser,
+    WebLoginRequest,
     WebTaskAccepted,
     WebTaskDetail,
     WebTaskPage,
@@ -66,8 +83,36 @@ from xiaowei_agent.interfaces.web_models import (
 from xiaowei_agent.log import configure_logging
 from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
-SESSION_COOKIE_NAME: Final[str] = "__Host-xiaowei-session"
-OAUTH_STATE_COOKIE_NAME: Final[str] = "__Host-xiaowei-oauth-state"
+_BodyT = TypeVar("_BodyT", bound=BaseModel)
+
+_SESSION_COOKIE_BASE: Final[str] = "xiaowei-session"
+_OAUTH_STATE_COOKIE_BASE: Final[str] = "xiaowei-oauth-state"
+ALL_SESSION_COOKIE_NAMES: Final[tuple[str, ...]] = (
+    f"__Host-{_SESSION_COOKIE_BASE}",
+    _SESSION_COOKIE_BASE,
+)
+ALL_OAUTH_STATE_COOKIE_NAMES: Final[tuple[str, ...]] = (
+    f"__Host-{_OAUTH_STATE_COOKIE_BASE}",
+    _OAUTH_STATE_COOKIE_BASE,
+)
+
+
+def session_cookie_name(mode: WebMode) -> str:
+    """session cookie 名。
+
+    ``__Host-`` 前缀要求 ``Secure``，而 ``lan_http`` 下没有 TLS，带前缀的 cookie
+    会被浏览器整个丢掉——不是"降级为不安全"，是登录直接不工作。因此按模式取名。
+    """
+    return f"__Host-{_SESSION_COOKIE_BASE}" if mode is WebMode.HTTPS else _SESSION_COOKIE_BASE
+
+
+def oauth_state_cookie_name(mode: WebMode) -> str:
+    """OAuth state cookie 名；同理。"""
+    return (
+        f"__Host-{_OAUTH_STATE_COOKIE_BASE}"
+        if mode is WebMode.HTTPS
+        else _OAUTH_STATE_COOKIE_BASE
+    )
 _CSRF_HEADER: Final[str] = "x-csrf-token"
 _CSP: Final[str] = (
     "default-src 'self'; "
@@ -114,15 +159,25 @@ class _WebConfigurationError(RuntimeError):
     """Web 真实装配所需的文件引用无效；不保留原始异常。"""
 
 
+class _PasswordChangeRequiredError(RuntimeError):
+    """初始口令尚未更换；除登录/改密/退出外一律拒绝。"""
+
+
 class _WebInputError(ValueError):
     """Web 协议字段形状不合法；异常正文不返回浏览器。"""
 
 
 class _SecurityHeadersMiddleware:
-    """为正常、框架错误和 body 边界响应统一附加浏览器安全头。"""
+    """为正常、框架错误和 body 边界响应统一附加浏览器安全头。
 
-    def __init__(self, app: ASGIApp) -> None:
+    ``hsts`` 由 Web 模式决定：``lan_http`` 下发 HSTS 会让浏览器把整个
+    局域网 IP 记成"只许 HTTPS"，之后连管理面自己都打不开，且该记录在
+    max-age 内无法撤销。
+    """
+
+    def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
         self._app = app
+        self._hsts = hsts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         async def send_with_headers(message: Message) -> None:
@@ -147,16 +202,44 @@ class _SecurityHeadersMiddleware:
                         (b"x-content-type-options", b"nosniff"),
                         (b"referrer-policy", b"no-referrer"),
                         (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
-                        (b"strict-transport-security", _HSTS),
                     )
                 )
+                if self._hsts:
+                    headers.append((b"strict-transport-security", _HSTS))
                 message = {**message, "headers": headers}
             await send(message)
 
         await self._app(scope, receive, send_with_headers)
 
 
-def _canonical_host_header(value: str) -> str | None:
+def _canonical_host_header(value: str, *, mode: WebMode) -> str | None:
+    """规范化 ``Host`` 头，按 Web 模式决定允许的主机形态。
+
+    这里原本无条件走 :func:`canonical_non_ip_hostname`——即"主机名，绝不是 IP"。
+    那是 HTTPS 模式的前提：证书签给域名。``lan_http`` 的 authority 本身就是
+    IP 字面量，沿用同一条规则会让**每一个**请求都被判成不可信 Host 而 403，
+    管理面根本打不开。与 ``public_origin_is_safe`` 是同一类问题、同一种修法：
+    协议与主机形态的放宽只作用于本方，且必须由模式显式决定。
+    """
+    if mode is WebMode.LAN_HTTP:
+        return _canonical_lan_authority(value)
+    return _canonical_https_host_header(value)
+
+
+def _canonical_lan_authority(value: str) -> str | None:
+    """只接受 canonical loopback/RFC1918 IPv4 + 显式端口。
+
+    复用 :func:`canonical_web_public_origin` 的判定，而不是在这里重写一遍 IP
+    规范化——两份实现会以第一次就出现过的方式漂移。
+    """
+    try:
+        origin = canonical_web_public_origin(f"http://{value}", mode=WebMode.LAN_HTTP)
+    except ValueError:
+        return None
+    return urlsplit(origin).netloc
+
+
+def _canonical_https_host_header(value: str) -> str | None:
     if (
         not value
         or not value.isascii()
@@ -260,11 +343,12 @@ def _silence_uvicorn_loggers() -> None:
 class _WebRequestBoundaryMiddleware:
     """绑定服务端 trace，并只按固定 SSO authority/origin 接受 Web 请求。"""
 
-    def __init__(self, app: ASGIApp, *, public_origin: str) -> None:
+    def __init__(self, app: ASGIApp, *, public_origin: str, mode: WebMode) -> None:
         self._app = app
         parsed = urlsplit(public_origin)
         self._public_origin = public_origin
         self._authority = parsed.netloc
+        self._mode = mode
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -297,7 +381,8 @@ class _WebRequestBoundaryMiddleware:
                     origins = _header_values(scope, b"origin")
                     trusted = (
                         len(hosts) == 1
-                        and _canonical_host_header(hosts[0]) == self._authority
+                        and _canonical_host_header(hosts[0], mode=self._mode)
+                        == self._authority
                         and (
                             not origins
                             or (
@@ -369,6 +454,10 @@ async def _oauth_unavailable(_: Request, __: Exception) -> Response:
     return _error(503, "unavailable")
 
 
+async def _password_change_required(_: Request, __: Exception) -> Response:
+    return _error(403, "password_change_required")
+
+
 async def _forbidden(_: Request, __: Exception) -> Response:
     return _error(403, "forbidden")
 
@@ -402,26 +491,39 @@ def _set_secret_cookie(
     name: str,
     value: str,
     max_age: int,
+    secure: bool,
 ) -> None:
     response.set_cookie(
         key=name,
         value=value,
         max_age=max_age,
         path="/",
-        secure=True,
+        secure=secure,
         httponly=True,
         samesite="lax",
     )
 
 
-def _clear_secret_cookie(response: Response, *, name: str) -> None:
+def _clear_secret_cookie(response: Response, *, name: str, secure: bool) -> None:
     response.delete_cookie(
         key=name,
         path="/",
-        secure=True,
+        secure=secure,
         httponly=True,
         samesite="lax",
     )
+
+
+def _clear_all_known_cookies(
+    response: Response, *, names: tuple[str, ...], secure: bool
+) -> None:
+    """两个已知 cookie 名都清一遍。
+
+    切换 ``XIAOWEI_WEB_MODE`` 之后浏览器里可能同时留着 ``__Host-`` 版和普通版；
+    只清当前模式那一个会留下一个永远读不到、也永远不过期的残留 cookie。
+    """
+    for name in names:
+        _clear_secret_cookie(response, name=name, secure=secure)
 
 
 def _is_json_request(request: Request) -> bool:
@@ -442,6 +544,52 @@ def _single_cookie(request: Request, *, name: str) -> tuple[str | None, bool]:
     if len(matches) > 1:
         return None, False
     return (matches[0] if matches else None), True
+
+
+def _login_shell(*, oauth_available: bool) -> str:
+    """未登录时的最小登录壳。
+
+    只含口令表单与同源提交脚本：**不加载**任务列表、配置面板或任何需要会话的
+    资源，否则未登录页面自己就会触发一串 401。飞书入口仅在装配成功时渲染，
+    避免出现一个点进去必然失败的假入口。
+    """
+    oauth_entry = (
+        '<p><a id="feishu-oauth" href="/oauth/feishu/start">使用飞书登录</a></p>'
+        if oauth_available
+        else ""
+    )
+    return (
+        "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
+        "<title>小维 Agent 登录</title>"
+        '<link rel="stylesheet" href="/app/static/app.css"></head><body>'
+        "<main><h1>登录</h1>"
+        '<form id="login-form" method="post" action="/app/api/login">'
+        '<label for="password">口令</label>'
+        '<input id="password" name="password" type="password"'
+        ' autocomplete="current-password" required>'
+        '<button type="submit">登录</button></form>'
+        f"{oauth_entry}"
+        '<script src="/app/static/login.js"></script>'
+        "</main></body></html>"
+    )
+
+
+def _password_change_shell() -> str:
+    """强制改密壳；初始口令是源码常量，改完之前不放行任何业务接口。"""
+    return (
+        "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
+        "<title>小维 Agent 修改口令</title>"
+        '<link rel="stylesheet" href="/app/static/app.css"></head><body>'
+        "<main><h1>请先修改初始口令</h1>"
+        '<form id="change-password-form" method="post" action="/app/api/change-password">'
+        '<label for="current-password">当前口令</label>'
+        '<input id="current-password" name="current_password" type="password" required>'
+        '<label for="new-password">新口令</label>'
+        '<input id="new-password" name="new_password" type="password" required>'
+        '<button type="submit">提交</button></form>'
+        '<script src="/app/static/login.js"></script>'
+        "</main></body></html>"
+    )
 
 
 def _asset_text(name: str) -> str:
@@ -501,6 +649,27 @@ def _reject_non_json_constant(_: str) -> None:
     raise _WebInputError
 
 
+async def _typed_body(request: Request, model: type[_BodyT]) -> _BodyT:
+    """严格 JSON 解析：拒绝重复键、JSON 常量与任何 schema 偏差。"""
+    try:
+        value = json.loads(
+            await request.body(),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_non_json_constant,
+        )
+        return model.model_validate(value)
+    except (UnicodeError, ValueError, TypeError, ValidationError):
+        raise _WebInputError from None
+
+
+async def _login_body(request: Request) -> WebLoginRequest:
+    return await _typed_body(request, WebLoginRequest)
+
+
+async def _change_password_body(request: Request) -> WebChangePasswordRequest:
+    return await _typed_body(request, WebChangePasswordRequest)
+
+
 async def _task_submit_body(request: Request) -> WebTaskSubmitRequest:
     try:
         value = json.loads(
@@ -513,33 +682,86 @@ async def _task_submit_body(request: Request) -> WebTaskSubmitRequest:
         raise _WebInputError from None
 
 
+@dataclass(frozen=True)
+class _WebPrincipalSession:
+    """两条认证路径的统一结果。
+
+    本地管理员与飞书 OAuth 写的是同一张 ``web_sessions`` 表、用的是同一个
+    cookie 名和同一套 digest 域，路由层因此只需要一种会话形状。
+    ``must_change_password`` 只有本地管理员可能为真。
+    """
+
+    cookie: str = field(repr=False)
+    principal: AuthenticatedPrincipal
+    csrf_token: str = field(repr=False)
+    must_change_password: bool
+
+
 async def _authenticated(
-    request: Request, *, auth: WebAuthService
-) -> tuple[str, AuthenticatedWebSession]:
-    cookie, unambiguous = _single_cookie(request, name=SESSION_COOKIE_NAME)
-    if not unambiguous:
+    request: Request,
+    *,
+    local_admin_auth: LocalAdminAuthService,
+    auth: WebAuthService | None,
+    cookie_name: str,
+) -> _WebPrincipalSession:
+    """先按本地管理员解析，再回落到飞书 OAuth。
+
+    顺序不能反：``LocalAdminAuthService.authenticate`` 会核对 ``auth_source``，
+    飞书签发的 session 在那一步就被拒，因此回落是安全的；反过来
+    ``WebAuthService`` 会拿本地管理员的 ``subject_ref`` 去查身份目录，得到的是
+    一个语义错误的"身份不存在"。
+    """
+    cookie, unambiguous = _single_cookie(request, name=cookie_name)
+    if not unambiguous or cookie is None:
+        raise WebAuthenticationError
+    try:
+        local = await local_admin_auth.authenticate(session_cookie=cookie)
+    except LocalAdminAuthenticationError:
+        pass
+    else:
+        return _WebPrincipalSession(
+            cookie=cookie,
+            principal=local.principal,
+            csrf_token=local.csrf_token,
+            must_change_password=local.must_change_password,
+        )
+    if auth is None:
         raise WebAuthenticationError
     session = await auth.authenticate(session_cookie=cookie)
-    if cookie is None:  # authenticate() 已 fail-closed；保留窄化供类型检查。
-        raise WebAuthenticationError
-    return cookie, session
+    return _WebPrincipalSession(
+        cookie=cookie,
+        principal=session.principal,
+        csrf_token=session.csrf_token,
+        must_change_password=False,
+    )
+
+
+def _state_change_headers(request: Request) -> tuple[str | None, str | None]:
+    origins = request.headers.getlist("origin")
+    csrf_tokens = request.headers.getlist(_CSRF_HEADER)
+    return (
+        origins[0] if len(origins) == 1 else None,
+        csrf_tokens[0] if len(csrf_tokens) == 1 else None,
+    )
 
 
 def _validate_state_change(
-    request: Request, *, auth: WebAuthService, session_cookie: str
+    request: Request, *, public_origin: str, session_cookie: str
 ) -> None:
-    origins = request.headers.getlist("origin")
-    csrf_tokens = request.headers.getlist(_CSRF_HEADER)
-    auth.validate_state_change(
+    origin, csrf_token = _state_change_headers(request)
+    validate_state_change(
+        public_origin=public_origin,
         session_cookie=session_cookie,
-        origin=origins[0] if len(origins) == 1 else None,
-        csrf_token=csrf_tokens[0] if len(csrf_tokens) == 1 else None,
+        origin=origin,
+        csrf_token=csrf_token,
     )
 
 
 def create_app(
     *,
-    auth: WebAuthService,
+    auth: WebAuthService | None,
+    local_admin_auth: LocalAdminAuthService,
+    oauth_available: bool,
     settings: Settings,
     readiness: ReadinessProbe,
     task_access: TaskAccessService,
@@ -547,9 +769,20 @@ def create_app(
     clock: Clock,
     policy_revision: str,
 ) -> FastAPI:
-    """注册认证与薄任务投影路由，不装配执行 Runtime。"""
-    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
+    """注册认证与薄任务投影路由，不装配执行 Runtime。
+
+    ``auth is None`` 时**不注册**两条 OAuth 路由——不是注册后返回 503。
+    「路由在但永远失败」是假入口，M7 §2.5 明文禁止。
+    """
+    if not settings.web_app_enabled:
         raise ValueError("Web app is disabled")
+    if oauth_available != (auth is not None):
+        raise ValueError("oauth availability does not match the assembled service")
+    mode = settings.web_mode
+    secure_cookies = mode is WebMode.HTTPS
+    session_cookie = session_cookie_name(mode)
+    oauth_state_cookie = oauth_state_cookie_name(mode)
+    public_origin = cast(str, settings.web_public_origin).rstrip("/")
     index_shell = _asset_text("index.html")
     detail_shell = _asset_text("detail.html")
     static_assets = {name: _asset_text(name) for name in _STATIC_MEDIA_TYPES}
@@ -562,14 +795,32 @@ def create_app(
     app.add_middleware(
         JsonBodyLimitMiddleware,
         limit=settings.api_request_body_limit_bytes,
-        paths=frozenset({"/app/api/logout", "/app/api/tasks"}),
+        # 每一个 JSON 写入口都必须在这里，否则它没有 body 大小上限。
+        # 三个 config/test 子路径逐条列全：中间件是精确匹配，不做前缀。
+        paths=frozenset(
+            {
+                "/app/api/logout",
+                "/app/api/tasks",
+                "/app/api/login",
+                "/app/api/change-password",
+                "/app/api/config",
+                "/app/api/config/clear",
+                "/app/api/config/test/gemini_connection",
+                "/app/api/config/test/feishu_credentials",
+                "/app/api/config/test/feishu_oauth",
+            }
+        ),
     )
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
+    app.add_exception_handler(LocalAdminAuthenticationError, _authentication_error)
     app.add_exception_handler(WebOAuthStateError, _oauth_input_error)
     app.add_exception_handler(WebOAuthCodeError, _oauth_input_error)
     app.add_exception_handler(WebOAuthUnavailableError, _oauth_unavailable)
+    app.add_exception_handler(
+        _PasswordChangeRequiredError, _password_change_required
+    )
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
     app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
@@ -580,82 +831,112 @@ def create_app(
     app.add_exception_handler(_WebInputError, _input_error)
     app.add_exception_handler(Exception, _application_error)
 
-    @app.get("/oauth/feishu/start")
-    async def oauth_start() -> Response:
-        started = await auth.start_login()
-        response = RedirectResponse(started.authorization_url, status_code=302)
-        _set_secret_cookie(
-            response,
-            name=OAUTH_STATE_COOKIE_NAME,
-            value=started.state_cookie,
-            max_age=started.max_age_seconds,
-        )
-        return response
-
-    @app.get("/oauth/feishu/callback")
-    async def oauth_callback(
-        request: Request,
-        code: Annotated[str, Query(min_length=1, max_length=2048)],
-        state: Annotated[str, Query(min_length=1, max_length=512)],
-    ) -> Response:
-        response: Response
-        state_cookie, state_cookie_is_unambiguous = _single_cookie(
-            request, name=OAUTH_STATE_COOKIE_NAME
-        )
-        previous_session, session_cookie_is_unambiguous = _single_cookie(
-            request, name=SESSION_COOKIE_NAME
-        )
-        if request.query_params.getlist("code") != [code] or request.query_params.getlist(
-            "state"
-        ) != [state] or not (
-            state_cookie_is_unambiguous and session_cookie_is_unambiguous
-        ):
-            response = _error(400, "invalid_request")
-            _clear_secret_cookie(response, name=OAUTH_STATE_COOKIE_NAME)
-            return response
-        try:
-            issued = await auth.complete_login(
-                code=code,
-                state=state,
-                state_cookie=state_cookie,
-                previous_session_cookie=previous_session,
-            )
-        except WebAuthenticationError:
-            response = _error(401, "unauthorized")
-        except (WebOAuthStateError, WebOAuthCodeError):
-            response = _error(400, "invalid_request")
-        except WebOAuthUnavailableError:
-            response = _error(503, "unavailable")
-        else:
-            response = RedirectResponse("/app", status_code=302)
+    if auth is not None:
+        @app.get("/oauth/feishu/start")
+        async def oauth_start() -> Response:
+            started = await auth.start_login()
+            response = RedirectResponse(started.authorization_url, status_code=302)
             _set_secret_cookie(
                 response,
-                name=SESSION_COOKIE_NAME,
-                value=issued.session_cookie,
-                max_age=issued.max_age_seconds,
+                name=oauth_state_cookie,
+                value=started.state_cookie,
+                max_age=started.max_age_seconds,
+                secure=secure_cookies,
             )
-        _clear_secret_cookie(response, name=OAUTH_STATE_COOKIE_NAME)
-        return response
+            return response
+
+        @app.get("/oauth/feishu/callback")
+        async def oauth_callback(
+            request: Request,
+            code: Annotated[str, Query(min_length=1, max_length=2048)],
+            state: Annotated[str, Query(min_length=1, max_length=512)],
+        ) -> Response:
+            response: Response
+            state_cookie, state_cookie_is_unambiguous = _single_cookie(
+                request, name=oauth_state_cookie
+            )
+            previous_session, session_cookie_is_unambiguous = _single_cookie(
+                request, name=session_cookie
+            )
+            if request.query_params.getlist("code") != [code] or request.query_params.getlist(
+                "state"
+            ) != [state] or not (
+                state_cookie_is_unambiguous and session_cookie_is_unambiguous
+            ):
+                response = _error(400, "invalid_request")
+                _clear_secret_cookie(response, name=oauth_state_cookie, secure=secure_cookies)
+                return response
+            try:
+                issued = await auth.complete_login(
+                    code=code,
+                    state=state,
+                    state_cookie=state_cookie,
+                    previous_session_cookie=previous_session,
+                )
+            except WebAuthenticationError:
+                response = _error(401, "unauthorized")
+            except (WebOAuthStateError, WebOAuthCodeError):
+                response = _error(400, "invalid_request")
+            except WebOAuthUnavailableError:
+                response = _error(503, "unavailable")
+            else:
+                response = RedirectResponse("/app", status_code=302)
+                _set_secret_cookie(
+                    response,
+                    name=session_cookie,
+                    value=issued.session_cookie,
+                    max_age=issued.max_age_seconds,
+                    secure=secure_cookies,
+                )
+            _clear_secret_cookie(response, name=oauth_state_cookie, secure=secure_cookies)
+            return response
+
+    async def session_of(request: Request) -> _WebPrincipalSession:
+        return await _authenticated(
+            request,
+            local_admin_auth=local_admin_auth,
+            auth=auth,
+            cookie_name=session_cookie,
+        )
+
+    async def session_allowed_to_work(request: Request) -> _WebPrincipalSession:
+        """改密之前只放行 login / change-password / logout。
+
+        初始口令是常量，因此"已登录"在改密前不等于"可以做事"。这个闸门放在
+        每条业务路由的入口，而不是某个中间件按路径名单放行——名单会随新增路由漂移。
+        """
+        session = await session_of(request)
+        if session.must_change_password:
+            raise _PasswordChangeRequiredError
+        return session
 
     @app.get("/app")
     async def shell(request: Request) -> Response:
-        await _authenticated(request, auth=auth)
+        try:
+            session = await session_of(request)
+        except (WebAuthenticationError, LocalAdminAuthenticationError):
+            # 未登录必须拿到登录壳：否则本地管理员没有任何入口能取到表单。
+            return HTMLResponse(_login_shell(oauth_available=oauth_available))
+        if session.must_change_password:
+            return HTMLResponse(_password_change_shell())
         return HTMLResponse(index_shell)
 
     @app.get("/app/tasks/{task_id}")
     async def detail_shell_route(request: Request, task_id: str) -> Response:
-        await _authenticated(request, auth=auth)
+        await session_allowed_to_work(request)
         _task_id_or_not_found(task_id)
         return HTMLResponse(detail_shell)
 
     @app.get("/app/api/me")
     async def current_user(request: Request) -> dict[str, object]:
-        _, session = await _authenticated(request, auth=auth)
-        return WebCurrentUser.from_session(session).model_dump(mode="json")
+        session = await session_allowed_to_work(request)
+        return WebCurrentUser.from_principal(
+            session.principal, csrf_token=session.csrf_token
+        ).model_dump(mode="json")
 
     @app.get("/app/api/tasks")
     async def list_tasks(request: Request) -> dict[str, object]:
-        _, session = await _authenticated(request, auth=auth)
+        session = await session_allowed_to_work(request)
         before_created_seq, limit = _list_query(request)
         page = await task_access.list_tasks(
             query=TaskListQuery(
@@ -668,8 +949,10 @@ def create_app(
 
     @app.post("/app/api/tasks", status_code=202)
     async def submit_task(request: Request) -> dict[str, object]:
-        session_cookie, session = await _authenticated(request, auth=auth)
-        _validate_state_change(request, auth=auth, session_cookie=session_cookie)
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
         body = await _task_submit_body(request)
         trace_id = get_trace_id()
         if trace_id is None:  # create_app 的外层 middleware 是唯一可信绑定入口。
@@ -694,7 +977,7 @@ def create_app(
 
     @app.get("/app/api/tasks/{task_id}")
     async def get_task(request: Request, task_id: str) -> dict[str, object]:
-        _, session = await _authenticated(request, auth=auth)
+        session = await session_allowed_to_work(request)
         accessible = await task_access.get_task(
             query=TaskAccessQuery(
                 principal=session.principal,
@@ -705,9 +988,57 @@ def create_app(
         exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
         return detail.model_dump(mode="json", exclude=exclude)
 
+    @app.post("/app/api/login")
+    async def login(request: Request) -> Response:
+        """首次登录必须能在没有任何 cookie 的情况下完成。"""
+        origin, _ = _state_change_headers(request)
+        content_types = request.headers.getlist("content-type")
+        validate_unauthenticated_origin(
+            public_origin=public_origin,
+            origin=origin,
+            content_type=content_types[0] if len(content_types) == 1 else None,
+        )
+        body = await _login_body(request)
+        previous, unambiguous = _single_cookie(request, name=session_cookie)
+        issued = await local_admin_auth.login(
+            password=body.password,
+            previous_session_cookie=previous if unambiguous else None,
+        )
+        response = JSONResponse(content={"status": "ok"})
+        _set_secret_cookie(
+            response,
+            name=session_cookie,
+            value=issued.session_cookie,
+            max_age=issued.max_age_seconds,
+            secure=secure_cookies,
+        )
+        return response
+
+    @app.post("/app/api/change-password")
+    async def change_password(request: Request) -> Response:
+        session = await session_of(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _change_password_body(request)
+        issued = await local_admin_auth.change_password(
+            session_cookie=session.cookie,
+            current=body.current_password,
+            new=body.new_password,
+        )
+        response = JSONResponse(content={"status": "ok"})
+        _set_secret_cookie(
+            response,
+            name=session_cookie,
+            value=issued.session_cookie,
+            max_age=issued.max_age_seconds,
+            secure=secure_cookies,
+        )
+        return response
+
     @app.post("/app/api/logout", status_code=204)
     async def logout(request: Request) -> Response:
-        cookie, _ = await _authenticated(request, auth=auth)
+        session = await session_of(request)
         if not _is_json_request(request):
             return _error(415, "unsupported_media_type")
         try:
@@ -716,10 +1047,17 @@ def create_app(
             return _error(400, "invalid_request")
         if payload != {}:
             return _error(400, "invalid_request")
-        _validate_state_change(request, auth=auth, session_cookie=cookie)
-        await auth.logout(session_cookie=cookie)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        if auth is not None:
+            await auth.logout(session_cookie=session.cookie)
+        await local_admin_auth.logout(session_cookie=session.cookie)
         response = Response(status_code=204)
-        _clear_secret_cookie(response, name=SESSION_COOKIE_NAME)
+        # 两个已知 cookie 名都清：切过模式的浏览器可能同时留着两份。
+        _clear_all_known_cookies(
+            response, names=ALL_SESSION_COOKIE_NAMES, secure=secure_cookies
+        )
         return response
 
     @app.get("/app/static/app.css")
@@ -750,21 +1088,30 @@ def create_app(
     app.middleware_stack = _SecurityHeadersMiddleware(
         _WebRequestBoundaryMiddleware(
             app.build_middleware_stack(),
-            public_origin=cast(str, settings.web_public_origin),
-        )
+            public_origin=public_origin,
+            mode=mode,
+        ),
+        hsts=secure_cookies,
     )
     return app
 
 
 async def serve_web(settings: Settings) -> int:
-    """装配真实、默认关闭的 OAuth Web 进程，并释放唯一数据库 Engine。"""
-    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
+    """装配真实、默认关闭的 Web 进程，并释放唯一数据库 Engine。
+
+    这里是 composition root：读 `integrations.json`、判双层开关、构造或**不构造**
+    真实飞书 adapter。装配函数只收端口，不读配置。
+    """
+    if not settings.web_app_enabled:
         raise _WebConfigurationError
     configure_logging(settings)
     _silence_uvicorn_loggers()
 
     from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
-    from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkMembershipAdapter
+    from xiaowei_agent.interfaces.feishu_sdk import (
+        FeishuSdkError,
+        FeishuSdkMembershipAdapter,
+    )
     from xiaowei_agent.interfaces.local_stack import (
         WebStackConfigurationError,
         build_postgres_web_stack,
@@ -773,25 +1120,32 @@ async def serve_web(settings: Settings) -> int:
         load_provider_credentials,
     )
 
-    credentials, _ = load_provider_credentials(settings=settings)
-    oauth = None
-    credential_invalid = False
-    try:
-        oauth = FeishuOAuthAdapter(
-            app_id=cast(str, credentials.feishu_app_id),
-            app_secret=cast(str, credentials.feishu_app_secret),
-            timeout_seconds=FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
-        )
-    except ValueError:
-        credential_invalid = True
-    if credential_invalid or oauth is None:
-        raise _WebConfigurationError
-
-    membership = FeishuSdkMembershipAdapter(
-        tenant_id=settings.tenant_id,
-        app_id=cast(str, credentials.feishu_app_id),
-        app_secret=cast(str, credentials.feishu_app_secret),
-    )
+    credentials, _ = load_provider_credentials(settings=settings)  # 回执见 Task 6
+    oauth: FeishuOAuthPort | None = None
+    membership: FeishuMembershipPort | None = None
+    if (
+        settings.feishu_oauth_enabled
+        and credentials.feishu_app_id is not None
+        and credentials.feishu_app_secret is not None
+    ):
+        try:
+            oauth = FeishuOAuthAdapter(
+                app_id=credentials.feishu_app_id,
+                app_secret=credentials.feishu_app_secret,
+                timeout_seconds=FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
+            )
+            membership = FeishuSdkMembershipAdapter(
+                tenant_id=settings.tenant_id,
+                app_id=credentials.feishu_app_id,
+                app_secret=credentials.feishu_app_secret,
+            )
+        except (ValueError, FeishuSdkError):
+            # 两个必须同进同退：装配函数收到半套端口会走进"已装配"分支，
+            # 然后在第一次真实调用时才炸。
+            oauth = None
+            membership = None
+    # 飞书凭据不可用是**正常状态**，不是配置错误：本地管理员登录始终可用，
+    # Web 进程照常起来，页面只是不渲染飞书入口。
     stack = None
     stack_configuration_invalid = False
     try:
@@ -808,6 +1162,8 @@ async def serve_web(settings: Settings) -> int:
     try:
         app = create_app(
             auth=stack.auth,
+            local_admin_auth=stack.local_admin_auth,
+            oauth_available=stack.oauth_available,
             settings=settings,
             readiness=stack.readiness,
             task_access=stack.task_access_service,
@@ -858,9 +1214,11 @@ if __name__ == "__main__":  # pragma: no cover - 由进程/Compose 调用
 
 
 __all__ = [
-    "OAUTH_STATE_COOKIE_NAME",
-    "SESSION_COOKIE_NAME",
+    "ALL_OAUTH_STATE_COOKIE_NAMES",
+    "ALL_SESSION_COOKIE_NAMES",
     "create_app",
     "main",
+    "oauth_state_cookie_name",
     "serve_web",
+    "session_cookie_name",
 ]

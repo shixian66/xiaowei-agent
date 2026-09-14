@@ -11,7 +11,7 @@ from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
-from xiaowei_agent.contracts import ActorTaskPageQuery, TaskStatus
+from xiaowei_agent.contracts import ActorTaskPageQuery, TaskStatus, WebMode
 from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces.feishu_sdk import FeishuMention, FeishuMessageEvent
 from xiaowei_agent.interfaces.local_stack import (
@@ -20,9 +20,11 @@ from xiaowei_agent.interfaces.local_stack import (
     build_postgres_local_stack,
     build_postgres_web_stack,
 )
-from xiaowei_agent.interfaces.web_app import SESSION_COOKIE_NAME, create_app
+from xiaowei_agent.interfaces.web_app import create_app, session_cookie_name
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
+
+_SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
 
 
 class _Messages:
@@ -246,7 +248,7 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
-        cookies={SESSION_COOKIE_NAME: bob_cookie},
+        cookies={_SESSION_COOKIE_NAME: bob_cookie},
     ) as bob_client:
         group_detail = await bob_client.get(f"/app/api/tasks/{group_task_id}")
         assert group_detail.status_code == 200
@@ -262,7 +264,7 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
-        cookies={SESSION_COOKIE_NAME: alice_cookie},
+        cookies={_SESSION_COOKIE_NAME: alice_cookie},
     ) as alice_client:
 
         me = await alice_client.get("/app/api/me")
@@ -289,7 +291,7 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
-        cookies={SESSION_COOKIE_NAME: admin_cookie},
+        cookies={_SESSION_COOKIE_NAME: admin_cookie},
     ) as admin_client:
         me = await admin_client.get("/app/api/me")
         admin_submit = await admin_client.post(

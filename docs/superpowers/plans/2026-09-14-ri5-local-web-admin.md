@@ -1700,7 +1700,7 @@ LocalAdminRecord 去掉两个标志    -> 口令哈希用例 + 结构守卫     
   - 新路由：`POST /app/api/login`、`POST /app/api/change-password`（既有 `POST /app/api/logout` 复用）
   - `GET /app` 在未登录时返回登录壳（不再 401/302）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/security/test_ri5_web_assembly.py`（标 `security`）：
 
@@ -1826,13 +1826,13 @@ async def test_every_new_json_write_route_enforces_the_body_limit() -> None:
     raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `python -m pytest tests/security/test_ri5_web_assembly.py -q`
 
 Expected: FAIL —— `build_postgres_web_stack` 仍在 `local_stack.py:855` 抛 `ValueError("Web app is disabled")`。
 
-- [ ] **Step 3: 实现装配解耦**
+- [x] **Step 3: 实现装配解耦**
 
 **先划清两层的职责，不要把读配置塞进装配函数。** `build_postgres_web_stack` 现在的
 docstring 就是「用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端」
@@ -2002,18 +2002,68 @@ OAuth 入口；飞书 OAuth 入口只有在 `oauth_available` 为真时才渲染
 `must_change_password=true` 时，除 login / change-password / logout / `/healthz` / `/readyz` 外的
 所有 `/app/api/*` 一律返回 403 闭集码 `password_change_required`；`GET /app` 返回改密壳。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `python -m pytest tests/security/test_ri5_web_assembly.py tests/contract/test_web_app_routes.py tests/unit/test_local_stack.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/interfaces/web_app.py tests/security/test_ri5_web_assembly.py tests/contract/test_web_app_routes.py tests/unit/test_local_stack.py
 git commit -m "feat(ri5): decouple web assembly from feishu and add local admin routes"
 ```
+
+**Task 5 执行记录（2026-09-14）：** 四条基线全绿——`3652 passed, 237 skipped`（Task 4 后 3626）、
+`1353 security passed`、`ruff` 通过、`mypy` 171 files 通过。八条反证全部按预期变红后恢复：
+
+```text
+装配函数改回自己读配置        -> test_the_stack_builder_never_reads_the_integration_config  1 failed
+半套端口也走进「已装配」分支  -> test_half_a_port_pair_does_not_assemble_feishu             2 failed
+捕获集合漏掉 ValueError       -> test_bad_origin_does_not_take_down_the_whole_web           1 failed
+登录复用 session CSRF 校验    -> test_first_login_succeeds_without_any_csrf_token           1 failed
+https cookie 名用在 lan_http  -> cookie 名 + lan_http 两条                                  2 failed
+去掉改密前的闸门              -> test_before_first_change_password_other_routes_are_refused 1 failed
+membership=None 降级为放行    -> test_absent_membership_port_fails_closed...                1 failed
+白名单少一条路径              -> test_every_new_json_write_route_enforces_the_body_limit    1 failed
+恢复后                                                                                     19 passed
+```
+
+六处与计划文字不同，前两处是计划没写、但照做会坏掉的：
+
+1. **`Host` 头校验也必须模式化，否则 `lan_http` 下每个请求都 403。**
+   `_WebRequestBoundaryMiddleware` 用 `_canonical_host_header()` 核对固定 authority，而那个
+   函数无条件走 `canonical_non_ip_hostname`——"主机名，绝不是 IP"。那是 HTTPS 模式的前提
+   （证书签给域名），但 `lan_http` 的 authority 本身就是 IP 字面量，于是**管理面根本打不开**。
+   这与 Task 3 拆 `_public_origin_is_safe` 是同一类问题：一个函数同时服务两种模式。
+   改法也相同——`_canonical_host_header(value, *, mode)`，`lan_http` 分支直接复用
+   `canonical_web_public_origin` 的判定，不在这里重写一遍 IP 规范化。
+
+2. **`password_change_required` 必须进 `ErrorItem` 的闭集。** 它是 `Literal` 联合，
+   直接返回新码会在 `error_body()` 里抛 `ValidationError` 并被兜底成 500——既有守卫替我抓到了
+   这一点。错误码是浏览器唯一能据以分支的事实，只能是闭集成员。
+
+3. **`validate_state_change` 从 `WebAuthService` 的方法提取为模块级函数。** 本地管理员路径
+   可能根本没有 `WebAuthService`（飞书整个不装配），但它写的是同一张 session 表、用同一个
+   CSRF 域，判定必须是同一份实现。方法保留为薄委托。既有测试里的 `_Auth` 替身自带一份
+   `validate_state_change`，脱钩后立刻 403——顺带说明那份替身本来就在遮蔽真实实现，
+   现在 `_CSRF` 改为 `web_csrf_token(_COOKIE)` 派生。
+
+4. **`WebCurrentUser.from_session` 改为 `from_principal`。** 本地管理员与飞书是两种会话形状，
+   绑死其中一种会逼着另一条路径伪造一个假 session 对象。
+
+5. **口令的长度门分成两个标记类型。** 登录侧不能设下限——seed 写入的初始口令是 5 位的
+   `admin`，加最小长度会让第一次登录直接 422。强度要求只属于"设置新口令"那一侧
+   （`SecretNewPassword`，12 位）。两个类型都以 `Secret` 开头，因此自动纳入上一轮建的
+   泄漏守卫；也正因此发现该守卫原本只扫 `Contract` 子类，漏掉了 `web_models.py` 的
+   `_WebModel`——基类是实现细节，标记类型才是信号，已改为不限基类。
+
+6. **既有的「身份目录加载失败 → dispose engine 并抛错」用例语义反转。** 那是 RI5 之前
+   "飞书是 Web 的必要条件"的断言。现在飞书失败是降级、本地管理员失败才是起不来，因此改写为
+   `test_identity_loading_failure_leaves_the_web_up_without_oauth`，并补一条互为对照的
+   `test_local_admin_seed_failure_disposes_the_engine`。装配现在会真的往库里 seed 一行，
+   三处用假 engine 的用例因此补上了 `begin()`。
 
 ---
 

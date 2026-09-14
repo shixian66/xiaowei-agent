@@ -122,7 +122,7 @@ class TaskAccessService:
         runtime: TaskViewRuntime,
         task_store: TaskStore,
         channel_store: ChannelStore,
-        membership: FeishuMembershipPort,
+        membership: FeishuMembershipPort | None,
     ) -> None:
         self._runtime = runtime
         self._tasks = task_store
@@ -190,6 +190,12 @@ class TaskAccessService:
         except ChannelBindingNotFoundError:
             return None
         if binding.conversation_ref is None:
+            return None
+        if self._membership is None:
+            # 飞书未装配时群成员校验无从进行：按既有 not-found 语义拒绝，
+            # **不得**降级为放行。本地管理员只看自己的任务与 admin 全量安全任务，
+            # 不走这条路径，因此该 fail-closed 不影响 RI5 闭环。
+            _log_membership_check_failure(principal)
             return None
         try:
             is_member = await self._membership.is_current_group_member(

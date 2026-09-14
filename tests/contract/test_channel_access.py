@@ -193,6 +193,72 @@ async def test_current_group_member_can_read_and_is_checked_on_every_request(
     ]
 
 
+async def test_absent_membership_port_fails_closed_for_group_scoped_reads(
+    store, channel_store, memory_state, context, clock
+) -> None:
+    """飞书未装配时 `membership=None`，群成员校验无从进行，必须拒绝。
+
+    RI5 让飞书变成可选插件，于是 `membership` 可能整个不存在。这条守的是
+    **降级方向**：不能因为"没法校验"就放行——那会让一个没装配飞书的部署
+    把群任务开放给任何登录用户。
+    """
+    task = await _create_task(store, context, suffix="absent-membership")
+    await channel_store.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id="dev-local",
+            environment_id="dev",
+            channel=ChannelKind.FEISHU_GROUP,
+            initiator_subject_ref="subject-alice",
+            conversation_ref="chat-1",
+            source_event_ref="event-absent-membership",
+            created_at=clock(),
+        )
+    )
+    query = TaskAccessQuery(
+        principal=_principal(actor="bob", subject_ref="subject-bob"),
+        task_id=task.task_id,
+    )
+
+    absent = _service(store, channel_store, memory_state, None)
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await absent.get_task(query=query)
+
+    # 对照：装配了 membership 且确认在群里时，同一次读取是放行的——
+    # 说明上面的拒绝来自"没法校验"，不是这条路径本来就读不到。
+    present = _service(store, channel_store, memory_state, MembershipStub(result=True))
+    assert await present.get_task(query=query)
+
+
+async def test_absent_membership_port_does_not_block_the_owner_or_admin(
+    store, channel_store, memory_state, context, clock
+) -> None:
+    """该 fail-closed 不得波及 RI5 闭环：本人任务与 admin 全量安全任务仍可读。"""
+    task = await _create_task(store, context, suffix="absent-membership-owner")
+    service = _service(store, channel_store, memory_state, None)
+
+    owner = TaskAccessQuery(
+        principal=_principal(actor="alice", subject_ref="subject-alice"),
+        task_id=task.task_id,
+    )
+    admin = TaskAccessQuery(
+        principal=_principal(
+            actor="admin",
+            subject_ref="subject-admin",
+            permissions=frozenset(
+                {
+                    ChannelPermission.VIEW_SAFE_TASK,
+                    ChannelPermission.ADMIN_ALL_SAFE_TASKS,
+                }
+            ),
+        ),
+        task_id=task.task_id,
+    )
+
+    assert await service.get_task(query=owner)
+    assert await service.get_task(query=admin)
+
+
 @pytest.mark.parametrize(
     "membership",
     [MembershipStub(result=False), MembershipStub(error=TimeoutError())],

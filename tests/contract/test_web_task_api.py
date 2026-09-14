@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.web_auth import NoLocalAdmin
 
 from xiaowei_agent.application.channel_access import (
     TASK_DETAIL_PREVIEW_LIMIT,
@@ -33,14 +34,16 @@ from xiaowei_agent.contracts import (
     RenderSection,
     TaskStatus,
     TaskView,
+    WebMode,
     task_query_path,
 )
-from xiaowei_agent.interfaces.web_app import SESSION_COOKIE_NAME, create_app
+from xiaowei_agent.interfaces.web_app import create_app, session_cookie_name
 from xiaowei_agent.interfaces.web_auth import (
     AuthenticatedWebSession,
     WebAuthenticationError,
     WebCsrfError,
     WebOriginError,
+    web_csrf_token,
 )
 from xiaowei_agent.interfaces.web_models import (
     WebTaskDetail,
@@ -54,8 +57,12 @@ from xiaowei_agent.persistence.errors import (
 )
 from xiaowei_agent.trace import get_trace_id
 
+_SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
+
 _COOKIE = "session_value_for_web_task_api"
-_CSRF = "a" * 64
+# CSRF token 由 session cookie 派生，且派生实现只有一份（web_auth.web_csrf_token）。
+# 写成固定字面量会让替身与真实实现脱钩，路由层换成公共函数后立刻 403。
+_CSRF = web_csrf_token(_COOKIE)
 _NOW = dt.datetime(2026, 9, 9, 9, 30, tzinfo=dt.UTC)
 
 
@@ -218,6 +225,8 @@ def _client(
     submissions.authentication_trace_ids = auth.trace_ids
     app = create_app(
         auth=auth,
+        local_admin_auth=NoLocalAdmin(),
+        oauth_available=True,
         settings=_settings(),
         readiness=_Probe(),
         task_access=access,
@@ -231,7 +240,7 @@ def _client(
             raise_app_exceptions=raise_app_exceptions,
         ),
         base_url="https://ops.example.test",
-        cookies={SESSION_COOKIE_NAME: _COOKIE},
+        cookies={_SESSION_COOKIE_NAME: _COOKIE},
     )
     return client, access, submissions
 

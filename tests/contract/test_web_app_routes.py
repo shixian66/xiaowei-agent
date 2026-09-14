@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from tests.fakes.web_auth import NoLocalAdmin
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -32,13 +33,16 @@ from xiaowei_agent.interfaces.api import create_app as create_internal_app
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import (
-    OAUTH_STATE_COOKIE_NAME,
-    SESSION_COOKIE_NAME,
     create_app,
+    oauth_state_cookie_name,
+    session_cookie_name,
 )
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
 from xiaowei_agent.trace import get_trace_id
+
+_SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
+_OAUTH_STATE_COOKIE_NAME = oauth_state_cookie_name(WebMode.HTTPS)
 
 
 class _Probe:
@@ -173,6 +177,8 @@ def _web_app(
     return (
         create_app(
             auth=auth,
+            local_admin_auth=NoLocalAdmin(),
+            oauth_available=True,
             settings=_settings(public_origin=public_origin),
             readiness=_Probe(),
             task_access=TaskAccess(),
@@ -250,7 +256,6 @@ async def test_real_protected_routes_return_401_unauthorized(clock, memory_state
     app, _ = _web_app(clock, memory_state)
     async with _client(app) as client:
         for path in (
-            "/app",
             "/app/tasks/task-1",
             "/app/api/me",
             "/app/api/tasks",
@@ -259,6 +264,25 @@ async def test_real_protected_routes_return_401_unauthorized(clock, memory_state
             response = await client.get(path)
             assert response.status_code == 401
             assert response.json() == {"error": {"code": "unauthorized"}}
+
+
+async def test_the_app_shell_is_a_login_page_instead_of_a_401(
+    clock, memory_state
+) -> None:
+    """``GET /app`` 是唯一一条未登录也返回 200 的非健康检查路由。
+
+    它原本和其它受保护路由一样 401。RI5 之后本地管理员必须能在浏览器里拿到
+    口令表单，401 或跳转 OAuth 都等于"没有任何入口可以登录"。壳里不得包含
+    任何需要会话的内容，否则未登录页面自己就会触发一串 401。
+    """
+    app, _ = _web_app(clock, memory_state)
+    async with _client(app) as client:
+        response = await client.get("/app")
+
+    assert response.status_code == 200
+    assert "login-form" in response.text
+    assert 'type="password"' in response.text
+    assert "/app/api/tasks" not in response.text
 
 
 async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
@@ -271,7 +295,7 @@ async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
         assert start.headers["location"].startswith("https://feishu.example.test/")
         state_headers = start.headers.get_list("set-cookie")
         assert len(state_headers) == 1
-        assert state_headers[0].startswith(f"{OAUTH_STATE_COOKIE_NAME}=")
+        assert state_headers[0].startswith(f"{_OAUTH_STATE_COOKIE_NAME}=")
         assert "Secure" in state_headers[0]
         assert "HttpOnly" in state_headers[0]
         assert "SameSite=lax" in state_headers[0]
@@ -288,7 +312,7 @@ async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
         session_header = next(
             header
             for header in session_headers
-            if header.startswith(f"{SESSION_COOKIE_NAME}=")
+            if header.startswith(f"{_SESSION_COOKIE_NAME}=")
         )
         assert "Secure" in session_header
         assert "HttpOnly" in session_header
@@ -296,7 +320,7 @@ async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
         assert "Path=/" in session_header
         assert "Domain=" not in session_header
         assert any(
-            header.startswith(f"{OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
+            header.startswith(f"{_OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
             for header in session_headers
         )
 
@@ -334,11 +358,11 @@ async def test_callback_rejections_clear_state_and_never_set_a_session(
         assert callback.json() == {"error": {"code": "unauthorized"}}
         cookies = callback.headers.get_list("set-cookie")
         assert any(
-            header.startswith(f"{OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
+            header.startswith(f"{_OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
             for header in cookies
         )
         assert not any(
-            header.startswith(f"{SESSION_COOKIE_NAME}=") for header in cookies
+            header.startswith(f"{_SESSION_COOKIE_NAME}=") for header in cookies
         )
 
 
@@ -362,7 +386,7 @@ async def test_duplicate_callback_parameters_are_rejected_before_exchange(
         assert callback.json() == {"error": {"code": "invalid_request"}}
         assert oauth.exchange_calls == 0
         assert not any(
-            header.startswith(f"{SESSION_COOKIE_NAME}=")
+            header.startswith(f"{_SESSION_COOKIE_NAME}=")
             for header in callback.headers.get_list("set-cookie")
         )
 
@@ -380,8 +404,8 @@ async def test_duplicate_auth_cookies_are_rejected_without_choosing_a_value(
             params={"code": "valid-code", "state": state},
             headers={
                 "cookie": (
-                    f"{OAUTH_STATE_COOKIE_NAME}={state}; "
-                    f"{OAUTH_STATE_COOKIE_NAME}={state}"
+                    f"{_OAUTH_STATE_COOKIE_NAME}={state}; "
+                    f"{_OAUTH_STATE_COOKIE_NAME}={state}"
                 )
             },
         )
@@ -391,15 +415,15 @@ async def test_duplicate_auth_cookies_are_rejected_without_choosing_a_value(
 
     async with _client(app) as client:
         assert (await _login(client, oauth)).status_code == 302
-        session = client.cookies.get(SESSION_COOKIE_NAME)
+        session = client.cookies.get(_SESSION_COOKIE_NAME)
         assert session is not None
         client.cookies.clear()
         response = await client.get(
             "/app/api/me",
             headers={
                 "cookie": (
-                    f"{SESSION_COOKIE_NAME}={session}; "
-                    f"{SESSION_COOKIE_NAME}={session}"
+                    f"{_SESSION_COOKIE_NAME}={session}; "
+                    f"{_SESSION_COOKIE_NAME}={session}"
                 )
             },
         )
@@ -484,7 +508,7 @@ async def test_logout_requires_json_origin_csrf_and_revokes_session(
         )
         assert logged_out.status_code == 204
         assert any(
-            header.startswith(f"{SESSION_COOKIE_NAME}=") and "Max-Age=0" in header
+            header.startswith(f"{_SESSION_COOKIE_NAME}=") and "Max-Age=0" in header
             for header in logged_out.headers.get_list("set-cookie")
         )
         assert (await client.get("/app/api/me")).status_code == 401
@@ -508,6 +532,8 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("POST", "/app/api/tasks"),
         ("GET", "/app/api/tasks/{task_id}"),
         ("POST", "/app/api/logout"),
+        ("POST", "/app/api/login"),
+        ("POST", "/app/api/change-password"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/detail.js"),
@@ -866,6 +892,8 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
 
     class Stack:
         auth = object()
+        local_admin_auth = NoLocalAdmin()
+        oauth_available = True
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
@@ -1174,6 +1202,7 @@ provider_consumption.load_provider_credentials = lambda **_: (
     {},
 )
 
+
 class FailingErrorHandler(logging.Handler):
     def emit(self, record):
         Path(os.environ["TEST_UVICORN_HANDLER_SENTINEL"]).write_text(
@@ -1221,6 +1250,8 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
 
     class Stack:
         auth = object()
+        local_admin_auth = NoLocalAdmin()
+        oauth_available = True
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()

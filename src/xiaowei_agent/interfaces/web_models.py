@@ -1,6 +1,6 @@
 """Web 工作台的严格请求与安全响应模型。"""
 
-from typing import Self
+from typing import Annotated, Self, TypeAlias
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -14,6 +14,7 @@ from xiaowei_agent.application.channel_access import (
 )
 from xiaowei_agent.application.channel_submission import SubmittedTask
 from xiaowei_agent.contracts import (
+    AuthenticatedPrincipal,
     AwareDatetime,
     ChannelPermission,
     NonEmptyText,
@@ -23,7 +24,24 @@ from xiaowei_agent.contracts import (
     TaskId,
     TaskStatus,
 )
-from xiaowei_agent.interfaces.web_auth import AuthenticatedWebSession
+
+SecretPassword: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
+"""**提交上来的**明文口令；只做长度边界，不判强度。
+
+名字以 ``Secret`` 开头是有意义的：凡是这样标注的字段都必须同时写
+``exclude=True`` 与 ``repr=False``（见 ``tests/security/test_secret_field_exposure.py``）。
+
+登录这一侧**不能**设下限：seed 写入的初始口令是 5 位的 ``admin``，在这里加最小
+长度会让第一次登录直接 422，整条闭环卡死在第一步。强度要求只属于"设置新口令"
+那一侧，见 :data:`SecretNewPassword`。
+"""
+
+SecretNewPassword: TypeAlias = Annotated[StrictStr, Field(min_length=12, max_length=256)]
+"""**要设置成的**新口令；这里才是强度门。
+
+12 位是下限而不是建议：初始口令是写死在源码里的常量，任何人都知道它，因此
+第一次改密是这台机器上唯一一次真正建立凭据的机会。
+"""
 
 
 class _WebModel(BaseModel):
@@ -52,6 +70,23 @@ class WebTaskSubmitRequest(_WebModel):
     parent_task_id: TaskId | None = None
 
 
+class WebLoginRequest(_WebModel):
+    """本地管理员登录请求。
+
+    ``password`` 标为 ``Secret*`` 并同时关掉 ``repr`` 与 ``model_dump``：请求体
+    模型最容易在校验失败时被打进日志，明文口令不能走那条路。
+    """
+
+    password: SecretPassword = Field(exclude=True, repr=False)
+
+
+class WebChangePasswordRequest(_WebModel):
+    """改密请求；两个字段都是明文口令。"""
+
+    current_password: SecretPassword = Field(exclude=True, repr=False)
+    new_password: SecretNewPassword = Field(exclude=True, repr=False)
+
+
 class WebCurrentUser(_WebModel):
     actor: StrictStr
     environment_id: StrictStr
@@ -59,12 +94,19 @@ class WebCurrentUser(_WebModel):
     csrf_token: StrictStr = Field(min_length=64, max_length=64, repr=False)
 
     @classmethod
-    def from_session(cls, session: AuthenticatedWebSession) -> "WebCurrentUser":
+    def from_principal(
+        cls, principal: AuthenticatedPrincipal, *, csrf_token: str
+    ) -> "WebCurrentUser":
+        """按主体构造。
+
+        不再直接收某一种 session 对象：本地管理员与飞书 OAuth 是两种会话形状，
+        绑死其中一种会逼着另一条路径伪造一个假的。
+        """
         return cls(
-            actor=session.principal.actor,
-            environment_id=session.principal.environment_id,
-            permissions=tuple(sorted(session.principal.permissions, key=lambda item: item.value)),
-            csrf_token=session.csrf_token,
+            actor=principal.actor,
+            environment_id=principal.environment_id,
+            permissions=tuple(sorted(principal.permissions, key=lambda item: item.value)),
+            csrf_token=csrf_token,
         )
 
 
@@ -159,7 +201,11 @@ class WebTaskDetail(_WebModel):
 
 
 __all__ = [
+    "SecretNewPassword",
+    "SecretPassword",
+    "WebChangePasswordRequest",
     "WebCurrentUser",
+    "WebLoginRequest",
     "WebTaskAccepted",
     "WebTaskDetail",
     "WebTaskPage",

@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.web_auth import NoLocalAdmin
 from tests.security.test_task_view_runtime_authority import (
     _TASK_VIEW_PROCESS_ALLOWED_MODULES,
     _loaded_xiaowei_modules_after,
@@ -73,6 +74,8 @@ def _auth_app(
 ) -> object:
     return create_app(
         auth=service,
+        local_admin_auth=NoLocalAdmin(),
+        oauth_available=True,
         settings=settings,
         readiness=_Probe(),
         task_access=task_access or _UnusedTaskAccess(),
@@ -507,7 +510,7 @@ def test_public_origin_is_an_origin_not_a_url_path(
 def test_direct_host_rejects_ip_aliases_delimiters_and_invalid_ports(
     host: str,
 ) -> None:
-    assert web_app_module._canonical_host_header(host) is None
+    assert web_app_module._canonical_host_header(host, mode=WebMode.HTTPS) is None
 
 
 @pytest.mark.parametrize(
@@ -522,7 +525,7 @@ def test_direct_host_rejects_ip_aliases_delimiters_and_invalid_ports(
 def test_direct_host_keeps_canonical_hostname_authorities(
     host: str, expected: str
 ) -> None:
-    assert web_app_module._canonical_host_header(host) == expected
+    assert web_app_module._canonical_host_header(host, mode=WebMode.HTTPS) == expected
 
 
 @pytest.mark.parametrize(
@@ -653,7 +656,9 @@ async def test_request_boundary_closes_exception_at_the_response_start_boundary(
         web_app_module._WebRequestBoundaryMiddleware(
             failing_app,
             public_origin="https://ops.example.test",
-        )
+            mode=WebMode.HTTPS,
+        ),
+        hsts=True,
     )
 
     with caplog.at_level(logging.INFO, logger="xiaowei_agent.interfaces.web_app"):
@@ -833,7 +838,9 @@ async def test_logging_failure_cannot_replace_transport_send_failure(
         web_app_module._WebRequestBoundaryMiddleware(
             inner_app,
             public_origin="https://ops.example.test",
-        )
+            mode=WebMode.HTTPS,
+        ),
+        hsts=True,
     )
     scope = {
         "type": "http",
@@ -1071,6 +1078,8 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "xiaowei_runtime",
     }
     assert names == {
+        "local_admin_auth",
+        "oauth_available",
         "auth",
         "oauth_port",
         "membership",
@@ -1099,7 +1108,35 @@ from tempfile import TemporaryDirectory
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity
+from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces.local_stack import build_postgres_web_stack
+
+# 本探针只看"装配会 import 哪些模块"。RI5 之后装配会真的往库里 seed 一行本地
+# 管理员，而这里没有 PostgreSQL；替换 engine 工厂即可保持探针原本的语义。
+class FakeConnection:
+    async def execute(self, *args, **kwargs):
+        return None
+
+    async def scalar(self, *args, **kwargs):
+        return None
+
+class FakeTransaction:
+    async def __aenter__(self):
+        return FakeConnection()
+
+    async def __aexit__(self, *args):
+        return False
+
+class FakeEngine:
+    def begin(self):
+        return FakeTransaction()
+
+    connect = begin
+
+    async def dispose(self):
+        return None
+
+local_stack_module.create_database_engine = lambda _: FakeEngine()
 
 class OAuth:
     def authorization_url(self, *, state, redirect_uri):
@@ -1156,6 +1193,8 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.application.channel_access",
         "xiaowei_agent.application.channel_submission",
         "xiaowei_agent.interfaces.feishu_identity",
+        # RI5：本地管理员登录是 Web 的必备入口，装配时必然加载。
+        "xiaowei_agent.interfaces.local_admin_auth",
         "xiaowei_agent.interfaces.web_auth",
     }
     assert loaded == (

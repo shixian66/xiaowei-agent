@@ -33,6 +33,9 @@ class ErrorItem(BaseModel):
         "unsupported_media_type",
         "internal_error",
         "unavailable",
+        # RI5：初始口令未更换时，除登录/改密/退出外一律用这一条拒绝。
+        # 它必须是闭集成员而不是自由文本——错误码是浏览器唯一能据以分支的事实。
+        "password_change_required",
     ]
 
 

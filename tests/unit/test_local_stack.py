@@ -30,6 +30,7 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
+from xiaowei_agent.interfaces.local_admin_auth import LocalAdminAuthService
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
     ChannelWorkerStack,
@@ -691,17 +692,46 @@ def _web_settings(identity_file: Path) -> Settings:
     )
 
 
+class _FakeWebConnection:
+    """只吞下语句、不返回行的连接替身。
+
+    Web 装配现在会在这里 seed 本地管理员——那是一次真实写入，因此假 engine
+    必须支持 ``begin()``。返回 ``None`` 即"这行还不存在"，seed 视为已写入。
+    """
+
+    async def execute(self, *_: object, **__: object) -> object:
+        return None
+
+    async def scalar(self, *_: object, **__: object) -> object:
+        return None
+
+
+class _FakeWebEngine:
+    disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+    def begin(self) -> object:
+        connection = _FakeWebConnection()
+
+        class _Transaction:
+            async def __aenter__(self) -> _FakeWebConnection:
+                return connection
+
+            async def __aexit__(self, *_: object) -> bool:
+                return False
+
+        return _Transaction()
+
+    connect = begin
+
+
 @pytest.mark.asyncio
 async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeEngine:
-        disposed = False
-
-        async def dispose(self) -> None:
-            self.disposed = True
-
-    engine = FakeEngine()
+    engine = _FakeWebEngine()
     identity_file = tmp_path / "identities.json"
     _write_identity(identity_file)
     oauth = _OfflineOAuth()
@@ -719,12 +749,16 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
 
     assert isinstance(stack, WebStack)
     assert isinstance(stack.auth, WebAuthService)
+    assert stack.oauth_available is True
+    assert isinstance(stack.local_admin_auth, LocalAdminAuthService)
     assert isinstance(stack.runtime, TaskViewRuntime)
     assert isinstance(stack.task_access_service, TaskAccessService)
     assert isinstance(stack.submission_service, ChannelSubmissionService)
     assert isinstance(stack.channel_store, PostgresChannelStore)
     assert isinstance(stack.web_session_store, PostgresWebSessionStore)
     assert {field.name for field in fields(WebStack)} == {
+        "local_admin_auth",
+        "oauth_available",
         "auth",
         "oauth_port",
         "membership",
@@ -768,15 +802,11 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
 async def test_web_stack_uses_fixed_oauth_deadline_not_channel_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeEngine:
-        async def dispose(self) -> None:
-            return None
-
     identity_file = tmp_path / "identities.json"
     _write_identity(identity_file)
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
-        lambda _: FakeEngine(),
+        lambda _: _FakeWebEngine(),
     )
     settings = Settings(
         **(
@@ -841,32 +871,71 @@ async def test_web_stack_maps_database_credential_failure_to_its_narrow_error(
 
 
 @pytest.mark.asyncio
-async def test_web_stack_disposes_engine_when_identity_loading_fails(
+async def test_identity_loading_failure_leaves_the_web_up_without_oauth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeEngine:
-        disposed = False
+    """身份目录加载失败**不再**打死整个 Web。
 
-        async def dispose(self) -> None:
-            self.disposed = True
-
-    engine = FakeEngine()
+    RI5 之前飞书 OAuth 是 Web 的必要条件，因此这里原本断言 engine 被 dispose、
+    装配抛错。现在本地管理员登录才是 Web 的必备入口，飞书是插件：加载失败只让
+    ``oauth_available`` 为假，进程照常起来，否则一份坏身份文件就能让运维连
+    配置页面都打不开——而那正是他修复它的唯一入口。
+    """
+    engine = _FakeWebEngine()
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
         lambda _: engine,
     )
 
-    with pytest.raises(
-        WebStackConfigurationError,
-        match="web stack configuration invalid",
-    ) as caught:
+    stack = await build_postgres_web_stack(
+        settings=_web_settings(tmp_path / "missing-identities.json"),
+        oauth=_OfflineOAuth(),
+        membership=_OfflineMembership(),
+    )
+    try:
+        assert stack.oauth_available is False
+        assert stack.auth is None
+        assert stack.identity_directory is None
+        assert stack.oauth_port is None
+        assert stack.membership is None
+        # 本地管理员那一组仍然装配好了——这正是"Web 还能用"的含义。
+        assert isinstance(stack.local_admin_auth, LocalAdminAuthService)
+        assert engine.disposed is False
+    finally:
+        await stack.aclose()
+
+
+@pytest.mark.asyncio
+async def test_local_admin_seed_failure_disposes_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地管理员是必填：seed 失败必须让 composition 不成立。
+
+    与上一条互为对照——飞书失败是"降级"，本地管理员失败是"起不来"。
+    """
+    engine = _FakeWebEngine()
+    identity_file = tmp_path / "identities.json"
+    _write_identity(identity_file)
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    async def fail_seed(self: object, *, password_hash: str) -> bool:
+        raise RuntimeError("constant seed failure")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.persistence.local_admin.PostgresLocalAdminStore.seed_if_absent",
+        fail_seed,
+    )
+
+    with pytest.raises(RuntimeError, match="constant seed failure"):
         await build_postgres_web_stack(
-            settings=_web_settings(tmp_path / "missing-identities.json"),
+            settings=_web_settings(identity_file),
             oauth=_OfflineOAuth(),
             membership=_OfflineMembership(),
         )
     assert engine.disposed is True
-    assert caught.value.__context__ is None
 
 
 @pytest.mark.asyncio
