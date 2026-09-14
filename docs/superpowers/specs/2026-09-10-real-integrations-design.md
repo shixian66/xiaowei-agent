@@ -1,15 +1,15 @@
 # 小维 Agent 2.0 真实接入总体设计
 
 - 状态：Accepted V3；RI3 精简实现方案于 2026-09-12 获批离线开工，真实调用仍需独立现场 GO
-  + **RI5 Proposed Amendment（2026-09-14，与 ADR-007/014/015 的 2026-09-13 修订成套，待一并重新接受）**
+  + **Accepted RI5 Amendment（2026-09-14，与 ADR-007/014/015 的 RI5 修订成套接受）**
 - 规划与 PR 3A 开工基线：`ab35b756b07aa1baa2f0eb3ac98dba24999c40b1`；后续 PR 基线由 `AGENT_HANDOFF.md` 记录
 - 证据等级：源码事实 + 只读设计；没有真实调用、部署、canary 或用户验收
-- 日期：2026-09-12；RI5 候选修订 2026-09-14
+- 日期：2026-09-12；RI5 修订 2026-09-14 接受
 
 > **RI5 修订状态说明**：RI5 的实现方案已由
 > [RI5 简化设计](../../plans/RI5-local-web-admin-simplified-design.md)取代。本文中所有 RI5/Admin
-> 相关段落已按新方案同步，状态为 **Proposed**。
-> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 相关段落已按新方案同步并被接受。
+> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 > RI1–RI4、RI6 的口径不受本次同步影响。
 
 ## 1. 大白话结论
@@ -146,7 +146,7 @@ Admin   --> 只管理 Gemini/飞书两个闭集配置 --> 宿主机重启后各�
   ApprovalGate/`ToolGateway`，也不改变任何服务的 readiness。Web 不得由此取得模型端口、任意
   endpoint/路径或任何运维目标访问权。边界见
   [ADR-007](../../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
-  §RI5 Proposed Amendment、[ADR-014](../../adr/ADR-014-real-feishu-oauth-and-web-activation.md) R4 与
+  §RI5 Amendment、[ADR-014](../../adr/ADR-014-real-feishu-oauth-and-web-activation.md) R4 与
   [ADR-015](../../adr/ADR-015-real-model-provider-boundary.md) R3。
 - PostgreSQL 继续作为任务、session、accepted intent、advisory、证据和审计事实真源；secret 字节
   不进入 PostgreSQL。现有 heartbeat 提成 application helper：task-worker 包住
@@ -420,7 +420,7 @@ RI6 只启用实际具备对应 test-env + H 层 GO 的能力 <─────�
 
 RI2、RI3、RI4 互不借用真实调用许可，离线实现次序由项目负责人逐项下令。RI3 已获顺序离线开工
 授权并从纯文档 PR 3A 开始；RI2 没有被完成、取消或自动跳过。RI5 只等 RI1/RI3 的配置契约稳定
-（不含 StarRocks，因此不依赖 RI4）；ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+（不含 StarRocks，因此不依赖 RI4）；ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 RI6 对每个拟启用 provider 分别检查其现场证据，未启用项可以保持关闭。
 
 共同硬门：
@@ -513,9 +513,9 @@ ADR-007 H 层的生产只读授权仍未签认；RI3 离线开工授权不允许
 | 按最近消息或同时猜 Web/飞书回复作为模型记忆 | 易串人、串环境或误把普通回复当 parent | 首版只支持 Web 显式终态 task id；逐跳校验作用域，20 轮/64,000 字符；飞书等待 RI2 真实事件语义 |
 | Add nullable parent by dumping the whole object into every hash | Null parents drift old bytes; using full submission digest for conflict would reject normal retries because `as_of` changes | Preserve null-parent vectors; add non-null parent to semantic request and full stored submission digests only; conflict uses semantic request digest, while scope digest remains unchanged |
 | 新 configuration-test worker 自行 import tools | 破坏“只有 local_stack 是工具装配根”的静态等式，最容易诱发修改安全测试白名单的 workaround | **RI5 修订后**：该 worker 不再存在，风险机制整体消失；`test_only_local_stack_can_import_the_tools_layer` 期望集合保持原样，不因 RI5 放宽 |
-| 候选配置测试悄悄增加第二个完整执行进程 | 与 M7“只有 task-worker 装配完整 Runtime”冲突，且没有解释为何不能复用 active worker | **RI5 修订后**：不新增任何执行进程，因此 **ADR-016 不再需要**，M7“只有 task worker 装配完整执行 Runtime”的口径不被修改；结论写入 ADR-007 §RI5 Proposed Amendment R2 |
+| 候选配置测试悄悄增加第二个完整执行进程 | 与 M7“只有 task-worker 装配完整 Runtime”冲突，且没有解释为何不能复用 active worker | **RI5 修订后**：不新增任何执行进程，因此 **ADR-016 不再需要**，M7“只有 task worker 装配完整执行 Runtime”的口径不被修改；结论写入 ADR-007 §RI5 Amendment R2 |
 | 独立测试进程仍把候选任务放入普通 dispatch 池 | active task-worker 可能抢先用已发布配置执行，导致错误目标调用和伪造候选测试证据 | **RI5 修订后**：不存在候选任务，因此不新增 `configuration_test` dispatch lane、不改 TaskStore 窄方法、不改列表过滤与领取事务。配置生效改由宿主机重启 + `service_config_state` 加载回执承担 |
 | 给幂等 scope payload 无条件加入 `lane` | 既有 USER digest 全部漂移，旧 key 会静默创建第二个任务 | **RI5 修订后**：不引入 lane，幂等 scope payload 完全不变，既有 USER canonical JSON 与向量原样保留 |
-| 让独立 configuration-test worker 读取 Gemini key | 直接打破“Gemini secret 只挂 task-worker”的既定边界，并扩大 secret 暴露进程 | **RI5 修订后**：不再有 task-worker 的 Gemini probe control port。Web 读取 Key 仅用于配置管理与固定最小 synthetic 输入的 `gemini_connection` 探针；任务模型调用仍严格 worker-only，Web 不得取得模型端口。该窄例外由 ADR-007 §RI5 Proposed Amendment R1 承载，真实调用仍须 RI3 PR 3E 现场 GO |
+| 让独立 configuration-test worker 读取 Gemini key | 直接打破“Gemini secret 只挂 task-worker”的既定边界，并扩大 secret 暴露进程 | **RI5 修订后**：不再有 task-worker 的 Gemini probe control port。Web 读取 Key 仅用于配置管理与固定最小 synthetic 输入的 `gemini_connection` 探针；任务模型调用仍严格 worker-only，Web 不得取得模型端口。该窄例外由 ADR-007 §RI5 Amendment R1 承载，真实调用仍须 RI3 PR 3E 现场 GO |
 | RI6 只叠 base+production 就声称启用模型，或紧急关闭时仍叠 model override | 前者会形成假启用证据；后者会让 key mount 留在重建后的 worker | runbook 分开“继续启用模型的三文件部署/版本回滚”和“移除模型的两文件紧急关闭”；后者 force-recreate 并反证 mount 消失、后续调用为 0 |
 | 把生产连接禁令拆成 H 生产只读授权与 E2 生产写禁令 | 如果作为编号整理合并，可能在负责人未意识到时实质扩大生产网络权限 | ADR-007 增加单独签认框；未签认时 RI6 只能 provider 全关闭或沿用 test-env 目标，不能建立/宣称生产只读能力 |

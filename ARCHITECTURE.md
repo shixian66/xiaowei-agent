@@ -364,8 +364,8 @@ Evidence 或 capability，不产生 `ToolResult`，不进入 Policy/SQLGuard/App
 任何服务的 readiness；它们既不是 capability 执行，也不得成为绕过 Gateway 访问运维目标的通道。
 该边界是显式决策而非实现推断，见
 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md) §RI5 修订 R4 与
-[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R3（两者均为 Proposed，
-待项目负责人重新接受；未接受前 RI5 不得开工）。任何让探针顺手做真实工作的扩展——执行查询、
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R3（两者已于 2026-09-14
+接受；接受设计边界不等于已实现，源码仍待 RI5 实现计划通过后按 TDD 落地）。任何让探针顺手做真实工作的扩展——执行查询、
 读取业务数据、写入运维目标——都必须回到完整安全链，或先修订上述 ADR。
 
 真实 connector 必须注册为 target-bound adapter，由 Gateway 按
@@ -675,12 +675,12 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-**待重新接受的 RI5 修订**：上述 Gemini secret 段落描述的是当前已实现口径
+**已接受但尚未实现的 RI5 修订**：上述 Gemini secret 段落描述的是当前已实现口径
 （`./.secrets/gemini_api_key` → file-backed Compose secret → `/run/secrets/gemini_api_key`）。
 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R1 提议由本地配置文件
 `.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`）取代该路径与飞书
-App Secret 文件，并把镜像内 `xiaowei` 用户固定为 UID/GID `10001:10001`。该提案尚未被接受，
-也尚未实现；本节在 RI5 实现 PR 落地时才随真实代码更新，在此之前以上述已实现口径为准。
+App Secret 文件，并把镜像内 `xiaowei` 用户固定为 UID/GID `10001:10001`。该修订已于 2026-09-14
+被接受，但**尚未实现**；本节在 RI5 实现 PR 落地时才随真实代码更新，在此之前以上述已实现口径为准。
 同理，基础 Compose 继续只发布 loopback 端口；RI5 的局域网发布只能由独立 override 打开，
 且首次强制改密必须在 loopback 阶段完成。
 
@@ -839,12 +839,12 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-011：M6a capability binding、operation gateway 与 PromQL 固定模板准入（已记录：[docs/adr/ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)）。
 - ADR-012：M6b StarRocks 真实只读 adapter 的精确目标绑定（已记录：[docs/adr/ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)）。
 - ADR-013：M7 Web/飞书薄渠道与身份投影边界（已记录：[docs/adr/ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)）。
-- ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)；**RI5 修订 Proposed，待重新接受**）。
-- ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)；**RI5 修订 Proposed，待重新接受**）。
+- ADR-014：真实飞书 OAuth 与 Web 激活边界（已记录：[docs/adr/ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)；**RI5 修订 2026-09-14 Accepted**）。
+- ADR-015：Gemini 真实模型的窄口、数据、时限、记忆和执行权边界（已接受：[docs/adr/ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)；**RI5 修订 2026-09-14 Accepted**）。
 - ADR-016：曾计划用于 RI5 独立配置测试 worker 的进程边界例外。新 RI5 设计取消该 worker，改为
   控制面探针，因此 **ADR-016 不再立项**；相应结论写入
   [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
-  §RI5 Proposed Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
-  固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+  §RI5 Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
+  固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

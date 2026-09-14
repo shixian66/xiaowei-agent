@@ -1,13 +1,12 @@
 # ADR-014：真实飞书 OAuth 与 Web 激活安全契约
 
-- 状态：Accepted（2026-09-10）+ **RI5 修订提案（2026-09-13，Proposed，待项目负责人重新接受）**
-- 日期：2026-09-10；候选修订 2026-09-13
+- 状态：Accepted（2026-09-10）+ **Accepted RI5 修订（2026-09-14；不授予 RI2 现场 GO）**
+- 日期：2026-09-10；RI5 修订 2026-09-13 起草、2026-09-14 接受
 - 决策人：项目负责人
 - 相关：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-013](ADR-013-m7-channel-boundary.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[真实接入总体设计](../superpowers/specs/2026-09-10-real-integrations-design.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
 
 > **修订状态说明**：下文 §决策 D1–D5 是 2026-09-10 已接受的口径，保持原样。§RI5 修订
-> 只在 RI5 本地 Web Admin 范围内增补或收窄，尚未被接受；未经项目负责人重新接受前，
-> 已接受口径继续有效，RI5 不得开工。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 只在 RI5 本地 Web Admin 范围内增补或收窄，已于 2026-09-14 被接受。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 > 接受本修订也**不**授予真实飞书调用许可——RI2 现场 GO 仍是独立硬门。
 
 ## 背景
@@ -82,7 +81,7 @@ RI1 只允许实现默认关闭的 adapter/composition root 与离线 fake/recor
 真实应用、secret、飞书网络调用、公开部署和 canary 仍须 ADR-007 F 层与 RI2 的独立现场 GO。
 ADR-007 H 层生产只读授权尚未单独签认；生产连接与任何 E1/生产写均未授权。
 
-## RI5 修订（2026-09-13，Proposed，待重新接受）
+## RI5 修订（2026-09-13 起草，2026-09-14 Accepted）
 
 RI5 交付本机 Compose、局域网范围内的最小 Web Admin：一个本地管理员、Gemini 与飞书两个闭集
 集成、`lan_http` 与 HTTPS 两种显式 Web 模式。完整范围见
@@ -196,10 +195,10 @@ Runtime/Runner/Admission/Gateway 链、须经 ADR-016 修订、"独立 worker �
 key 执行探针冲突。
 
 ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007，因此两行必须一并处理。相应的
-**RI5 Proposed Amendment 已在 ADR-007 中起草并完成**（R1 修订 B2、R2 修订 G、R3 声明未放宽项），
-状态同为 Proposed；本行不再有待决项。
+**RI5 Amendment 已在 ADR-007 中完成并接受**（R1 修订 B2、R2 修订 G、R3 声明未放宽项）；
+本行不再有待决项。
 
-ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 
 ## 后果
 

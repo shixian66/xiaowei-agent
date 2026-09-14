@@ -1,13 +1,12 @@
 # ADR-007：首批能力、初始执行上下文与真实调用许可
 
 - 状态：Accepted Revision（2026-09-10）+ Accepted RI3 Amendment（2026-09-12；H 层仍未单独签认）
-  + **RI5 Proposed Amendment（2026-09-13，待项目负责人重新接受）**
-- 日期：2026-09-01；候选修订 2026-09-10、2026-09-12、2026-09-13
+  + **Accepted RI5 Amendment（2026-09-14；不授予 PR 3E / RI2 现场 GO，H 层仍未单独签认）**
+- 日期：2026-09-01；候选修订 2026-09-10、2026-09-12、2026-09-13（RI5 修订 2026-09-14 接受）
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
 
-> **修订状态说明**：§RI5 Proposed Amendment 尚未被接受。未经项目负责人重新接受前，D4 表中
-> B2 与 G 的已接受口径继续有效，RI5 不得开工。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> **修订状态说明**：§RI5 Amendment 已被接受，D4 表中 B2 与 G 以该节为准。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 > 接受该修订**不**授予任何真实网络调用许可——B2 的 RI3 PR 3E 现场 GO 与 F 的 RI2 现场 GO
 > 仍是各自独立的硬门。
 
@@ -93,7 +92,7 @@ OAuth/session 仍必须通过已批准 HTTPS SSO Host/Origin，直接 HTTP IP �
 
 更换首批能力或放宽任一层调用许可，必须先修订本 ADR，不得通过代码默认值、配置项或 feature flag 静默放宽。
 
-RI5 Proposed Amendment 接受后，以下任一变化同样必须先修订本 ADR：让 Web 取得模型端口或参与
+RI5 Amendment 已接受，此后以下任一变化同样必须先修订本 ADR：让 Web 取得模型端口或参与
 任务模型调用、扩大探针输入超出固定最小 synthetic 文本、让探针创建 Task/Evidence 或进入
 `ToolGateway`、把 StarRocks 或任何运维目标纳入 Web Admin 配置或测试范围、让 `LOCAL_ADMIN`
 之外的 principal 读写配置或发起探针，以及为 RI5 新增任何执行进程或 dispatch lane。
@@ -161,7 +160,7 @@ CI 使用基础设施的权限按里程碑逐级开放，不得提前：
 
 **所有阶段共同约束**：CI 不持有任何测试环境、生产环境或运维目标系统凭证；仅允许 GitHub 自动签发、作用域限于本仓库、短生命周期的临时 `GITHUB_TOKEN`，且 workflow 权限固定为 `contents: read`、checkout 设 `persist-credentials: false`。CI 的 **E1 调用次数恒为 0**，不执行 A、B2、D、F、H、E1、E2 类真实调用，也不执行 G 的真实 provider probe。
 
-## RI5 Proposed Amendment（2026-09-13，待重新接受）
+## RI5 Amendment（2026-09-13 起草，2026-09-14 Accepted）
 
 RI5 的实现方案已由[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)取代原方案：
 取消独立配置测试 worker，改由 Web 自身读取本地配置并执行控制面连通性探针。该变化触及 D4 表中

@@ -2,14 +2,14 @@
 
 - 状态：Accepted（2026-09-12；PR 3B 复审澄清独立 nullable usage、派生字段字节上限与固定宿主路径；
   仅授权 RI3 按分 PR 顺序离线实现，真实网络调用仍需 D8 现场 GO）
-  + **RI5 修订提案（2026-09-13，Proposed，待项目负责人重新接受）**
-- 日期：2026-09-12；候选修订 2026-09-13
+  + **Accepted RI5 修订（2026-09-14；不授予 D8 的 PR 3E 现场 GO）**
+- 日期：2026-09-12；RI5 修订 2026-09-13 起草、2026-09-14 接受
 - 适用阶段：RI3；RI5 修订适用于 RI5 的本地配置管理边界
 - 关联：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
 
 > **修订状态说明**：下文 §决策 D1–D8 是已接受口径，保持原样。§RI5 修订只改变 RI5 范围内的
-> 配置与凭据落点，尚未被接受；未经项目负责人重新接受前，已接受口径继续有效。
-> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订必须成套复核并重新接受；任一份未被接受，RI5 都不得开工。
+> 配置与凭据落点，已于 2026-09-14 被接受。
+> ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 > 接受本修订**不**授予真实 Gemini 网络调用许可——D8 的 PR 3E 现场 GO 仍是独立硬门。
 
 ## 背景
@@ -376,7 +376,7 @@ RI3 不实现 Admin readback、`worker_start_id` 或运行时代次聚合。RI5 
 完成后最高只能标记 `test-env verified`。它不等于 deployed、canary 或 user-accepted，也不自动授权
 RI6 的生产模型调用。
 
-## RI5 修订（2026-09-13，Proposed，待重新接受）
+## RI5 修订（2026-09-13 起草，2026-09-14 Accepted）
 
 D7 末尾已预留归属："RI5 如确需这类能力，应按自己的配置发布问题设计，不能反向扩大 RI3。"
 本节即该设计的 ADR 侧结论，范围严格限定在 RI5 的本地单机配置管理，不改变 D1–D6 的 provider、
