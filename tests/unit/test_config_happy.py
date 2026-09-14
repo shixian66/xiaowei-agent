@@ -48,14 +48,18 @@ def test_log_level_defaults_to_info() -> None:
     assert load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}).log_level == "INFO"
 
 
-def test_model_configuration_surface_is_exactly_one_default_off_flag() -> None:
+def test_model_configuration_surface_is_only_default_off_flags() -> None:
     settings = load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"})
     assert settings.gemini_enabled is False
+    assert settings.gemini_real_test_enabled is False
     assert {
         field: environment
         for field, environment in _FIELD_TO_ENV.items()
         if field.startswith("gemini_")
-    } == {"gemini_enabled": "XIAOWEI_GEMINI_ENABLED"}
+    } == {
+        "gemini_enabled": "XIAOWEI_GEMINI_ENABLED",
+        "gemini_real_test_enabled": "XIAOWEI_GEMINI_REAL_TEST_ENABLED",
+    }
 
 
 def test_tenant_id_is_a_constant() -> None:

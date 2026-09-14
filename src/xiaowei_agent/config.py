@@ -17,7 +17,7 @@ import os
 from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from socket import inet_aton
 from typing import Annotated, Final, Literal
@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from xiaowei_agent.contracts.enums import WebMode
 from xiaowei_agent.redaction import safe_error_details
 
 ENV_PREFIX: Final[str] = "XIAOWEI_"
@@ -154,6 +155,67 @@ def _https_origin(value: str) -> str:
 
 HttpsOrigin = Annotated[StrictStr, AfterValidator(_https_origin)]
 
+_RFC1918_NETWORKS: Final = (
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+)
+
+
+def _lan_http_origin(value: str) -> str:
+    """只接受显式 http + canonical loopback/RFC1918 IPv4 + 显式端口。
+
+    端口必须显式：http 的默认端口 80 在本地部署里从不使用，允许省略只会让
+    ``http://192.168.1.20`` 这种既不可达又能通过校验的取值混进来。
+    """
+    if any(
+        ord(character) < 0x20 or ord(character) == 0x7F or character.isspace()
+        for character in value
+    ):
+        raise ValueError("must be a lan_http origin")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError("must be a lan_http origin") from None
+    if (
+        parsed.scheme != "http"
+        or port is None
+        or not 1 <= port <= 65_535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or "?" in value
+        or "#" in value
+    ):
+        raise ValueError("must be a lan_http origin")
+    literal = _canonical_ip_literal(parsed.hostname or "")
+    if literal is None:
+        raise ValueError("must be a lan_http origin")
+    address = ip_address(literal)
+    if not (
+        address.version == 4
+        and (address.is_loopback or any(address in net for net in _RFC1918_NETWORKS))
+    ):
+        raise ValueError("must be a lan_http origin")
+    return f"http://{literal}:{port}"
+
+
+def canonical_web_public_origin(value: str, *, mode: WebMode) -> str:
+    """按 Web 模式规范化本方 public origin；模式与协议不能错配。
+
+    协议放开只作用于**本方** origin。Provider 侧 URL 仍走
+    :func:`_https_origin`，任何模式下都必须是 HTTPS。
+    """
+    if mode is WebMode.LAN_HTTP:
+        return _lan_http_origin(value)
+    origin = _https_origin(value)
+    if canonical_non_ip_hostname(urlsplit(origin).hostname or "") is None:
+        raise ValueError("https origin requires a hostname")
+    return origin
+
 
 class ConfigError(RuntimeError):
     """配置缺失或非法。
@@ -230,7 +292,10 @@ class Settings(BaseModel):
     feishu_tenant_key: StrictStr | None = None
     feishu_bot_open_id: StrictStr | None = None
     feishu_identity_file: AbsolutePath | None = None
-    web_detail_base_url: HttpsOrigin | None = None
+    web_mode: WebMode = WebMode.HTTPS
+    web_public_origin: StrictStr | None = None
+    gemini_real_test_enabled: bool = False
+    feishu_real_test_enabled: bool = False
     feishu_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     projection_claim_ttl_seconds: int = Field(default=15, gt=0, le=300)
     projection_batch_limit: int = Field(default=10, gt=0, le=100)
@@ -362,19 +427,38 @@ class Settings(BaseModel):
             raise ValueError("StarRocks server timeout must not exceed read timeout")
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_web_public_origin(cls, data: object) -> object:
+        """按 ``web_mode`` 规范化本方 public origin。
+
+        必须放在 ``before``：校验规则依赖同一模型上的 ``web_mode``，字段级
+        ``AfterValidator`` 拿不到它；而 ``after`` 回写需要对 frozen 实例做
+        ``object.__setattr__``，等于自己绕开 ``frozen=True``。
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("web_public_origin")
+        if not isinstance(raw, str) or not raw:
+            return data
+        try:
+            mode = WebMode(data.get("web_mode", WebMode.HTTPS))
+        except ValueError:
+            return data  # 模式本身非法，交给字段校验去报错
+        return data | {"web_public_origin": canonical_web_public_origin(raw, mode=mode)}
+
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
-        if self.web_app_enabled != self.feishu_oauth_enabled:
-            raise ValueError("Web app and Feishu OAuth must be enabled together")
         shared = (self.feishu_app_id, self.feishu_app_secret_file)
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
         identity = (self.feishu_identity_file,)
-        web_origin = (self.web_detail_base_url,)
+        web_origin = (self.web_public_origin,)
         live_profile = shared + listener_only + identity + web_origin
         if not (
             self.feishu_listener_enabled
             or self.channel_worker_enabled
             or self.web_app_enabled
+            or self.feishu_oauth_enabled
         ):
             if any(value is not None for value in live_profile):
                 raise ValueError(
@@ -397,13 +481,15 @@ class Settings(BaseModel):
                     "enabled worker requires the complete channel worker profile"
                 )
         if self.web_app_enabled:
+            # 飞书 OAuth 自 RI5 起是可选插件：Web 自己只需要一个 public origin，
+            # 身份目录与应用凭据改由 feishu_oauth_enabled 单独要求。
+            if any(value is None for value in web_origin):
+                raise ValueError("enabled Web app requires a public origin")
+        if self.feishu_oauth_enabled:
             if any(value is None for value in shared + identity + web_origin):
                 raise ValueError(
-                    "enabled Web app requires the complete Web authentication profile"
+                    "enabled Feishu OAuth requires the complete Web authentication profile"
                 )
-            origin_hostname = urlsplit(str(self.web_detail_base_url)).hostname
-            if canonical_non_ip_hostname(origin_hostname or "") is None:
-                raise ValueError("OAuth Web origin requires a hostname")
         if not self.feishu_listener_enabled and not self.web_app_enabled and any(
             value is not None for value in identity
         ):
@@ -519,7 +605,10 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
     "feishu_bot_open_id": "XIAOWEI_FEISHU_BOT_OPEN_ID",
     "feishu_identity_file": "XIAOWEI_FEISHU_IDENTITY_FILE",
-    "web_detail_base_url": "XIAOWEI_WEB_DETAIL_BASE_URL",
+    "web_mode": "XIAOWEI_WEB_MODE",
+    "web_public_origin": "XIAOWEI_WEB_PUBLIC_ORIGIN",
+    "gemini_real_test_enabled": "XIAOWEI_GEMINI_REAL_TEST_ENABLED",
+    "feishu_real_test_enabled": "XIAOWEI_FEISHU_REAL_TEST_ENABLED",
     "feishu_api_timeout_seconds": "XIAOWEI_FEISHU_API_TIMEOUT_SECONDS",
     "projection_claim_ttl_seconds": "XIAOWEI_PROJECTION_CLAIM_TTL_SECONDS",
     "projection_batch_limit": "XIAOWEI_PROJECTION_BATCH_LIMIT",
@@ -572,7 +661,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             (
                 field.startswith("starrocks_")
                 or field.startswith("feishu_")
-                or field == "web_detail_base_url"
+                or field == "web_public_origin"
             )
             and not prefixed[name]
         )

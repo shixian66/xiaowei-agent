@@ -276,7 +276,7 @@ async def test_oauth_start_capacity_returns_503_without_cookie_body_or_log_leaka
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
     async with httpx.AsyncClient(
@@ -561,7 +561,7 @@ async def test_unknown_application_exception_is_closed_inside_the_request_trace(
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(
         service=service,
@@ -710,7 +710,7 @@ async def test_logging_failure_cannot_replace_http_result(
             feishu_app_id="cli_test_app",
             feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
             feishu_identity_file="/run/config/feishu-identities.json",
-            web_detail_base_url="https://ops.example.test",
+            web_public_origin="https://ops.example.test",
         ),
         task_access=TaskAccess(),
         clock=clock,
@@ -767,7 +767,7 @@ async def test_logging_failure_does_not_replace_request_cancellation(
             feishu_app_id="cli_test_app",
             feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
             feishu_identity_file="/run/config/feishu-identities.json",
-            web_detail_base_url="https://ops.example.test",
+            web_public_origin="https://ops.example.test",
         ),
         task_access=CancelledTaskAccess(),
         clock=clock,
@@ -875,7 +875,7 @@ async def test_oversized_logout_is_rejected_before_auth_state_changes(
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
     async with httpx.AsyncClient(
@@ -931,7 +931,7 @@ async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
     async with httpx.AsyncClient(
@@ -980,7 +980,7 @@ async def test_rejected_web_request_log_uses_only_closed_fields(
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
     code = "provider-" + "sensitive-code"
@@ -1040,7 +1040,7 @@ async def test_provider_failure_log_omits_provider_body_and_opaque_identity(
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
     code = "provider-" + "sensitive-code"
@@ -1147,7 +1147,7 @@ async def main():
                 feishu_app_id="app",
                 feishu_app_secret_file=str(root / "missing"),
                 feishu_identity_file=str(identity),
-                web_detail_base_url="https://ops.example.test",
+                web_public_origin="https://ops.example.test",
             ),
             oauth=OAuth(),
             membership=Membership(),

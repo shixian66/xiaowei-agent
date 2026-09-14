@@ -236,10 +236,10 @@ Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没�
 
 三个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
 `XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
-`XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_DETAIL_BASE_URL` 必须全部留空。listener 开启时
+`XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_PUBLIC_ORIGIN` 必须全部留空。listener 开启时
 前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
 Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
-`XIAOWEI_WEB_DETAIL_BASE_URL` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
+`XIAOWEI_WEB_PUBLIC_ORIGIN` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
 Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
 code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 使用严格更长的 6 秒外层
 watchdog，且不重试；两者都没有读取
@@ -292,7 +292,7 @@ services:
       XIAOWEI_FEISHU_APP_ID: "example-app-id"
       XIAOWEI_FEISHU_APP_SECRET_FILE: /run/secrets/feishu_app_secret
       XIAOWEI_FEISHU_IDENTITY_FILE: /run/config/feishu-identities.json
-      XIAOWEI_WEB_DETAIL_BASE_URL: https://sso.example.invalid
+      XIAOWEI_WEB_PUBLIC_ORIGIN: https://sso.example.invalid
 ```
 
 数据库与 migration 就绪后，显式启用 profile 和 override：

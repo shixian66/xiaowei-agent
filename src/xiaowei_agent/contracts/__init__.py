@@ -73,6 +73,7 @@ from xiaowei_agent.contracts.enums import (
     ToolCallStatus,
     TransitionRejection,
     TrustLevel,
+    WebMode,
 )
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
@@ -270,6 +271,7 @@ __all__ = [
     "TransitionRejection",
     "TransitionResult",
     "TrustLevel",
+    "WebMode",
     "content_digest",
     "evidence_id",
     "frozen_map",

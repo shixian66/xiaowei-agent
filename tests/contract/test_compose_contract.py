@@ -33,7 +33,7 @@ _FEISHU_LIVE_ENVIRONMENT = {
     "XIAOWEI_FEISHU_TENANT_KEY",
     "XIAOWEI_FEISHU_BOT_OPEN_ID",
     "XIAOWEI_FEISHU_IDENTITY_FILE",
-    "XIAOWEI_WEB_DETAIL_BASE_URL",
+    "XIAOWEI_WEB_PUBLIC_ORIGIN",
 }
 _CHANNEL_ONLY_ENVIRONMENT = _FEISHU_LIVE_ENVIRONMENT | {
     "XIAOWEI_FEISHU_LISTENER_ENABLED",
@@ -328,7 +328,7 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
         "XIAOWEI_FEISHU_APP_ID": "cli_smoke_fake_app",
         "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
         "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
-        "XIAOWEI_WEB_DETAIL_BASE_URL": "https://sso.example.invalid",
+        "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://sso.example.invalid",
     }
     provider_origin = urlsplit(interfaces_module.FEISHU_PROVIDER_ORIGIN)
     assert provider_origin.scheme == "https"

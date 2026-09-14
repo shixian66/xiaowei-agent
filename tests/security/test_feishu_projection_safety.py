@@ -163,7 +163,7 @@ async def probe():
                 channel_worker_enabled=True,
                 feishu_app_id='app',
                 feishu_app_secret_file=str(root / 'missing'),
-                web_detail_base_url='https://ops.example.test',
+                web_public_origin='https://ops.example.test',
             ),
             message_port=Messages(),
         )
@@ -221,7 +221,7 @@ async def test_request_preview_is_scrubbed_before_it_enters_the_card(
         settings=SimpleNamespace(
             tenant_id="dev-local",
             environment_id="dev",
-            web_detail_base_url="https://ops.example.test",
+            web_public_origin="https://ops.example.test",
             projection_claim_ttl_seconds=15,
             projection_batch_limit=10,
             projection_provider_max_attempts=3,

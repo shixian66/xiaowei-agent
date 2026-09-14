@@ -62,6 +62,17 @@ class IdentitySource(StrEnum):
     FEISHU = "feishu"
 
 
+class WebMode(StrEnum):
+    """Web 对外暴露方式。决定 public origin 允许的协议与主机形态。
+
+    ``LAN_HTTP`` 是 RI5 本地管理面的部署形态：仅局域网、仅 http、仅 IP 字面量。
+    ``HTTPS`` 是既有的对外形态，沿用既有 HTTPS origin 的全部约束。
+    """
+
+    LAN_HTTP = "lan_http"
+    HTTPS = "https"
+
+
 class ChannelKind(StrEnum):
     FEISHU_PRIVATE = "feishu_private"
     FEISHU_GROUP = "feishu_group"

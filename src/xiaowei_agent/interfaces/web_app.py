@@ -750,7 +750,7 @@ def create_app(
     app.middleware_stack = _SecurityHeadersMiddleware(
         _WebRequestBoundaryMiddleware(
             app.build_middleware_stack(),
-            public_origin=cast(str, settings.web_detail_base_url),
+            public_origin=cast(str, settings.web_public_origin),
         )
     )
     return app

@@ -611,7 +611,7 @@ def _channel_worker_settings(secret_file: Path) -> Settings:
         channel_worker_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file=str(secret_file),
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
 
 
@@ -690,7 +690,7 @@ def _web_settings(identity_file: Path) -> Settings:
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file=str(identity_file),
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
 
 

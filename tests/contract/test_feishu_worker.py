@@ -142,7 +142,7 @@ def test_process_main_reports_only_a_closed_failure_kind(
         channel_worker_enabled=True,
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
     monkeypatch.setattr(feishu_worker, "load_settings", lambda: settings)
     monkeypatch.setattr(feishu_worker, "configure_logging", lambda _: None)

@@ -234,7 +234,7 @@ Expected: 新开关与装配尚不存在，测试失败。
 
 - 容器内 `web_bind_host=0.0.0.0` 只表示容器监听；基础 Compose 宿主发布仍是
   `127.0.0.1:8080:8080`；
-- `web_detail_base_url` 仍要求用户已有的 HTTPS SSO origin；
+- `web_public_origin` 仍要求用户已有的 HTTPS SSO origin；
 - OAuth redirect、Secure cookie、SameSite、CSRF 和 HSTS 继续按 public origin 契约工作；
 - 不在应用中实现 TLS 或代理。
 - OAuth start/callback 和受保护 `/app` 路由验证受信 Host；直接访问

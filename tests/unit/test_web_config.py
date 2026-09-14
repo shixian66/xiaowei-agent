@@ -2,7 +2,13 @@
 
 import pytest
 
-from xiaowei_agent.config import ConfigError, Settings, load_settings
+from xiaowei_agent.config import (
+    ConfigError,
+    Settings,
+    canonical_web_public_origin,
+    load_settings,
+)
+from xiaowei_agent.contracts import WebMode
 
 
 def _profile(**updates: object) -> dict[str, object]:
@@ -13,7 +19,7 @@ def _profile(**updates: object) -> dict[str, object]:
         "feishu_app_id": "cli_test_app",
         "feishu_app_secret_file": "/run/secrets/feishu_app_secret",
         "feishu_identity_file": "/run/config/feishu-identities.json",
-        "web_detail_base_url": "https://ops.example.test",
+        "web_public_origin": "https://ops.example.test",
     }
     return values | updates
 
@@ -35,7 +41,7 @@ def test_web_app_is_default_closed_with_short_bounded_lifetimes() -> None:
         "feishu_app_id",
         "feishu_app_secret_file",
         "feishu_identity_file",
-        "web_detail_base_url",
+        "web_public_origin",
     ],
 )
 def test_enabled_web_app_requires_the_complete_auth_profile(field: str) -> None:
@@ -59,7 +65,7 @@ def test_web_app_profile_loads_from_the_explicit_environment_only() -> None:
             "XIAOWEI_FEISHU_APP_ID": "cli_test_app",
             "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
-            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://OPS.example.test/",
+            "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://OPS.example.test/",
         }
     )
 
@@ -68,7 +74,7 @@ def test_web_app_profile_loads_from_the_explicit_environment_only() -> None:
     assert settings.web_bind_port == 8081
     assert settings.web_oauth_state_ttl_seconds == 120
     assert settings.web_session_ttl_seconds == 7200
-    assert settings.web_detail_base_url == "https://ops.example.test"
+    assert settings.web_public_origin == "https://ops.example.test"
 
 
 @pytest.mark.parametrize(
@@ -87,29 +93,28 @@ def test_web_app_timing_and_bind_values_are_bounded(field: str, value: int) -> N
         Settings(**_profile(**{field: value}))
 
 
-@pytest.mark.parametrize(
-    ("web_enabled", "oauth_enabled"),
-    [(True, False), (False, True)],
-    ids=["web-without-oauth", "oauth-without-web"],
-)
-def test_web_and_oauth_activation_flags_must_move_together(
-    web_enabled: bool, oauth_enabled: bool
-) -> None:
-    profile = _profile(
-        web_app_enabled=web_enabled,
-        feishu_oauth_enabled=oauth_enabled,
-    )
-    if not web_enabled:
-        for field in (
-            "feishu_app_id",
-            "feishu_app_secret_file",
-            "feishu_identity_file",
-            "web_detail_base_url",
-        ):
-            profile.pop(field)
+def test_feishu_oauth_still_requires_the_web_app() -> None:
+    """解耦是单向的：Web 可以没有飞书，飞书 OAuth 不能没有 Web。
+
+    OAuth 登录本身就是 Web 的一条路由，没有 Web 进程就没有 callback 落点。
+    """
+    profile = _profile(web_app_enabled=False, feishu_oauth_enabled=True)
+    for field in (
+        "feishu_app_id",
+        "feishu_app_secret_file",
+        "feishu_identity_file",
+        "web_public_origin",
+    ):
+        profile.pop(field)
 
     with pytest.raises(ValueError, match="OAuth"):
         Settings(**profile)
+
+
+def test_feishu_oauth_with_a_full_profile_still_needs_the_web_app() -> None:
+    """反例：补齐全部飞书字段也不行——web_app_enabled=False 时 origin 本身不被允许。"""
+    with pytest.raises(ValueError):
+        Settings(**_profile(web_app_enabled=False, feishu_oauth_enabled=True))
 
 
 @pytest.mark.parametrize(
@@ -137,7 +142,7 @@ def test_web_and_oauth_activation_flags_must_move_together(
 )
 def test_oauth_web_origin_requires_a_hostname(origin: str) -> None:
     with pytest.raises(ValueError, match="hostname"):
-        Settings(**_profile(web_detail_base_url=origin))
+        Settings(**_profile(web_public_origin=origin))
 
 
 @pytest.mark.parametrize(
@@ -161,7 +166,7 @@ def test_oauth_web_origin_requires_a_hostname(origin: str) -> None:
 )
 def test_web_origin_rejects_invalid_authority_syntax(origin: str) -> None:
     with pytest.raises(ValueError, match="HTTPS origin"):
-        Settings(**_profile(web_detail_base_url=origin))
+        Settings(**_profile(web_public_origin=origin))
 
 
 def test_disabled_web_app_cannot_carry_a_web_only_identity_profile() -> None:
@@ -171,7 +176,7 @@ def test_disabled_web_app_cannot_carry_a_web_only_identity_profile() -> None:
             feishu_app_id="cli_test_app",
             feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
             feishu_identity_file="/run/config/feishu-identities.json",
-            web_detail_base_url="https://ops.example.test",
+            web_public_origin="https://ops.example.test",
         )
 
 
@@ -186,8 +191,88 @@ def test_invalid_web_profile_does_not_echo_configuration_values() -> None:
                 "XIAOWEI_FEISHU_APP_ID": "cli_test_app",
                 "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
                 "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
-                "XIAOWEI_WEB_DETAIL_BASE_URL": sensitive,
+                "XIAOWEI_WEB_PUBLIC_ORIGIN": sensitive,
             }
         )
 
     assert sensitive not in str(caught.value)
+
+
+def _env(**updates: str) -> dict[str, str]:
+    """最小可用环境；只带必填键，其余由 Settings 默认值补齐。"""
+    values: dict[str, str] = {"XIAOWEI_ENVIRONMENT_ID": "dev"}
+    return values | updates
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://127.0.0.1:8080",
+        "http://192.168.1.20:8080",
+        "http://10.0.0.5:8080",
+        "http://172.16.0.9:8080",
+    ],
+)
+def test_lan_http_accepts_loopback_and_rfc1918_with_explicit_port(value: str) -> None:
+    assert canonical_web_public_origin(value, mode=WebMode.LAN_HTTP) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://8.8.8.8:8080",          # 公网 IP
+        "http://192.168.1.20",          # 缺显式端口
+        "https://192.168.1.20:8080",    # 协议与模式错配
+        "http://example.com:8080",      # lan_http 不接受主机名
+        "http://192.168.1.20:8080/app", # 带路径
+        "http://user@192.168.1.20:8080",
+    ],
+)
+def test_lan_http_rejects_everything_else(value: str) -> None:
+    with pytest.raises(ValueError):
+        canonical_web_public_origin(value, mode=WebMode.LAN_HTTP)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://192.168.1.20:8080", "https://192.168.1.20:8080", "https://127.0.0.1:8443"],
+)
+def test_https_mode_still_rejects_http_and_ip_literals(value: str) -> None:
+    with pytest.raises(ValueError):
+        canonical_web_public_origin(value, mode=WebMode.HTTPS)
+
+
+def test_https_mode_accepts_the_existing_sso_hostname_shape() -> None:
+    assert (
+        canonical_web_public_origin("https://sso.example.com", mode=WebMode.HTTPS)
+        == "https://sso.example.com"
+    )
+
+
+def test_web_app_no_longer_requires_feishu_oauth() -> None:
+    settings = load_settings(
+        _env(
+            XIAOWEI_WEB_APP_ENABLED="true",
+            XIAOWEI_FEISHU_OAUTH_ENABLED="false",
+            XIAOWEI_WEB_MODE="lan_http",
+            XIAOWEI_WEB_PUBLIC_ORIGIN="http://127.0.0.1:8080",
+        )
+    )
+    assert settings.web_app_enabled is True
+    assert settings.feishu_oauth_enabled is False
+
+
+def test_real_test_switches_default_to_false() -> None:
+    settings = load_settings(_env())
+    assert settings.gemini_real_test_enabled is False
+    assert settings.feishu_real_test_enabled is False
+
+
+def test_web_app_still_requires_a_public_origin() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(_env(XIAOWEI_WEB_APP_ENABLED="true", XIAOWEI_WEB_MODE="lan_http"))
+
+
+def test_disabled_web_and_worker_must_not_carry_a_public_origin() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(_env(XIAOWEI_WEB_PUBLIC_ORIGIN="https://sso.example.com"))

@@ -113,7 +113,7 @@ mypy src                       Success: no issues found in 164 source files
   - `Settings.feishu_real_test_enabled: bool = False`
   - `def canonical_web_public_origin(value: str, *, mode: WebMode) -> str`——按模式规范化并返回 origin，非法抛 `ValueError`
 
-- [ ] **Step 1: 写失败测试——模式化 origin 校验**
+- [x] **Step 1: 写失败测试——模式化 origin 校验**
 
 在 `tests/unit/test_web_config.py` 追加：
 
@@ -168,7 +168,7 @@ def test_https_mode_accepts_the_existing_sso_hostname_shape() -> None:
     )
 ```
 
-- [ ] **Step 2: 写失败测试——解耦与双层开关**
+- [x] **Step 2: 写失败测试——解耦与双层开关**
 
 同文件追加。`_env()` 沿用该文件既有的最小环境构造 helper；若不存在则新增一个返回必填 `XIAOWEI_ENVIRONMENT_ID=dev` 等键的字典函数。
 
@@ -202,13 +202,13 @@ def test_disabled_web_and_worker_must_not_carry_a_public_origin() -> None:
         load_settings(_env(XIAOWEI_WEB_PUBLIC_ORIGIN="https://sso.example.com"))
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `python -m pytest tests/unit/test_web_config.py -q`
 
 Expected: FAIL —— `ImportError: cannot import name 'canonical_web_public_origin'`、`WebMode` 不存在。
 
-- [ ] **Step 4: 实现最小契约**
+- [x] **Step 4: 实现最小契约**
 
 在 `contracts/enums.py` 追加 `WebMode`（并加入该模块 `__all__` 与 `contracts/__init__.py` 的导出，`tests/contract/test_contract_enum_references.py` 会机械核对）。
 
@@ -287,13 +287,13 @@ XIAOWEI_GEMINI_REAL_TEST_ENABLED=false
 XIAOWEI_FEISHU_REAL_TEST_ENABLED=false
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `python -m pytest tests/unit/test_web_config.py tests/unit/test_feishu_config.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 6: 完成机械重命名并跑全量**
+- [x] **Step 6: 完成机械重命名并跑全量**
 
 把剩余 `web_detail_base_url` / `XIAOWEI_WEB_DETAIL_BASE_URL` 引用全部改名。**不提供兼容别名**。用这条命令拿到完整清单，逐个改完后它必须返回空：
 
@@ -314,7 +314,7 @@ mypy src
 
 Expected: 全绿。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add \
@@ -341,6 +341,43 @@ git add \
   docs/superpowers/plans/2026-09-10-feishu-oauth-web-activation.md
 git commit -m "feat(ri5): add web mode and rename web origin to a single source"
 ```
+
+**Task 1 执行记录（2026-09-14）：** 四条基线全绿——`3552 passed, 227 skipped`（基线 3534）、
+`1290 security passed`、`ruff` 通过、`mypy` 164 files 通过。三处与计划文字不同，均已按根因处理：
+
+1. **Step 6 的收敛命令按原文永远不会返回空。** 有三份文档写的正是「把 `web_detail_base_url`
+   重命名为 `web_public_origin`」这句话本身——`docs/adr/ADR-014`、RI5 简化设计、以及本计划。
+   改掉它们会让那句话失去含义。实际收敛判据为：
+
+   ```bash
+   grep -rl "web_detail_base_url\\|WEB_DETAIL_BASE_URL" --exclude-dir=__pycache__ \\
+     --exclude-dir=.git --exclude-dir=.venv . \\
+     | grep -v -e 'docs/adr/ADR-014' \\
+               -e 'docs/plans/RI5-local-web-admin-simplified-design.md' \\
+               -e 'docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md'
+   ```
+
+   该命令已返回空。代码、配置、Compose、README 与旧里程碑计划共 20 个文件全部改名，无兼容别名。
+
+2. **规范化落在 `@model_validator(mode="before")`，不在 `load_settings`。** 计划给了两条路并
+   担心 `object.__setattr__` 绕过 `frozen=True`；before 校验器两个问题都没有：它在实例存在之前
+   改的是入参 dict，且直接构造 `Settings(...)`（既有测试大量这么做）同样会走校验与规范化。
+   只在 `load_settings` 规范化会让直接构造的路径失去校验。
+
+3. **两条既有测试在字段统一后正面冲突，按「单一真源」收紧。**
+   `test_valid_https_origin_host_forms_are_stored_canonically` 的 `ipv4`/`ipv6` 用例断言
+   channel worker 侧接受 IP 字面量，而 `test_oauth_web_origin_requires_a_hostname` 用同样的取值
+   断言必须拒绝——两者能共存只因为主机名断言写在 `web_app_enabled` 分支里。改名后只剩一个
+   origin 字段，同一个值不可能在一个进程是主机名、在另一个进程是 IP。因此把主机名要求移进
+   `canonical_web_public_origin`，删掉那两个用例并补上
+   `test_https_public_origin_rejects_ip_literals_for_the_worker_too` 钉住新规则。
+   同类：`test_gemini_setting_is_exactly_one_default_off_boolean` 与
+   `test_model_configuration_surface_is_exactly_one_default_off_flag` 断言 `gemini_*` 恰好一个字段，
+   新增 `gemini_real_test_enabled` 后改为断言闭集恰好是两个**布尔开关**（守的是「只有开关、
+   没有凭据/端点/模型名」，不是「只有一个」）。
+
+   实际改到的既有测试比计划清单多两个：`tests/unit/test_config_happy.py`、
+   `tests/unit/test_gemini_config.py`，已按 `git status` 补进本 Task 的 `git add`。
 
 ---
 

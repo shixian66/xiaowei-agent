@@ -122,7 +122,7 @@ def _settings(*, public_origin: str = "https://ops.example.test") -> Settings:
         feishu_app_id="cli_test_app",
         feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
-        web_detail_base_url=public_origin,
+        web_public_origin=public_origin,
     )
 
 
@@ -944,7 +944,7 @@ def test_real_module_entry_rejects_half_enabled_web_before_secret_access() -> No
             "XIAOWEI_FEISHU_APP_ID": "app",
             "XIAOWEI_FEISHU_APP_SECRET_FILE": "/missing/secret-reference",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
-            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+            "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }
     )
 
@@ -1116,7 +1116,7 @@ def test_real_uvicorn_bind_failure_emits_only_the_fixed_main_error(
             "XIAOWEI_FEISHU_APP_ID": "app",
             "XIAOWEI_FEISHU_APP_SECRET_FILE": str(feishu_secret),
             "XIAOWEI_FEISHU_IDENTITY_FILE": str(identities),
-            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+            "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
             "XIAOWEI_WEB_BIND_HOST": "192.0.2.1",
             "XIAOWEI_WEB_BIND_PORT": "49152",
             "TEST_UVICORN_HANDLER_SENTINEL": str(handler_sentinel),
@@ -1262,7 +1262,7 @@ def test_enabled_module_entry_maps_bad_secret_reference_to_configuration_error()
             "XIAOWEI_FEISHU_APP_ID": "app",
             "XIAOWEI_FEISHU_APP_SECRET_FILE": "/missing/secret-reference",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
-            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test",
+            "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }
     )
 

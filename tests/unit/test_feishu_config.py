@@ -18,7 +18,7 @@ _WORKER_PROFILE: dict[str, object] = {
     "channel_worker_enabled": True,
     "feishu_app_id": "cli_test_app",
     "feishu_app_secret_file": "/run/secrets/feishu_app_secret",
-    "web_detail_base_url": "https://ops.example.test",
+    "web_public_origin": "https://ops.example.test",
 }
 
 
@@ -33,7 +33,7 @@ def test_feishu_listener_is_disabled_without_any_live_profile_by_default() -> No
     assert settings.feishu_tenant_key is None
     assert settings.feishu_bot_open_id is None
     assert settings.feishu_identity_file is None
-    assert settings.web_detail_base_url is None
+    assert settings.web_public_origin is None
     assert settings.feishu_api_timeout_seconds == 5.0
     assert settings.projection_claim_ttl_seconds == 15
     assert settings.projection_provider_max_attempts == 3
@@ -102,7 +102,7 @@ def test_worker_only_profile_does_not_require_listener_identity_configuration() 
     assert settings.feishu_tenant_key is None
     assert settings.feishu_bot_open_id is None
     assert settings.feishu_identity_file is None
-    assert settings.web_detail_base_url == "https://ops.example.test"
+    assert settings.web_public_origin == "https://ops.example.test"
 
 
 def test_listener_and_worker_can_share_one_explicit_app_credential_reference() -> None:
@@ -122,12 +122,12 @@ def test_complete_channel_worker_profile_loads_from_environment() -> None:
             "XIAOWEI_CHANNEL_WORKER_ENABLED": "true",
             "XIAOWEI_FEISHU_APP_ID": "cli_test_app",
             "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
-            "XIAOWEI_WEB_DETAIL_BASE_URL": "https://ops.example.test/",
+            "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test/",
         }
     )
 
     assert settings.channel_worker_enabled is True
-    assert settings.web_detail_base_url == "https://ops.example.test"
+    assert settings.web_public_origin == "https://ops.example.test"
 
 
 @pytest.mark.parametrize(
@@ -155,11 +155,11 @@ def test_complete_channel_worker_profile_loads_from_environment() -> None:
         "invalid-host-character",
     ],
 )
-def test_web_detail_base_url_is_a_trusted_https_origin_only(url: str) -> None:
+def test_web_public_origin_is_a_trusted_https_origin_only(url: str) -> None:
     with pytest.raises(ValidationError, match="HTTPS origin"):
         Settings(
             environment_id="dev",
-            **(_WORKER_PROFILE | {"web_detail_base_url": url}),
+            **(_WORKER_PROFILE | {"web_public_origin": url}),
         )
 
 
@@ -167,8 +167,6 @@ def test_web_detail_base_url_is_a_trusted_https_origin_only(url: str) -> None:
     ("url", "expected"),
     [
         ("https://ops-internal", "https://ops-internal"),
-        ("https://127.0.0.1:8443", "https://127.0.0.1:8443"),
-        ("https://[::1]:8443", "https://[::1]:8443"),
         ("https://täst.de", "https://xn--tst-qla.de"),
         ("https://ops.example.test:443", "https://ops.example.test"),
         (
@@ -179,8 +177,6 @@ def test_web_detail_base_url_is_a_trusted_https_origin_only(url: str) -> None:
     ],
     ids=[
         "single-label",
-        "ipv4",
-        "ipv6",
         "idna",
         "default-port",
         "confusable-slash",
@@ -192,10 +188,29 @@ def test_valid_https_origin_host_forms_are_stored_canonically(
 ) -> None:
     settings = Settings(
         environment_id="dev",
-        **(_WORKER_PROFILE | {"web_detail_base_url": url}),
+        **(_WORKER_PROFILE | {"web_public_origin": url}),
     )
 
-    assert settings.web_detail_base_url == expected
+    assert settings.web_public_origin == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://127.0.0.1:8443", "https://[::1]:8443"],
+    ids=["ipv4", "ipv6"],
+)
+def test_https_public_origin_rejects_ip_literals_for_the_worker_too(url: str) -> None:
+    """RI5 起 origin 只有一个真源，主机名要求不再只作用于 Web 分支。
+
+    改名前 ``web_detail_base_url`` 在 channel worker 侧接受 IP 字面量、在 Web 侧
+    要求主机名——同一个字段两套规则，只因为断言写在 ``web_app_enabled`` 分支里。
+    统一成 :func:`canonical_web_public_origin` 之后，HTTPS 模式一律要求主机名。
+    """
+    with pytest.raises(ValueError, match="hostname"):
+        Settings(
+            environment_id="dev",
+            **(_WORKER_PROFILE | {"web_public_origin": url}),
+        )
 
 
 @pytest.mark.parametrize(

@@ -41,7 +41,7 @@ from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 class _Settings:
     tenant_id: str = "dev-local"
     environment_id: str = "dev"
-    web_detail_base_url: str = "https://ops.example.test"
+    web_public_origin: str = "https://ops.example.test"
     projection_claim_ttl_seconds: int = 15
     projection_batch_limit: int = 10
     projection_provider_max_attempts: int = 3

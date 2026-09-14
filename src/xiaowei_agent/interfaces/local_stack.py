@@ -905,7 +905,7 @@ async def build_postgres_web_stack(
             sessions=web_session_store,
             identities=identity_directory,
             oauth=oauth,
-            public_origin=cast(str, settings.web_detail_base_url),
+            public_origin=cast(str, settings.web_public_origin),
             oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
             session_ttl_seconds=settings.web_session_ttl_seconds,
             oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,

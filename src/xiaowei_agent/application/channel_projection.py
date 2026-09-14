@@ -122,7 +122,7 @@ class ChannelProjectionSettings(Protocol):
     def tenant_id(self) -> str: ...
 
     environment_id: str
-    web_detail_base_url: str | None
+    web_public_origin: str | None
     projection_claim_ttl_seconds: int
     projection_batch_limit: int
     projection_provider_max_attempts: int
@@ -159,9 +159,9 @@ class ChannelProjectionService:
         self._messages = message_port
         self._clock = clock
         self._settings = settings
-        if settings.web_detail_base_url is None:
+        if settings.web_public_origin is None:
             raise ValueError("channel projection requires a trusted detail origin")
-        self._web_detail_base_url = settings.web_detail_base_url
+        self._web_public_origin = settings.web_public_origin
         self._sleep = sleep
         self.owner = owner or f"channel-worker-{uuid.uuid4().hex}"
         self._outbound = asyncio.Semaphore(settings.projection_tenant_concurrency)
@@ -178,7 +178,7 @@ class ChannelProjectionService:
 
     def _detail_url(self, task_id: str) -> str:
         return (
-            f"{self._web_detail_base_url}/app/tasks/"
+            f"{self._web_public_origin}/app/tasks/"
             f"{quote(task_id, safe='')}"
         )
 

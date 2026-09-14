@@ -135,7 +135,7 @@ def _settings(tmp_path: Path) -> Settings:
         feishu_tenant_key="offline-tenant",
         feishu_bot_open_id="bot-open-id",
         feishu_identity_file=str(_identity_file(tmp_path)),
-        web_detail_base_url="https://ops.example.test",
+        web_public_origin="https://ops.example.test",
     )
 
 
