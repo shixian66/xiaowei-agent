@@ -271,7 +271,7 @@ async def test_membership_provider_exception_is_rebuilt_without_response_body(
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
     )
 
     with pytest.raises(FeishuSdkError) as caught:
@@ -300,8 +300,6 @@ async def test_process_boundary_does_not_log_sdk_exception_text(
     settings = Settings(
         environment_id="dev",
         feishu_listener_enabled=True,
-        feishu_app_id="app",
-        feishu_app_secret_file="/missing/" + "secret-reference",
         feishu_tenant_key="tenant",
         feishu_bot_open_id="bot",
         feishu_identity_file="/missing/identity-reference",

@@ -161,8 +161,6 @@ async def probe():
                 environment_id='dev',
                 postgres_password_file=str(postgres),
                 channel_worker_enabled=True,
-                feishu_app_id='app',
-                feishu_app_secret_file=str(root / 'missing'),
                 web_public_origin='https://ops.example.test',
             ),
             message_port=Messages(),

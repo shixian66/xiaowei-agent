@@ -234,12 +234,11 @@ listener/worker 不发布宿主端口。Web 容器内使用 HTTP `0.0.0.0:8080`�
 OAuth 浏览器入口仍必须使用已经备案的 HTTPS SSO 域名，并由 Compose 外部的 TLS/反向代理转发到
 Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没有证明真实 callback 可以从飞书到达。
 
-三个进程都关闭时，`XIAOWEI_FEISHU_APP_ID`、`XIAOWEI_FEISHU_APP_SECRET_FILE`、
-`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
+三个进程都关闭时，`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
 `XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_PUBLIC_ORIGIN` 必须全部留空。listener 开启时
-前五项必须同时提供；worker 开启时必须提供 App ID、App secret 文件与受信 HTTPS 详情 origin。
-Web app 开启时必须提供 App ID、App secret 文件、身份文件与受信 HTTPS public origin；
-`XIAOWEI_WEB_PUBLIC_ORIGIN` 在 Web 进程中复用为该 public origin。不经 Compose 直接运行时，
+前三项必须同时提供；Web app 开启时必须提供 `XIAOWEI_WEB_PUBLIC_ORIGIN`，飞书 OAuth 另外开启时
+还需要身份文件。**App ID 与 App Secret 不再是环境变量**：自 RI5 起它们的唯一真源是
+`.config/integrations.json`，由 Web 管理面写入、各进程启动时读取。不经 Compose 直接运行时，
 Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
 code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 使用严格更长的 6 秒外层
 watchdog，且不重试；两者都没有读取
@@ -289,8 +288,6 @@ services:
     environment:
       XIAOWEI_WEB_APP_ENABLED: "true"
       XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
-      XIAOWEI_FEISHU_APP_ID: "example-app-id"
-      XIAOWEI_FEISHU_APP_SECRET_FILE: /run/secrets/feishu_app_secret
       XIAOWEI_FEISHU_IDENTITY_FILE: /run/config/feishu-identities.json
       XIAOWEI_WEB_PUBLIC_ORIGIN: https://sso.example.invalid
 ```

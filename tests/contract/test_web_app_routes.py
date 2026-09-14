@@ -25,10 +25,12 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
 from xiaowei_agent.interfaces import feishu_sdk as feishu_sdk_module
 from xiaowei_agent.interfaces import local_stack as local_stack_module
+from xiaowei_agent.interfaces import provider_consumption as provider_consumption_module
 from xiaowei_agent.interfaces import web_app as web_app_module
 from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.api import create_app as create_internal_app
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import (
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -120,8 +122,6 @@ def _settings(*, public_origin: str = "https://ops.example.test") -> Settings:
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_app_id="cli_test_app",
-        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin=public_origin,
     )
@@ -847,6 +847,8 @@ async def test_oauth_request_trace_is_server_generated_bound_and_logged_once(
     ]
 
 
+_FAKE_APP_SECRET = "unit-test-" + "app-secret"
+
 async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -891,6 +893,17 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         async def serve(self) -> None:
             events["served"] = True
 
+    # RI5：凭据来自 `integrations.json`，composition root 先读一次再构造 adapter。
+    monkeypatch.setattr(
+        provider_consumption_module,
+        "load_provider_credentials",
+        lambda **_: (
+            ProviderCredentials(
+                feishu_app_id="cli_test_app", feishu_app_secret=_FAKE_APP_SECRET
+            ),
+            {},
+        ),
+    )
     monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
     monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
     monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", build)
@@ -909,13 +922,13 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
     assert result == 0
     assert events["oauth"] == {
         "app_id": "cli_test_app",
-        "app_secret_file": "/run/secrets/feishu_app_secret",
+        "app_secret": _FAKE_APP_SECRET,
         "timeout_seconds": web_auth_module.FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     }
     assert events["membership"] == {
         "tenant_id": "dev-local",
         "app_id": "cli_test_app",
-        "app_secret_file": "/run/secrets/feishu_app_secret",
+        "app_secret": _FAKE_APP_SECRET,
     }
     assert events["build"] == {
         "settings": settings,
@@ -943,8 +956,6 @@ def test_real_module_entry_rejects_half_enabled_web_before_secret_access() -> No
         {
             "XIAOWEI_ENVIRONMENT_ID": "dev",
             "XIAOWEI_WEB_APP_ENABLED": "true",
-            "XIAOWEI_FEISHU_APP_ID": "app",
-            "XIAOWEI_FEISHU_APP_SECRET_FILE": "/missing/secret-reference",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }
@@ -980,6 +991,17 @@ def test_main_maps_identity_configuration_to_one_fixed_line(
         )
 
     monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    # RI5：凭据来自 `integrations.json`，composition root 先读一次再构造 adapter。
+    monkeypatch.setattr(
+        provider_consumption_module,
+        "load_provider_credentials",
+        lambda **_: (
+            ProviderCredentials(
+                feishu_app_id="cli_test_app", feishu_app_secret=_FAKE_APP_SECRET
+            ),
+            {},
+        ),
+    )
     monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
     monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
     monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", fail_identity)
@@ -1011,6 +1033,17 @@ def test_main_maps_database_credential_configuration_to_one_fixed_line(
         )
 
     monkeypatch.setattr(web_app_module, "load_settings", lambda: _settings())
+    # RI5：凭据来自 `integrations.json`，composition root 先读一次再构造 adapter。
+    monkeypatch.setattr(
+        provider_consumption_module,
+        "load_provider_credentials",
+        lambda **_: (
+            ProviderCredentials(
+                feishu_app_id="cli_test_app", feishu_app_secret=_FAKE_APP_SECRET
+            ),
+            {},
+        ),
+    )
     monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
     monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
     monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", fail_database)
@@ -1115,8 +1148,6 @@ def test_real_uvicorn_bind_failure_emits_only_the_fixed_main_error(
             "XIAOWEI_POSTGRES_PASSWORD_FILE": str(postgres_secret),
             "XIAOWEI_WEB_APP_ENABLED": "true",
             "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-            "XIAOWEI_FEISHU_APP_ID": "app",
-            "XIAOWEI_FEISHU_APP_SECRET_FILE": str(feishu_secret),
             "XIAOWEI_FEISHU_IDENTITY_FILE": str(identities),
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
             "XIAOWEI_WEB_BIND_HOST": "192.0.2.1",
@@ -1130,7 +1161,18 @@ import os
 import sys
 from pathlib import Path
 
+from xiaowei_agent.interfaces import provider_consumption
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import main
+
+# RI5：凭据真源是 `integrations.json`。本用例要验的是**真实 uvicorn 绑定失败**那一段，
+# 因此在子进程里把读取替换成固定返回，避免依赖容器里的挂载路径。
+provider_consumption.load_provider_credentials = lambda **_: (
+    ProviderCredentials(
+        feishu_app_id="cli_test_app", feishu_app_secret="fixture-" + "secret"
+    ),
+    {},
+)
 
 class FailingErrorHandler(logging.Handler):
     def emit(self, record):
@@ -1215,6 +1257,17 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
             if failure_point == "serve":
                 raise RuntimeError("serve failed")
 
+    # RI5：凭据来自 `integrations.json`，composition root 先读一次再构造 adapter。
+    monkeypatch.setattr(
+        provider_consumption_module,
+        "load_provider_credentials",
+        lambda **_: (
+            ProviderCredentials(
+                feishu_app_id="cli_test_app", feishu_app_secret=_FAKE_APP_SECRET
+            ),
+            {},
+        ),
+    )
     monkeypatch.setattr(feishu_oauth_module, "FeishuOAuthAdapter", OAuth)
     monkeypatch.setattr(feishu_sdk_module, "FeishuSdkMembershipAdapter", Membership)
     monkeypatch.setattr(local_stack_module, "build_postgres_web_stack", build)
@@ -1261,8 +1314,6 @@ def test_enabled_module_entry_maps_bad_secret_reference_to_configuration_error()
             "XIAOWEI_ENVIRONMENT_ID": "dev",
             "XIAOWEI_WEB_APP_ENABLED": "true",
             "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-            "XIAOWEI_FEISHU_APP_ID": "app",
-            "XIAOWEI_FEISHU_APP_SECRET_FILE": "/missing/secret-reference",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }

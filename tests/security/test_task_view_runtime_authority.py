@@ -23,6 +23,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.application.default_capabilities
     xiaowei_agent.application.model_advisory
     xiaowei_agent.application.model_ports
+    xiaowei_agent.application.integration_state
     xiaowei_agent.application.task_view_runtime
     xiaowei_agent.capabilities
     xiaowei_agent.capabilities.asset_inventory
@@ -74,6 +75,8 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.interfaces.body_limit
     xiaowei_agent.interfaces.http_models
     xiaowei_agent.interfaces.local_stack
+    xiaowei_agent.interfaces.integration_config_file
+    xiaowei_agent.interfaces.provider_consumption
     xiaowei_agent.log
     xiaowei_agent.persistence
     xiaowei_agent.persistence.local_admin

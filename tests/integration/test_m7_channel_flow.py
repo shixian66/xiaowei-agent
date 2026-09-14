@@ -130,8 +130,6 @@ def _settings(tmp_path: Path) -> Settings:
         channel_worker_enabled=True,
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_app_id="offline_test_app",
-        feishu_app_secret_file=str(tmp_path / "unused-app-secret"),
         feishu_tenant_key="offline-tenant",
         feishu_bot_open_id="bot-open-id",
         feishu_identity_file=str(_identity_file(tmp_path)),

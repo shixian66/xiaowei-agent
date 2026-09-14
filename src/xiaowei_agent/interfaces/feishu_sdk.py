@@ -6,6 +6,7 @@ import importlib
 import json
 import logging
 import math
+import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -23,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 _SDK_LOGGER_NAME: Final[str] = "Lark"
 _MAX_CONTENT_BYTES: Final[int] = 32_768
 _MEMBERS_PAGE_SIZE: Final[int] = 100
+_MAX_SECRET_BYTES: Final[int] = 4096
 _MAX_MEMBER_PAGES: Final[int] = 100
 _API_TIMEOUT_SECONDS: Final[float] = 5.0
 
@@ -163,19 +165,26 @@ def _convert_message_event(raw: object) -> FeishuMessageEvent:
         raise FeishuSdkError("feishu sdk payload invalid") from None
 
 
-def _read_secret_file(path: str) -> str:
-    # listener/worker import SDK seam 时不加载 credential 边界；只在真实调用前加载公开 API。
-    from xiaowei_agent.interfaces.secret_file import SecretFileError, read_secret_file
+def _validated_secret(value: str) -> str:
+    """注入的 App Secret 必须在构造期就通过边界检查。
 
-    failed = False
-    secret = ""
-    try:
-        secret = read_secret_file(path)
-    except SecretFileError:
-        failed = True
-    if failed:
+    改为注入之前，这层检查由 ``read_secret_file`` 在**每次调用前**做；把凭据搬进
+    内存后如果不补这一步，一个空串或带控制字符的取值会一路传到 SDK 才出问题，
+    而那时异常里可能已经带上供应商侧的上下文。
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8", "surrogatepass")) > _MAX_SECRET_BYTES
+        or value != value.strip()
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
         raise FeishuSdkError("feishu sdk unavailable")
-    return secret
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise FeishuSdkError("feishu sdk unavailable") from None
+    return value
 
 
 def _callable_attr(value: object, name: str) -> Callable[..., object]:
@@ -188,9 +197,9 @@ def _callable_attr(value: object, name: str) -> Callable[..., object]:
 class FeishuSdkInboundTransport:
     """运行时才读 credential 并加载 SDK 的长连接实现。"""
 
-    def __init__(self, *, app_id: str, app_secret_file: str) -> None:
+    def __init__(self, *, app_id: str, app_secret: str) -> None:
         self._app_id = app_id
-        self._app_secret_file = app_secret_file
+        self._app_secret = _validated_secret(app_secret)
 
     def run_forever(self, *, on_event: FeishuEventHandler) -> None:
         """在调用线程创建 SDK；无效事件 ACK 后丢弃，应用异常则交 SDK 重试。"""
@@ -205,7 +214,7 @@ class FeishuSdkInboundTransport:
 
     def _run_sdk(self, *, on_event: FeishuEventHandler) -> None:
         _disable_lark_logging()
-        secret = _read_secret_file(self._app_secret_file)
+        secret = self._app_secret
         sdk = _load_lark_oapi()
 
         def dispatch(raw: object) -> None:
@@ -430,7 +439,7 @@ class FeishuSdkMessageAdapter:
         self,
         *,
         app_id: str,
-        app_secret_file: str,
+        app_secret: str,
         timeout_seconds: float = _API_TIMEOUT_SECONDS,
     ) -> None:
         if (
@@ -441,7 +450,7 @@ class FeishuSdkMessageAdapter:
         ):
             raise ValueError("timeout_seconds must be a finite positive number")
         self._app_id = app_id
-        self._app_secret_file = app_secret_file
+        self._app_secret = _validated_secret(app_secret)
         self._timeout_seconds = float(timeout_seconds)
         self._api: _AsyncMessageApi | None = None
 
@@ -449,7 +458,7 @@ class FeishuSdkMessageAdapter:
         if self._api is None:
             self._api = _build_message_api(
                 app_id=self._app_id,
-                secret=_read_secret_file(self._app_secret_file),
+                secret=self._app_secret,
                 timeout_seconds=self._timeout_seconds,
             )
         return self._api
@@ -536,10 +545,10 @@ class FeishuSdkMessageAdapter:
 class FeishuSdkMembershipAdapter:
     """用 ``open_id`` 有界分页确认任意主体当前仍在群内。"""
 
-    def __init__(self, *, tenant_id: str, app_id: str, app_secret_file: str) -> None:
+    def __init__(self, *, tenant_id: str, app_id: str, app_secret: str) -> None:
         self._tenant_id = tenant_id
         self._app_id = app_id
-        self._app_secret_file = app_secret_file
+        self._app_secret = _validated_secret(app_secret)
         self._api: _AsyncMemberApi | None = None
 
     async def is_current_group_member(
@@ -565,7 +574,7 @@ class FeishuSdkMembershipAdapter:
         if self._api is None:
             self._api = _build_api_client(
                 app_id=self._app_id,
-                secret=_read_secret_file(self._app_secret_file),
+                secret=self._app_secret,
             )
         seen_tokens: set[str] = set()
         page_token: str | None = None

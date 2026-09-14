@@ -46,6 +46,7 @@ from xiaowei_agent.interfaces.local_stack import (
     build_postgres_task_view_stack,
     build_postgres_web_stack,
 )
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.persistence.database import DatabaseConfigurationError
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
@@ -107,8 +108,10 @@ def test_enabled_gemini_is_lazily_assembled_without_reading_the_key(
         "xiaowei_agent.interfaces.secret_file.read_secret_file",
         forbidden_read,
     )
+    # RI5：Key 由调用方注入，内存栈自己既不读文件也不读 `integrations.json`。
     stack = build_in_memory_local_stack(
-        settings=Settings(environment_id="dev", gemini_enabled=True)
+        settings=Settings(environment_id="dev", gemini_enabled=True),
+        credentials=ProviderCredentials(gemini_api_key="AIza" + "x" * 35),
     )
     assert stack.intent_model is not None
     assert stack.intent_model is stack.slow_query_advisory
@@ -597,8 +600,6 @@ def _feishu_settings(identity_file: Path, secret_file: Path) -> Settings:
     return Settings(
         environment_id="dev",
         feishu_listener_enabled=True,
-        feishu_app_id="cli_test_app",
-        feishu_app_secret_file=str(secret_file),
         feishu_tenant_key="tenant-test",
         feishu_bot_open_id="bot-open-id",
         feishu_identity_file=str(identity_file),
@@ -609,8 +610,6 @@ def _channel_worker_settings(secret_file: Path) -> Settings:
     return Settings(
         environment_id="dev",
         channel_worker_enabled=True,
-        feishu_app_id="cli_test_app",
-        feishu_app_secret_file=str(secret_file),
         web_public_origin="https://ops.example.test",
     )
 
@@ -687,8 +686,6 @@ def _web_settings(identity_file: Path) -> Settings:
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_app_id="cli_test_app",
-        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file=str(identity_file),
         web_public_origin="https://ops.example.test",
     )

@@ -200,8 +200,6 @@ def _settings() -> Settings:
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_app_id="cli_test_app",
-        feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
         feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )

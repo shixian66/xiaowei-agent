@@ -100,7 +100,7 @@ def _adapter(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=timeout_seconds,
     )
     return adapter, calls
@@ -251,12 +251,16 @@ async def test_exchange_uses_exact_v1_wire_order_bodies_and_headers(
     assert all(0 < float(call["timeout_seconds"]) < 1.0 for call in calls)
 
 
-async def test_each_exchange_rereads_secret_and_never_reuses_tokens(
+async def test_each_exchange_fetches_a_fresh_app_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first_value = "first-local-value"
-    second_value = "second-local-value"
-    secret_file = _secret_file(tmp_path, first_value)
+    """每次 exchange 都重新取 app_access_token，不复用上一次的。
+
+    原用例还断言"每次 exchange 重读 secret 文件"。RI5 之后 Secret 由装配层注入，
+    adapter 生命周期内不变——轮换凭据的方式是改 `integrations.json` 后重启，这正是
+    generation/restart 模型本身。文件重读那一半因此不再存在，token 不复用这一半
+    是真正的安全属性，保留。
+    """
     responses = _success_responses() + _success_responses()
     responses[2] = _json_response(
         {
@@ -275,16 +279,15 @@ async def test_each_exchange_rereads_secret_and_never_reuses_tokens(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=1.0,
     )
     with bind_trace_id(_TRACE_ID):
         await adapter.exchange_code(code="first-code", redirect_uri=_CALLBACK)
-        secret_file.write_text(second_value, encoding="utf-8")
         await adapter.exchange_code(code="second-code", redirect_uri=_CALLBACK)
 
-    assert calls[0]["body"]["app_secret"] == first_value
-    assert calls[2]["body"]["app_secret"] == second_value
+    assert calls[0]["body"]["app_secret"] == _FAKE_SECRET
+    assert calls[2]["body"]["app_secret"] == _FAKE_SECRET
     assert calls[1]["headers"]["Authorization"] == f"Bearer {_FAKE_APP_TOKEN}"
     assert calls[3]["headers"]["Authorization"] == "Bearer second-app-value"
 
@@ -525,7 +528,7 @@ async def test_printable_non_ascii_oauth_values_remain_supported(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_测试应用",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=1.0,
     )
 
@@ -622,7 +625,7 @@ def test_constructor_rejects_invalid_deadlines(
     with pytest.raises(ValueError):
         FeishuOAuthAdapter(
             app_id="cli_test_app",
-            app_secret_file=str(_secret_file(tmp_path)),
+            app_secret=_FAKE_SECRET,
             timeout_seconds=timeout_seconds,
         )
 
@@ -634,7 +637,7 @@ def test_constructor_maps_invalid_app_id_to_generic_value_error(
     with pytest.raises(ValueError) as caught:
         FeishuOAuthAdapter(
             app_id=app_id,
-            app_secret_file=str(_secret_file(tmp_path)),
+            app_secret=_FAKE_SECRET,
             timeout_seconds=1.0,
         )
 
@@ -649,44 +652,43 @@ def test_constructor_rejects_c1_control_in_app_id(
     with pytest.raises(ValueError, match="feishu oauth configuration invalid"):
         FeishuOAuthAdapter(
             app_id=f"cli_test{control}app",
-            app_secret_file=str(_secret_file(tmp_path)),
+            app_secret=_FAKE_SECRET,
             timeout_seconds=1.0,
         )
 
 
-def test_constructor_eagerly_rejects_unsafe_secret_and_exchange_rereads_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    missing = tmp_path / "missing"
+@pytest.mark.parametrize(
+    "app_secret",
+    ["", "bad\tvalue", "bad\nvalue", "x" * 4097, *(f"bad{c}value" for c in _C1_CONTROLS)],
+)
+def test_constructor_eagerly_rejects_an_unusable_secret(app_secret: str) -> None:
+    """不可用的 Secret 在构造期就必须拒绝，且不得回填到异常文本里。
+
+    原用例的后半段测的是"构造期通过、运行期重读时才发现坏掉"。Secret 改为注入后
+    这个窗口不存在了：构造期看到的就是最终值，坏值根本进不来。
+    """
     with pytest.raises(ValueError) as caught:
         FeishuOAuthAdapter(
             app_id="cli_test_app",
-            app_secret_file=str(missing),
+            app_secret=app_secret,
             timeout_seconds=1.0,
         )
-    assert str(missing) not in str(caught.value)
 
-    adapter, calls = _adapter(tmp_path, monkeypatch)
-    (tmp_path / "feishu-credential").write_text("bad\tvalue", encoding="utf-8")
-
-    async def check() -> None:
-        with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
-            await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
-
-    asyncio.run(check())
-    assert calls == []
+    assert str(caught.value) == "feishu oauth configuration invalid"
+    assert caught.value.__context__ is None
+    if app_secret:
+        assert app_secret not in str(caught.value)
 
 
 @pytest.mark.parametrize("suffix", ["\ud800", "\x00"])
-def test_constructor_maps_unrepresentable_secret_path_to_generic_value_error(
+def test_constructor_maps_an_unrepresentable_secret_to_generic_value_error(
     suffix: str,
 ) -> None:
-    path = "/private/tmp/invalid-credential-" + suffix
-
+    """不可编码的取值（孤立代理、NUL）同样只能得到同一条常量错误。"""
     with pytest.raises(ValueError) as caught:
         FeishuOAuthAdapter(
             app_id="cli_test_app",
-            app_secret_file=path,
+            app_secret=_FAKE_SECRET + suffix,
             timeout_seconds=1.0,
         )
 
@@ -713,7 +715,7 @@ async def test_both_posts_share_one_total_deadline(
     )
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=0.2,
     )
 
@@ -724,39 +726,9 @@ async def test_both_posts_share_one_total_deadline(
     assert timeouts == pytest.approx([0.1, 0.04])
 
 
-async def test_secret_reread_is_inside_total_deadline_and_cannot_start_http_late(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    secret_file = _secret_file(tmp_path)
-    adapter = FeishuOAuthAdapter(
-        app_id="cli_test_app",
-        app_secret_file=str(secret_file),
-        timeout_seconds=0.05,
-    )
-    now = [100.0]
-    calls: list[dict[str, object]] = []
-
-    def delayed_secret_reader(path: str) -> str:
-        assert path == str(secret_file)
-        now[0] += 0.06
-        return _FAKE_SECRET
-
-    def post_json(**kwargs: object):
-        calls.append(kwargs)
-        return _success_responses()[0]
-
-    monkeypatch.setattr(feishu_oauth, "read_secret_file", delayed_secret_reader)
-    monkeypatch.setattr(
-        feishu_oauth,
-        "time",
-        SimpleNamespace(monotonic=lambda: now[0]),
-    )
-    monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
-
-    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
-        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
-
-    assert calls == []
+# 原 `test_secret_reread_is_inside_total_deadline_and_cannot_start_http_late` 已删除：
+# 它测的是"读 secret 文件消耗的时间也算进总预算"。Secret 改为注入后没有这次 I/O，
+# 两次 POST 共享同一预算这条属性由 `test_both_posts_share_one_total_deadline` 覆盖。
 
 
 async def test_late_first_response_cannot_trigger_a_second_request(
@@ -778,7 +750,7 @@ async def test_late_first_response_cannot_trigger_a_second_request(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=0.05,
     )
     try:
@@ -810,7 +782,7 @@ async def test_direct_cancellation_is_not_converted_and_late_result_is_unused(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=1.0,
     )
     try:
@@ -849,7 +821,7 @@ async def test_late_second_response_cannot_construct_an_identity(
     monkeypatch.setattr(feishu_oauth, "_post_json", post_json)
     adapter = FeishuOAuthAdapter(
         app_id="cli_test_app",
-        app_secret_file=str(_secret_file(tmp_path)),
+        app_secret=_FAKE_SECRET,
         timeout_seconds=0.05,
     )
     constructed: list[str] = []
@@ -878,7 +850,7 @@ async def test_transport_error_and_adapter_repr_never_expose_inputs(
     code = "private-one-time-code"
     provider = "private-provider-body"
     app_id = "private-app-id"
-    secret_file = _secret_file(tmp_path)
+    app_secret = "private-app-" + "secret-value"
 
     def fail(**_kwargs: object):
         raise OSError(provider)
@@ -886,7 +858,7 @@ async def test_transport_error_and_adapter_repr_never_expose_inputs(
     monkeypatch.setattr(feishu_oauth, "_post_json", fail)
     adapter = FeishuOAuthAdapter(
         app_id=app_id,
-        app_secret_file=str(secret_file),
+        app_secret=app_secret,
         timeout_seconds=1.0,
     )
     with caplog.at_level(logging.DEBUG), bind_trace_id(_TRACE_ID):
@@ -894,5 +866,6 @@ async def test_transport_error_and_adapter_repr_never_expose_inputs(
             await adapter.exchange_code(code=code, redirect_uri=_CALLBACK)
 
     rendered = "\n".join((str(caught.value), repr(caught.value), repr(adapter), caplog.text))
-    for private in (code, provider, app_id, _FAKE_SECRET, str(secret_file)):
+    # Secret 现在常驻内存，repr 泄露的风险比持路径时更高，这条因此更承重。
+    for private in (code, provider, app_id, app_secret):
         assert private not in rendered

@@ -16,8 +16,6 @@ def _profile(**updates: object) -> dict[str, object]:
         "environment_id": "dev",
         "web_app_enabled": True,
         "feishu_oauth_enabled": True,
-        "feishu_app_id": "cli_test_app",
-        "feishu_app_secret_file": "/run/secrets/feishu_app_secret",
         "feishu_identity_file": "/run/config/feishu-identities.json",
         "web_public_origin": "https://ops.example.test",
     }
@@ -38,8 +36,6 @@ def test_web_app_is_default_closed_with_short_bounded_lifetimes() -> None:
 @pytest.mark.parametrize(
     "field",
     [
-        "feishu_app_id",
-        "feishu_app_secret_file",
         "feishu_identity_file",
         "web_public_origin",
     ],
@@ -62,8 +58,6 @@ def test_web_app_profile_loads_from_the_explicit_environment_only() -> None:
             "XIAOWEI_WEB_BIND_PORT": "8081",
             "XIAOWEI_WEB_OAUTH_STATE_TTL_SECONDS": "120",
             "XIAOWEI_WEB_SESSION_TTL_SECONDS": "7200",
-            "XIAOWEI_FEISHU_APP_ID": "cli_test_app",
-            "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
             "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://OPS.example.test/",
         }
@@ -100,8 +94,6 @@ def test_feishu_oauth_still_requires_the_web_app() -> None:
     """
     profile = _profile(web_app_enabled=False, feishu_oauth_enabled=True)
     for field in (
-        "feishu_app_id",
-        "feishu_app_secret_file",
         "feishu_identity_file",
         "web_public_origin",
     ):
@@ -173,8 +165,6 @@ def test_disabled_web_app_cannot_carry_a_web_only_identity_profile() -> None:
     with pytest.raises(ValueError):
         Settings(
             environment_id="dev",
-            feishu_app_id="cli_test_app",
-            feishu_app_secret_file="/run/secrets/feishu_app_" + "secret",
             feishu_identity_file="/run/config/feishu-identities.json",
             web_public_origin="https://ops.example.test",
         )
@@ -188,8 +178,6 @@ def test_invalid_web_profile_does_not_echo_configuration_values() -> None:
                 "XIAOWEI_ENVIRONMENT_ID": "dev",
                 "XIAOWEI_WEB_APP_ENABLED": "true",
                 "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-                "XIAOWEI_FEISHU_APP_ID": "cli_test_app",
-                "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
                 "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
                 "XIAOWEI_WEB_PUBLIC_ORIGIN": sensitive,
             }

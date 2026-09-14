@@ -23,6 +23,10 @@ from xiaowei_agent.contracts import (
     ReadinessReport,
 )
 from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
+from xiaowei_agent.interfaces.provider_consumption import (
+    ProviderCredentials,
+    load_provider_credentials,
+)
 from xiaowei_agent.persistence.database import (
     DatabaseConfigurationError,
     PostgresReadinessProbe,
@@ -236,6 +240,20 @@ class _Ready:
         )
 
 
+def _resolved_credentials(
+    settings: Settings, credentials: ProviderCredentials | None
+) -> ProviderCredentials:
+    """注入优先；没注入就从默认路径读一次。
+
+    读失败不抛：断供的后果是"这条链路不装配"，由各装配点自己判断，而不是让整个
+    进程起不来——那会让一份坏配置把已经在跑的服务一起拖死。
+    """
+    if credentials is not None:
+        return credentials
+    resolved, _ = load_provider_credentials(settings=settings)
+    return resolved
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(tz=dt.UTC)
 
@@ -406,6 +424,7 @@ def _assemble_local_stack(
     clock: Clock,
     monotonic: MonotonicClock,
     starrocks_live_assembly: StarRocksLiveAssembly | None,
+    credentials: ProviderCredentials,
 ) -> LocalStack:
     from xiaowei_agent.application.context import ContextAssembler
     from xiaowei_agent.application.runtime import XiaoweiRuntime
@@ -451,14 +470,19 @@ def _assemble_local_stack(
     application_model_profile = ModelInvocationProfile()
     model_adapter = None
     model_profile = None
-    if settings.gemini_enabled:
+    # 双层与关系：`.env` 装配了，且 JSON 里确实给出了可用的 Key，才构造 adapter。
+    # 缺凭据时不装配而不是构造一个注定失败的 adapter——断供是"这条链路不存在"，
+    # 不是"每次调用都报错"。
+    if settings.gemini_enabled and credentials.gemini_api_key is not None:
         from xiaowei_agent.interfaces.gemini_model import (
             GEMINI_MODEL_PROFILE,
             GeminiModelAdapter,
         )
 
         model_profile = GEMINI_MODEL_PROFILE
-        model_adapter = GeminiModelAdapter(profile=model_profile)
+        model_adapter = GeminiModelAdapter(
+            profile=model_profile, api_key=credentials.gemini_api_key
+        )
         application_model_profile = model_profile
 
     starrocks_adapters, target_adapters, slow_query_live_policy = (
@@ -598,8 +622,12 @@ def build_in_memory_local_stack(
     monotonic: MonotonicClock = time.monotonic,
     on_close: Callable[[], None] | None = None,
     starrocks_live_assembly: StarRocksLiveAssembly | None = None,
+    credentials: ProviderCredentials | None = None,
 ) -> LocalStack:
-    """装配不依赖 tests/ 的 fake 闭环；供打包证明与本地测试使用。"""
+    """装配不依赖 tests/ 的 fake 闭环；供打包证明与本地测试使用。
+
+    **不读 `integrations.json`**：内存栈是离线证明用的，凭据只能显式注入。
+    """
     state = InMemoryPersistenceState()
     task_store = InMemoryTaskStore(
         clock=clock,
@@ -626,6 +654,7 @@ def build_in_memory_local_stack(
         clock=clock,
         monotonic=monotonic,
         starrocks_live_assembly=starrocks_live_assembly,
+        credentials=ProviderCredentials() if credentials is None else credentials,
     )
 
 
@@ -678,6 +707,7 @@ async def build_postgres_feishu_listener_stack(
     settings: Settings,
     clock: Clock = _utc_now,
     transport: FeishuInboundTransport | None = None,
+    credentials: ProviderCredentials | None = None,
 ) -> FeishuListenerStack:
     """装配默认关闭的飞书入口；不创建 Runner、Gateway 或目标 adapter。"""
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
@@ -689,6 +719,7 @@ async def build_postgres_feishu_listener_stack(
 
     if not settings.feishu_listener_enabled:
         raise ValueError("Feishu listener is disabled")
+    credentials = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -726,12 +757,12 @@ async def build_postgres_feishu_listener_stack(
             transport
             if transport is not None
             else FeishuSdkInboundTransport(
-                app_id=cast(str, settings.feishu_app_id),
-                app_secret_file=cast(str, settings.feishu_app_secret_file),
+                app_id=cast(str, credentials.feishu_app_id),
+                app_secret=cast(str, credentials.feishu_app_secret),
             )
         )
         listener = FeishuListener(
-            app_id=cast(str, settings.feishu_app_id),
+            app_id=cast(str, credentials.feishu_app_id),
             tenant_key=cast(str, settings.feishu_tenant_key),
             bot_open_id=cast(str, settings.feishu_bot_open_id),
             tenant_id=settings.tenant_id,
@@ -766,6 +797,7 @@ async def build_postgres_channel_worker_stack(
     clock: Clock = _utc_now,
     message_port: ChannelMessagePort | None = None,
     sleep: AsyncSleep = asyncio.sleep,
+    credentials: ProviderCredentials | None = None,
 ) -> ChannelWorkerStack:
     """装配默认关闭的渠道投影；不创建 Runner、Gateway 或目标 adapter。"""
     from xiaowei_agent.application.channel_projection import ChannelProjectionService
@@ -773,6 +805,7 @@ async def build_postgres_channel_worker_stack(
 
     if not settings.channel_worker_enabled:
         raise ValueError("channel worker is disabled")
+    credentials = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -801,8 +834,8 @@ async def build_postgres_channel_worker_stack(
             message_port
             if message_port is not None
             else FeishuSdkMessageAdapter(
-                app_id=cast(str, settings.feishu_app_id),
-                app_secret_file=cast(str, settings.feishu_app_secret_file),
+                app_id=cast(str, credentials.feishu_app_id),
+                app_secret=cast(str, credentials.feishu_app_secret),
                 timeout_seconds=settings.feishu_api_timeout_seconds,
             )
         )
@@ -942,8 +975,10 @@ async def build_postgres_local_stack(
     clock: Clock = _utc_now,
     monotonic: MonotonicClock = time.monotonic,
     starrocks_live_assembly: StarRocksLiveAssembly | None = None,
+    credentials: ProviderCredentials | None = None,
 ) -> LocalStack:
     """用一个 AsyncEngine 装配 API/Worker 共用的 PostgreSQL 本地栈。"""
+    resolved_credentials = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -967,6 +1002,7 @@ async def build_postgres_local_stack(
             clock=clock,
             monotonic=monotonic,
             starrocks_live_assembly=starrocks_live_assembly,
+            credentials=resolved_credentials,
         )
     except Exception:
         await engine.dispose()

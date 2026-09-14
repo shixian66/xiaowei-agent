@@ -91,7 +91,7 @@ async def test_outer_timeout_waits_for_adapter_close_and_does_not_run_fallback()
     client = _BlockingClient()
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "x" * 35,
+        api_key="AIza" + "x" * 35,
     )
     fallback_calls = 0
 

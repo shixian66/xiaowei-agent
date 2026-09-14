@@ -287,8 +287,6 @@ class Settings(BaseModel):
     channel_worker_enabled: bool = False
     web_app_enabled: bool = False
     feishu_oauth_enabled: bool = False
-    feishu_app_id: StrictStr | None = None
-    feishu_app_secret_file: AbsolutePath | None = None
     feishu_tenant_key: StrictStr | None = None
     feishu_bot_open_id: StrictStr | None = None
     feishu_identity_file: AbsolutePath | None = None
@@ -449,7 +447,9 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
-        shared = (self.feishu_app_id, self.feishu_app_secret_file)
+        # Provider 凭据自 RI5 起只有 `integrations.json` 一个真源；`.env` 侧只剩
+        # "这个进程装配了哪条链路"。凭据是否齐备由装配点在读 JSON 时判断。
+        shared: tuple[object, ...] = ()
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
         identity = (self.feishu_identity_file,)
         web_origin = (self.web_public_origin,)
@@ -600,8 +600,6 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "channel_worker_enabled": "XIAOWEI_CHANNEL_WORKER_ENABLED",
     "web_app_enabled": "XIAOWEI_WEB_APP_ENABLED",
     "feishu_oauth_enabled": "XIAOWEI_FEISHU_OAUTH_ENABLED",
-    "feishu_app_id": "XIAOWEI_FEISHU_APP_ID",
-    "feishu_app_secret_file": "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
     "feishu_bot_open_id": "XIAOWEI_FEISHU_BOT_OPEN_ID",
     "feishu_identity_file": "XIAOWEI_FEISHU_IDENTITY_FILE",

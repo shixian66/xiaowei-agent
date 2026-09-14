@@ -769,13 +769,17 @@ async def serve_web(settings: Settings) -> int:
         WebStackConfigurationError,
         build_postgres_web_stack,
     )
+    from xiaowei_agent.interfaces.provider_consumption import (
+        load_provider_credentials,
+    )
 
+    credentials, _ = load_provider_credentials(settings=settings)
     oauth = None
     credential_invalid = False
     try:
         oauth = FeishuOAuthAdapter(
-            app_id=cast(str, settings.feishu_app_id),
-            app_secret_file=cast(str, settings.feishu_app_secret_file),
+            app_id=cast(str, credentials.feishu_app_id),
+            app_secret=cast(str, credentials.feishu_app_secret),
             timeout_seconds=FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
         )
     except ValueError:
@@ -785,8 +789,8 @@ async def serve_web(settings: Settings) -> int:
 
     membership = FeishuSdkMembershipAdapter(
         tenant_id=settings.tenant_id,
-        app_id=cast(str, settings.feishu_app_id),
-        app_secret_file=cast(str, settings.feishu_app_secret_file),
+        app_id=cast(str, credentials.feishu_app_id),
+        app_secret=cast(str, credentials.feishu_app_secret),
     )
     stack = None
     stack_configuration_invalid = False

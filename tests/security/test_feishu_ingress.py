@@ -119,8 +119,6 @@ async def main():
                 environment_id="dev",
                 postgres_password_file=str(postgres),
                 feishu_listener_enabled=True,
-                feishu_app_id="app",
-                feishu_app_secret_file=str(root / "missing"),
                 feishu_tenant_key="tenant",
                 feishu_bot_open_id="bot",
                 feishu_identity_file=str(identity),

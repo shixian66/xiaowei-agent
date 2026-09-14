@@ -135,7 +135,7 @@ def test_transport_is_lazy_and_converts_sdk_objects_before_callback(
 
     monkeypatch.setattr(feishu_sdk, "_load_lark_oapi", load)
     transport = FeishuSdkInboundTransport(
-        app_id="cli_test_app", app_secret_file=str(secret_file)
+        app_id="cli_test_app", app_secret=_FAKE_SECRET
     )
     received: list[FeishuMessageEvent] = []
     assert loads == 0
@@ -389,7 +389,7 @@ def _install_message_api(
     return (
         FeishuSdkMessageAdapter(
             app_id="cli_test_app",
-            app_secret_file=str(secret_file),
+            app_secret=_FAKE_SECRET,
             timeout_seconds=5.0,
         ),
         api,
@@ -560,7 +560,7 @@ def test_malformed_sdk_event_is_dropped_without_reaching_application(
     received: list[FeishuMessageEvent] = []
 
     FeishuSdkInboundTransport(
-        app_id="cli_test_app", app_secret_file=str(secret_file)
+        app_id="cli_test_app", app_secret=_FAKE_SECRET
     ).run_forever(on_event=received.append)
 
     assert received == []
@@ -625,7 +625,7 @@ async def test_membership_uses_bounded_open_id_pagination(
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
     )
 
     assert await adapter.is_current_group_member(
@@ -644,7 +644,7 @@ async def test_membership_complete_empty_page_is_a_confirmed_negative(
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
     )
 
     assert (
@@ -681,7 +681,7 @@ async def test_membership_uncertainty_raises_one_safe_adapter_error(
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
     )
 
     with pytest.raises(FeishuSdkError, match=r"^feishu membership unavailable$"):
@@ -722,7 +722,7 @@ async def test_membership_malformed_page_cannot_be_treated_as_not_a_member(
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(secret_file),
+        app_secret=_FAKE_SECRET,
     )
 
     with pytest.raises(FeishuSdkError, match=r"^feishu membership unavailable$"):
@@ -731,20 +731,21 @@ async def test_membership_malformed_page_cannot_be_treated_as_not_a_member(
         )
 
 
-async def test_membership_rejects_cross_scope_without_reading_secret(
+async def test_membership_rejects_cross_scope_before_touching_the_api(
     tmp_path: Path,
 ) -> None:
-    missing = tmp_path / "missing"
+    """跨租户在任何供应商调用之前就被拒；``_api`` 始终没被构造。"""
     adapter = FeishuSdkMembershipAdapter(
         tenant_id="dev-local",
         app_id="cli_test_app",
-        app_secret_file=str(missing),
+        app_secret=_FAKE_SECRET,
     )
 
     with pytest.raises(FeishuSdkError, match=r"^feishu membership unavailable$"):
         await adapter.is_current_group_member(
             tenant_id="other", conversation_ref="chat-1", subject_ref="subject"
         )
+    assert adapter._api is None
 
 
 def test_lark_logger_is_disabled_before_sdk_client_can_log_connection_url(
@@ -771,7 +772,7 @@ def test_lark_logger_is_disabled_before_sdk_client_can_log_connection_url(
     try:
         with caplog.at_level(logging.DEBUG, logger="Lark"):
             FeishuSdkInboundTransport(
-                app_id="cli_test_app", app_secret_file=str(secret_file)
+                app_id="cli_test_app", app_secret=_FAKE_SECRET
             ).run_forever(on_event=lambda _: None)
         assert shaped not in caplog.text
     finally:
@@ -827,11 +828,17 @@ def test_lark_logger_is_disabled_before_http_client_can_log_provider_data(
 
 
 def test_transport_startup_error_is_generic_and_drops_the_original_context(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SDK 启动异常可能带连接 URL 或 ticket；对外只能是同一条常量且不留异常链。"""
+    monkeypatch.setattr(
+        feishu_sdk,
+        "_load_lark_oapi",
+        lambda: (_ for _ in ()).throw(RuntimeError("wss://example.invalid/?ticket=x")),
+    )
     transport = FeishuSdkInboundTransport(
         app_id="cli_test_app",
-        app_secret_file=str(tmp_path / "missing"),
+        app_secret=_FAKE_SECRET,
     )
 
     with pytest.raises(FeishuSdkError) as caught:
@@ -839,43 +846,14 @@ def test_transport_startup_error_is_generic_and_drops_the_original_context(
 
     assert str(caught.value) == "feishu sdk unavailable"
     assert caught.value.__context__ is None
+    assert "ticket" not in str(caught.value)
 
 
-@pytest.mark.parametrize(
-    "kind", ["symlink", "multiline", "oversized", "invalid-utf8", "directory"]
-)
-def test_transport_rejects_unsafe_secret_files_before_loading_sdk(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    kind: str,
-) -> None:
-    secret_file = tmp_path / "secret"
-    if kind == "symlink":
-        target = tmp_path / "target"
-        target.write_text(_FAKE_SECRET, encoding="utf-8")
-        secret_file.symlink_to(target)
-    elif kind == "multiline":
-        secret_file.write_text(_FAKE_SECRET + "\nsecond-line", encoding="utf-8")
-    elif kind == "oversized":
-        secret_file.write_bytes(b"x" * 4097)
-    elif kind == "invalid-utf8":
-        secret_file.write_bytes(b"\xff")
-    else:
-        secret_file.mkdir()
-
-    def fail_load() -> object:
-        raise AssertionError("unsafe secret must fail before SDK import")
-
-    monkeypatch.setattr(feishu_sdk, "_load_lark_oapi", fail_load)
-    transport = FeishuSdkInboundTransport(
-        app_id="cli_test_app", app_secret_file=str(secret_file)
-    )
-
-    with pytest.raises(FeishuSdkError) as caught:
-        transport.run_forever(on_event=lambda _: None)
-
-    assert str(caught.value) == "feishu sdk unavailable"
-    assert caught.value.__context__ is None
+# 原 `test_transport_rejects_unsafe_secret_files_before_loading_sdk` 已删除：它按
+# symlink / 多行 / 超长 / 非 UTF-8 / 目录 五种**文件形态**构造不安全凭据，而 transport
+# 已经不再读文件，这些参数对它不再有任何作用（留着就是一条永远绿的空跑用例）。
+# 文件形态的边界由下面两条直接打在 `read_secret_file` 上的用例覆盖；注入取值的边界
+# 由 `test_adapters_reject_an_unusable_injected_secret` 覆盖。
 
 
 def test_secret_reader_rejects_fifo_without_blocking_on_missing_writer(
@@ -940,26 +918,30 @@ def test_transport_rejects_every_control_character_in_secret_file(
 
     with pytest.raises(FeishuSdkError) as caught:
         FeishuSdkInboundTransport(
-            app_id="cli_test_app", app_secret_file=str(secret_file)
+            app_id="cli_test_app", app_secret=_FAKE_SECRET
         ).run_forever(on_event=lambda _: None)
 
     assert str(caught.value) == "feishu sdk unavailable"
     assert caught.value.__context__ is None
 
 
-def test_transport_rejects_relative_secret_path_before_loading_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        feishu_sdk,
-        "_load_lark_oapi",
-        lambda: (_ for _ in ()).throw(AssertionError("SDK must not load")),
-    )
+@pytest.mark.parametrize(
+    "app_secret",
+    ["", "multi\nline", "x" * 4097, " padded ", "bad\ttab", "\ud800"],
+    ids=["empty", "multiline", "oversized", "padded", "control", "unpaired-surrogate"],
+)
+def test_adapters_reject_an_unusable_injected_secret(app_secret: str) -> None:
+    """凭据搬进内存后，边界检查必须跟着搬到构造期。
 
-    with pytest.raises(FeishuSdkError) as caught:
-        FeishuSdkInboundTransport(
-            app_id="cli_test_app", app_secret_file="relative-" + "credential"
-        ).run_forever(on_event=lambda _: None)
-
-    assert str(caught.value) == "feishu sdk unavailable"
-    assert caught.value.__context__ is None
+    原用例测的是"相对路径/不安全文件在加载 SDK 之前就被拒"。Secret 改为注入后
+    没有文件可检，但同一条属性仍然必须成立：不可用的取值不得一路传到 SDK。
+    三个 adapter 都要挡，漏一个就留一条绕过路径。
+    """
+    with pytest.raises(FeishuSdkError, match=r"^feishu sdk unavailable$"):
+        FeishuSdkInboundTransport(app_id="cli_test_app", app_secret=app_secret)
+    with pytest.raises(FeishuSdkError, match=r"^feishu sdk unavailable$"):
+        FeishuSdkMessageAdapter(app_id="cli_test_app", app_secret=app_secret)
+    with pytest.raises(FeishuSdkError, match=r"^feishu sdk unavailable$"):
+        FeishuSdkMembershipAdapter(
+            tenant_id="dev-local", app_id="cli_test_app", app_secret=app_secret
+        )

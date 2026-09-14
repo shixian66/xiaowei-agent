@@ -31,14 +31,12 @@ from xiaowei_agent.contracts import (
     StrictInt,
 )
 from xiaowei_agent.contracts.model import model_text_values
-from xiaowei_agent.interfaces.secret_file import read_secret_file
 from xiaowei_agent.redaction import scrub_text
 
 GEMINI_MODEL_PROFILE: Final[ModelInvocationProfile] = ModelInvocationProfile()
 GEMINI_MODEL: Final[str] = GEMINI_MODEL_PROFILE.model
 GEMINI_API_VERSION: Final[str] = GEMINI_MODEL_PROFILE.api_version
 GEMINI_PROVIDER_ORIGIN: Final[str] = GEMINI_MODEL_PROFILE.origin
-GEMINI_SECRET_FILE: Final[str] = "/run/secrets/gemini_api_key"  # noqa: S105 -- path
 INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = GEMINI_MODEL_PROFILE.intent_output_tokens
 _CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 1.0
 
@@ -178,9 +176,9 @@ class GeminiModelAdapter:
     def __init__(
         self,
         *,
+        api_key: str,
         profile: ModelInvocationProfile = GEMINI_MODEL_PROFILE,
         client_factory: Callable[..., Any] = genai.Client,
-        secret_reader: Callable[[str], str] = read_secret_file,
     ) -> None:
         # 正常 Pydantic 构造只能得到这一组 Literal；这里还拒绝 Python 层可造出的
         # object.__setattr__ 变体，避免 profile 注入口绕过固定 origin/model 边界。
@@ -188,14 +186,16 @@ class GeminiModelAdapter:
             raise ValueError("Gemini adapter requires the fixed RI3 profile")
         self.profile = profile
         self._client_factory = client_factory
-        self._secret_reader = secret_reader
+        # Key 由装配层从 `integrations.json` 注入；adapter 不持有任何路径常量，
+        # 也不再自己去文件系统找凭据。
+        self._api_key = api_key
 
     def _client(self) -> genai.Client:
         if any(os.environ.get(name) for name in _PROXY_ENVIRONMENT):
             raise ModelPortError(ModelErrorCode.AMBIENT_PROXY)
         credential_failed = False
         try:
-            credential = _validate_credential(self._secret_reader(GEMINI_SECRET_FILE))
+            credential = _validate_credential(self._api_key)
         except Exception:
             credential_failed = True
             credential = ""
@@ -325,6 +325,5 @@ __all__ = [
     "GEMINI_MODEL",
     "GEMINI_MODEL_PROFILE",
     "GEMINI_PROVIDER_ORIGIN",
-    "GEMINI_SECRET_FILE",
     "GeminiModelAdapter",
 ]

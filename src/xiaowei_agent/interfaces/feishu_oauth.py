@@ -15,7 +15,6 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
-from xiaowei_agent.interfaces.secret_file import SecretFileError, read_secret_file
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     FeishuOAuthCodeError,
@@ -226,7 +225,7 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
     """把两个固定飞书端点收窄为一次 ``open_id`` 身份事实。"""
 
     def __init__(
-        self, *, app_id: str, app_secret_file: str, timeout_seconds: float
+        self, *, app_id: str, app_secret: str, timeout_seconds: float
     ) -> None:
         if (
             not _bounded_string(app_id, max_bytes=256)
@@ -240,15 +239,10 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
             <= FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS
         ):
             raise ValueError("feishu oauth configuration invalid")
-        secret_failed = False
-        try:
-            read_secret_file(app_secret_file)
-        except SecretFileError:
-            secret_failed = True
-        if secret_failed:
+        if not _bounded_string(app_secret, max_bytes=4096) or not app_secret:
             raise ValueError("feishu oauth configuration invalid")
         self._app_id = app_id
-        self._app_secret_file = app_secret_file
+        self._app_secret = app_secret
         self._timeout_seconds = float(timeout_seconds)
 
     def authorization_url(self, *, state: str, redirect_uri: str) -> str:
@@ -309,14 +303,7 @@ class FeishuOAuthAdapter(FeishuOAuthPort):
         ):
             raise FeishuOAuthCodeError
         deadline = time.monotonic() + self._timeout_seconds
-        secret_failed = False
-        app_secret = ""
-        try:
-            app_secret = read_secret_file(self._app_secret_file)
-        except SecretFileError:
-            secret_failed = True
-        if secret_failed:
-            raise FeishuOAuthUnavailableError
+        app_secret = self._app_secret
 
         app_response = await self._request(
             url=_APP_TOKEN_URL,

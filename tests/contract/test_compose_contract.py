@@ -28,8 +28,6 @@ _APP_SERVICES = _PROCESS_SERVICES | {"migrate"}
 _CHANNEL_SERVICES = {"feishu-listener", "channel-worker", "web-app"}
 _NON_CHANNEL_APP_SERVICES = _APP_SERVICES - _CHANNEL_SERVICES
 _FEISHU_LIVE_ENVIRONMENT = {
-    "XIAOWEI_FEISHU_APP_ID",
-    "XIAOWEI_FEISHU_APP_SECRET_FILE",
     "XIAOWEI_FEISHU_TENANT_KEY",
     "XIAOWEI_FEISHU_BOT_OPEN_ID",
     "XIAOWEI_FEISHU_IDENTITY_FILE",
@@ -325,8 +323,6 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
     assert web["environment"] == {
         "XIAOWEI_WEB_APP_ENABLED": "true",
         "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-        "XIAOWEI_FEISHU_APP_ID": "cli_smoke_fake_app",
-        "XIAOWEI_FEISHU_APP_SECRET_FILE": "/run/secrets/feishu_app_secret",
         "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
         "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://sso.example.invalid",
     }

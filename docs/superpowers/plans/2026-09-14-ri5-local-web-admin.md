@@ -1254,7 +1254,7 @@ PostgreSQL 的环境。
     ——一次读取，同时产出凭据与本进程要写的加载回执
   - `GeminiModelAdapter.__init__` 新增必填 keyword-only `api_key: str`，**不再自带路径常量**
 
-- [ ] **Step 1: 写失败测试——双层开关与断供行为**
+- [x] **Step 1: 写失败测试——双层开关与断供行为**
 
 `tests/unit/test_provider_consumption.py`：
 
@@ -1408,7 +1408,7 @@ def test_a_broken_symlink_does_not_produce_an_unconfigured_startup(
     assert receipts == {}  # 读不出可信 generation，不写回执
 ```
 
-- [ ] **Step 2: 写失败测试——旧真源彻底消失**
+- [x] **Step 2: 写失败测试——旧真源彻底消失**
 
 `tests/security/test_ri5_no_legacy_secret_path.py`（标 `security`）：
 
@@ -1461,13 +1461,13 @@ def test_settings_no_longer_exposes_the_legacy_feishu_fields() -> None:
     assert "XIAOWEI_FEISHU_APP_SECRET_FILE" not in _FIELD_TO_ENV.values()
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q`
 
 Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` 仍在；`Settings` 仍有两个飞书字段。
 
-- [ ] **Step 4: 迁移四个装配点**
+- [x] **Step 4: 迁移四个装配点**
 
 新增 `src/xiaowei_agent/interfaces/provider_consumption.py`，其中一并引入 `read_or_absent()`
 （Task 6 的配置 API 会复用它）：
@@ -1533,7 +1533,7 @@ StarRocks；本 Task 只是让飞书与 Gemini 不再走它。
 `config.py` 删除 `feishu_app_id` 与 `feishu_app_secret_file` 两个字段、`shared` 元组对应项与
 `_FIELD_TO_ENV` 两个条目，并同步 `.env.example`（`test_env_example_clean.py` 断言键集合全等）。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run:
 
@@ -1547,7 +1547,7 @@ Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败�
 不得为了让测试过而保留旧路径读取。这些被顺带改到的既有测试文件同样要按 `git status` 精确补进
 下一步的 `git add`——四个 adapter 换签名必然波及它们的构造点。
 
-- [ ] **Step 6: 反证承重**
+- [x] **Step 6: 反证承重**
 
 把「JSON `enabled` 与 `.env` 开关取 AND」改成只看 JSON，确认
 `test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；把 `read_or_absent` 改回
@@ -1555,12 +1555,63 @@ Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败�
 变红；再把它改成 `os.path.lexists()`，确认同一条转绿——这说明测试钉的是行为而不是某一个函数名，
 但 `lexists` 版本仍有 TOCTOU，最终实现保持捕获异常的写法。两处都恢复后全绿。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/xiaowei_agent/interfaces/provider_consumption.py src/xiaowei_agent/interfaces/gemini_model.py src/xiaowei_agent/interfaces/feishu_oauth.py src/xiaowei_agent/interfaces/feishu_sdk.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/config.py .env.example docker-compose.smoke.yml tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py
 git commit -m "feat(ri5): consume provider credentials from the integration config"
 ```
+
+**Task 4 执行记录（2026-09-14）：** 四条基线全绿——`3619 passed, 237 skipped`（Task 3 后 3606）、
+`1325 security passed`、`ruff` 通过、`mypy` 171 files 通过。反证：
+
+```text
+双层与关系改成只看 JSON        -> test_json_cannot_enable_a_provider...          1 failed
+read_or_absent 改回 exists()   -> test_read_or_absent_does_not_swallow...        1 failed
+同一实现改成 lexists()         -> 同一条                                          1 passed
+读不出文件时伪造 generation    -> test_absent_file_writes_no_receipt...          1 failed
+恢复后                                                                           17 passed
+```
+
+`lexists` 那一条转绿说明测试钉的是**行为**而不是某个函数名；最终实现仍用捕获异常的写法，
+因为 `lexists` 版本还留着检查与使用之间的时间窗。
+
+五处与计划文字不同：
+
+1. **三个 SDK adapter 补上了注入 Secret 的构造期校验。** 凭据从文件搬进内存后，
+   `_read_secret_file()` 那层边界检查（非空、单行、无控制字符、≤4096、可编码）跟着消失了——
+   计划只说改签名，但照做会留下一条绕过路径：空串或带控制字符的取值会一路传到 SDK 才出问题，
+   而那时异常里可能已经带上供应商侧的上下文。新增 `_validated_secret()`，三个 adapter 都过，
+   并补 `test_adapters_reject_an_unusable_injected_secret` 逐个钉住（漏一个就红）。
+   `FeishuOAuthAdapter` 原本就有构造期检查，同步改成校验取值。
+
+2. **五条既有用例测的是已经不存在的 seam，按承重属性重写而不是删掉。**
+   `test_each_exchange_rereads_secret_*` 的"重读文件"那一半没有了（轮换凭据的方式变成改 JSON
+   后重启，这正是 generation/restart 模型本身），"不复用 app_access_token"那一半保留；
+   `test_constructor_eagerly_rejects_unsafe_secret_and_exchange_rereads_it` 拆成构造期拒绝不可用
+   取值；`test_constructor_maps_unrepresentable_secret_path_*` 改测不可编码的**取值**；
+   `test_secret_reread_is_inside_total_deadline_*` 与
+   `test_transport_rejects_unsafe_secret_files_before_loading_sdk` 删除并在原位留下说明——前者
+   的预算属性已由 `test_both_posts_share_one_total_deadline` 覆盖，后者的五种文件形态对不再读
+   文件的 transport 完全不起作用，留着就是一条永远绿的空跑用例。
+   `test_transport_error_and_adapter_repr_never_expose_inputs` 反而更承重了：Secret 现在常驻内存。
+
+3. **Gemini 的三条 reader 用例合并为取值校验 + 顺序校验。** `secret_reader` 不存在了，
+   "reader 抛 SecretFileError / ValueError / BaseException"三条都是那个 seam 的。承重属性不变：
+   任何不满足 `_validate_credential` 的取值都不得走到 client 构造，且拒绝路径不回填原文
+   （新增 `test_the_rejected_key_never_appears_in_the_error`）。代理检查那条改为断言更强的
+   顺序性质：合法 Key 与非法 Key 都必须报 `AMBIENT_PROXY`，而不是数"读了几次文件"。
+
+4. **装配点按"缺凭据就不装配"处理，而不是构造一个注定失败的 adapter。** 断供是"这条链路
+   不存在"，不是"每次调用都报错"。`_resolved_credentials()` 在注入优先的前提下从默认路径读一次，
+   读失败不抛——否则一份坏配置会把已经在跑的服务一起拖死。`build_in_memory_local_stack`
+   **不读文件**，凭据只能显式注入（离线证明用）。
+
+5. **`docker-compose.smoke.yml` 与 README 同步删掉两个已不存在的 `XIAOWEI_*`。**
+   `load_settings` 对未知 `XIAOWEI_*` 是 fail-fast 的，留着会让容器直接起不来。补了一条交叉
+   验证：所有 `docker-compose*.yml` 里出现的 `XIAOWEI_*` 都必须在 `_FIELD_TO_ENV` 里（当前为空）。
+
+比计划清单多改到的既有测试共 13 个文件，均已按 `git status` 精确补进 `git add`。
 
 ---
 

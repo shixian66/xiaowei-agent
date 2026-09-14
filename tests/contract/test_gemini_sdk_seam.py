@@ -139,7 +139,7 @@ async def test_locked_sdk_outer_async_path_transforms_schema_once_without_afc_or
     monkeypatch.setattr(genai_models.AsyncModels, "_logged_afc_warning", False)
     adapter = GeminiModelAdapter(
         client_factory=real_client_factory,
-        secret_reader=lambda path: "AIza" + "r" * 35,
+        api_key="AIza" + "r" * 35,
     )
 
     with caplog.at_level("WARNING", logger="google.genai.models"):
@@ -169,7 +169,7 @@ async def test_intent_uses_fixed_developer_api_structured_async_call() -> None:
     factory = RecordingClientFactory(_intent_json())
     adapter = GeminiModelAdapter(
         client_factory=factory,
-        secret_reader=lambda path: "AIza" + "x" * 35,
+        api_key="AIza" + "x" * 35,
     )
 
     result = await adapter.generate_intent(
@@ -220,7 +220,7 @@ async def test_intent_rejects_explicit_null_slot_from_provider_json() -> None:
         client_factory=RecordingClientFactory(
             _intent_json(slots={"window_minutes": None})
         ),
-        secret_reader=lambda path: "AIza" + "x" * 35,
+        api_key="AIza" + "x" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -239,7 +239,7 @@ async def test_advisory_uses_high_thinking_and_plan_bounded_output() -> None:
     factory = RecordingClientFactory(response)
     adapter = GeminiModelAdapter(
         client_factory=factory,
-        secret_reader=lambda path: "AIza" + "y" * 35,
+        api_key="AIza" + "y" * 35,
     )
     request = SlowQueryAdvisoryRequest(
         rows=({"queryId": "q-1", "scanRows": 10},),
@@ -276,7 +276,7 @@ async def test_advisory_rejects_invalid_output_budget_before_client_construction
     factory = RecordingClientFactory("{}")
     adapter = GeminiModelAdapter(
         client_factory=factory,
-        secret_reader=lambda path: "AIza" + "z" * 35,
+        api_key="AIza" + "z" * 35,
     )
     request = SlowQueryAdvisoryRequest(
         rows=({"queryId": "q"},),
@@ -305,7 +305,7 @@ async def test_client_is_closed_when_generation_raises() -> None:
 
     adapter = GeminiModelAdapter(
         client_factory=build,
-        secret_reader=lambda path: "AIza" + "w" * 35,
+        api_key="AIza" + "w" * 35,
     )
     with pytest.raises(ModelPortError) as caught:
         await adapter.generate_intent(
@@ -323,7 +323,7 @@ async def test_valid_usage_metadata_is_returned_with_the_typed_result() -> None:
     )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(_intent_json(), metadata),
-        secret_reader=lambda path: "AIza" + "u" * 35,
+        api_key="AIza" + "u" * 35,
     )
 
     result = await adapter.generate_intent(
@@ -364,7 +364,7 @@ async def test_usage_metadata_accepts_each_independently_missing_count(
     )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(response, metadata),
-        secret_reader=lambda path: "AIza" + "u" * 35,
+        api_key="AIza" + "u" * 35,
     )
 
     if call_kind == "intent":
@@ -385,7 +385,7 @@ def test_adapter_rejects_an_object_mutated_profile() -> None:
     object.__setattr__(profile, "origin", "https://redirect.invalid")
 
     with pytest.raises(ValueError, match="fixed RI3 profile"):
-        GeminiModelAdapter(profile=profile)
+        GeminiModelAdapter(profile=profile, api_key="AIza" + "u" * 35)
 
 
 @pytest.mark.parametrize("value", [-1, 2**63])
@@ -399,7 +399,7 @@ async def test_usage_metadata_rejects_negative_and_overflow_after_sdk_normalizat
     )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(_intent_json(), metadata),
-        secret_reader=lambda path: "AIza" + "u" * 35,
+        api_key="AIza" + "u" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -418,7 +418,7 @@ async def test_usage_metadata_accepts_explicit_nullable_fields() -> None:
     )
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory(_intent_json(), metadata),
-        secret_reader=lambda path: "AIza" + "u" * 35,
+        api_key="AIza" + "u" * 35,
     )
 
     result = await adapter.generate_intent(
@@ -469,7 +469,7 @@ async def test_legitimate_slow_close_is_not_tuned_to_the_test_wall_clock() -> No
     client.aio = DelayedCloseAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "d" * 35,
+        api_key="AIza" + "d" * 35,
     )
 
     result = await adapter.generate_intent(
@@ -501,7 +501,7 @@ async def test_hung_close_is_bounded_after_success(
     client.aio = HungAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "h" * 35,
+        api_key="AIza" + "h" * 35,
     )
 
     started = time.monotonic()
@@ -530,7 +530,7 @@ async def test_close_failure_after_success_is_safely_normalized() -> None:
     client.aio = FailingCloseAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "e" * 35,
+        api_key="AIza" + "e" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -557,7 +557,7 @@ async def test_close_error_does_not_mask_provider_error() -> None:
     client.aio = FailingCloseAsyncClient(FailingModels("{}"))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "e" * 35,
+        api_key="AIza" + "e" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -580,7 +580,7 @@ async def test_close_error_does_not_mask_schema_error() -> None:
     client.aio = FailingCloseAsyncClient(RecordingModels("not-json"))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "s" * 35,
+        api_key="AIza" + "s" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -613,7 +613,7 @@ async def test_outer_cancellation_propagates_after_bounded_close(
     client.aio = SlowCloseAsyncClient(WaitingModels("{}"))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "c" * 35,
+        api_key="AIza" + "c" * 35,
     )
     task = asyncio.create_task(
         adapter.generate_intent(
@@ -654,7 +654,7 @@ async def test_repeated_outer_cancellation_waits_for_close_completion() -> None:
     client.aio = ObservableCloseAsyncClient(WaitingModels("{}"))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "c" * 35,
+        api_key="AIza" + "c" * 35,
     )
     task = asyncio.create_task(
         adapter.generate_intent(
@@ -689,7 +689,7 @@ async def test_close_cancelled_error_does_not_mask_provider_error() -> None:
     client.aio = CancelledCloseAsyncClient(FailingModels("{}"))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "c" * 35,
+        api_key="AIza" + "c" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -712,7 +712,7 @@ async def test_close_cancelled_error_after_success_is_a_safe_close_failure() -> 
     client.aio = CancelledCloseAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "c" * 35,
+        api_key="AIza" + "c" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -738,7 +738,7 @@ async def test_close_base_exception_after_success_is_safely_normalized() -> None
     client.aio = FailingCloseAsyncClient(RecordingModels(_intent_json()))
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "b" * 35,
+        api_key="AIza" + "b" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -775,7 +775,7 @@ async def test_sdk_api_errors_map_to_closed_codes_without_retained_context(
     client.aio.models = FailingModels("{}")
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "a" * 35,
+        api_key="AIza" + "a" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -797,7 +797,7 @@ async def test_sdk_api_error_with_non_integer_code_fails_safe() -> None:
     client.aio.models = FailingModels("{}")
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "a" * 35,
+        api_key="AIza" + "a" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -827,7 +827,7 @@ async def test_transport_error_maps_to_retryable_transport_code_without_retained
     client.aio.models = FailingModels("{}")
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "o" * 35,
+        api_key="AIza" + "o" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -855,7 +855,7 @@ async def test_poisoned_local_model_error_is_replaced_with_a_fresh_safe_error() 
     client.aio.models = FailingModels("{}")
     adapter = GeminiModelAdapter(
         client_factory=lambda **kwargs: client,
-        secret_reader=lambda path: "AIza" + "p" * 35,
+        api_key="AIza" + "p" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -871,7 +871,7 @@ async def test_poisoned_local_model_error_is_replaced_with_a_fresh_safe_error() 
 async def test_non_string_response_text_is_invalid_response() -> None:
     adapter = GeminiModelAdapter(
         client_factory=RecordingClientFactory({"not": "text"}),
-        secret_reader=lambda path: "AIza" + "n" * 35,
+        api_key="AIza" + "n" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
@@ -889,7 +889,7 @@ async def test_client_construction_failure_is_safely_normalized() -> None:
 
     adapter = GeminiModelAdapter(
         client_factory=fail_client,
-        secret_reader=lambda path: "AIza" + "f" * 35,
+        api_key="AIza" + "f" * 35,
     )
 
     with pytest.raises(ModelPortError) as caught:
