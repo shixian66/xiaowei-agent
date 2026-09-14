@@ -1062,6 +1062,8 @@ Run: `python -m pytest -q && python -m pytest -m security -q && ruff check . && 
 
 Expected: 全绿。**只有全绿才提交**——schema 与 session 写入面必须在同一个提交里落地。
 
+提交前先看一遍 `git status`：新增两个必填列会波及既有的 session fake 与共享测试套件（至少 `tests/suites/web_session_store.py`、`src/xiaowei_agent/persistence/fake.py`），这些文件不在下面的清单里但确实被改了，按 `git status` 精确补进 `git add`，不要用 `git add -A`，也不要留下未暂存的改动。
+
 ```bash
 git add \
   src/xiaowei_agent/persistence/schema.py \
@@ -1410,7 +1412,8 @@ python -m pytest -m security -q
 ```
 
 Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败，按新签名调整**测试的构造方式**，
-不得为了让测试过而保留旧路径读取。
+不得为了让测试过而保留旧路径读取。这些被顺带改到的既有测试文件同样要按 `git status` 精确补进
+下一步的 `git add`——四个 adapter 换签名必然波及它们的构造点。
 
 - [ ] **Step 6: 反证承重**
 
@@ -2466,7 +2469,9 @@ def _yaml(name: str) -> dict[str, Any]:
 
 `.gitignore` / `.dockerignore` 追加 `.config/`。
 
-`src/xiaowei_agent/interfaces/config_preflight.py` 以镜像内用户执行「建目录 → 建同目录临时文件 → chmod 0600 → 原子替换 → 重新读取」，只打印 `preflight: ok` 或闭集失败码，**绝不打印文件内容**。它复用 Task 2 的 `write_integration_config` / `read_integration_config`，不另写一份文件逻辑。
+`src/xiaowei_agent/interfaces/config_preflight.py` 以镜像内用户执行「建目录 → 建同目录哨兵文件 → chmod 0600 → 原子替换 → 重新读取 → **删除哨兵文件**」，只打印 `preflight: ok` 或闭集失败码，**绝不打印文件内容**。它复用 Task 2 的 `write_integration_config` / `read_integration_config`，不另写一份文件逻辑。
+
+**哨兵文件名固定为 `.preflight-probe.json`，绝不能用 `integrations.json`。** 预检的目的是证明这个目录可建、可写、可原子替换、可回读，不是生成配置。写到真实路径会留下一份 `generation=1` 的配置，于是首次保存从 1 递增到 2，页面显示的代次与「第一份配置」对不上，且 `read_or_absent` 再也读不到「尚未配置」这个状态——干净部署的起点被预检自己污染了。成功与失败路径都要 `os.unlink` 哨兵文件；退出前断言 `read_or_absent(真实路径) is None`（已存在配置的重复预检除外，此时它必须原样不动）。
 
 - [ ] **Step 4: 实现前端面板**
 
