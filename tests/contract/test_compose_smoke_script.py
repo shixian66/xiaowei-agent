@@ -845,6 +845,9 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         assert session.config_source == config_directory
         observed_paths = (postgres, identities, config_file)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(postgres.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(identities.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(config_directory.stat().st_mode) == 0o711
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
             for path in observed_paths

@@ -583,6 +583,13 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
                 ),
             )
         )
+        # 这份目录会作为目录 bind mount 给 UID 10001 的非 root 容器。宿主侧仍在
+        # 0700 的 input_root 下面；mount 根目录本身只需可遍历、不需可列目录，否则
+        # Web/Worker 读不到 /run/xiaowei-config/integrations.json，OAuth smoke 会退化成未装配。
+        try:
+            os.chmod(config_namespace.path, 0o711)  # noqa: S103 - 目录 bind mount 只开放遍历位
+        except OSError:
+            raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS") from None
         identity_owned = _create_input(
             identity,
             json.dumps(
