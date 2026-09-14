@@ -538,6 +538,10 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("GET", "/app/api/config"),
         ("PUT", "/app/api/config"),
         ("POST", "/app/api/config/clear"),
+        # 字面量在前、路径参数在后：Starlette 按注册顺序匹配，反过来会让
+        # feishu_oauth 落进凭据探针那条分支。
+        ("POST", "/app/api/config/test/feishu_oauth"),
+        ("POST", "/app/api/config/test/{check_name}"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/detail.js"),

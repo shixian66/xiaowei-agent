@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -79,6 +80,17 @@ from xiaowei_agent.interfaces.provider_consumption import (
     read_or_absent,
     required_services_for_check,
 )
+from xiaowei_agent.interfaces.provider_probe import (
+    PROVIDER_PROBE_TIMEOUT_SECONDS,
+    ProbeErrorCode,
+    ProbeOutcome,
+    ProbeTransport,
+    feishu_probe_transport,
+    gemini_probe_transport,
+    probe_feishu_credentials,
+    probe_gemini_connection,
+    refused_outcome,
+)
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     FeishuOAuthPort,
@@ -105,6 +117,7 @@ from xiaowei_agent.interfaces.web_models import (
     WebGeminiConfigUpdate,
     WebGeminiConfigView,
     WebLoginRequest,
+    WebOAuthTestStarted,
     WebTaskAccepted,
     WebTaskDetail,
     WebTaskPage,
@@ -112,9 +125,11 @@ from xiaowei_agent.interfaces.web_models import (
 )
 from xiaowei_agent.log import configure_logging
 from xiaowei_agent.persistence.provider_state import (
+    MAX_TEST_DURATION_MS,
     CheckName,
     ProviderStateSnapshot,
     ProviderStateStore,
+    RecordTestCommand,
 )
 from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
@@ -915,6 +930,47 @@ def _config_view(
     )
 
 
+def _probe_duration_ms(started: float) -> int:
+    """与 ``provider_probe`` 用同一个上界裁剪；两处不一致会让写库在边界上失败。"""
+    elapsed = int((time.monotonic() - started) * 1000)
+    return min(max(elapsed, 0), MAX_TEST_DURATION_MS)
+
+
+def _probe_failure(code: ProbeErrorCode, *, started: float) -> ProbeOutcome:
+    return ProbeOutcome(
+        status="failed", duration_ms=_probe_duration_ms(started), error_code=code
+    )
+
+
+def _check_name_or_input_error(value: str) -> CheckName:
+    """路径段必须落在三项闭集里。
+
+    用 ``CheckName(value)`` 而不是自己列一遍字符串：页面、表上的 CHECK 与这里问的
+    是同一个闭集，抄第二份就会出现"路由接受但写不进表"的那一半。
+    """
+    try:
+        return CheckName(value)
+    except ValueError:
+        raise _WebInputError from None
+
+
+def _usable_config(
+    provider: ProviderName, config: IntegrationConfig | None
+) -> IntegrationConfig | None:
+    """两层与关系都为真才交出配置，否则探针看到的就是"未配置"。
+
+    `.env` 的真实测试开关与这里**不是一回事**：前者回答"这台机器允许发真实请求
+    吗"，后者回答"有没有东西可以拿去发"。合并会让"关着开关"与"没填 Key"变成
+    同一个错误码，管理员看不出该去开开关还是该去填配置。
+    """
+    if not (
+        _provider_enabled(provider, config)
+        and _required_fields_present(provider, config)
+    ):
+        return None
+    return config
+
+
 @dataclass(frozen=True)
 class _WebPrincipalSession:
     """两条认证路径的统一结果。
@@ -1003,6 +1059,8 @@ def create_app(
     policy_revision: str,
     provider_state: ProviderStateStore,
     integration_config_path: str = DEFAULT_INTEGRATION_CONFIG_PATH,
+    gemini_probe: ProbeTransport = gemini_probe_transport,
+    feishu_probe: ProbeTransport = feishu_probe_transport,
 ) -> FastAPI:
     """注册认证与薄任务投影路由，不装配执行 Runtime。
 
@@ -1087,6 +1145,52 @@ def create_app(
             )
             return response
 
+        async def oauth_connection_test_callback(
+            request: Request, *, code: str, state: str, state_cookie: str | None
+        ) -> Response:
+            """OAuth 连接测试的回调分支：只记一条结果，**不签发任何会话**。
+
+            顺序是承重的：先消费测试域 state，再核对本地管理员 session，最后才换
+            code。反过来先查 session，会把"登录 state 过期"这种常见情况误报成
+            403——那时用户会去找权限问题，而真正的原因是重新点一次登录就好。
+            """
+            try:
+                await auth.consume_connection_test_state(
+                    state=state, state_cookie=state_cookie
+                )
+            except WebOAuthStateError:
+                return _error(400, "invalid_request")
+            try:
+                await local_admin_session(request)
+            except (WebAuthenticationError, LocalAdminAuthenticationError):
+                # session 已过期或被撤销：测试不再有主体可归属，什么都不写。
+                return _error(401, "unauthorized")
+            except (_WebForbiddenError, _PasswordChangeRequiredError):
+                return _error(403, "forbidden")
+            config = _integration_config_or_unavailable(integration_config_path)
+            started = time.monotonic()
+            outcome: ProbeOutcome
+            try:
+                await auth.complete_connection_test(code=code)
+            except (WebOAuthCodeError, WebAuthenticationError):
+                outcome = _probe_failure(
+                    ProbeErrorCode.UNAUTHORIZED, started=started
+                )
+            except WebOAuthUnavailableError:
+                outcome = _probe_failure(
+                    ProbeErrorCode.UNAVAILABLE, started=started
+                )
+            else:
+                outcome = ProbeOutcome(
+                    status="passed", duration_ms=_probe_duration_ms(started)
+                )
+            await record_probe(
+                outcome, check_name=CheckName.FEISHU_OAUTH, config=config
+            )
+            # 不 ``_set_secret_cookie``、不 ``rotate_session``：一次连接测试结束时
+            # 浏览器手里不该多出任何东西。
+            return RedirectResponse("/app", status_code=302)
+
         @app.get("/oauth/feishu/callback")
         async def oauth_callback(
             request: Request,
@@ -1115,9 +1219,16 @@ def create_app(
                     state_cookie=state_cookie,
                     previous_session_cookie=previous_session,
                 )
+            except WebOAuthStateError:
+                # 登录域里没有这个 state。可能是一次连接测试的回调——两个域互不
+                # 相认，所以回落是安全的：测试域同样不认识它时仍然是 400，与没有
+                # 这条分支时完全一致。
+                response = await oauth_connection_test_callback(
+                    request, code=code, state=state, state_cookie=state_cookie
+                )
             except WebAuthenticationError:
                 response = _error(401, "unauthorized")
-            except (WebOAuthStateError, WebOAuthCodeError):
+            except WebOAuthCodeError:
                 response = _error(400, "invalid_request")
             except WebOAuthUnavailableError:
                 response = _error(503, "unavailable")
@@ -1371,6 +1482,122 @@ def create_app(
         return WebConfigSaved(
             generation=updated.generation, restart_required=True
         ).model_dump(mode="json")
+
+    async def record_probe(
+        outcome: ProbeOutcome,
+        *,
+        check_name: CheckName,
+        config: IntegrationConfig | None,
+    ) -> None:
+        """有可信代次才落库。
+
+        文件不存在时没有代次可归属，而 ``RecordTestCommand.generation`` 恒 ``> 0``；
+        硬凑一个值等于伪造证据。不落库的后果只是页面继续显示"未配置"——它本来就是。
+        """
+        if config is None:
+            return
+        await provider_state.record_test(
+            command=RecordTestCommand(
+                check_name=check_name,
+                generation=config.generation,
+                status=outcome.status,
+                duration_ms=outcome.duration_ms,
+                error_code=outcome.error_code,
+            )
+        )
+
+    def oauth_test_refusal(
+        config: IntegrationConfig | None, *, snapshot: ProviderStateSnapshot
+    ) -> ProbeOutcome | None:
+        """OAuth 测试的三道前置；``None`` 表示可以签发 state。
+
+        最后一道——凭据测试必须在**当前代次**通过——不是礼貌，是必需：OAuth 回调
+        链路建立在应用凭据之上，凭据本身没验过时跳出去的失败无法区分"回调地址配
+        错了"与"密钥根本不对"，管理员会照着错误的方向改半天。
+        """
+        if not settings.feishu_real_test_enabled:
+            return refused_outcome(ProbeErrorCode.REAL_TEST_DISABLED)
+        if auth is None or _usable_config(ProviderName.FEISHU, config) is None:
+            return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
+        credentials = snapshot.tests.get(CheckName.FEISHU_CREDENTIALS.value)
+        if (
+            credentials is None
+            or credentials.status != "passed"
+            or credentials.generation != current_generation(config)
+        ):
+            return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
+        return None
+
+    # 字面量路由必须注册在带路径参数的那条**之前**：Starlette 按注册顺序匹配。
+    # 顺序之外还有一道兜底——下面那条路由显式拒绝 ``feishu_oauth``，因此即使有人
+    # 调换了顺序，也不会静默落进"用凭据探针去测 OAuth"的错误分支。
+    @app.post("/app/api/config/test/feishu_oauth", response_model=None)
+    async def start_oauth_test(request: Request) -> Response:
+        """签发一次只能被测试分支消费的 state，并返回授权 URL。
+
+        ``auth is None`` 时这条路由仍然注册——它与两条 OAuth 入口不同，返回的是
+        一个闭集拒绝码而不是一次永远失败的跳转。管理员需要知道"没装配"，而不是
+        点下去毫无反应。
+        """
+        session = await local_admin_session(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        config = _integration_config_or_unavailable(integration_config_path)
+        refusal = oauth_test_refusal(config, snapshot=await provider_state.snapshot())
+        if refusal is not None:
+            await record_probe(
+                refusal, check_name=CheckName.FEISHU_OAUTH, config=config
+            )
+            return JSONResponse(content=refusal.model_dump(mode="json"))
+        started = await cast(WebAuthService, auth).start_connection_test()
+        response = JSONResponse(
+            content=WebOAuthTestStarted(
+                authorization_url=started.authorization_url
+            ).model_dump(mode="json")
+        )
+        _set_secret_cookie(
+            response,
+            name=oauth_state_cookie,
+            value=started.state_cookie,
+            max_age=started.max_age_seconds,
+            secure=secure_cookies,
+        )
+        return response
+
+    @app.post("/app/api/config/test/{check_name}")
+    async def run_provider_test(
+        request: Request, check_name: str
+    ) -> dict[str, object]:
+        session = await local_admin_session(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        check = _check_name_or_input_error(check_name)
+        if check is CheckName.FEISHU_OAUTH:
+            # 走到这里说明上面那条字面量路由被移到了后面。宁可 400，也不能用
+            # 凭据探针去回答一个 OAuth 问题——那会写下一条名不副实的测试结果。
+            raise _WebInputError
+        config = _integration_config_or_unavailable(integration_config_path)
+        if check is CheckName.GEMINI_CONNECTION:
+            usable = _usable_config(ProviderName.GEMINI, config)
+            outcome = await probe_gemini_connection(
+                enabled=settings.gemini_real_test_enabled,
+                api_key=None if usable is None else usable.gemini.api_key,
+                transport=gemini_probe,
+                timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+            )
+        else:
+            usable = _usable_config(ProviderName.FEISHU, config)
+            outcome = await probe_feishu_credentials(
+                enabled=settings.feishu_real_test_enabled,
+                app_id=None if usable is None else usable.feishu.app_id,
+                app_secret=None if usable is None else usable.feishu.app_secret,
+                transport=feishu_probe,
+                timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+            )
+        await record_probe(outcome, check_name=check, config=config)
+        return outcome.model_dump(mode="json")
 
     # 路由从闭集注册表循环注册，而不是一条一条手写：漏一条就是页面静默 404，
     # 而那种 404 只有真正用浏览器打开才会发现。

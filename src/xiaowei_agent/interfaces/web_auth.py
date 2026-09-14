@@ -166,6 +166,19 @@ def _digest(*, domain: str, secret: str) -> str:
     return sha256(f"{domain}:{secret}".encode()).hexdigest()
 
 
+OAUTH_LOGIN_STATE_DOMAIN: Final[str] = "oauth-state:v1"
+OAUTH_TEST_STATE_DOMAIN: Final[str] = "oauth-conn-test:v1"
+"""登录 state 与连接测试 state 的摘要域；**并排定义是刻意的**。
+
+两者写的是同一张 ``oauth_states`` 表。域一旦相同，一次连接测试签发的 state 就能
+被登录 callback 消费掉——那条路会 ``rotate_session`` 并下发 session cookie，于是
+"点一下测试按钮"变成了"签发一个会话"。反方向同样致命：登录 state 被测试分支吃掉，
+用户的登录会静默失败，而管理面记下一条并不存在的测试结果。
+
+隔离必须双向，两个方向各有一条用例钉住。
+"""
+
+
 def web_session_digest(session_cookie: str) -> str:
     """session cookie 的存储摘要。
 
@@ -329,7 +342,18 @@ class WebAuthService:
         return value
 
     async def start_login(self) -> OAuthStart:
-        """创建与浏览器临时 cookie 绑定的一次性 OAuth state。"""
+        """创建与浏览器临时 cookie 绑定的一次性登录 state。"""
+        return await self._start(domain=OAUTH_LOGIN_STATE_DOMAIN)
+
+    async def start_connection_test(self) -> OAuthStart:
+        """签发一次**只能**被测试分支消费的 state。
+
+        与登录共用授权 URL 与 redirect_uri——测的就是那条真实回调链路；换一个
+        redirect_uri 等于测了一条生产环境里不存在的路径。
+        """
+        return await self._start(domain=OAUTH_TEST_STATE_DOMAIN)
+
+    async def _start(self, *, domain: str) -> OAuthStart:
         state = self._new_secret()
         authorization_url: str | None = None
         provider_failed = False
@@ -351,7 +375,7 @@ class WebAuthService:
         try:
             await self._sessions.issue_oauth_state(
                 command=IssueOAuthStateCommand(
-                    state_digest=_digest(domain="oauth-state:v1", secret=state),
+                    state_digest=_digest(domain=domain, secret=state),
                     ttl_seconds=self._oauth_state_ttl_seconds,
                 )
             )
@@ -365,15 +389,14 @@ class WebAuthService:
             max_age_seconds=self._oauth_state_ttl_seconds,
         )
 
-    async def complete_login(
-        self,
-        *,
-        code: str,
-        state: str,
-        state_cookie: str | None,
-        previous_session_cookie: str | None,
-    ) -> IssuedWebSession:
-        """消费同浏览器 state，重映射身份并原子轮换 session。"""
+    async def _consume_state(
+        self, *, state: str, state_cookie: str | None, domain: str
+    ) -> None:
+        """一次性消费某个域下的 state；不属于这个域就当作不存在。
+
+        先比 cookie 再查库：``state`` 来自 URL（攻击者可控），``state_cookie``
+        来自浏览器。少了前一步，一个被诱导的回调就能替受害者消费掉 state。
+        """
         if (
             not _secret_is_valid(state)
             or not _secret_is_valid(state_cookie)
@@ -384,7 +407,7 @@ class WebAuthService:
         try:
             await self._sessions.consume_oauth_state(
                 command=ConsumeOAuthStateCommand(
-                    state_digest=_digest(domain="oauth-state:v1", secret=state)
+                    state_digest=_digest(domain=domain, secret=state)
                 )
             )
         except OAuthStateNotFoundError:
@@ -392,6 +415,34 @@ class WebAuthService:
         if state_missing:
             raise WebOAuthStateError
 
+    async def consume_connection_test_state(
+        self, *, state: str, state_cookie: str | None
+    ) -> None:
+        """确认这次回调属于连接测试；不属于就抛 ``WebOAuthStateError``。
+
+        与 ``complete_connection_test`` **分成两步**是刻意的：路由必须在确认命中
+        测试域之后、发起 code 交换之前，再核对一遍本地管理员 session 仍然有效。
+        合成一个方法就没有插入那道检查的位置。
+        """
+        await self._consume_state(
+            state=state, state_cookie=state_cookie, domain=OAUTH_TEST_STATE_DOMAIN
+        )
+
+    async def complete_connection_test(self, *, code: str) -> None:
+        """只交换一次 code 以证明回调链路可用；成功即返回。
+
+        **不解析身份、不轮换 session、不下发任何 cookie。** 这里测的是"飞书能不能
+        把 code 换成身份"，不是"这个人能不能登录"：一个不在身份目录里的管理员完成
+        测试是正常的，把它算成失败会让管理员去改身份目录而不是去查 OAuth 配置。
+        """
+        await self._exchange(code=code)
+
+    async def _exchange(self, *, code: str) -> FeishuOAuthIdentity:
+        """校验 code 形状并换一次身份；Provider 异常只映射到本模块的闭集。
+
+        登录与连接测试共用这一处：两边各写一份就有两套超时上限、两套控制字符
+        拒绝与两套异常映射，而"测试通过但登录失败"恰恰是最难排查的那种不一致。
+        """
         if (
             not isinstance(code, str)
             or not code
@@ -419,6 +470,21 @@ class WebAuthService:
             raise provider_error
         if identity is None:
             raise WebOAuthUnavailableError
+        return identity
+
+    async def complete_login(
+        self,
+        *,
+        code: str,
+        state: str,
+        state_cookie: str | None,
+        previous_session_cookie: str | None,
+    ) -> IssuedWebSession:
+        """消费同浏览器 state，重映射身份并原子轮换 session。"""
+        await self._consume_state(
+            state=state, state_cookie=state_cookie, domain=OAUTH_LOGIN_STATE_DOMAIN
+        )
+        identity = await self._exchange(code=code)
         identity_missing = False
         try:
             principal = self._identities.resolve(subject_ref=identity.subject_ref)

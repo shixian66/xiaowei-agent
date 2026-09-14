@@ -2716,6 +2716,80 @@ git add src/xiaowei_agent/interfaces/provider_probe.py src/xiaowei_agent/interfa
 git commit -m "feat(ri5): add the three control-plane provider probes"
 ```
 
+
+#### 执行记录（Task 7）
+
+**未联网、未部署、未调用真实 Provider。** 全部出站都经注入的 spy；真实 transport
+（`gemini_probe_transport` / `feishu_probe_transport`）只在被 monkeypatch 的情况下
+执行过错误映射分支，没有构造过任何 SDK client。`--disable-socket` 全程生效。
+
+**diff 摘要**
+
+| 文件 | 变化 |
+|---|---|
+| `interfaces/provider_probe.py`（新增 275 行） | `ProbeOutcome`、`ProbeErrorCode`、`ProbeTransportError`、两个纯探针、两个真实 transport、`GEMINI_ERROR_CODES` 全映射 |
+| `interfaces/gemini_model.py` | 抽出模块级 `_build_client`；新增 `probe_connection` |
+| `interfaces/feishu_sdk.py` | 新增 `probe_app_credentials`（只调 `tenant_access_token.ainternal`） |
+| `interfaces/web_auth.py` | `OAUTH_LOGIN_STATE_DOMAIN` / `OAUTH_TEST_STATE_DOMAIN`；抽出 `_start` / `_consume_state` / `_exchange`；新增 `start_connection_test` / `consume_connection_test_state` / `complete_connection_test` |
+| `interfaces/web_app.py` | 两条测试路由 + callback 的测试分支；`create_app` 新增 `gemini_probe` / `feishu_probe` |
+| `interfaces/web_models.py` | `WebOAuthTestStarted` |
+
+**相关测试**：`tests/security/test_ri5_probe_boundary.py`（20）、
+`tests/contract/test_ri5_probe_routes.py`（19），以及三处闭集更新
+（路由清单、模块分层白名单、拒绝路径插值白名单）。
+
+**四条基线**：`3758 passed, 237 skipped` / `1380 security passed, 80 skipped` /
+`ruff: All checks passed!` / `mypy: 174 source files` / `git diff --check` 干净。
+
+**反证（逐条改坏 → 变红 → 恢复）**
+
+```text
+开关关闭时不再立刻返回              -> 2 failed
+先查配置再查开关（顺序反了）        -> 1 failed
+飞书只看 secret 不看 app_id         -> 1 failed
+失败时把 Provider 正文带出来        -> 3 failed
+两个 state 域合成一个               -> 5 failed
+测试分支不再校验本地管理员 session  -> 2 failed
+测试分支顺手下发 session cookie     -> 1 failed
+OAuth 测试不再要求凭据先通过        -> 2 failed
+没有配置时也伪造一条测试结果        -> 1 failed
+测试路由不再限定本地管理员          -> 1 failed（补测试后）
+恢复后                              111 passed
+```
+
+**"测试路由不再限定本地管理员"第一次没变红**，是我自己的测试不够：原本只测了
+匿名请求，而匿名在 `session_allowed_to_work` 那一层也会被拒。补上
+`test_probe_routes_reject_a_feishu_principal_with_admin_permission`——一个持有
+`ADMIN_ALL_SAFE_TASKS` 的**已登录**飞书主体——之后才真正承重。
+
+**六处需要留痕的判断**
+
+1. **`ProbeErrorCode` 是 `ProviderTestErrorCode` 的别名，不是第二个闭集。** 计划里
+   两者分别定义。抄第二份的后果不是重复代码：多出来的成员写不进表（CHECK 拒绝），
+   少掉的成员让探针无法表达一种真实失败，两者都只在真机上暴露。
+2. **`GEMINI_ERROR_CODES` 写成全表而不是一串 `if`。** 模型侧新增一个错误码时，
+   `if/else` 会悄悄落进 `UNAVAILABLE`，全表则在
+   `test_every_model_error_code_has_a_probe_code` 立刻变红。
+3. **`gemini_model._build_client` 提到模块级。** 探针若自己再建一次 client，
+   环境代理拒绝、凭据形状检查与固定 base_url 就成了两份，"探针通过但真实调用
+   失败"只是时间问题。
+4. **回调分支用一个新 cookie 还是共用登录 cookie？** 最终共用，按计划"先查登录域，
+   未命中再查测试域"。测试分支内部的顺序是承重的：**先消费测试域 state，命中之后
+   才查 session**。反过来先查 session，会把"登录 state 过期"这种常见情况误报成
+   403，用户会去找权限问题而真正的原因是重新点一次登录。
+5. **`feishu_oauth` 用字面量路由注册在参数化路由之前**，并在参数化路由里显式拒绝
+   `feishu_oauth`。Starlette 按注册顺序匹配，只靠顺序是隐式约束；多一道兜底，
+   顺序被改动时也不会用凭据探针去回答一个 OAuth 问题。
+6. **`raise ProbeTransportError(...)` 移出 `except` 块。** 块内抛会把原异常挂进
+   `__context__`，一条本该只有闭集码的异常链重新带上 Provider 侧对象。改法沿用
+   本仓库已有的"先记码、出块再抛"写法。
+
+另外两处小的：`_feishu_error_code(200) -> UNAUTHORIZED`，因为飞书在凭据错误时
+返回的是 HTTP 200 加业务错误码，读成 `INVALID_RESPONSE` 会让管理员去查网络；
+`test_probe_never_reaches_the_tool_gateway` 的断言落在 `provider_probe` 的导入闭包
+而不是整个 `web_app` 的——Web 的任务投影本来就要读能力规格，禁掉整条闭包会得到
+一条假断言，红了也只能靠放宽白名单收场。
+
 ---
 
 ### Task 8: Compose、Dockerfile、前端面板与 runbook

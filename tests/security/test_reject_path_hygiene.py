@@ -45,6 +45,15 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "result.rejection",
         # --- 闭集：来自代码定义的必填操作数名，不是外部输入 ---
         "sorted(required)",
+        # --- RI5 探针：两处都在**构造闭集码本身**，不是在回显 Provider 的话 ---
+        # ``probe_failure_code`` 只可能取自 GEMINI_ERROR_CODES 的值域，即
+        # ProbeErrorCode 成员——名字取得窄是为了不让这条白名单顺带放行别处的
+        # 同名局部变量；
+        # _feishu_error_code 的输入只是一个 HTTP 状态码整数，返回的同样是
+        # ProbeErrorCode 成员。Provider 的响应正文在调用点即被丢弃，由
+        # test_failure_never_returns_provider_body_or_secret 反向承重。
+        "probe_failure_code",
+        "_feishu_error_code(status_code)",
         # --- 已经过安全投影 ---
         # config.py 的 detail 来自 redaction.safe_error_details，只含 loc 与 type。
         "detail",

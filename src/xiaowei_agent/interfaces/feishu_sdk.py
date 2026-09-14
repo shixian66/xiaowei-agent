@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from pydantic import Field, ValidationError
@@ -430,6 +430,65 @@ def _exception_error(error: Exception) -> ChannelMessageError:
     else:
         code = ProjectionErrorCode.PROVIDER_INTERNAL
     return _message_error(error_code=code)
+
+
+def _build_internal_tenant_access_token_request(
+    *, app_id: str, app_secret: str
+) -> object:
+    model = importlib.import_module(
+        "lark_oapi.api.auth.v3.model.internal_tenant_access_token_request"
+    )
+    body_model = importlib.import_module(
+        "lark_oapi.api.auth.v3.model.internal_tenant_access_token_request_body"
+    )
+    body_builder = _callable_attr(
+        _required_attr(body_model, "InternalTenantAccessTokenRequestBody"), "builder"
+    )()
+    body_builder = _callable_attr(body_builder, "app_id")(app_id)
+    body_builder = _callable_attr(body_builder, "app_secret")(app_secret)
+    builder = _callable_attr(
+        _required_attr(model, "InternalTenantAccessTokenRequest"), "builder"
+    )()
+    builder = _callable_attr(builder, "request_body")(
+        _callable_attr(body_builder, "build")()
+    )
+    return _callable_attr(builder, "build")()
+
+
+async def probe_app_credentials(
+    *,
+    app_id: str,
+    app_secret: str,
+    timeout_seconds: float = _API_TIMEOUT_SECONDS,
+) -> tuple[bool, int]:
+    """用应用凭据换一次 tenant access token，返回 ``(成功, HTTP 状态码)``。
+
+    **只碰应用凭证接口**：控制面要证明的是"这对 App ID / Secret 现在可用"，不该
+    顺带具备发消息或读群成员的能力。Token 本身不返回、不记录、不进异常文本——
+    调用方需要的只是成功与否。
+
+    "成功"与"状态码"分开返回，是因为飞书在凭据错误时返回的是 **HTTP 200 加一个
+    业务错误码**；只看状态码会把"密钥不对"读成"一切正常"。
+    """
+    secret = _validated_secret(app_secret)
+    client = _build_client(app_id=app_id, secret=secret, timeout_seconds=timeout_seconds)
+    resource = _required_attr(
+        _required_attr(_required_attr(client, "auth"), "v3"), "tenant_access_token"
+    )
+    response = await cast(
+        Awaitable[object],
+        _callable_attr(resource, "ainternal")(
+            _build_internal_tenant_access_token_request(
+                app_id=app_id, app_secret=secret
+            )
+        ),
+    )
+    if _callable_attr(response, "success")() is True:
+        return True, 200
+    status_code = _required_attr(_required_attr(response, "raw"), "status_code")
+    if isinstance(status_code, bool) or not isinstance(status_code, int):
+        raise FeishuSdkError("feishu sdk payload invalid")
+    return False, status_code
 
 
 class FeishuSdkMessageAdapter:

@@ -120,6 +120,13 @@ _ALLOWED_INTERNAL_BY_FILE = {
     "interfaces/integration_config_file.py": {
         "xiaowei_agent.contracts",
     },
+    "interfaces/provider_probe.py": {
+        "xiaowei_agent.application",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        # 失败码闭集与写库用的那一个**是同一个**；抄一份形状迟早会漂。
+        "xiaowei_agent.persistence",
+    },
     "interfaces/provider_consumption.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.config",

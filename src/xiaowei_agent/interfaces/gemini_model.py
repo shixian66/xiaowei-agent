@@ -170,6 +170,49 @@ async def _close_client(
     raise ModelPortError(ModelErrorCode.UNAVAILABLE)
 
 
+def _build_client(
+    *,
+    api_key: str,
+    profile: ModelInvocationProfile,
+    client_factory: Callable[..., Any],
+) -> genai.Client:
+    """构造一个只指向固定 origin / api_version 的 client。
+
+    ``GeminiModelAdapter`` 与连接探针共用这一处：探针若自己再建一次 client，
+    环境代理拒绝、凭据形状检查与固定 base_url 就变成两份，"探针通过但真实调用
+    失败"只是时间问题。
+    """
+    if any(os.environ.get(name) for name in _PROXY_ENVIRONMENT):
+        raise ModelPortError(ModelErrorCode.AMBIENT_PROXY)
+    credential_failed = False
+    try:
+        credential = _validate_credential(api_key)
+    except Exception:
+        credential_failed = True
+        credential = ""
+    if credential_failed:
+        raise ModelPortError(ModelErrorCode.CREDENTIAL_UNAVAILABLE)
+    construction_failed = False
+    try:
+        client = cast(
+            genai.Client,
+            client_factory(
+                vertexai=False,
+                api_key=credential,
+                http_options=types.HttpOptions(
+                    base_url=profile.origin,
+                    api_version=profile.api_version,
+                    retry_options=None,
+                ),
+            ),
+        )
+    except Exception:
+        construction_failed = True
+    if construction_failed:
+        raise ModelPortError(ModelErrorCode.UNAVAILABLE)
+    return client
+
+
 class GeminiModelAdapter:
     """只做本地 DTO 与一次 SDK request 的相互转换。"""
 
@@ -191,35 +234,11 @@ class GeminiModelAdapter:
         self._api_key = api_key
 
     def _client(self) -> genai.Client:
-        if any(os.environ.get(name) for name in _PROXY_ENVIRONMENT):
-            raise ModelPortError(ModelErrorCode.AMBIENT_PROXY)
-        credential_failed = False
-        try:
-            credential = _validate_credential(self._api_key)
-        except Exception:
-            credential_failed = True
-            credential = ""
-        if credential_failed:
-            raise ModelPortError(ModelErrorCode.CREDENTIAL_UNAVAILABLE)
-        construction_failed = False
-        try:
-            client = cast(
-                genai.Client,
-                self._client_factory(
-                    vertexai=False,
-                    api_key=credential,
-                    http_options=types.HttpOptions(
-                        base_url=self.profile.origin,
-                        api_version=self.profile.api_version,
-                        retry_options=None,
-                    ),
-                ),
-            )
-        except Exception:
-            construction_failed = True
-        if construction_failed:
-            raise ModelPortError(ModelErrorCode.UNAVAILABLE)
-        return client
+        return _build_client(
+            api_key=self._api_key,
+            profile=self.profile,
+            client_factory=self._client_factory,
+        )
 
     async def _generate(
         self,
@@ -320,10 +339,56 @@ class GeminiModelAdapter:
         return parsed
 
 
+async def probe_connection(
+    *,
+    api_key: str,
+    contents: str,
+    profile: ModelInvocationProfile = GEMINI_MODEL_PROFILE,
+    client_factory: Callable[..., Any] = genai.Client,
+) -> None:
+    """发一次最小的固定请求验证凭据与连通性；失败抛 ``ModelPortError``。
+
+    **不经过 ``IntentModelPort``**：那条路带着 system instruction、response schema
+    与 thinking 配置，测的是"模型能不能按约定作答"。控制面要回答的是更前面一个
+    问题——"这把 Key 现在通不通"。用后者的失败去解释前者只会误导管理员。
+
+    响应正文一律不读、不返回：调用方只需要知道"有没有换到一次真实回应"。
+    """
+    client = _build_client(
+        api_key=api_key, profile=profile, client_factory=client_factory
+    )
+    primary_error: BaseException | None = None
+    mapped_error: ModelPortError | None = None
+    try:
+        response = await client.aio.models.generate_content(
+            model=profile.model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=profile.intent_output_tokens,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
+        )
+        if response is None:
+            raise ModelPortError(ModelErrorCode.INVALID_RESPONSE)
+    except Exception as error:
+        primary_error = error
+        mapped_error = _map_error(error)
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        await _close_client(client, primary_error=primary_error)
+    if mapped_error is not None:
+        raise mapped_error
+
+
 __all__ = [
     "GEMINI_API_VERSION",
     "GEMINI_MODEL",
     "GEMINI_MODEL_PROFILE",
     "GEMINI_PROVIDER_ORIGIN",
     "GeminiModelAdapter",
+    "probe_connection",
 ]

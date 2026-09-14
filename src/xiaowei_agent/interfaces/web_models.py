@@ -194,6 +194,17 @@ class WebConfigSaved(_WebModel):
     restart_required: bool
 
 
+class WebOAuthTestStarted(_WebModel):
+    """飞书 OAuth 连接测试**已签发**的响应；与失败响应是两种形状。
+
+    只有这一条会带 ``authorization_url``，因此前端用它的有无来分支即可。刻意不把
+    它塞进探针结果模型里做成可选字段：那会造出一个既像结果又像跳转指令的对象，
+    读的人无法从类型上判断该跳转还是该显示红色徽章。
+    """
+
+    authorization_url: StrictStr
+
+
 class WebCurrentUser(_WebModel):
     actor: StrictStr
     environment_id: StrictStr
@@ -313,6 +324,7 @@ __all__ = [
     "WebChangePasswordRequest",
     "WebCurrentUser",
     "WebLoginRequest",
+    "WebOAuthTestStarted",
     "WebTaskAccepted",
     "WebTaskDetail",
     "WebTaskPage",
