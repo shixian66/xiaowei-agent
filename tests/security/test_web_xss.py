@@ -22,10 +22,10 @@ _STATIC = _ROOT / "src" / "xiaowei_agent" / "interfaces" / "web_static"
 
 
 def test_javascript_has_no_html_execution_sink() -> None:
-    scripts = "\n".join(
-        (_STATIC / name).read_text(encoding="utf-8")
-        for name in ("app.js", "detail.js")
-    )
+    # 按目录取而不是按文件名列举：新增一个脚本不应该悄悄落在这条守卫之外。
+    paths = sorted(_STATIC.glob("*.js"))
+    assert len(paths) >= 3
+    scripts = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     forbidden = (
         "innerHTML",
         "outerHTML",
@@ -40,10 +40,9 @@ def test_javascript_has_no_html_execution_sink() -> None:
 
 
 def test_static_html_has_no_inline_handlers_or_template_interpolation() -> None:
-    html = "\n".join(
-        (_STATIC / name).read_text(encoding="utf-8")
-        for name in ("index.html", "detail.html")
-    )
+    paths = sorted(_STATIC.glob("*.html"))
+    assert len(paths) >= 2
+    html = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
     assert "{{" not in html
     assert "{%" not in html

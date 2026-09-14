@@ -6,6 +6,7 @@
 
 import functools
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -608,3 +609,146 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
             )
             # 中间件必须在路由分发之前挡下：尚不存在的 config 路由也不能返回 404。
             assert response.status_code == 413, path
+
+
+# --------------------------------------------------------------------------
+# 真实浏览器首启闭环：读不到 HttpOnly cookie，也没有第二台设备
+# --------------------------------------------------------------------------
+
+_ASSET_RE = re.compile(r'(?:src|href)="(/app/static/[^"]+)"')
+_CSRF_META_RE = re.compile(r'<meta name="csrf-token" content="([^"]*)">')
+
+
+async def test_every_asset_the_server_rendered_shells_reference_is_served(
+    clock, memory_state
+) -> None:
+    """壳引用的每个静态资源都必须真的能取到。
+
+    登录壳与改密壳是服务端拼出来的字符串，不在 ``web_static`` 的既有守卫覆盖内；
+    静态路由又是一条一条手写的，因此"加一句 ``<script src>``"不会自动带来一条路由。
+    这里把"壳里引用的 URL"和"实际能取到的 URL"直接绑在一起。
+    """
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        pages = [(await client.get("/app")).text]
+        await client.post(
+            "/app/api/login",
+            content=json.dumps({"password": initial}),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        pages.append((await client.get("/app")).text)
+        referenced = sorted({url for page in pages for url in _ASSET_RE.findall(page)})
+        # 反向断言：守卫本身不能因为"壳其实什么都没引用"而空转。
+        assert "/app/static/login.js" in referenced
+        assert "/app/static/app.css" in referenced
+        for url in referenced:
+            asset = await client.get(url)
+            assert asset.status_code == 200, url
+            assert asset.content, url
+
+
+async def test_a_browser_completes_the_first_run_without_reading_the_cookie(
+    clock, memory_state
+) -> None:
+    """整条首启闭环，全程只用浏览器拿得到的东西。
+
+    session cookie 是 ``HttpOnly``，页面脚本读不到它，因此也**派生不出** CSRF
+    token。强制改密又要求 CSRF token——token 的唯一出口 ``/app/api/me`` 却正好被
+    改密闸门挡在门外。这里不调用 ``web_csrf_token()``：一旦用它算 token，测试就
+    绕过了真实浏览器唯一的取值渠道，绿灯是假的。
+    """
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+    new_password = "rotated-local-" + "admin-secret"
+
+    async with _client(app) as client:
+        login_page = await client.get("/app")
+        assert "login-form" in login_page.text
+        # 未登录时没有 session，就没有可绑定的 token；此刻交出任何 token 都是错的。
+        assert _CSRF_META_RE.search(login_page.text) is None
+        assert (await client.get("/app/static/login.js")).status_code == 200
+
+        signed_in = await client.post(
+            "/app/api/login",
+            content=json.dumps({"password": initial}),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        assert signed_in.status_code == 200
+
+        change_page = await client.get("/app")
+        assert "change-password-form" in change_page.text
+        carried = _CSRF_META_RE.search(change_page.text)
+        assert carried is not None, "改密页必须自带 CSRF token，否则闭环走不下去"
+
+        changed = await client.post(
+            "/app/api/change-password",
+            content=json.dumps(
+                {"current_password": initial, "new_password": new_password}
+            ),
+            headers={
+                "origin": origin,
+                "content-type": "application/json",
+                "x-csrf-token": carried.group(1),
+            },
+        )
+        assert changed.status_code == 200
+        assert (await admins.get()).must_change_password is False
+        assert "workbench-shell" in (await client.get("/app")).text
+
+
+async def test_a_token_from_someone_elses_page_is_still_refused(
+    clock, memory_state
+) -> None:
+    """反例：页面交付 token 不等于 token 不再绑定 session。"""
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+    new_password = "rotated-local-" + "admin-secret"
+
+    async with _client(app) as client:
+        await client.post(
+            "/app/api/login",
+            content=json.dumps({"password": initial}),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        stolen = _CSRF_META_RE.search((await client.get("/app")).text)
+        assert stolen is not None
+        forged = "f" * len(stolen.group(1))
+        assert forged != stolen.group(1)
+        refused = await client.post(
+            "/app/api/change-password",
+            content=json.dumps(
+                {"current_password": initial, "new_password": new_password}
+            ),
+            headers={
+                "origin": origin,
+                "content-type": "application/json",
+                "x-csrf-token": forged,
+            },
+        )
+
+    assert refused.status_code == 403
+    assert (await admins.get()).must_change_password is True
+
+
+def test_an_unrenderable_csrf_token_is_refused_instead_of_interpolated() -> None:
+    """反例：交给页面的值必须先确认形态，不能直接拼进 HTML。
+
+    现在的 token 是 sha256 十六进制，天然安全；这条守卫是为了让"以后换了 token
+    形态"变成一个立刻可见的错误，而不是一个安静的注入点。
+    """
+    from xiaowei_agent.interfaces.web_app import _password_change_shell
+
+    for forged in (
+        '"><script>alert(1)</script>',
+        "not-hex-" + "0" * 56,
+        "0" * 63,
+        "0" * 65,
+        "",
+    ):
+        with pytest.raises(RuntimeError):
+            _password_change_shell(csrf_token=forged)
+
+    rendered = _password_change_shell(csrf_token="a" * 64)
+    assert '<meta name="csrf-token" content="' + "a" * 64 + '">' in rendered

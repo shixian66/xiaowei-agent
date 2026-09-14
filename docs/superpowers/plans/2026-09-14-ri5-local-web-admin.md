@@ -2065,6 +2065,66 @@ membership=None 降级为放行    -> test_absent_membership_port_fails_closed..
    `test_local_admin_seed_failure_disposes_the_engine`。装配现在会真的往库里 seed 一行，
    三处用假 engine 的用例因此补上了 `begin()`。
 
+**Task 5 补修（2026-09-14，复审发现的 3 个 P1）：** 按根因分成三组，不按评论位置打补丁。
+
+**根因 A — Web 进程的启动门有两处，Task 5 只收敛了里面那一处。**
+`serve_web()` 已经只看 `web_app_enabled`，但 `main()` 仍然要求
+`web_app_enabled and feishu_oauth_enabled`。真实部署走的是
+`python -m xiaowei_agent.interfaces.web_app`，也就是 `main()`，所以"飞书可选"在真实进程入口
+根本没成立——容器在更外面一层就退出了，本地管理员永远没有机会登录。`main()` 现在只以
+`web_app_enabled` 为门；飞书可不可用由 `serve_web()` 按 `integrations.json` 决定，不可用是降级、
+不是配置错误（因此 `return 2` 不再伴随 `configuration_error` 那行 stderr）。旧用例
+`test_main_rejects_bypassed_half_enabled_settings_before_serving` 编码的是被推翻的不变量，
+改写为正反一对：Web 开飞书关必须真的调用 `serve_web()`；Web 关必须不装配任何东西。
+
+**根因 B — 真实浏览器的首启闭环断在三处，而既有测试全程绕过了浏览器。**
+
+1. **壳引用的 `/app/static/login.js` 不存在。** 更深的原因是静态路由一条条手写，而
+   `_STATIC_MEDIA_TYPES` 只被用来读文件——注册表不是唯一真源，于是"壳里加一句 `<script src>`"
+   不会带来一条路由，页面静默 404。改为**从注册表循环注册**路由，并补一条端到端守卫：
+   把登录壳与改密壳里所有 `/app/static/...` 引用抓出来逐个 GET，必须 200（含反向断言，
+   防止壳其实什么都没引用时空跑）。反证里"壳引用一个注册表外的资源"同样变红。
+2. **强制改密拿不到 CSRF token。** session cookie 是 `HttpOnly`，页面脚本读不到它，也就
+   派生不出 token；而 token 原本的唯一出口 `/app/api/me` 恰好被改密闸门挡在门外——闸门把
+   自己成立的前提也一起关掉了。改由服务端把 `session.csrf_token` 渲染进改密页的
+   `<meta name="csrf-token">`。登录页**不带** token：那时还没有 session，没有可绑定的对象。
+   拼进 HTML 前先用 `_CSRF_TOKEN_RE` 核对形态——当前 token 是 sha256 十六进制、天然安全，
+   这条守卫是为了让"以后换了 token 形态"变成立刻可见的错误而不是一个安静的注入点。
+3. **前端 401 一律跳 `/oauth/feishu/start`。** 飞书整个不装配时那条路由根本没注册，
+   于是"会话过期"变成 404 死路。全部改跳 `/app`——它是唯一在任何装配形态下都存在的入口，
+   未登录时渲染登录壳，飞书入口渲不渲染由服务端按装配结果决定。
+
+   既有测试为什么全绿：它们直接用 `web_csrf_token(cookie)` 算 token，而浏览器拿不到 cookie。
+   新的闭环用例**不调用**那个函数，只用浏览器真能拿到的东西（页面、meta、响应），
+   并配一条反例证明"页面交付 token"没有削弱绑定：伪造的 token 仍然 403 且不改密。
+
+   顺带修掉同一类的两个守卫空档：`test_web_xss.py` 的两条 XSS 守卫按文件名硬编码列举，
+   新增脚本不会自动进入覆盖；改为按目录 glob 并带下界断言。
+
+**根因 C — 两条认证来源共用一张 `web_sessions` 表，隔离只做了单向。**
+`LocalAdminAuthService.authenticate()` 有 `auth_source is not LOCAL_ADMIN → 拒绝`，
+`WebAuthService.authenticate()` 却没有对称检查：它拿到 session 就直接
+`self._identities.resolve(subject_ref=session.subject_ref)`。两条路径写的是同一张表、同一套
+digest 域，所以"查得到 session"根本不蕴含"这条 session 是我签发的"——身份目录里只要存在一条
+能解析 `local-admin` 的条目，一张本地管理员 cookie 就会被当成飞书身份放行。补上镜像检查，
+并把两个方向写成一组用例（含正对照：同形状但 `auth_source=FEISHU` 的 session 必须通过，
+证明拒绝来自来源判定而不是这条用例本来就查不到 session），避免以后只修一侧。
+同路径扫过 `logout()`：它按 digest 撤销、不看来源，但撤销需要持有明文 cookie 且只能自撤，
+是去权不是提权——`/app/api/logout` 本来就故意两条都调，保持不动。
+
+```text
+main 重新要求 feishu_oauth_enabled        -> 1 failed
+WebAuthService 去掉 auth_source 校验       -> 1 failed
+改密页不再交付 CSRF token                  -> 2 failed
+注册表里去掉 login.js（壳仍引用）           -> 1 failed
+壳引用注册表外的资源                        -> 1 failed
+401 重新跳回可能不存在的 OAuth 入口         -> 1 failed
+去掉拼进 HTML 前的形态校验                  -> 1 failed
+恢复后                                     103 passed
+```
+
+四条基线：`3662 passed, 237 skipped`、`1357 security passed`、`ruff` 通过、`mypy` 171 files 通过。
+
 ---
 
 ### Task 6: 配置 API、加载回执与页面状态计算

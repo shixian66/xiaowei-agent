@@ -405,3 +405,101 @@ async def test_printable_non_ascii_oauth_code_reaches_provider(
     assert oauth.exchange_calls == [
         ("一次性授权码", "https://ops.example.test/oauth/feishu/callback")
     ]
+
+
+# --------------------------------------------------------------------------
+# 两条认证来源共用一张 web_sessions 表：隔离必须是双向的
+# --------------------------------------------------------------------------
+
+
+async def _session_in(
+    sessions: InMemoryWebSessionStore, cookie: str, *, auth_source: IdentitySource
+) -> None:
+    """在共享的 web_sessions 表里放一条有效 session，只有签发来源不同。"""
+    from xiaowei_agent.interfaces.web_auth import web_origin_digest, web_session_digest
+    from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SUBJECT_REF
+    from xiaowei_agent.persistence.web_session import RotateWebSessionCommand
+
+    await sessions.rotate_session(
+        command=RotateWebSessionCommand(
+            session_digest=web_session_digest(cookie),
+            subject_ref=LOCAL_ADMIN_SUBJECT_REF,
+            ttl_seconds=3600,
+            auth_source=auth_source,
+            public_origin_digest=web_origin_digest("https://ops.example.test"),
+        )
+    )
+
+
+async def test_a_local_admin_session_is_not_accepted_as_a_feishu_session(
+    clock, memory_state
+) -> None:
+    """本地管理员那侧已有反向校验，飞书这侧必须对称。
+
+    两条路径写的是同一张表、同一套 digest 域，所以"能查到 session"根本不蕴含
+    "这条 session 是我签发的"。缺了这一半，只要身份目录里恰好存在一条能解析
+    ``local-admin`` 的条目，一张本地管理员 cookie 就会被当成飞书身份放行。
+    """
+    from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SUBJECT_REF
+
+    cookie = "local_admin_cookie_1234567890"
+    service, _, sessions = _service(
+        clock=clock,
+        memory_state=memory_state,
+        identities=StaticFeishuIdentityDirectory(
+            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)}
+        ),
+    )
+    await _session_in(sessions, cookie, auth_source=IdentitySource.LOCAL_ADMIN)
+
+    with pytest.raises(WebAuthenticationError) as caught:
+        await service.authenticate(session_cookie=cookie)
+
+    # 本模块一贯的约束：认证失败不携带上游异常上下文，免得把主体引用带进 traceback。
+    assert caught.value.__context__ is None
+
+
+async def test_a_feishu_session_of_the_same_shape_is_still_accepted(
+    clock, memory_state
+) -> None:
+    """正对照：拒绝必须来自 ``auth_source``，而不是这条用例本来就查不到 session。"""
+    from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SUBJECT_REF
+
+    cookie = "feishu_issued_cookie_1234567890"
+    service, _, sessions = _service(
+        clock=clock,
+        memory_state=memory_state,
+        identities=StaticFeishuIdentityDirectory(
+            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)}
+        ),
+    )
+    await _session_in(sessions, cookie, auth_source=IdentitySource.FEISHU)
+
+    authenticated = await service.authenticate(session_cookie=cookie)
+
+    assert authenticated.principal.subject_ref == LOCAL_ADMIN_SUBJECT_REF
+
+
+async def test_a_feishu_session_is_not_accepted_as_a_local_admin_session(
+    clock, memory_state
+) -> None:
+    """反方向的同一条不变量；两条一起写，避免以后只修一侧。"""
+    from xiaowei_agent.interfaces.local_admin_auth import (
+        LocalAdminAuthenticationError,
+        LocalAdminAuthService,
+    )
+    from xiaowei_agent.interfaces.web_auth import web_origin_digest
+    from xiaowei_agent.persistence.fake import InMemoryLocalAdminStore
+
+    cookie = "feishu_issued_cookie_1234567890"
+    sessions = InMemoryWebSessionStore(clock=clock, state=memory_state)
+    await _session_in(sessions, cookie, auth_source=IdentitySource.FEISHU)
+    service = LocalAdminAuthService(
+        admins=InMemoryLocalAdminStore(clock=clock, state=memory_state),
+        sessions=sessions,
+        public_origin_digest=web_origin_digest("https://ops.example.test"),
+        session_ttl_seconds=3600,
+    )
+
+    with pytest.raises(LocalAdminAuthenticationError):
+        await service.authenticate(session_cookie=cookie)

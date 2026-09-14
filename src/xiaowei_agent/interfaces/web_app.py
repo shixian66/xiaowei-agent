@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import Annotated, Final, TypeVar, cast
@@ -133,7 +134,14 @@ _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
     "app.css": "text/css",
     "app.js": "text/javascript",
     "detail.js": "text/javascript",
+    "login.js": "text/javascript",
 }
+"""被服务的静态资源闭集。
+
+这是**唯一真源**：路由由它循环注册（见 :func:`create_app`）。一个资源手写一条
+路由时，壳里加一句 ``<script src>`` 不会带来路由，页面就静默 404。
+"""
+_CSRF_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _HEALTH_PATHS: Final[frozenset[str]] = frozenset({"/healthz", "/readyz"})
 _LOGGED_ROUTE_CLASSES: Final[frozenset[str]] = frozenset(
     {
@@ -568,17 +576,32 @@ def _login_shell(*, oauth_available: bool) -> str:
         '<input id="password" name="password" type="password"'
         ' autocomplete="current-password" required>'
         '<button type="submit">登录</button></form>'
+        '<p class="form-message is-hidden" id="form-message" role="alert"></p>'
         f"{oauth_entry}"
-        '<script src="/app/static/login.js"></script>'
+        '<script type="module" src="/app/static/login.js"></script>'
         "</main></body></html>"
     )
 
 
-def _password_change_shell() -> str:
-    """强制改密壳；初始口令是源码常量，改完之前不放行任何业务接口。"""
+def _password_change_shell(*, csrf_token: str) -> str:
+    """强制改密壳；初始口令是源码常量，改完之前不放行任何业务接口。
+
+    ``csrf_token`` 由服务端渲染进页面。session cookie 是 ``HttpOnly``，页面脚本
+    读不到它，也就**派生不出** CSRF token；而 token 原本的唯一出口
+    ``/app/api/me`` 恰好被改密闸门挡在门外。不在这里交付，改密就永远拿不到
+    token，首启闭环卡死在第二步。
+
+    交给页面是安全的：token 仍然绑定当前 session，跨站脚本读不到同源 HTML，
+    伪造的 token 依旧会被 :func:`validate_state_change` 拒绝。
+    """
+    if _CSRF_TOKEN_RE.fullmatch(csrf_token) is None:
+        # 拼进 HTML 的值必须先确认形态。当前 token 由 sha256 十六进制构成，
+        # 这条断言是为了让"以后换了 token 形态"变成立刻可见的错误而不是注入点。
+        raise RuntimeError("csrf token is not renderable")
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
         "<title>小维 Agent 修改口令</title>"
+        f'<meta name="csrf-token" content="{csrf_token}">'
         '<link rel="stylesheet" href="/app/static/app.css"></head><body>'
         "<main><h1>请先修改初始口令</h1>"
         '<form id="change-password-form" method="post" action="/app/api/change-password">'
@@ -587,9 +610,21 @@ def _password_change_shell() -> str:
         '<label for="new-password">新口令</label>'
         '<input id="new-password" name="new_password" type="password" required>'
         '<button type="submit">提交</button></form>'
-        '<script src="/app/static/login.js"></script>'
+        '<p class="form-message is-hidden" id="form-message" role="alert"></p>'
+        '<script type="module" src="/app/static/login.js"></script>'
         "</main></body></html>"
     )
+
+
+def _static_asset_route(
+    body: str, media_type: str
+) -> Callable[[], Awaitable[Response]]:
+    """把一个已读入的静态资源包成路由处理函数。"""
+
+    async def serve() -> Response:
+        return Response(body, media_type=media_type)
+
+    return serve
 
 
 def _asset_text(name: str) -> str:
@@ -918,7 +953,9 @@ def create_app(
             # 未登录必须拿到登录壳：否则本地管理员没有任何入口能取到表单。
             return HTMLResponse(_login_shell(oauth_available=oauth_available))
         if session.must_change_password:
-            return HTMLResponse(_password_change_shell())
+            return HTMLResponse(
+                _password_change_shell(csrf_token=session.csrf_token)
+            )
         return HTMLResponse(index_shell)
 
     @app.get("/app/tasks/{task_id}")
@@ -1060,17 +1097,15 @@ def create_app(
         )
         return response
 
-    @app.get("/app/static/app.css")
-    async def app_css() -> Response:
-        return Response(static_assets["app.css"], media_type="text/css")
-
-    @app.get("/app/static/app.js")
-    async def app_javascript() -> Response:
-        return Response(static_assets["app.js"], media_type="text/javascript")
-
-    @app.get("/app/static/detail.js")
-    async def detail_javascript() -> Response:
-        return Response(static_assets["detail.js"], media_type="text/javascript")
+    # 路由从闭集注册表循环注册，而不是一条一条手写：漏一条就是页面静默 404，
+    # 而那种 404 只有真正用浏览器打开才会发现。
+    for asset_name, media_type in _STATIC_MEDIA_TYPES.items():
+        app.add_api_route(
+            f"/app/static/{asset_name}",
+            _static_asset_route(static_assets[asset_name], media_type),
+            methods=["GET"],
+            response_model=None,
+        )
 
     @app.get("/healthz")
     async def health() -> dict[str, str]:
@@ -1194,10 +1229,10 @@ def main() -> int:
     except ConfigError:
         sys.stderr.write("xiaowei-web: configuration_error\n")
         return 2
-    if not settings.web_app_enabled and not settings.feishu_oauth_enabled:
-        return 2
-    if not (settings.web_app_enabled and settings.feishu_oauth_enabled):
-        sys.stderr.write("xiaowei-web: configuration_error\n")
+    # Web 进程的启动门只有一条：``web_app_enabled``。飞书 OAuth 是不是可用由
+    # ``serve_web()`` 按 `integrations.json` 决定，不可用只是降级，不是配置错误。
+    # 这里多写一个条件，等于把"飞书必须装配"重新钉回真实进程入口。
+    if not settings.web_app_enabled:
         return 2
     try:
         return asyncio.run(serve_web(settings))

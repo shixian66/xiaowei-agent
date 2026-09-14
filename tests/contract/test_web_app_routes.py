@@ -537,6 +537,7 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/detail.js"),
+        ("GET", "/app/static/login.js"),
         ("GET", "/healthz"),
         ("GET", "/readyz"),
     }
@@ -604,6 +605,7 @@ async def test_static_assets_are_served_from_exact_routes_with_safe_media_types(
         "/app/static/app.css": ("text/css", ".workbench-main"),
         "/app/static/app.js": ("text/javascript", "function renderTaskList"),
         "/app/static/detail.js": ("text/javascript", "function clearTaskDetail"),
+        "/app/static/login.js": ("text/javascript", 'meta[name="csrf-token"]'),
     }
 
     async with _client(app) as client:
@@ -1086,19 +1088,52 @@ def test_main_maps_database_credential_configuration_to_one_fixed_line(
     assert "sensitive" not in captured.err
 
 
-def test_main_rejects_bypassed_half_enabled_settings_before_serving(
+def test_main_serves_the_web_without_feishu_oauth(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    half_enabled = Settings.model_construct(
+    """``main()`` 就是 Compose 的 web-app 进程入口。
+
+    真实部署走的是 ``python -m xiaowei_agent.interfaces.web_app``，因此"飞书可选"
+    这件事必须在 ``main()`` 成立。只在 ``serve_web()`` 里解耦等于没有解耦：进程
+    在更外面一层就退出了，本地管理员永远没有机会登录。
+    """
+    web_only = Settings(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=False,
+        web_mode=WebMode.LAN_HTTP,
+        web_public_origin="http://127.0.0.1:8080",
     )
+    served: list[Settings] = []
+
+    async def serve(value: Settings) -> int:
+        served.append(value)
+        return 0
+
+    monkeypatch.setattr(web_app_module, "load_settings", lambda: web_only)
+    monkeypatch.setattr(web_app_module, "serve_web", serve, raising=False)
+
+    result = web_app_module.main()
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert served == [web_only]
+    assert captured.err == ""
+
+
+def test_main_without_the_web_app_returns_two_without_serving(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """反例：默认关闭仍然是唯一的"不启动"判据，而且它不是配置错误。"""
 
     async def must_not_serve(_: Settings) -> int:
-        raise AssertionError("half-enabled Web must not assemble or call a provider")
+        raise AssertionError("a disabled Web app must not assemble anything")
 
-    monkeypatch.setattr(web_app_module, "load_settings", lambda: half_enabled)
+    monkeypatch.setattr(
+        web_app_module,
+        "load_settings",
+        lambda: Settings(environment_id="dev", web_app_enabled=False),
+    )
     monkeypatch.setattr(web_app_module, "serve_web", must_not_serve, raising=False)
 
     result = web_app_module.main()
@@ -1106,7 +1141,7 @@ def test_main_rejects_bypassed_half_enabled_settings_before_serving(
     captured = capsys.readouterr()
     assert result == 2
     assert captured.out == ""
-    assert captured.err == "xiaowei-web: configuration_error\n"
+    assert captured.err == ""
 
 
 def test_main_maps_nonconfiguration_failure_to_one_fixed_line(

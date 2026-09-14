@@ -461,6 +461,13 @@ class WebAuthService:
                     public_origin_digest=self._origin_digest,
                 )
             )
+            if session.auth_source is not IdentitySource.FEISHU:
+                # 本地管理员写的是**同一张** ``web_sessions`` 表、同一套 digest 域，
+                # 所以"查得到 session"不蕴含"这条 session 是我签发的"。少了这一半，
+                # 身份目录里只要存在一条能解析 ``local-admin`` 的条目，本地管理员的
+                # cookie 就会被当成飞书身份放行。隔离必须双向——
+                # ``LocalAdminAuthService.authenticate`` 那侧是这句的镜像。
+                raise WebAuthenticationError
             principal = self._identities.resolve(subject_ref=session.subject_ref)
         except (WebSessionNotFoundError, FeishuIdentityNotFoundError):
             authentication_failed = True

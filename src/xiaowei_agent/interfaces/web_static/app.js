@@ -230,7 +230,7 @@ async function loadTasks({ append = false } = {}) {
   } catch (error) {
     setVisible(elements.listError, true);
     if (error.status === 401) {
-      window.location.assign("/oauth/feishu/start");
+      window.location.assign("/app");
     }
   } finally {
     setVisible(elements.listLoading, false);
@@ -371,7 +371,7 @@ async function readSelectedTask({ immediate = false } = {}) {
         renderTaskList();
         return;
       }
-      window.location.assign("/oauth/feishu/start");
+      window.location.assign("/app");
       return;
     }
   }
@@ -445,7 +445,7 @@ async function submitTask() {
           : "任务内容不符合提交要求，请检查后重试。";
     setSubmitState({ busy: false, ambiguous, message });
     if (error.status === 401) {
-      window.location.assign("/oauth/feishu/start");
+      window.location.assign("/app");
     }
   }
 }
@@ -473,7 +473,7 @@ async function logout() {
       body: "{}",
     });
   } finally {
-    window.location.assign("/oauth/feishu/start");
+    window.location.assign("/app");
   }
 }
 
@@ -527,7 +527,7 @@ async function start() {
     }
   } catch (error) {
     if (error.status === 401) {
-      window.location.assign("/oauth/feishu/start");
+      window.location.assign("/app");
       return;
     }
     setVisible(elements.listLoading, false);

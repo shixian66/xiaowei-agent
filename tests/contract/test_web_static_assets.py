@@ -14,6 +14,7 @@ def test_web_static_asset_set_is_exact_and_not_a_python_package() -> None:
         "app.css",
         "app.js",
         "detail.js",
+        "login.js",
     }
     assert not (_STATIC / "__init__.py").exists()
 
@@ -66,3 +67,27 @@ def test_explicit_parent_controls_are_present_and_payload_is_opt_in() -> None:
     assert "encodeURIComponent" in app_script + detail_script
     assert "parent_task_id: pendingParentTaskId" not in app_script
     assert "innerHTML" not in app_script + detail_script
+
+
+def test_no_script_sends_the_browser_to_an_oauth_only_entry() -> None:
+    """飞书可能整个不装配，那时 ``/oauth/feishu/start`` 根本没有注册。
+
+    401 之后跳一条可能不存在的路由，等于把"会话过期"变成 404 死路。唯一在任何
+    装配形态下都存在的入口是 ``/app``：它未登录时渲染登录壳，飞书入口渲不渲染
+    由服务端按装配结果决定。
+    """
+    scripts = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(_STATIC.glob("*.js"))
+    )
+
+    assert "/oauth/feishu/start" not in scripts
+    # 反向断言：守卫不能因为脚本里根本没有跳转而空转。
+    assert 'window.location.assign("/app")' in scripts
+
+
+def test_the_login_script_never_derives_the_csrf_token_itself() -> None:
+    """token 只能来自服务端渲染的页面；脚本读不到 HttpOnly cookie。"""
+    login = (_STATIC / "login.js").read_text(encoding="utf-8")
+
+    assert "document.cookie" not in login
+    assert 'meta[name="csrf-token"]' in login
