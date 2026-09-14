@@ -301,7 +301,28 @@ Expected: 全绿。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src/xiaowei_agent/config.py src/xiaowei_agent/contracts/enums.py src/xiaowei_agent/contracts/__init__.py .env.example README.md docker-compose.smoke.yml src/xiaowei_agent/application/channel_projection.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/interfaces/local_stack.py tests docs/superpowers/plans/2026-09-10-feishu-oauth-web-activation.md
+git add \
+  src/xiaowei_agent/config.py \
+  src/xiaowei_agent/contracts/enums.py \
+  src/xiaowei_agent/contracts/__init__.py \
+  src/xiaowei_agent/application/channel_projection.py \
+  src/xiaowei_agent/interfaces/web_app.py \
+  src/xiaowei_agent/interfaces/local_stack.py \
+  .env.example README.md docker-compose.smoke.yml \
+  tests/unit/test_web_config.py \
+  tests/unit/test_feishu_config.py \
+  tests/unit/test_local_stack.py \
+  tests/contract/test_feishu_worker.py \
+  tests/contract/test_compose_contract.py \
+  tests/contract/test_web_app_routes.py \
+  tests/contract/test_web_task_api.py \
+  tests/contract/test_channel_projection_worker.py \
+  tests/security/test_feishu_projection_safety.py \
+  tests/security/test_web_auth_boundary.py \
+  tests/security/test_projection_fencing.py \
+  tests/evals/test_m7_channel_safety.py \
+  tests/integration/test_m7_channel_flow.py \
+  docs/superpowers/plans/2026-09-10-feishu-oauth-web-activation.md
 git commit -m "feat(ri5): add web mode and rename web origin to a single source"
 ```
 
@@ -326,6 +347,9 @@ git commit -m "feat(ri5): add web mode and rename web origin to a single source"
   - `class FeishuIntegration(Contract): enabled: bool = False; app_id: StrictStr | None = None; app_secret: SecretRef | None = None`
   - `class IntegrationConfig(Contract): generation: StrictInt = Field(gt=0); gemini: GeminiIntegration; feishu: FeishuIntegration`
   - `class IntegrationConfigError(RuntimeError)`
+  - `class IntegrationConfigMissingError(IntegrationConfigError)`——**只**在路径本身不存在（`ENOENT`）
+    时抛出。它是基类的子类，所以既有 `except IntegrationConfigError` 的调用方仍然 fail-closed；
+    只有明确要区分「尚未配置」的调用方才捕获这一个子类。
   - `def read_integration_config(path: str) -> IntegrationConfig`
   - `def write_integration_config(path: str, config: IntegrationConfig) -> None`——同目录临时文件 + `0600` + `os.replace()`
   - `DEFAULT_INTEGRATION_CONFIG_PATH: Final[str] = "/run/xiaowei-config/integrations.json"`
@@ -402,6 +426,7 @@ pytestmark = pytest.mark.security
 from xiaowei_agent.contracts import FeishuIntegration, GeminiIntegration, IntegrationConfig
 from xiaowei_agent.interfaces.integration_config_file import (
     IntegrationConfigError,
+    IntegrationConfigMissingError,
     read_integration_config,
     write_integration_config,
 )
@@ -449,8 +474,30 @@ def test_symlink_is_refused(tmp_path: Path) -> None:
     _write_raw(real, {"generation": 1, "gemini": {"enabled": False}, "feishu": {"enabled": False}})
     link = tmp_path / "link.json"
     link.symlink_to(real)
-    with pytest.raises(IntegrationConfigError):
+    with pytest.raises(IntegrationConfigError) as caught:
         read_integration_config(str(link))
+    assert not isinstance(caught.value, IntegrationConfigMissingError)
+
+
+def test_a_broken_symlink_is_a_failure_not_an_absence(tmp_path: Path) -> None:
+    """断链是本条的要害：os.path.exists() 会说它不存在，从而把它降级成「尚未配置」。"""
+    link = tmp_path / "integrations.json"
+    link.symlink_to(tmp_path / "nowhere.json")
+    assert os.path.exists(link) is False
+    assert os.path.lexists(link) is True
+    with pytest.raises(IntegrationConfigError) as caught:
+        read_integration_config(str(link))
+    assert not isinstance(caught.value, IntegrationConfigMissingError)
+
+
+def test_only_a_truly_absent_path_reports_missing(tmp_path: Path) -> None:
+    with pytest.raises(IntegrationConfigMissingError):
+        read_integration_config(str(tmp_path / "integrations.json"))
+
+
+def test_missing_is_a_subclass_so_unaware_callers_still_fail_closed() -> None:
+    """反例守护：如果把它改成独立异常，所有只捕获基类的调用方会漏网。"""
+    assert issubclass(IntegrationConfigMissingError, IntegrationConfigError)
 
 
 def test_non_regular_file_is_refused(tmp_path: Path) -> None:
@@ -537,17 +584,23 @@ def read_integration_config(path: str) -> IntegrationConfig:
     descriptor: int | None = None
     payload = b""
     failed = False
+    missing = False
     try:
         descriptor = os.open(path, flags)
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             failed = True
         else:
             payload = os.read(descriptor, _MAX_CONFIG_BYTES + 1)
+    except FileNotFoundError:
+        # 只有 ENOENT 才是「尚未配置」。必须排在下面这条之前，否则会被它吞掉。
+        missing = True
     except (OSError, ValueError):
         failed = True
     finally:
         if descriptor is not None:
             os.close(descriptor)
+    if missing:
+        raise IntegrationConfigMissingError("integration config absent")
     if failed or not payload or len(payload) > _MAX_CONFIG_BYTES:
         raise IntegrationConfigError("integration config unavailable")
     try:
@@ -556,6 +609,14 @@ def read_integration_config(path: str) -> IntegrationConfig:
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
         raise IntegrationConfigError("integration config invalid") from None
 ```
+
+「不存在」与「存在但坏」的判定只能放在 `os.open` 这一处，因为只有这里拿得到 errno。
+不要在调用方用 `os.path.exists()` 预检：它**跟随**符号链接，断链会报 `False`，于是一个指向不存在
+目标的 `integrations.json` 符号链接会被误判成「尚未配置」，绕过「符号链接一律故障」的设计；
+`os.path.lexists()` 能修掉这一例，但仍留着 TOCTOU，且无法区分 `EACCES`、`ELOOP` 这些同样
+「存在但不可读」的情况。实测（darwin 22，Linux 同）：断链 `exists=False lexists=True`，
+而带 `O_NOFOLLOW` 的 `os.open` 对任何符号链接都抛 `ELOOP`，只有真正不存在的路径才抛 `ENOENT`。
+分流点因此唯一，且没有检查与使用之间的时间窗。
 
 `write_integration_config()` 在**同目录**创建 `tempfile.mkstemp(dir=os.path.dirname(path))` 临时文件，`os.fchmod(fd, 0o600)`，写入 `json.dumps(..., ensure_ascii=False, sort_keys=True)`（含 secret，用一个内部 `_to_document(config)` 而非 `model_dump()`），`os.fsync(fd)`，关闭后 `os.replace(tmp, path)`，并 `os.fsync` 目录 fd。任何异常路径都 `os.unlink(tmp)`。异常文本固定为两条常量，不回填内容。
 
@@ -567,7 +628,7 @@ Expected: PASS。
 
 - [ ] **Step 6: 反证承重**
 
-临时把 `read_integration_config` 里的 `O_NOFOLLOW` 去掉，确认 `test_symlink_is_refused` 变红；再把 `exclude=True` 去掉，确认 `test_model_dump_never_carries_secret_values` 变红。两处都恢复后重跑全绿。
+临时把 `read_integration_config` 里的 `O_NOFOLLOW` 去掉，确认 `test_symlink_is_refused` 变红；把 `except FileNotFoundError` 那一支删掉（让断链与缺失都落到 `failed`），确认 `test_only_a_truly_absent_path_reports_missing` 变红；反过来把它挪到 `except (OSError, ValueError)` 之后，确认同一条仍然变红（Python 按顺序匹配，排在后面永远不会命中）；再把 `exclude=True` 去掉，确认 `test_model_dump_never_carries_secret_values` 变红。四处都恢复后重跑全绿。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_integration_config_boundary.py -q -p no:cacheprovider
@@ -584,7 +645,13 @@ git commit -m "feat(ri5): add the integration config contract and hardened file 
 
 ### Task 3: schema `rev_0010`、本地管理员认证与 HTTPS helper 拆分
 
-三张新表加 `web_sessions` 两列。migration 只建 schema，**不写任何口令或哈希**。
+三张新表加 `web_sessions` 两列，以及写这两列的 session 命令与 store、本地管理员认证、
+`_split_https_url()` 的拆分。
+
+**本 Task 只允许一次提交，在最后一步。** 加两个非空新列之后、`RotateWebSessionCommand` /
+`WebSessionLookup` / `postgres.py` 的行写入面改完之前，仓库必然处于既有 session 写入被打坏的
+状态——中途 commit 就是往历史里留一个跑不过测试的提交。schema 与写它的代码因此合并在这里，
+中间步骤一律不 `git add`。
 
 **Files:**
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0010_local_admin_and_provider_state.py`
@@ -592,10 +659,37 @@ git commit -m "feat(ri5): add the integration config contract and hardened file 
 - Test: `tests/contract/test_schema_matches_migration.py`（既有，无需改，必须仍绿）
 - Test: `tests/contract/test_ri5_schema.py`
 - Test: `tests/integration/test_ri5_schema_migration.py`
+- Create: `src/xiaowei_agent/persistence/local_admin.py`
+- Create: `src/xiaowei_agent/interfaces/local_admin_auth.py`
+- Modify: `src/xiaowei_agent/interfaces/web_auth.py`（`_split_https_url:162`、`_public_origin_is_safe:181`、`_authorization_url_is_safe:186`、`WebAuthService.__init__:206`、`authenticate:363`、`complete_login:281`）
+- Modify: `src/xiaowei_agent/persistence/web_session.py`（`RotateWebSessionCommand:96`、`WebSessionLookup:109`、`WebSessionStore:117`）
+- Modify: `src/xiaowei_agent/persistence/postgres.py`（`web_sessions` 读写）
+- Modify: `src/xiaowei_agent/contracts/enums.py`（`IdentitySource:61`）
+- Test: `tests/unit/test_local_admin_auth.py`
+- Test: `tests/security/test_ri5_origin_split.py`
+- Test: `tests/security/test_local_admin_boundary.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `ProviderName`
-- Produces: `LOCAL_ADMINS`、`SERVICE_CONFIG_STATE`、`PROVIDER_TEST_STATE` 三个 `sa.Table`，以及 `WEB_SESSIONS` 的 `auth_source`、`public_origin_digest` 两列
+- Consumes: Task 2 的 `ProviderName`；Task 1 的 `WebMode`、`Settings.web_mode`、`Settings.web_public_origin`
+- Produces:
+  - `LOCAL_ADMINS`、`SERVICE_CONFIG_STATE`、`PROVIDER_TEST_STATE` 三个 `sa.Table`，以及 `WEB_SESSIONS` 的 `auth_source`、`public_origin_digest` 两列
+  - `IdentitySource.LOCAL_ADMIN = "local_admin"`
+  - `def hash_password(password: str) -> str` / `def verify_password(password: str, encoded: str) -> bool`（`local_admin_auth.py`）
+  - `class LocalAdminRecord(Contract): password_hash: StrictStr; must_change_password: bool`
+  - `class LocalAdminStore(Protocol)`：
+    - `async def seed_if_absent(*, password_hash: str) -> bool`
+    - `async def get() -> LocalAdminRecord`
+    - `async def change_password_and_rotate_session(*, command: ChangePasswordCommand) -> LocalAdminRecord`
+      ——**一次提交内**完成四件事：更新 `password_hash`、置 `must_change_password=false`、
+      撤销**全部** `auth_source='local_admin'` 的既有 session、插入新 session 行。密码更新与
+      session 变更因此不再跨两个 Store，不会出现「密码已改但旧 session 还活着」的中间态。
+  - `class ChangePasswordCommand(Contract)`：`password_hash: StrictStr`、`new_session_digest: Sha256Hex`、`public_origin_digest: Sha256Hex`、`session_ttl_seconds: StrictInt = Field(gt=0, le=86_400)`
+  - `class LocalAdminAuthService`：`async def login(*, password: str, previous_session_cookie: str | None) -> IssuedWebSession`、`async def change_password(*, session_cookie: str, current: str, new: str) -> IssuedWebSession`
+  - `def _provider_https_url(value: str) -> SplitResult | None`（原 `_split_https_url` 语义，仅供 provider URL）
+  - `def public_origin_is_safe(value: str, *, mode: WebMode) -> bool`
+  - `RotateWebSessionCommand` 新增 `auth_source: IdentitySource`、`public_origin_digest: Sha256Hex`
+  - `WebSessionLookup` 新增 `public_origin_digest: Sha256Hex`
+  - `LOCAL_ADMIN_PRINCIPAL`：`tenant_id="dev-local"`、`environment_id="dev"`、`actor="admin"`、权限 `{VIEW_SAFE_TASK, SUBMIT_READONLY_TASK, ADMIN_ALL_SAFE_TASKS}`
 
 表形状（严格照设计）：
 
@@ -633,7 +727,7 @@ web_sessions  (新增两列)
   public_origin_digest char(64) not null
 ```
 
-- [ ] **Step 1: 写失败契约测试**
+- [ ] **Step 1: 写失败契约测试（schema）**
 
 `tests/contract/test_ri5_schema.py`：
 
@@ -682,84 +776,7 @@ def test_new_tables_are_registered() -> None:
     assert {"local_admins", "service_config_state", "provider_test_state"} <= names
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
-
-Run: `python -m pytest tests/contract/test_ri5_schema.py -q`
-
-Expected: FAIL —— `AttributeError: module 'xiaowei_agent.persistence.schema' has no attribute 'LOCAL_ADMINS'`。
-
-- [ ] **Step 3: 实现 schema 与 migration**
-
-`schema.py` 按上表追加三个 `sa.Table` 并加入 `ALL_TABLES`；给 `WEB_SESSIONS` 追加两列。
-
-migration 文件头部：
-
-```python
-revision: str = "0010_local_admin_and_provider_state"
-down_revision: str | None = "0009_task_parent_context"
-```
-
-`upgrade()` 建三表 + `op.add_column("web_sessions", ...)`。既有 `web_sessions` 行在加非空列时会失败，但本项目 migration 只跑在空库或本地库上；为保证幂等，两列用 `server_default` 建好后立即 `op.alter_column(..., server_default=None)`——`auth_source` 默认 `'feishu'`（RI1 时期只有飞书 session），`public_origin_digest` 默认 64 个 `'0'`（哨兵值，认证时必然与真实 origin digest 不匹配，等价于旧 session 全部失效，与设计「切换模式等同于全体登出」一致）。
-
-`downgrade()` 必须走既有 `require_destructive_authorization(op.get_bind(), guarded=(...))` 守卫，参照 `rev_0007_web_sessions.py:65-78` 的写法，把三张新表都列入 `guarded`。
-
-- [ ] **Step 4: 跑契约测试与既有 schema 一致性测试**
-
-Run: `python -m pytest tests/contract/test_ri5_schema.py tests/contract/test_schema_matches_migration.py tests/contract/test_migration_guard.py -q`
-
-Expected: PASS。
-
-- [ ] **Step 5: 加集成测试并对真实 PostgreSQL 跑**
-
-`tests/integration/test_ri5_schema_migration.py` 沿用该目录既有 fixture（`PYTEST_POSTGRES_DSN`），断言：升级到 head 后三张表存在、`local_admins` 插入第二行被 CHECK 拒绝、`provider_test_state` 插入未知 `check_name` 被拒绝、`test_status='passed'` 且 `error_code` 非空被拒绝。
-
-Run: `python -m pytest tests/integration/test_ri5_schema_migration.py -q`
-
-Expected: PASS（无 DSN 时该目录既有 fixture 会 skip，属正常）。
-
-- [ ] **Step 6: 提交**
-
-```bash
-git add src/xiaowei_agent/persistence/schema.py src/xiaowei_agent/persistence/migrations/versions/rev_0010_local_admin_and_provider_state.py tests/contract/test_ri5_schema.py tests/integration/test_ri5_schema_migration.py
-git commit -m "feat(ri5): add local admin and provider state schema"
-```
-
-
-口令哈希、幂等 seed、强制改密、`LOCAL_ADMIN` 身份来源、Session 的 origin 绑定，以及本计划里安全权重最高的一处改动——把 `_split_https_url()` 拆成两个 helper。
-
-**Files:**
-- Create: `src/xiaowei_agent/persistence/local_admin.py`
-- Create: `src/xiaowei_agent/interfaces/local_admin_auth.py`
-- Modify: `src/xiaowei_agent/interfaces/web_auth.py`（`_split_https_url:162`、`_public_origin_is_safe:181`、`_authorization_url_is_safe:186`、`WebAuthService.__init__:206`、`authenticate:363`、`complete_login:281`）
-- Modify: `src/xiaowei_agent/persistence/web_session.py`（`RotateWebSessionCommand:96`、`WebSessionLookup:109`、`WebSessionStore:117`）
-- Modify: `src/xiaowei_agent/persistence/postgres.py`（`web_sessions` 读写）
-- Modify: `src/xiaowei_agent/contracts/enums.py`（`IdentitySource:61`）
-- Test: `tests/unit/test_local_admin_auth.py`
-- Test: `tests/security/test_ri5_origin_split.py`
-- Test: `tests/security/test_local_admin_boundary.py`
-
-**Interfaces:**
-- Consumes: Task 1 的 `WebMode`、`Settings.web_mode`、`Settings.web_public_origin`
-- Produces:
-  - `IdentitySource.LOCAL_ADMIN = "local_admin"`
-  - `def hash_password(password: str) -> str` / `def verify_password(password: str, encoded: str) -> bool`（`local_admin_auth.py`）
-  - `class LocalAdminRecord(Contract): password_hash: StrictStr; must_change_password: bool`
-  - `class LocalAdminStore(Protocol)`：
-    - `async def seed_if_absent(*, password_hash: str) -> bool`
-    - `async def get() -> LocalAdminRecord`
-    - `async def change_password_and_rotate_session(*, command: ChangePasswordCommand) -> LocalAdminRecord`
-      ——**一次提交内**完成四件事：更新 `password_hash`、置 `must_change_password=false`、
-      撤销**全部** `auth_source='local_admin'` 的既有 session、插入新 session 行。密码更新与
-      session 变更因此不再跨两个 Store，不会出现「密码已改但旧 session 还活着」的中间态。
-  - `class ChangePasswordCommand(Contract)`：`password_hash: StrictStr`、`new_session_digest: Sha256Hex`、`public_origin_digest: Sha256Hex`、`session_ttl_seconds: StrictInt = Field(gt=0, le=86_400)`
-  - `class LocalAdminAuthService`：`async def login(*, password: str, previous_session_cookie: str | None) -> IssuedWebSession`、`async def change_password(*, session_cookie: str, current: str, new: str) -> IssuedWebSession`
-  - `def _provider_https_url(value: str) -> SplitResult | None`（原 `_split_https_url` 语义，仅供 provider URL）
-  - `def public_origin_is_safe(value: str, *, mode: WebMode) -> bool`
-  - `RotateWebSessionCommand` 新增 `auth_source: IdentitySource`、`public_origin_digest: Sha256Hex`
-  - `WebSessionLookup` 新增 `public_origin_digest: Sha256Hex`
-  - `LOCAL_ADMIN_PRINCIPAL`：`tenant_id="dev-local"`、`environment_id="dev"`、`actor="admin"`、权限 `{VIEW_SAFE_TASK, SUBMIT_READONLY_TASK, ADMIN_ALL_SAFE_TASKS}`
-
-- [ ] **Step 1: 写失败测试——HTTPS helper 拆分（本 Task 的承重项）**
+- [ ] **Step 2: 写失败测试——HTTPS helper 拆分（本 Task 的承重项）**
 
 `tests/security/test_ri5_origin_split.py`：
 
@@ -797,7 +814,7 @@ def test_the_two_helpers_are_not_the_same_object() -> None:
     assert "mode" not in web_auth._provider_https_url.__code__.co_varnames
 ```
 
-- [ ] **Step 2: 写失败测试——口令与管理员边界**
+- [ ] **Step 3: 写失败测试——口令与管理员边界**
 
 `tests/unit/test_local_admin_auth.py`：
 
@@ -880,13 +897,31 @@ def test_feishu_principal_with_admin_permission_cannot_reach_config_routes():
 
 每条用 `tests/fakes` 下既有的 in-memory session store fake 驱动；按注释里的规格写出完整断言后再写实现。
 
-- [ ] **Step 3: 跑测试确认失败**
+- [ ] **Step 4: 跑三组测试确认全部失败**
 
-Run: `python -m pytest tests/security/test_ri5_origin_split.py tests/unit/test_local_admin_auth.py -q`
+Run: `python -m pytest tests/contract/test_ri5_schema.py tests/security/test_ri5_origin_split.py tests/unit/test_local_admin_auth.py -q`
 
-Expected: FAIL —— `_provider_https_url` / `public_origin_is_safe` / `local_admin_auth` 不存在。
+Expected: FAIL —— `AttributeError: module 'xiaowei_agent.persistence.schema' has no attribute 'LOCAL_ADMINS'`；`_provider_https_url` / `public_origin_is_safe` / `local_admin_auth` 不存在。
 
-- [ ] **Step 4: 实现拆分与认证**
+- [ ] **Step 5: 实现 schema 与 migration（写完不提交）**
+
+`schema.py` 按上表追加三个 `sa.Table` 并加入 `ALL_TABLES`；给 `WEB_SESSIONS` 追加两列。
+
+migration 文件头部：
+
+```python
+revision: str = "0010_local_admin_and_provider_state"
+down_revision: str | None = "0009_task_parent_context"
+```
+
+`upgrade()` 建三表 + `op.add_column("web_sessions", ...)`。既有 `web_sessions` 行在加非空列时会失败，但本项目 migration 只跑在空库或本地库上；为保证幂等，两列用 `server_default` 建好后立即 `op.alter_column(..., server_default=None)`——`auth_source` 默认 `'feishu'`（RI1 时期只有飞书 session），`public_origin_digest` 默认 64 个 `'0'`（哨兵值，认证时必然与真实 origin digest 不匹配，等价于旧 session 全部失效，与设计「切换模式等同于全体登出」一致）。
+
+`downgrade()` 必须走既有 `require_destructive_authorization(op.get_bind(), guarded=(...))` 守卫，参照 `rev_0007_web_sessions.py:65-78` 的写法，把三张新表都列入 `guarded`。
+
+做完这一步**不要 commit、不要 git add**：`web_sessions` 已经多了两个非空列，而 `postgres.py:990`
+的 `web_session_to_row()` 仍按旧列集插入，既有 session 测试此刻必红。直接进入 Step 6。
+
+- [ ] **Step 6: 实现拆分、认证与 session 写入面**
 
 `web_auth.py` 改动（**这是承重改动，按此顺序做**）：
 
@@ -983,13 +1018,37 @@ async def change_password_and_rotate_session(
 
 `contracts/enums.py` 的 `IdentitySource` 追加 `LOCAL_ADMIN = "local_admin"`。
 
-- [ ] **Step 5: 跑测试确认通过**
+同一步里把 session 写入面一起改完，才能让上一步的两个新列真正可写：
+
+- `persistence/web_session.py`：`RotateWebSessionCommand:96` 增加 `auth_source: IdentitySource`、
+  `public_origin_digest: Sha256Hex`；`WebSessionLookup:109` 增加 `public_origin_digest: Sha256Hex`。
+  两者都是必填，不给默认值——给默认值等于允许调用方漏传而静默写入错误的绑定。
+- `persistence/postgres.py:990`：`rotate_session` 用的 `web_session_to_row()` 补上这两列；
+  按 `public_origin_digest` 过滤的条件加进 session 查询，digest 不匹配返回 `WebSessionNotFoundError`。
+- 所有既有 `RotateWebSessionCommand(...)` 构造点（含 `tests/fakes` 下的 in-memory store）同步补参，
+  `python -m pytest tests/ -q` 必须重新全绿——这正是本 Task 不能在 Step 5 断开提交的原因。
+
+- [ ] **Step 7: 跑 schema 契约测试与既有一致性测试**
+
+Run: `python -m pytest tests/contract/test_ri5_schema.py tests/contract/test_schema_matches_migration.py tests/contract/test_migration_guard.py -q`
+
+Expected: PASS。
+
+- [ ] **Step 8: 加集成测试并对真实 PostgreSQL 跑**
+
+`tests/integration/test_ri5_schema_migration.py` 沿用该目录既有 fixture（`PYTEST_POSTGRES_DSN`），断言：升级到 head 后三张表存在、`local_admins` 插入第二行被 CHECK 拒绝、`provider_test_state` 插入未知 `check_name` 被拒绝、`test_status='passed'` 且 `error_code` 非空被拒绝。
+
+Run: `python -m pytest tests/integration/test_ri5_schema_migration.py -q`
+
+Expected: PASS（无 DSN 时该目录既有 fixture 会 skip，属正常）。
+
+- [ ] **Step 9: 跑认证与边界测试确认通过**
 
 Run: `python -m pytest tests/security/test_ri5_origin_split.py tests/unit/test_local_admin_auth.py tests/security/test_local_admin_boundary.py tests/security/test_web_auth_boundary.py -q`
 
 Expected: PASS，且既有 `test_web_auth_boundary.py` 不回归。
 
-- [ ] **Step 6: 反证承重（必须做，ADR-014 R2 明文要求）**
+- [ ] **Step 10: 反证承重（必须做，ADR-014 R2 明文要求）**
 
 把第 2 步的拆分撤掉——让 `_authorization_url_is_safe` 改用 `public_origin_is_safe(..., mode=WebMode.LAN_HTTP)`——确认 `test_provider_authorization_url_is_always_https_only` 变红；恢复后重新全绿。
 
@@ -997,13 +1056,29 @@ Expected: PASS，且既有 `test_web_auth_boundary.py` 不回归。
 PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_ri5_origin_split.py -q -p no:cacheprovider
 ```
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 11: 跑全量后一次性提交（本 Task 唯一一次提交）**
+
+Run: `python -m pytest -q && python -m pytest -m security -q && ruff check . && mypy src`
+
+Expected: 全绿。**只有全绿才提交**——schema 与 session 写入面必须在同一个提交里落地。
 
 ```bash
-git add src/xiaowei_agent/persistence/local_admin.py src/xiaowei_agent/persistence/web_session.py src/xiaowei_agent/persistence/postgres.py src/xiaowei_agent/interfaces/local_admin_auth.py src/xiaowei_agent/interfaces/web_auth.py src/xiaowei_agent/contracts/enums.py tests/unit/test_local_admin_auth.py tests/security/test_ri5_origin_split.py tests/security/test_local_admin_boundary.py
-git commit -m "feat(ri5): add local admin auth and split the provider https gate"
+git add \
+  src/xiaowei_agent/persistence/schema.py \
+  src/xiaowei_agent/persistence/migrations/versions/rev_0010_local_admin_and_provider_state.py \
+  src/xiaowei_agent/persistence/local_admin.py \
+  src/xiaowei_agent/persistence/web_session.py \
+  src/xiaowei_agent/persistence/postgres.py \
+  src/xiaowei_agent/interfaces/local_admin_auth.py \
+  src/xiaowei_agent/interfaces/web_auth.py \
+  src/xiaowei_agent/contracts/enums.py \
+  tests/contract/test_ri5_schema.py \
+  tests/integration/test_ri5_schema_migration.py \
+  tests/unit/test_local_admin_auth.py \
+  tests/security/test_ri5_origin_split.py \
+  tests/security/test_local_admin_boundary.py
+git commit -m "feat(ri5): add local admin auth, provider state schema and the https gate split"
 ```
-
 ---
 
 ### Task 4: 运行消费迁移——四个 composition root 改读 JSON
@@ -1028,8 +1103,9 @@ git commit -m "feat(ri5): add local admin auth and split the provider https gate
 - Test: `tests/security/test_ri5_no_legacy_secret_path.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `IntegrationConfig` 与文件层；Task 1 的 `Settings.gemini_enabled` 等装配开关；
-  Task 3 的 `service_config_state` 表（写加载回执）。`read_or_absent` 在本 Task 引入，Task 6 复用
+- Consumes: Task 2 的 `IntegrationConfig`、`read_integration_config` 与 `IntegrationConfigMissingError`；
+  Task 1 的 `Settings.gemini_enabled` 等装配开关；Task 3 的 `service_config_state` 表（写加载回执）。
+  `read_or_absent` 在本 Task 引入，Task 6 复用
 - Produces:
   - `@dataclass(frozen=True, slots=True) class ProviderCredentials`：
     `gemini_api_key: str | None = field(default=None, repr=False)`、
@@ -1163,6 +1239,39 @@ def test_no_feishu_adapter_reads_the_filesystem_at_construction(monkeypatch):
 
     FeishuOAuthAdapter(app_id="cli_x", app_secret="s" * 8, timeout_seconds=5.0)
     assert opened == []
+
+
+def test_read_or_absent_returns_none_only_for_a_truly_absent_path(tmp_path):
+    from xiaowei_agent.interfaces.provider_consumption import read_or_absent
+
+    assert read_or_absent(str(tmp_path / "integrations.json")) is None
+
+
+def test_read_or_absent_does_not_swallow_a_broken_symlink(tmp_path):
+    """断链必须继续 fail-closed；用 os.path.exists() 预检的实现会在这里返回 None。"""
+    import os
+
+    from xiaowei_agent.interfaces.integration_config_file import IntegrationConfigError
+    from xiaowei_agent.interfaces.provider_consumption import read_or_absent
+
+    link = tmp_path / "integrations.json"
+    link.symlink_to(tmp_path / "nowhere.json")
+    assert os.path.exists(link) is False
+    with pytest.raises(IntegrationConfigError):
+        read_or_absent(str(link))
+
+
+def test_a_broken_symlink_does_not_produce_an_unconfigured_startup(
+    tmp_path, settings_with_gemini_assembled
+):
+    """同一路径的上层后果：进程不能因为断链就当成「尚未配置」照常起来。"""
+    link = tmp_path / "integrations.json"
+    link.symlink_to(tmp_path / "nowhere.json")
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(link)
+    )
+    assert creds.gemini_api_key is None
+    assert receipts == {}  # 读不出可信 generation，不写回执
 ```
 
 - [ ] **Step 2: 写失败测试——旧真源彻底消失**
@@ -1231,11 +1340,17 @@ Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` �
 
 ```python
 def read_or_absent(path: str) -> IntegrationConfig | None:
-    """文件不存在 = 尚未配置；其余异常仍然 fail-closed。"""
-    if not os.path.exists(path):
+    """只有 ENOENT 才算「尚未配置」；符号链接、权限、损坏一律 fail-closed 往上抛。"""
+    try:
+        return read_integration_config(path)
+    except IntegrationConfigMissingError:
         return None
-    return read_integration_config(path)
 ```
+
+**不要**写成 `if not os.path.exists(path): return None`：`exists()` 跟随符号链接，指向不存在目标的
+断链会返回 `False`，于是它被当成「尚未配置」，直接绕过 Task 2「符号链接一律故障」的设计，并让
+`PUT` 用 `os.replace()` 把这个链接替换成普通文件。`lexists()` 只补上这一例，仍分不出 `EACCES` /
+`ELOOP`，也仍有 TOCTOU。判定统一由 Task 2 的加载器在 `os.open` 的 errno 上做（见该 Task Step 4）。
 
 `load_provider_credentials()` 用它读一次文件，按「`.env` 装配开关 AND JSON `enabled`」决定每个 Provider
 是否产出凭据；**只为本进程实际启用且需要的 Provider** 考虑写回执（未启用的不写，避免永久
@@ -1300,7 +1415,10 @@ Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败�
 - [ ] **Step 6: 反证承重**
 
 把「JSON `enabled` 与 `.env` 开关取 AND」改成只看 JSON，确认
-`test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；恢复后全绿。
+`test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；把 `read_or_absent` 改回
+`if not os.path.exists(path): return None`，确认 `test_read_or_absent_does_not_swallow_a_broken_symlink`
+变红；再把它改成 `os.path.lexists()`，确认同一条转绿——这说明测试钉的是行为而不是某一个函数名，
+但 `lexists` 版本仍有 TOCTOU，最终实现保持捕获异常的写法。两处都恢复后全绿。
 
 - [ ] **Step 7: 提交**
 
@@ -1316,16 +1434,16 @@ git commit -m "feat(ri5): consume provider credentials from the integration conf
 让 Web 在没有飞书配置时也能起来，Cookie 名按模式切换，并把登录/改密/退出接到路由。
 
 **Files:**
-- Modify: `src/xiaowei_agent/interfaces/local_stack.py`（`build_postgres_web_stack:835`，其 `if not (settings.web_app_enabled and settings.feishu_oauth_enabled)` 于 `local_stack.py:855`；`WebAuthService` 装配于 `local_stack.py:904`）
-- Modify: `src/xiaowei_agent/interfaces/web_app.py`（`SESSION_COOKIE_NAME:69`、`OAUTH_STATE_COOKIE_NAME:70`、`_set_secret_cookie:399`、`_clear_secret_cookie:417`、`_WebRequestBoundaryMiddleware:260`、`readyz:741`）
+- Modify: `src/xiaowei_agent/interfaces/local_stack.py`（`build_postgres_web_stack:835` 的两个端口参数改可选，其 `if not (settings.web_app_enabled and settings.feishu_oauth_enabled)` 于 `local_stack.py:855`；`identity_directory` 装配于 `:889`；`WebAuthService` 装配于 `local_stack.py:904`）
+- Modify: `src/xiaowei_agent/interfaces/web_app.py`（`SESSION_COOKIE_NAME:69`、`OAUTH_STATE_COOKIE_NAME:70`、`_set_secret_cookie:399`、`_clear_secret_cookie:417`、`_WebRequestBoundaryMiddleware:260`、`readyz:741`、`serve_web:759` 的开关与 adapter 构造）
 - Test: `tests/contract/test_web_app_routes.py`
 - Test: `tests/unit/test_local_stack.py`
 - Test: `tests/security/test_ri5_web_assembly.py`
 
 **Interfaces:**
 - Consumes: Task 3 的 `LocalAdminAuthService`、`public_origin_is_safe`；Task 4 的
-  `ProviderCredentials` / `load_provider_credentials`（Web 装配要据此判断飞书是否可用，因此
-  **Task 4 必须先于本 Task 完成**）；Task 1 的 `Settings.web_mode` 与 `Settings.web_public_origin`
+  `ProviderCredentials` / `load_provider_credentials`（**只在 `serve_web` 里用**，见下方职责划分；
+  因此 **Task 4 必须先于本 Task 完成**）；Task 1 的 `Settings.web_mode` 与 `Settings.web_public_origin`
 - Produces:
   - `def session_cookie_name(mode: WebMode) -> str`——HTTPS 返回 `"__Host-xiaowei-session"`，`lan_http` 返回 `"xiaowei-session"`
   - `def oauth_state_cookie_name(mode: WebMode) -> str`——同理 `"__Host-xiaowei-oauth-state"` / `"xiaowei-oauth-state"`
@@ -1374,8 +1492,41 @@ git commit -m "feat(ri5): consume provider credentials from the integration conf
 
 ```python
 async def test_web_starts_without_any_feishu_configuration():
-    # web_app_enabled=true, feishu_oauth_enabled=false -> build_postgres_web_stack 成功，
-    # stack.oauth_available is False
+    # Given web_app_enabled=true，且 oauth=None、membership=None
+    # Then  build_postgres_web_stack 成功，stack.oauth_available is False，
+    #       stack.auth / oauth_port / membership / identity_directory 均为 None
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_the_stack_builder_never_reads_the_integration_config():
+    # 职责分界的承重断言：装配函数只收端口，不读文件。
+    # Given monkeypatch 掉 read_integration_config / load_provider_credentials，
+    #       任何一次调用都记一笔
+    # When  build_postgres_web_stack(settings=..., oauth=None, membership=None)
+    # Then  调用记录为空；把读配置挪回装配函数的实现会在这里变红
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_half_a_port_pair_does_not_assemble_feishu():
+    # Given 只传 oauth 不传 membership（反过来同理）
+    # When  build_postgres_web_stack
+    # Then  oauth_available is False，且不构造 WebAuthService——
+    #       半套端口不得走进「已装配」分支
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_serve_web_builds_no_feishu_adapter_when_the_switch_is_off():
+    # Given feishu_oauth_enabled=false，但 integrations.json 里飞书字段齐备
+    # When  serve_web 装配
+    # Then  FeishuOAuthAdapter / FeishuSdkMembershipAdapter 一次都没被构造，
+    #       传给 build_postgres_web_stack 的两个端口都是 None
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_serve_web_survives_missing_feishu_credentials():
+    # Given feishu_oauth_enabled=true，但 JSON 里 app_secret 缺失（另一例：只有 id 没有 secret）
+    # When  serve_web 装配
+    # Then  不抛 _WebConfigurationError，进程照常起来，oauth_available 为 False
     raise NotImplementedError("按规格写出断言后删除本行")
 
 async def test_feishu_oauth_assembly_failure_does_not_kill_the_process():
@@ -1418,7 +1569,7 @@ async def test_local_admin_paths_work_with_membership_none():
 
 
 async def test_bad_origin_does_not_take_down_the_whole_web():
-    # Given feishu_oauth_enabled=true 但 WebAuthService 构造因 origin 非法抛 ValueError
+    # Given 两个端口都传入，但 WebAuthService 构造因 origin 非法抛 ValueError
     # Then  build_postgres_web_stack 仍成功，oauth_available 为 False，readyz 仍 ready
     raise NotImplementedError("按规格写出断言后删除本行")
 
@@ -1469,21 +1620,46 @@ Expected: FAIL —— `build_postgres_web_stack` 仍在 `local_stack.py:855` 抛
 
 - [ ] **Step 3: 实现装配解耦**
 
-`local_stack.py:855` 的判断改为 `if not settings.web_app_enabled: raise ValueError("Web app is disabled")`。
+**先划清两层的职责，不要把读配置塞进装配函数。** `build_postgres_web_stack` 现在的
+docstring 就是「用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端」
+（`local_stack.py:842`），它从来不读文件、不构造真实飞书 client。本 Task 不改这条职责，
+只把两个端口参数改成可选：
 
-飞书那一组依赖整体变成**可选块**。判定条件是双层开关同时为真，即
-`settings.feishu_oauth_enabled and credentials.feishu_app_id and credentials.feishu_app_secret`：
+| 层 | 位置 | 本 Task 的职责 |
+| --- | --- | --- |
+| composition root | `web_app.py:759 serve_web` | 读 JSON、判双层开关、构造或不构造真实 adapter |
+| 装配函数 | `local_stack.py:835 build_postgres_web_stack` | 只收端口；端口为 `None` 就不装配飞书那一组 |
+
+`local_stack.py` 改动：
+
+```python
+async def build_postgres_web_stack(
+    *,
+    settings: Settings,
+    oauth: FeishuOAuthPort | None = None,        # 原为必填
+    membership: FeishuMembershipPort | None = None,  # 原为必填
+    clock: Clock = _utc_now,
+) -> WebStack:
+    ...
+```
+
+1. `local_stack.py:855` 改为 `if not settings.web_app_enabled: raise ValueError("Web app is disabled")`；
+2. 飞书那一组（`identity_directory` `:889` 与 `WebAuthService` `:904`）的判定条件是
+   **`oauth is not None and membership is not None`**——不看 `settings.feishu_oauth_enabled`，
+   不读 `ProviderCredentials`。谁传端口谁负责判断，这里只反映传进来的事实：
 
 ```python
 auth: WebAuthService | None = None
-oauth_port_or_none: FeishuOAuthPort | None = None
-membership_or_none: FeishuMembershipPort | None = None
 identity_directory: FeishuIdentityDirectory | None = None
 oauth_available = False
 
-if settings.feishu_oauth_enabled and credentials.feishu_app_secret is not None:
+if oauth is not None and membership is not None:
     try:
-        identity_directory = load_feishu_identity_directory(settings)
+        identity_directory = load_feishu_identity_directory(
+            path=cast(str, settings.feishu_identity_file),
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        )
         auth = WebAuthService(
             sessions=web_session_store,
             identities=identity_directory,
@@ -1494,22 +1670,63 @@ if settings.feishu_oauth_enabled and credentials.feishu_app_secret is not None:
             session_ttl_seconds=settings.web_session_ttl_seconds,
             oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         )
-        oauth_port_or_none, membership_or_none = oauth, membership
         oauth_available = True
     except (FeishuIdentityConfigurationError, ValueError):
         # 只标记不可用；不 dispose engine，不抛出，Web 进程照常起来
         auth = None
+        identity_directory = None
         oauth_available = False
 ```
 
 注意捕获集合要含 `ValueError`——`WebAuthService.__init__` 对 origin/ttl 非法就是抛它，不能让它
-把整个 Web 打挂。
+把整个 Web 打挂。`WebStack` 的 `oauth_port` / `membership` 直接回填传入值（可能是 `None`）；
+`oauth_available` 恒等于 `auth is not None`，不要出现第二个真源。
+
+`web_app.py:759 serve_web` 改动（Task 4 已把这里从读路径改成读 `ProviderCredentials`，本 Task
+只把「读不出就报错」改成「读不出就不装配」）：
+
+```python
+if not settings.web_app_enabled:          # :761 原为 and feishu_oauth_enabled
+    raise _WebConfigurationError
+...
+credentials, _ = load_provider_credentials(settings=settings)  # 回执见下
+oauth: FeishuOAuthPort | None = None
+membership: FeishuMembershipPort | None = None
+if (
+    settings.feishu_oauth_enabled
+    and credentials.feishu_app_id is not None
+    and credentials.feishu_app_secret is not None
+):
+    try:
+        oauth = FeishuOAuthAdapter(
+            app_id=credentials.feishu_app_id,
+            app_secret=credentials.feishu_app_secret,
+            timeout_seconds=FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
+        )
+        membership = FeishuSdkMembershipAdapter(
+            tenant_id=settings.tenant_id,
+            app_id=credentials.feishu_app_id,
+            app_secret=credentials.feishu_app_secret,
+        )
+    except ValueError:
+        oauth = None          # 两个必须同进同退，否则 stack 会收到半套端口
+        membership = None
+stack = await build_postgres_web_stack(
+    settings=settings, oauth=oauth, membership=membership
+)
+```
+
+第二个返回值在本 Task 先丢弃；Task 6 会把它接到 `ProviderStateStore.record_load`，届时 `_` 改成 `receipts` 并落库，本 Task 不提前引入未使用变量（`ruff` 会报 `F841`）。
+
+`:773-783` 原来的 `credential_invalid` → `raise _WebConfigurationError` 那一段**必须删掉**：
+飞书凭据不可用是本 Task 要支持的正常状态，不能再打死 Web 进程。`app_id` 与 `app_secret`
+要一起判断——只有 secret 没有 id 同样构造不出 adapter。
 
 本地管理员那一组是**必填**：store 构造与 seed 失败仍走既有 `except Exception: await
 engine.dispose(); raise`，使 composition 不成立、Web 不进入 ready（这正是设计要求的
 「seed 失败时 Web 不 ready」）。
 
-`TaskAccessService` 用 `membership=membership_or_none` 构造；`create_app()` 按上面的最终签名调用。
+`TaskAccessService` 用 `membership=membership` 构造（现在它本来就可能是 `None`）；`create_app()` 按上面的最终签名调用。
 
 本地管理员 seed 在 `build_postgres_web_stack` 内、migration-head 检查之后执行：`await local_admin_store.seed_if_absent(password_hash=hash_password("admin"))`。seed 抛错则按既有 `except Exception: await engine.dispose(); raise` 路径走，使 composition 不成立。
 
@@ -1822,7 +2039,9 @@ Expected: FAIL —— 模块与路由不存在。
 
 `ProviderStateStore` 的 `record_load` 用 `INSERT ... ON CONFLICT (service_name, provider) DO UPDATE`，`record_test` 用 `INSERT ... ON CONFLICT (check_name) DO UPDATE`。
 
-各进程启动时写加载回执：只为**自己实际启用且需要**的 Provider 写——worker 写 `("worker","gemini")`，feishu listener / channel worker 写 `(..., "feishu")`，web 写自己实际消费的两项。读不到或 schema 无效时写 `load_status='invalid'`，**不阻止进程启动**。
+Web 进程这一路：把 Task 5 在 `serve_web` 里丢弃的第二个返回值接起来——`credentials, _ = load_provider_credentials(...)` 改成 `credentials, receipts = ...`，再 `await provider_state_store.record_load(receipts)`。
+
+各进程启动时写加载回执：只为**自己实际启用且需要**的 Provider 写——worker 写 `("worker","gemini")`，feishu listener / channel worker 写 `(..., "feishu")`，web 写自己实际消费的两项。**回执规则不在这里复述，一律以 Task 4 Step 4 的三行表为准**：只有读到可信 `generation` 之后、该 Provider 子树缺字段或非法时才写 `load_status='invalid'`；文件缺失或整体损坏时读不出 generation，**不写任何回执**。写成「读不到就写 invalid」会倒逼实现编一个 generation，而 `loaded_generation` 有 `> 0` 的 CHECK，编出来的就是伪造证据。三种情况**都不阻止进程启动**。
 
 **干净部署必须能保存第一份配置。** runbook 只 `mkdir .config`，此时 `integrations.json`
 **不存在**；而 `read_integration_config()` 要求文件存在且 `generation > 0`，`PUT` 又要先读当前
