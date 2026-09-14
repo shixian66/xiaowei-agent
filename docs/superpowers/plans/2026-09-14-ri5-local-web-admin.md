@@ -582,7 +582,7 @@ git commit -m "feat(ri5): add the integration config contract and hardened file 
 
 ---
 
-### Task 3: schema 与 migration `rev_0010`
+### Task 3: schema `rev_0010`、本地管理员认证与 HTTPS helper 拆分
 
 三张新表加 `web_sessions` 两列。migration 只建 schema，**不写任何口令或哈希**。
 
@@ -611,8 +611,9 @@ service_config_state
   provider            text
   loaded_generation   integer not null CHECK (loaded_generation > 0)
   load_status         text not null CHECK (load_status IN ('loaded','invalid'))
-                      -- invalid 必须进入页面状态计算（Task 6 的 LoadReceipt）：
-                      -- 它既不是「尚未加载」也不是「已加载待测试」，是独立失败态
+                      -- invalid 表示「读到了这一代但没读成」。它与「缺回执」一样落到
+                      -- PENDING_RESTART，不产生第六个页面状态；该列只供页面显示原因提示。
+                      -- 文件缺失/整体损坏时读不出 generation，此时不写行（见 Task 4）。
   loaded_at           timestamptz not null
   primary key (service_name, provider)
 
@@ -723,9 +724,6 @@ git add src/xiaowei_agent/persistence/schema.py src/xiaowei_agent/persistence/mi
 git commit -m "feat(ri5): add local admin and provider state schema"
 ```
 
----
-
-### Task 4: 本地管理员认证与 HTTPS helper 外科手术式拆分
 
 口令哈希、幂等 seed、强制改密、`LOCAL_ADMIN` 身份来源、Session 的 origin 绑定，以及本计划里安全权重最高的一处改动——把 `_split_https_url()` 拆成两个 helper。
 
@@ -1008,6 +1006,311 @@ git commit -m "feat(ri5): add local admin auth and split the provider https gate
 
 ---
 
+### Task 4: 运行消费迁移——四个 composition root 改读 JSON
+
+前面几个 Task 建了新真源、记了加载回执，但**没有任何真实消费链改过**：Gemini adapter 仍读
+`gemini_model.py:41` 的 `/run/secrets/gemini_api_key`，飞书 adapter 仍从
+`Settings.feishu_app_id` / `feishu_app_secret_file` 取值（`web_app.py:777-778`、`web_app.py:788-789`、
+`local_stack.py:729-730`、`local_stack.py:734`、`local_stack.py:804-805`）。不做这一步，Task 9
+一删旧 secret 挂载，两个 Provider 就全部断供——闭环跑不通。
+
+本 Task 删除旧真源、让四个装配点从 JSON 读取，并按双层开关装配。
+
+**Files:**
+- Modify: `src/xiaowei_agent/interfaces/gemini_model.py`（删除 `GEMINI_SECRET_FILE:41`、改 `_build_client:198`、`__all__:328`）
+- Modify: `src/xiaowei_agent/interfaces/feishu_oauth.py`（`:229` 签名、`:18` import、`:245` 构造期预读、`:315` 每请求重读）
+- Modify: `src/xiaowei_agent/interfaces/feishu_sdk.py`（`:166` `_read_secret_file` 及调用点 `:208`/`:452`/`:568`；`:191`/`:433`/`:539` 三个签名）
+- Modify: `src/xiaowei_agent/interfaces/local_stack.py`（`local_stack.py:729-730`、`:734`、`:804-805`）
+- Modify: `src/xiaowei_agent/interfaces/web_app.py`（`web_app.py:777-778`、`:788-789`）
+- Modify: `src/xiaowei_agent/config.py`（删除 `feishu_app_id:228`、`feishu_app_secret_file:229`，同步 `shared` 元组 `:369` 与 `_FIELD_TO_ENV:517-518`）
+- Modify: `.env.example`
+- Test: `tests/unit/test_provider_consumption.py`
+- Test: `tests/security/test_ri5_no_legacy_secret_path.py`
+
+**Interfaces:**
+- Consumes: Task 2 的 `IntegrationConfig` 与文件层；Task 1 的 `Settings.gemini_enabled` 等装配开关；
+  Task 3 的 `service_config_state` 表（写加载回执）。`read_or_absent` 在本 Task 引入，Task 6 复用
+- Produces:
+  - `@dataclass(frozen=True, slots=True) class ProviderCredentials`：
+    `gemini_api_key: str | None = field(default=None, repr=False)`、
+    `feishu_app_id: str | None = None`、
+    `feishu_app_secret: str | None = field(default=None, repr=False)`
+    ——**刻意不用 `Contract`**：Pydantic 模型默认 `repr` 与 `model_dump()` 会带上字段值，明文 Key
+    一旦进异常链、日志或调试输出就泄露。frozen dataclass + `repr=False` 让 `repr()` 只显示
+    `app_id`，两个 secret 不出现。`app_id` 不是 secret，保留在 `repr` 里便于排障。
+  - `def load_provider_credentials(*, settings: Settings, path: str = DEFAULT_INTEGRATION_CONFIG_PATH) -> tuple[ProviderCredentials, Mapping[tuple[str, str], LoadReceipt]]`
+    ——回执的键与 `service_config_state` 的联合主键、以及 Task 6 `compute_display_state` 的
+    `receipts` 形状**完全一致**，都是 `(service_name, provider)` 元组；三处不得各用一套。
+    ——一次读取，同时产出凭据与本进程要写的加载回执
+  - `GeminiModelAdapter.__init__` 新增必填 keyword-only `api_key: str`，**不再自带路径常量**
+
+- [ ] **Step 1: 写失败测试——双层开关与断供行为**
+
+`tests/unit/test_provider_consumption.py`：
+
+```python
+import pytest
+from xiaowei_agent.application.integration_state import LoadReceipt
+from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
+
+
+def test_json_disabled_provider_yields_no_credential(tmp_path, settings_with_gemini_assembled):
+    """.env 装配了，但 JSON 里 enabled=false —— 两层与关系，最终不启用。"""
+    path = _write_config(tmp_path, gemini={"enabled": False, "api_key": "k" * 8})
+    creds, _ = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
+    assert creds.gemini_api_key is None
+
+
+def test_json_cannot_enable_a_provider_the_env_did_not_assemble(tmp_path, settings_all_disabled):
+    """JSON 不能反向启动 Compose 中未装配的进程。"""
+    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
+    creds, receipts = load_provider_credentials(settings=settings_all_disabled, path=str(path))
+    assert creds.gemini_api_key is None
+    assert receipts == {}  # 未启用的服务不写回执，不会造成永久「待应用」
+
+
+def test_both_layers_true_yields_the_credential(tmp_path, settings_with_gemini_assembled):
+    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
+    creds, receipts = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
+    assert creds.gemini_api_key == "k" * 8
+    assert receipts[("worker", "gemini")].status == "loaded"
+
+
+def test_absent_file_writes_no_receipt_and_does_not_crash(tmp_path, settings_with_gemini_assembled):
+    """读不出文件就没有可信 generation，不得伪造一个写进回执。"""
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(tmp_path / "missing.json")
+    )
+    assert creds.gemini_api_key is None
+    assert receipts == {}
+
+
+def test_corrupt_file_writes_no_receipt_and_does_not_crash(tmp_path, settings_with_gemini_assembled):
+    bad = tmp_path / "integrations.json"
+    bad.write_text("{not json", encoding="utf-8")
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(bad)
+    )
+    assert creds.gemini_api_key is None
+    assert receipts == {}
+
+
+def test_readable_file_with_a_bad_provider_subtree_writes_an_invalid_receipt(
+    tmp_path, settings_with_gemini_assembled
+):
+    """文件本身可读 -> generation 可信 -> 该 Provider 记 invalid。"""
+    path = _write_config(tmp_path, generation=7, gemini={"enabled": True})  # 缺 api_key
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(path)
+    )
+    assert creds.gemini_api_key is None
+    assert receipts[("worker", "gemini")] == LoadReceipt(generation=7, status="invalid")
+
+
+def test_gemini_adapter_no_longer_owns_a_path_constant():
+    """adapter 只接受注入的 key，不得自己去文件系统找。"""
+    from xiaowei_agent.interfaces import gemini_model
+
+    assert not hasattr(gemini_model, "GEMINI_SECRET_FILE")
+
+
+def test_every_feishu_adapter_takes_an_in_memory_secret():
+    """四个 adapter 都不得再收文件路径——否则会把明文 Secret 当路径 open()。"""
+    import inspect
+
+    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+    from xiaowei_agent.interfaces.feishu_sdk import (
+        FeishuSdkInboundTransport,
+        FeishuSdkMembershipAdapter,
+        FeishuSdkMessageAdapter,
+    )
+
+    for adapter in (
+        FeishuOAuthAdapter,
+        FeishuSdkInboundTransport,
+        FeishuSdkMessageAdapter,
+        FeishuSdkMembershipAdapter,
+    ):
+        params = inspect.signature(adapter.__init__).parameters
+        assert "app_secret" in params, adapter.__name__
+        assert "app_secret_file" not in params, adapter.__name__
+
+
+def test_credentials_repr_hides_the_secrets():
+    from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
+
+    gemini = "g" + "-fake-key"
+    feishu = "f" + "-fake-secret"
+    creds = ProviderCredentials(
+        gemini_api_key=gemini, feishu_app_id="cli_x", feishu_app_secret=feishu
+    )
+    rendered = repr(creds)
+    assert gemini not in rendered
+    assert feishu not in rendered
+    assert "cli_x" in rendered  # app_id 不是 secret，保留便于排障
+
+
+def test_no_feishu_adapter_reads_the_filesystem_at_construction(monkeypatch):
+    """反例：构造期或请求期都不得再 open() 任何文件。"""
+    import builtins
+
+    opened: list[str] = []
+    real_open = builtins.open
+    monkeypatch.setattr(
+        builtins, "open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1]
+    )
+    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+
+    FeishuOAuthAdapter(app_id="cli_x", app_secret="s" * 8, timeout_seconds=5.0)
+    assert opened == []
+```
+
+- [ ] **Step 2: 写失败测试——旧真源彻底消失**
+
+`tests/security/test_ri5_no_legacy_secret_path.py`（标 `security`）：
+
+```python
+import pathlib
+
+import pytest
+
+pytestmark = pytest.mark.security
+
+_SRC = pathlib.Path(__file__).resolve().parents[2] / "src"
+
+
+def test_no_source_file_references_the_legacy_provider_secret_paths() -> None:
+    """只扫 src/：ADR、迁移说明和本测试自身当然会提到旧路径，那是历史记录。
+
+    注意**不能**把 `feishu_app_id` 整体列入禁词——新的 `ProviderCredentials` 自己就有
+    `feishu_app_id` 字段，那是迁移后的正当用法。禁的是**旧真源**：Settings 上的同名字段与
+    文件路径读取，不是这个名字本身。
+    """
+    banned = (
+        "/run/secrets/gemini_api_key",
+        "app_secret_file",            # 任何仍收文件路径的 adapter 签名
+        "settings.feishu_app_id",     # 旧 Settings 字段的读取点
+        "GEMINI_SECRET_FILE",
+    )
+    offenders = [
+        f"{path.relative_to(_SRC)}:{n}"
+        for path in _SRC.rglob("*.py")
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        for token in banned
+        if token in line
+    ]
+    assert offenders == [], f"旧 Provider 凭据真源仍被引用：{offenders}"
+
+
+def test_the_new_credentials_field_is_not_caught_by_the_ban() -> None:
+    """反例：确认上一条不会误杀迁移后的正当字段名。"""
+    from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
+
+    assert "feishu_app_id" in ProviderCredentials.__dataclass_fields__
+
+
+def test_settings_no_longer_exposes_the_legacy_feishu_fields() -> None:
+    from xiaowei_agent.config import _FIELD_TO_ENV, Settings
+
+    assert "feishu_app_id" not in Settings.model_fields
+    assert "feishu_app_secret_file" not in Settings.model_fields
+    assert "XIAOWEI_FEISHU_APP_ID" not in _FIELD_TO_ENV.values()
+    assert "XIAOWEI_FEISHU_APP_SECRET_FILE" not in _FIELD_TO_ENV.values()
+```
+
+- [ ] **Step 3: 跑测试确认失败**
+
+Run: `python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q`
+
+Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` 仍在；`Settings` 仍有两个飞书字段。
+
+- [ ] **Step 4: 迁移四个装配点**
+
+新增 `src/xiaowei_agent/interfaces/provider_consumption.py`，其中一并引入 `read_or_absent()`
+（Task 6 的配置 API 会复用它）：
+
+```python
+def read_or_absent(path: str) -> IntegrationConfig | None:
+    """文件不存在 = 尚未配置；其余异常仍然 fail-closed。"""
+    if not os.path.exists(path):
+        return None
+    return read_integration_config(path)
+```
+
+`load_provider_credentials()` 用它读一次文件，按「`.env` 装配开关 AND JSON `enabled`」决定每个 Provider
+是否产出凭据；**只为本进程实际启用且需要的 Provider** 考虑写回执（未启用的不写，避免永久
+「待应用」）。回执写入分三种情况，**任何一种都不抛异常、不阻止进程启动**：
+
+| 情况 | 凭据 | 回执 |
+| --- | --- | --- |
+| 文件可读、该 Provider 字段齐备 | 有值 | `(generation=当前, status="loaded")` |
+| 文件可读、该 Provider 字段缺失或非法 | `None` | `(generation=当前, status="invalid")` |
+| **文件缺失或整体损坏** | `None` | **不写回执** |
+
+第三种是关键：读不出文件就没有可信 generation，而 `LoadReceipt.generation` 恒 `> 0`，
+硬凑一个值等于伪造证据。缺回执在状态机里本就等价于「尚未加载当前 generation」，
+页面仍会正确显示「待应用」，所以无需为它编一个代次。
+
+四个装配点改法：
+
+| 位置 | 改法 |
+| --- | --- |
+| `gemini_model.py:41,198,328` | 删除 `GEMINI_SECRET_FILE` 与 `_secret_reader` 默认路径读取；`__init__` 改收必填 `api_key: str`，`_build_client` 直接用它 |
+| `local_stack.py:729-730,734` | feishu listener stack 的 `app_id`/`app_secret_file` 改为注入 `credentials.feishu_app_id` / `feishu_app_secret` |
+| `local_stack.py:804-805` | channel worker stack 同上 |
+| `web_app.py:777-778,788-789` | Web 自己的 OAuth adapter 与成员 adapter 同上；`oauth_available` 为假时不构造这两个 adapter |
+
+**飞书 adapter 共有四个，全部收文件路径，必须一起改**——只改入站那一个，其余三个会把 JSON 里的
+明文 Secret 当成路径去 `open()`，必然 `SecretFileError`：
+
+| adapter | 位置 | 现签名 | 改为 |
+| --- | --- | --- | --- |
+| OAuth | `feishu_oauth.py:229` | `__init__(*, app_id, app_secret_file, timeout_seconds)` | `app_secret: str` |
+| 入站长连接 | `feishu_sdk.py:191` | `__init__(*, app_id, app_secret_file)` | `app_secret: str` |
+| 消息发送 | `feishu_sdk.py:433` | `__init__(*, app_id, app_secret_file, ...)` | `app_secret: str` |
+| 成员查询 | `feishu_sdk.py:539` | `__init__(*, tenant_id, app_id, app_secret_file)` | `app_secret: str` |
+
+同时删除两处路径读取 helper 及其全部调用点：`feishu_sdk.py:166` 的 `_read_secret_file`
+（调用点 `:208`、`:452`、`:568`）与 `feishu_oauth.py:18` 对 `read_secret_file` 的 import
+（调用点 `:245` 构造期预读、`:315` 每次请求重读）。
+
+注意 `feishu_oauth.py:245` 现在会在**构造期**预读一次做校验，`:315` 每次请求**重读**文件；改成
+内存 secret 后这两处都消失——secret 在装配时一次注入，adapter 不再触碰文件系统。这也顺带去掉了
+「运行期文件被换掉」这一类不确定性。
+
+`interfaces/secret_file.py` 的 `read_secret_file()` **保留不动**，它继续服务 PostgreSQL 与
+StarRocks；本 Task 只是让飞书与 Gemini 不再走它。
+
+`config.py` 删除 `feishu_app_id` 与 `feishu_app_secret_file` 两个字段、`shared` 元组对应项与
+`_FIELD_TO_ENV` 两个条目，并同步 `.env.example`（`test_env_example_clean.py` 断言键集合全等）。
+
+- [ ] **Step 5: 跑测试确认通过**
+
+Run:
+
+```bash
+python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q
+python -m pytest -q
+python -m pytest -m security -q
+```
+
+Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败，按新签名调整**测试的构造方式**，
+不得为了让测试过而保留旧路径读取。
+
+- [ ] **Step 6: 反证承重**
+
+把「JSON `enabled` 与 `.env` 开关取 AND」改成只看 JSON，确认
+`test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；恢复后全绿。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/xiaowei_agent/interfaces/provider_consumption.py src/xiaowei_agent/interfaces/gemini_model.py src/xiaowei_agent/interfaces/feishu_oauth.py src/xiaowei_agent/interfaces/feishu_sdk.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/config.py .env.example docker-compose.smoke.yml tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py
+git commit -m "feat(ri5): consume provider credentials from the integration config"
+```
+
+---
+
 ### Task 5: Web 装配解耦、模式化 Cookie 与登录路由
 
 让 Web 在没有飞书配置时也能起来，Cookie 名按模式切换，并把登录/改密/退出接到路由。
@@ -1020,7 +1323,9 @@ git commit -m "feat(ri5): add local admin auth and split the provider https gate
 - Test: `tests/security/test_ri5_web_assembly.py`
 
 **Interfaces:**
-- Consumes: Task 4 的 `LocalAdminAuthService`、`public_origin_is_safe`；Task 1 的 `Settings.web_mode`
+- Consumes: Task 3 的 `LocalAdminAuthService`、`public_origin_is_safe`；Task 4 的
+  `ProviderCredentials` / `load_provider_credentials`（Web 装配要据此判断飞书是否可用，因此
+  **Task 4 必须先于本 Task 完成**）；Task 1 的 `Settings.web_mode` 与 `Settings.web_public_origin`
 - Produces:
   - `def session_cookie_name(mode: WebMode) -> str`——HTTPS 返回 `"__Host-xiaowei-session"`，`lan_http` 返回 `"xiaowei-session"`
   - `def oauth_state_cookie_name(mode: WebMode) -> str`——同理 `"__Host-xiaowei-oauth-state"` / `"xiaowei-oauth-state"`
@@ -1145,6 +1450,15 @@ async def test_unauthenticated_app_shell_is_a_login_page() -> None:
     # Then  200，正文含口令输入框；不含任务列表、配置面板；
     #       oauth_available 为假时不含飞书 OAuth 入口
     raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_every_new_json_write_route_enforces_the_body_limit() -> None:
+    # Given 一个超过 settings.api_request_body_limit_bytes 的 JSON body
+    # When  依次 POST/PUT login、change-password、config、config/clear、
+    #       config/test/{gemini_connection,feishu_credentials,feishu_oauth}
+    # Then  每一条都被中间件拒绝（413 或既有闭集码），且处理函数从未被调用
+    # 反例：把某条路径从 paths 白名单里去掉，这条必须变红
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1230,6 +1544,26 @@ def validate_unauthenticated_origin(
 `Origin` 头精确匹配固定 public origin 已足以挡住跨站表单提交（跨站请求无法伪造 `Origin`），
 而 `SameSite=Lax` 的 cookie 在此刻还不存在，所以登录这一步没有可被 CSRF 滥用的既有权限。
 
+**所有新增写入口都必须进 body limit 白名单。** `web_app.py:562-566` 的
+`JsonBodyLimitMiddleware` 现在只覆盖 `{"/app/api/logout", "/app/api/tasks"}`；新增的 login、
+change-password、config、config/clear、config/test 全是 JSON 写入口，不加进去就没有大小上限。
+`paths` 改为：
+
+```python
+paths=frozenset({
+    "/app/api/logout",
+    "/app/api/tasks",
+    "/app/api/login",
+    "/app/api/change-password",
+    "/app/api/config",
+    "/app/api/config/clear",
+    "/app/api/config/test",     # 前缀匹配三个 check_name 子路径
+}),
+```
+
+若 `JsonBodyLimitMiddleware` 只支持精确匹配，把三个 `config/test/{check_name}` 逐条列全，
+不要为此改中间件语义。
+
 **`GET /app` 未登录时必须返回登录壳**，不能 401 或跳转 OAuth——否则本地管理员没有任何入口能拿到
 表单去登录。登录壳只含口令输入、提交脚本与 `Origin` 所需的同源资源，不加载任务列表、配置面板或
 OAuth 入口；飞书 OAuth 入口只有在 `oauth_available` 为真时才渲染。
@@ -1263,9 +1597,12 @@ git commit -m "feat(ri5): decouple web assembly from feishu and add local admin 
 - Test: `tests/contract/test_ri5_config_api.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `IntegrationConfig` / `read_integration_config` / `write_integration_config`；Task 3 的三张表；Task 4 的 `LOCAL_ADMIN`
+- Consumes: Task 2 的 `IntegrationConfig` / `write_integration_config`；Task 3 的三张表与 `LOCAL_ADMIN`；Task 4 的 `read_or_absent` 与 `LoadReceipt`
 - Produces:
-  - `class ProviderDisplayState(StrEnum)`：`UNCONFIGURED="unconfigured"`、`PENDING_RESTART="pending_restart"`、`LOAD_FAILED="load_failed"`、`PENDING_TEST="pending_test"`、`AVAILABLE="available"`、`TEST_FAILED="test_failed"`
+  - `class ProviderDisplayState(StrEnum)`：**恰好五个成员**，与已接受设计
+    [RI5 设计 §页面状态](../../plans/RI5-local-web-admin-simplified-design.md) 一一对应，不得增减：
+    `UNCONFIGURED="unconfigured"`、`PENDING_RESTART="pending_restart"`、
+    `PENDING_TEST="pending_test"`、`AVAILABLE="available"`、`TEST_FAILED="test_failed"`
   - 完整签名（调用方必须显式告知「该等哪些服务」，否则无法判断某个已启用服务缺回执）：
 
     ```python
@@ -1286,12 +1623,16 @@ git commit -m "feat(ri5): decouple web assembly from feishu and add local admin 
       为空集表示没有服务需要它——此时不存在「待应用」，直接进入测试判定，避免永久卡在待应用。
     - `receipts`：`Mapping[(service_name, provider), LoadReceipt]`。判定「已加载」要求
       `required_service_names` 中**每一个**服务都有 `status == "loaded"` 且
-      `generation == current_generation` 的回执；**缺回执**算未加载，**任一 `invalid`** 算加载失败。
+      `generation == current_generation` 的回执。**缺回执**与**任一 `invalid`** 都算尚未加载，
+      统一落到 `PENDING_RESTART`——「服务尚未加载当前 generation」本就涵盖「读了但没读成」。
+      `load_status` 保留在表里供页面显示原因提示，但**不产生第六个状态**。
     - `test: TestResult | None`，`class TestResult(Contract): status: Literal["passed","failed"]; generation: StrictInt`
   - `class LoadReceipt(Contract): generation: StrictInt = Field(gt=0); status: Literal["loaded", "invalid"]`
+    ——`generation` 恒 `> 0`，因此**只有在服务确实读到了一个可信 generation 时才会存在回执**。
+    文件缺失或整体损坏时读不出 generation，此时**不写任何回执**（见 Task 4），缺回执自然等价于
+    「尚未加载当前 generation」。这样 `generation > 0` 的约束与「配置缺失也要有反馈」不再冲突。
   - `UNCONFIGURED_GENERATION: Final[int] = 0`——文件不存在时的逻辑代次
-  - `def read_or_absent(path: str) -> IntegrationConfig | None`——文件不存在返回 `None`；
-    其余错误（符号链接、非正规文件、schema 非法）仍抛 `IntegrationConfigError`
+  - （`read_or_absent` 由 Task 4 引入，本 Task 直接复用，不重复定义）
   - `class ProviderStateStore(Protocol)`：`record_load(...)`、`record_test(...)`、`snapshot() -> ProviderStateSnapshot`
   - 路由：`GET /app/api/config`、`PUT /app/api/config`、`POST /app/api/config/clear`
 
@@ -1335,14 +1676,21 @@ def test_disabled_or_missing_config_is_unconfigured() -> None:
 
 
 def test_an_invalid_load_receipt_is_not_pending_test() -> None:
-    """服务读到了当前代次但判定无效，必须是独立失败态，不能冒充「待测试」。"""
+    """读到了当前代次但判定无效 —— 仍是「尚未加载」，绝不能冒充「待测试」。"""
     receipts = {("worker", "gemini"): LoadReceipt(generation=2, status="invalid")}
-    assert _state(receipts=receipts) is S.LOAD_FAILED
+    assert _state(receipts=receipts) is S.PENDING_RESTART
 
 
-def test_a_stale_invalid_receipt_is_still_pending_restart() -> None:
+def test_a_stale_invalid_receipt_is_also_pending_restart() -> None:
     receipts = {("worker", "gemini"): LoadReceipt(generation=1, status="invalid")}
     assert _state(receipts=receipts) is S.PENDING_RESTART
+
+
+def test_the_state_enum_has_exactly_the_five_designed_members() -> None:
+    """反例：任何人想加第六态，这条先红。已接受设计只承诺五态。"""
+    assert [m.value for m in S] == [
+        "unconfigured", "pending_restart", "pending_test", "available", "test_failed",
+    ]
 
 
 def test_a_required_service_without_any_receipt_is_pending_restart() -> None:
@@ -1480,16 +1828,10 @@ Expected: FAIL —— 模块与路由不存在。
 **不存在**；而 `read_integration_config()` 要求文件存在且 `generation > 0`，`PUT` 又要先读当前
 generation。若不处理，第一次保存没有起点，整条闭环卡死在第一步。
 
-因此在应用层区分「文件不存在」与「文件非法」：
+因此在应用层区分「文件不存在」与「文件非法」。`read_or_absent()` 已由 Task 4 引入，本 Task
+直接复用，只新增一个把它折成代次的小函数：
 
 ```python
-def read_or_absent(path: str) -> IntegrationConfig | None:
-    """文件不存在 = 尚未配置；其余异常仍然 fail-closed。"""
-    if not os.path.exists(path):
-        return None
-    return read_integration_config(path)
-
-
 def current_generation(config: IntegrationConfig | None) -> int:
     return UNCONFIGURED_GENERATION if config is None else config.generation
 ```
@@ -1529,7 +1871,7 @@ git commit -m "feat(ri5): add the config api, load receipts and provider display
 - Test: `tests/contract/test_ri5_probe_routes.py`
 
 **Interfaces:**
-- Consumes: Task 2 的配置读取；Task 4 的 `LOCAL_ADMIN` 与 `_digest`；Task 6 的 `ProviderStateStore.record_test`
+- Consumes: Task 2 的配置读取；Task 3 的 `LOCAL_ADMIN` 与 `_digest`；Task 4 的 `read_or_absent`；Task 6 的 `ProviderStateStore.record_test`
 - Produces:
   - `class ProbeOutcome(Contract): status: Literal["passed","failed"]; duration_ms: int; error_code: ProbeErrorCode | None`
   - `class ProbeErrorCode(StrEnum)`：闭集 `REAL_TEST_DISABLED`、`NOT_CONFIGURED`、`UNAUTHORIZED`、`TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`
@@ -1718,258 +2060,7 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 
 ---
 
-### Task 8: 运行消费迁移——四个 composition root 改读 JSON
-
-前面几个 Task 建了新真源、记了加载回执，但**没有任何真实消费链改过**：Gemini adapter 仍读
-`gemini_model.py:41` 的 `/run/secrets/gemini_api_key`，飞书 adapter 仍从
-`Settings.feishu_app_id` / `feishu_app_secret_file` 取值（`web_app.py:777-778`、`web_app.py:788-789`、
-`local_stack.py:729-730`、`local_stack.py:734`、`local_stack.py:804-805`）。不做这一步，Task 9
-一删旧 secret 挂载，两个 Provider 就全部断供——闭环跑不通。
-
-本 Task 删除旧真源、让四个装配点从 JSON 读取，并按双层开关装配。
-
-**Files:**
-- Modify: `src/xiaowei_agent/interfaces/gemini_model.py`（删除 `GEMINI_SECRET_FILE:41`、改 `_build_client:198`、`__all__:328`）
-- Modify: `src/xiaowei_agent/interfaces/local_stack.py`（`local_stack.py:729-730`、`:734`、`:804-805`）
-- Modify: `src/xiaowei_agent/interfaces/web_app.py`（`web_app.py:777-778`、`:788-789`）
-- Modify: `src/xiaowei_agent/config.py`（删除 `feishu_app_id:228`、`feishu_app_secret_file:229`，同步 `shared` 元组 `:369` 与 `_FIELD_TO_ENV:517-518`）
-- Modify: `.env.example`
-- Test: `tests/unit/test_provider_consumption.py`
-- Test: `tests/security/test_ri5_no_legacy_secret_path.py`
-
-**Interfaces:**
-- Consumes: Task 2 的 `read_or_absent` / `IntegrationConfig`；Task 1 的 `Settings.gemini_enabled` 等装配开关
-- Produces:
-  - `@dataclass(frozen=True, slots=True) class ProviderCredentials`：
-    `gemini_api_key: str | None = field(default=None, repr=False)`、
-    `feishu_app_id: str | None = None`、
-    `feishu_app_secret: str | None = field(default=None, repr=False)`
-    ——**刻意不用 `Contract`**：Pydantic 模型默认 `repr` 与 `model_dump()` 会带上字段值，明文 Key
-    一旦进异常链、日志或调试输出就泄露。frozen dataclass + `repr=False` 让 `repr()` 只显示
-    `app_id`，两个 secret 不出现。`app_id` 不是 secret，保留在 `repr` 里便于排障。
-  - `def load_provider_credentials(*, settings: Settings, path: str = DEFAULT_INTEGRATION_CONFIG_PATH) -> tuple[ProviderCredentials, dict[str, LoadReceipt]]`
-    ——一次读取，同时产出凭据与本进程要写的加载回执
-  - `GeminiModelAdapter.__init__` 新增必填 keyword-only `api_key: str`，**不再自带路径常量**
-
-- [ ] **Step 1: 写失败测试——双层开关与断供行为**
-
-`tests/unit/test_provider_consumption.py`：
-
-```python
-import pytest
-from xiaowei_agent.application.integration_state import LoadReceipt
-from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
-
-
-def test_json_disabled_provider_yields_no_credential(tmp_path, settings_with_gemini_assembled):
-    """.env 装配了，但 JSON 里 enabled=false —— 两层与关系，最终不启用。"""
-    path = _write_config(tmp_path, gemini={"enabled": False, "api_key": "k" * 8})
-    creds, _ = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
-    assert creds.gemini_api_key is None
-
-
-def test_json_cannot_enable_a_provider_the_env_did_not_assemble(tmp_path, settings_all_disabled):
-    """JSON 不能反向启动 Compose 中未装配的进程。"""
-    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
-    creds, receipts = load_provider_credentials(settings=settings_all_disabled, path=str(path))
-    assert creds.gemini_api_key is None
-    assert receipts == {}  # 未启用的服务不写回执，不会造成永久「待应用」
-
-
-def test_both_layers_true_yields_the_credential(tmp_path, settings_with_gemini_assembled):
-    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
-    creds, receipts = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
-    assert creds.gemini_api_key == "k" * 8
-    assert receipts[("worker", "gemini")].status == "loaded"
-
-
-def test_absent_file_is_invalid_not_a_crash(tmp_path, settings_with_gemini_assembled):
-    """配置缺失只标记该 Provider 无效，进程仍须能启动。"""
-    creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(tmp_path / "missing.json")
-    )
-    assert creds.gemini_api_key is None
-    assert receipts[("worker", "gemini")].status == "invalid"
-
-
-def test_corrupt_file_is_invalid_not_a_crash(tmp_path, settings_with_gemini_assembled):
-    bad = tmp_path / "integrations.json"
-    bad.write_text("{not json", encoding="utf-8")
-    creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(bad)
-    )
-    assert creds.gemini_api_key is None
-    assert receipts[("worker", "gemini")].status == "invalid"
-
-
-def test_gemini_adapter_no_longer_owns_a_path_constant():
-    """adapter 只接受注入的 key，不得自己去文件系统找。"""
-    from xiaowei_agent.interfaces import gemini_model
-
-    assert not hasattr(gemini_model, "GEMINI_SECRET_FILE")
-
-
-def test_every_feishu_adapter_takes_an_in_memory_secret():
-    """四个 adapter 都不得再收文件路径——否则会把明文 Secret 当路径 open()。"""
-    import inspect
-
-    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
-    from xiaowei_agent.interfaces.feishu_sdk import (
-        FeishuSdkInboundTransport,
-        FeishuSdkMembershipAdapter,
-        FeishuSdkMessageAdapter,
-    )
-
-    for adapter in (
-        FeishuOAuthAdapter,
-        FeishuSdkInboundTransport,
-        FeishuSdkMessageAdapter,
-        FeishuSdkMembershipAdapter,
-    ):
-        params = inspect.signature(adapter.__init__).parameters
-        assert "app_secret" in params, adapter.__name__
-        assert "app_secret_file" not in params, adapter.__name__
-
-
-def test_credentials_repr_hides_the_secrets():
-    from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
-
-    gemini = "g" + "-fake-key"
-    feishu = "f" + "-fake-secret"
-    creds = ProviderCredentials(
-        gemini_api_key=gemini, feishu_app_id="cli_x", feishu_app_secret=feishu
-    )
-    rendered = repr(creds)
-    assert gemini not in rendered
-    assert feishu not in rendered
-    assert "cli_x" in rendered  # app_id 不是 secret，保留便于排障
-
-
-def test_no_feishu_adapter_reads_the_filesystem_at_construction(monkeypatch):
-    """反例：构造期或请求期都不得再 open() 任何文件。"""
-    import builtins
-
-    opened: list[str] = []
-    real_open = builtins.open
-    monkeypatch.setattr(
-        builtins, "open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1]
-    )
-    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
-
-    FeishuOAuthAdapter(app_id="cli_x", app_secret="s" * 8, timeout_seconds=5.0)
-    assert opened == []
-```
-
-- [ ] **Step 2: 写失败测试——旧真源彻底消失**
-
-`tests/security/test_ri5_no_legacy_secret_path.py`（标 `security`）：
-
-```python
-import pathlib
-
-import pytest
-
-pytestmark = pytest.mark.security
-
-_SRC = pathlib.Path(__file__).resolve().parents[2] / "src"
-
-
-def test_no_source_file_references_the_legacy_provider_secret_paths() -> None:
-    """只扫 src/：ADR、迁移说明和本测试自身当然会提到旧路径，那是历史记录。"""
-    banned = ("/run/secrets/gemini_api_key", "feishu_app_secret_file", "feishu_app_id")
-    offenders = [
-        f"{path.relative_to(_SRC)}:{n}"
-        for path in _SRC.rglob("*.py")
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        for token in banned
-        if token in line
-    ]
-    assert offenders == [], f"旧 Provider 凭据真源仍被引用：{offenders}"
-
-
-def test_settings_no_longer_exposes_the_legacy_feishu_fields() -> None:
-    from xiaowei_agent.config import _FIELD_TO_ENV, Settings
-
-    assert "feishu_app_id" not in Settings.model_fields
-    assert "feishu_app_secret_file" not in Settings.model_fields
-    assert "XIAOWEI_FEISHU_APP_ID" not in _FIELD_TO_ENV.values()
-    assert "XIAOWEI_FEISHU_APP_SECRET_FILE" not in _FIELD_TO_ENV.values()
-```
-
-- [ ] **Step 3: 跑测试确认失败**
-
-Run: `python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q`
-
-Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` 仍在；`Settings` 仍有两个飞书字段。
-
-- [ ] **Step 4: 迁移四个装配点**
-
-新增 `src/xiaowei_agent/interfaces/provider_consumption.py`，实现 `load_provider_credentials()`：
-用 Task 6 的 `read_or_absent` 读一次文件，按「`.env` 装配开关 AND JSON `enabled`」决定每个 Provider
-是否产出凭据；**只为本进程实际启用且需要的 Provider** 写回执（未启用的不写，避免永久「待应用」）；
-文件缺失或非法时凭据为 `None`、回执 `status="invalid"`，**不抛异常、不阻止进程启动**。
-
-四个装配点改法：
-
-| 位置 | 改法 |
-| --- | --- |
-| `gemini_model.py:41,198,328` | 删除 `GEMINI_SECRET_FILE` 与 `_secret_reader` 默认路径读取；`__init__` 改收必填 `api_key: str`，`_build_client` 直接用它 |
-| `local_stack.py:729-730,734` | feishu listener stack 的 `app_id`/`app_secret_file` 改为注入 `credentials.feishu_app_id` / `feishu_app_secret` |
-| `local_stack.py:804-805` | channel worker stack 同上 |
-| `web_app.py:777-778,788-789` | Web 自己的 OAuth adapter 与成员 adapter 同上；`oauth_available` 为假时不构造这两个 adapter |
-
-**飞书 adapter 共有四个，全部收文件路径，必须一起改**——只改入站那一个，其余三个会把 JSON 里的
-明文 Secret 当成路径去 `open()`，必然 `SecretFileError`：
-
-| adapter | 位置 | 现签名 | 改为 |
-| --- | --- | --- | --- |
-| OAuth | `feishu_oauth.py:229` | `__init__(*, app_id, app_secret_file, timeout_seconds)` | `app_secret: str` |
-| 入站长连接 | `feishu_sdk.py:191` | `__init__(*, app_id, app_secret_file)` | `app_secret: str` |
-| 消息发送 | `feishu_sdk.py:433` | `__init__(*, app_id, app_secret_file, ...)` | `app_secret: str` |
-| 成员查询 | `feishu_sdk.py:539` | `__init__(*, tenant_id, app_id, app_secret_file)` | `app_secret: str` |
-
-同时删除两处路径读取 helper 及其全部调用点：`feishu_sdk.py:166` 的 `_read_secret_file`
-（调用点 `:208`、`:452`、`:568`）与 `feishu_oauth.py:18` 对 `read_secret_file` 的 import
-（调用点 `:245` 构造期预读、`:315` 每次请求重读）。
-
-注意 `feishu_oauth.py:245` 现在会在**构造期**预读一次做校验，`:315` 每次请求**重读**文件；改成
-内存 secret 后这两处都消失——secret 在装配时一次注入，adapter 不再触碰文件系统。这也顺带去掉了
-「运行期文件被换掉」这一类不确定性。
-
-`interfaces/secret_file.py` 的 `read_secret_file()` **保留不动**，它继续服务 PostgreSQL 与
-StarRocks；本 Task 只是让飞书与 Gemini 不再走它。
-
-`config.py` 删除 `feishu_app_id` 与 `feishu_app_secret_file` 两个字段、`shared` 元组对应项与
-`_FIELD_TO_ENV` 两个条目，并同步 `.env.example`（`test_env_example_clean.py` 断言键集合全等）。
-
-- [ ] **Step 5: 跑测试确认通过**
-
-Run:
-
-```bash
-python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q
-python -m pytest -q
-python -m pytest -m security -q
-```
-
-Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败，按新签名调整**测试的构造方式**，
-不得为了让测试过而保留旧路径读取。
-
-- [ ] **Step 6: 反证承重**
-
-把「JSON `enabled` 与 `.env` 开关取 AND」改成只看 JSON，确认
-`test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；恢复后全绿。
-
-- [ ] **Step 7: 提交**
-
-```bash
-git add src/xiaowei_agent/interfaces/provider_consumption.py src/xiaowei_agent/interfaces/gemini_model.py src/xiaowei_agent/interfaces/feishu_sdk.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/config.py .env.example tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py
-git commit -m "feat(ri5): consume provider credentials from the integration config"
-```
-
----
-
-### Task 9: Compose、Dockerfile、前端面板与 runbook
+### Task 8: Compose、Dockerfile、前端面板与 runbook
 
 删掉两条旧 secret 路径，钉死 UID/GID，加 `.config` 挂载、LAN override 与预检脚本，补配置面板与首启顺序文档。
 
@@ -1977,17 +2068,18 @@ git commit -m "feat(ri5): consume provider credentials from the integration conf
 - Modify: `Dockerfile`（`Dockerfile:13` 的 `useradd --system`）
 - Modify: `docker-compose.yml`（`secrets:` 于 `docker-compose.yml:154-158`；各服务 `secrets` 列表）
 - Modify: `docker-compose.model.yml`（删除 `gemini_api_key` secret）
+- Modify: `docker-compose.smoke.yml`（`:13` `XIAOWEI_FEISHU_APP_ID`、`:14` `XIAOWEI_FEISHU_APP_SECRET_FILE` —— 这两个 Settings 字段已在 Task 4 删除，不改会让 smoke 栈起不来）
 - Create: `docker-compose.lan.yml`
 - Create: `docker-compose.feishu.yml`
 - Create: `src/xiaowei_agent/interfaces/config_preflight.py`（**不能放 `scripts/`**——`Dockerfile:8` 只 `COPY src ./src` 与 `alembic.ini`，`scripts/` 不进镜像，容器内执行必然 `ModuleNotFoundError`）
 - Modify: `src/xiaowei_agent/interfaces/web_static/index.html`、`app.js`、`app.css`
 - Modify: `scripts/compose_smoke.py`（`compose_smoke.py:48` 的 `_GEMINI_SECRET_DESTINATION`、`:393-411` 的 secrets 与 identity mount、`:507-508` 的两个 secret 路径）
 - Modify: `README.md`、`.gitignore`、`.dockerignore`
-- Test: `tests/contract/test_compose_contract.py`
+- Modify: `tests/contract/test_compose_contract.py`（`:48` `_yaml()` 注册 `!override` loader；新增渲染期端口断言）
 - Test: `tests/security/test_ri5_compose_boundary.py`
 
 **Interfaces:**
-- Consumes: 前 8 个 Task 的全部产出
+- Consumes: 前 7 个 Task 的全部产出
 - Produces: `docker-compose.lan.yml`（**替换**而非追加 `web-app` 的 `ports`）、`docker-compose.feishu.yml`、`python -m xiaowei_agent.interfaces.config_preflight`
 
 - [ ] **Step 1: 写失败契约测试**
@@ -2046,7 +2138,13 @@ def test_read_only_rootfs_and_dropped_caps_are_unchanged():
     raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_lan_override_replaces_rather_than_appends_the_port():
-    # 渲染 base + lan 后，web-app.ports 长度恰为 1，且不含 127.0.0.1:8080
+    # 用 compose config 渲染 base + lan（无 compose CLI 时 skip）
+    # 断言 web-app.ports 长度恰为 1，且不含 127.0.0.1:8080
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_existing_compose_yaml_reader_survives_the_override_tag():
+    # 反例：用 yaml.safe_load 直接读 docker-compose.lan.yml 必须抛 ConstructorError；
+    # 用本 Task 注册的 _ComposeLoader 读则成功。证明 loader 确实是承重的
     raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_preflight_module_lives_inside_the_packaged_source():
@@ -2120,8 +2218,32 @@ services:
       - "0.0.0.0:8080:8080"
 ```
 
-`!override` 需要 Compose ≥ 2.24.4（与 ADR-015 D7 记录的项目支持下限一致）。Task 9 的契约测试必须
-断言**渲染结果只有一条映射**，而不是只断言新映射存在。
+`!override` 需要 Compose ≥ 2.24.4（与 ADR-015 D7 记录的项目支持下限一致）。
+
+**它会打坏现有的 YAML 读法**：`tests/contract/test_compose_contract.py:48` 的 `_yaml()` 用
+`yaml.safe_load`，遇到未注册的 `!override` 标签会抛 `ConstructorError`。因此本 Task 必须同时
+给该 helper 注册一个忽略该标签的 loader，否则 override 一落地，既有 compose 契约测试立刻全红：
+
+```python
+class _ComposeLoader(yaml.SafeLoader):
+    """Compose 的 !override / !reset 是渲染期指令，静态读取时按普通序列对待。"""
+
+
+for _tag in ("!override", "!reset"):
+    _ComposeLoader.add_constructor(
+        _tag, lambda loader, node: loader.construct_sequence(node, deep=True)
+    )
+
+
+def _yaml(name: str) -> dict[str, Any]:
+    value = yaml.load((_ROOT / name).read_text(encoding="utf-8"), Loader=_ComposeLoader)
+    assert isinstance(value, dict)
+    return value
+```
+
+「渲染结果只有一条映射」不能靠静态 YAML 断言——静态读只能看到 override 文件里那一条。真正的
+判据是 `compose config` 的**渲染输出**，因此该断言放在 `tests/contract/test_compose_contract.py`
+里以子进程调用 `compose config` 完成（无 compose CLI 时 skip，与该文件既有做法一致）。
 
 `.gitignore` / `.dockerignore` 追加 `.config/`。
 
@@ -2158,20 +2280,23 @@ services:
 
    ```bash
    if docker compose version >/dev/null 2>&1; then
-     COMPOSE="docker compose"
+     compose() { docker compose "$@"; }
    elif docker-compose version >/dev/null 2>&1; then
-     COMPOSE="docker-compose"
+     compose() { docker-compose "$@"; }
    else
-     echo "no compose CLI" >&2; exit 1
+     echo "no compose CLI" >&2; return 1
    fi
    ```
 
-   后续步骤统一用 `$COMPOSE`；README 里两种写法都给出。
+   **必须用 shell 函数，不能用 `COMPOSE="docker compose"` 加 `$COMPOSE`。** zsh 对未加引号的
+   参数展开**不做分词**，`$COMPOSE` 会被当成一个名为 `docker compose`（含空格）的命令，直接
+   `command not found`。bash 下碰巧能用，zsh 下必错——本项目宿主 shell 是 zsh。
+   后续步骤统一写 `compose ...`。
 
 4. **先跑预检，成功后才启动 Web**：
 
    ```bash
-   $COMPOSE run --rm --no-deps \
+   compose run --rm --no-deps \
      -v "$PWD/.config:/run/xiaowei-config" \
      web-app python -m xiaowei_agent.interfaces.config_preflight
    ```
@@ -2181,7 +2306,7 @@ services:
 5. 启动（基础文件只发布 `127.0.0.1:8080`；`web-app` 已不在 profile 里，普通 up 即可拉起）：
 
    ```bash
-   $COMPOSE up -d
+   compose up -d
    ```
 
 6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
@@ -2195,13 +2320,13 @@ services:
 8. 叠加 LAN override 重建：
 
    ```bash
-   $COMPOSE -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
+   compose -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
    ```
 
    重建后核对渲染结果**只有一条**端口映射：
 
    ```bash
-   $COMPOSE -f docker-compose.yml -f docker-compose.lan.yml config | grep -A3 'ports:'
+   compose -f docker-compose.yml -f docker-compose.lan.yml config | grep -A3 'ports:'
    ```
 
 9. 从局域网地址用新密码重新登录（旧 Cookie 因 origin digest 变化已失效，属预期）。
@@ -2230,17 +2355,17 @@ Expected: PASS。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add Dockerfile docker-compose.yml docker-compose.model.yml docker-compose.lan.yml docker-compose.feishu.yml src/xiaowei_agent/interfaces/config_preflight.py scripts/compose_smoke.py src/xiaowei_agent/interfaces/web_static README.md .gitignore .dockerignore tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py
+git add Dockerfile docker-compose.yml docker-compose.model.yml docker-compose.smoke.yml docker-compose.lan.yml docker-compose.feishu.yml src/xiaowei_agent/interfaces/config_preflight.py scripts/compose_smoke.py src/xiaowei_agent/interfaces/web_static README.md .gitignore .dockerignore tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py
 git commit -m "feat(ri5): move provider credentials to a mounted config directory"
 ```
 
 ---
 
-### Task 10: 全量验收与交接
+### Task 9: 全量验收与交接
 
 **Files:**
 - Modify: `AGENT_HANDOFF.md`
-- Review: Task 0–9 改动的全部文件
+- Review: Task 0–8 改动的全部文件
 
 - [ ] **Step 1: 跑完整基线**
 
@@ -2258,7 +2383,7 @@ Expected: 四条全绿，且与 Task 0 记录的开工前基线对比无新增�
 
 - [ ] **Step 2: 本地闭环验证**
 
-按 Task 9 Step 5 的 runbook 实跑一遍，记录：
+按 Task 8 Step 5 的 runbook 实跑一遍，记录：
 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
@@ -2277,7 +2402,7 @@ Expected: `200`、`200`；`admin/admin` 登录后被强制改密；改密前访�
 会提到旧路径（那是历史记录与反例），所以**不能**以「全仓 grep 零输出」作为验收条件。判据是：
 
 ```bash
-# 判据一：src/ 下零命中（这一条由 Task 8 的 test_no_source_file_references_the_legacy_provider_secret_paths 承重）
+# 判据一：src/ 下零命中（这一条由 Task 4 的 test_no_source_file_references_the_legacy_provider_secret_paths 承重）
 grep -rn "web_detail_base_url\|/run/secrets/gemini_api_key\|feishu_app_secret_file" src/ --exclude-dir=__pycache__
 
 # 判据二：compose 与 .env.example 下零命中
@@ -2294,6 +2419,8 @@ grep -n "gemini_api_key\|feishu_app_secret" docker-compose*.yml .env.example
 git add AGENT_HANDOFF.md
 git commit -m "docs(ri5): record the local web admin implementation evidence"
 ```
+
+---
 
 ## Explicitly Out of Scope
 
