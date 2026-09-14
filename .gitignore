@@ -39,3 +39,6 @@ requirements-audit.txt
 # Local Compose secrets and smoke evidence
 .secrets/
 .smoke/
+
+# Provider 明文配置：由管理面写入，属于这台机器的运行时状态
+.config/

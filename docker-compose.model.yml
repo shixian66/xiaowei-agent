@@ -1,11 +1,6 @@
+# Gemini 不再有自己的 Docker secret：API Key 由管理面写进
+# ``.config/integrations.json``，与飞书凭据同一处真源。这个 override 只剩装配开关。
 services:
   worker:
     environment:
       XIAOWEI_GEMINI_ENABLED: "true"
-    secrets:
-      - postgres_password
-      - gemini_api_key
-
-secrets:
-  gemini_api_key:
-    file: ./.secrets/gemini_api_key

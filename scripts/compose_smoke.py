@@ -45,7 +45,10 @@ _EUID_PROBE_CODE = "import os,sys;sys.stdout.write(str(os.geteuid()))"
 _COMMAND_TIMEOUT = 180.0
 _MINIMUM_COMPOSE_VERSION = (2, 24, 4)
 _GEMINI_HOST_SECRET_FILE_ENV = "GEMINI_API_" + "KEY_FILE"
-_GEMINI_SECRET_DESTINATION = "/run/secrets/gemini_api_" + "key"
+_CONFIG_DESTINATION = "/run/xiaowei-config"
+_CONFIG_FILE_NAME = "integrations.json"
+# 只读挂载配置目录的三个消费进程；web-app 单独可写，api/migrate/postgres 完全不挂。
+_CONFIG_READ_ONLY_SERVICES = ("worker", "feishu-listener", "channel-worker")
 _POSTGRES_SECRET_DESTINATION = "/run/secrets/postgres_" + "password"
 _MODEL_AUDIT_SERVICES = (
     "postgres",
@@ -186,10 +189,14 @@ class _PrivateInputNamespace:
 @dataclass(frozen=True)
 class _SmokeInputs:
     namespace: _PrivateInputNamespace
+    # 配置目录**整目录**挂进容器，因此必须是独占的一个命名空间：与 postgres 口令、
+    # override 文档同目录时，那两份也会一起出现在 worker 的 /run/xiaowei-config 下。
+    config_namespace: _PrivateInputNamespace
     sensitive_values: tuple[str, ...]
     owned_inputs: tuple[_OwnedInput, ...]
+    config_inputs: tuple[_OwnedInput, ...]
     override_path: Path
-    model_secret_source: Path
+    config_source: Path
 
 
 def _cleanup_unreturned_input(
@@ -389,9 +396,32 @@ def _create_private_input_namespace(root: Path) -> _PrivateInputNamespace:
         os.close(root_descriptor)
 
 
+def _config_mount(source: Path, *, read_only: bool) -> dict[str, object]:
+    """把基础文件里的 ``./.config`` 绑定改指到本次 smoke 的私有目录。
+
+    Compose 按**目标路径**合并卷：同一个 ``/run/xiaowei-config`` 目标会被 override
+    整条替换，而不是并列出两条。因此这里既不需要 ``!override``，也不会在容器里
+    留下两个互相打架的挂载点。
+    """
+    mount: dict[str, object] = {
+        "type": "bind",
+        "source": str(source),
+        "target": _CONFIG_DESTINATION,
+        "bind": {"create_host_path": False},
+    }
+    if read_only:
+        mount["read_only"] = True
+    return mount
+
+
 def _input_override_document(
-    *, postgres: Path, feishu: Path, gemini: Path, identity: Path
+    *, postgres: Path, config_directory: Path, identity: Path
 ) -> str:
+    """本次 smoke 的输入 override。
+
+    Provider 凭据不再是 Docker secret：它们躺在一份合成的
+    ``integrations.json`` 里，和真实部署走同一条读取路径。
+    """
     identity_mount = {
         "type": "bind",
         "source": str(identity),
@@ -399,18 +429,27 @@ def _input_override_document(
         "read_only": True,
         "bind": {"create_host_path": False},
     }
+    services: dict[str, object] = {
+        name: {"volumes": [_config_mount(config_directory, read_only=True)]}
+        for name in _CONFIG_READ_ONLY_SERVICES
+    }
+    services["feishu-listener"] = {
+        "volumes": [
+            _config_mount(config_directory, read_only=True),
+            identity_mount,
+        ]
+    }
+    services["web-app"] = {
+        "volumes": [
+            _config_mount(config_directory, read_only=False),
+            identity_mount,
+        ]
+    }
     return (
         json.dumps(
             {
-                "secrets": {
-                    "postgres_password": {"file": str(postgres)},
-                    "feishu_app_secret": {"file": str(feishu)},
-                    "gemini_api_key": {"file": str(gemini)},
-                },
-                "services": {
-                    "feishu-listener": {"volumes": [identity_mount]},
-                    "web-app": {"volumes": [identity_mount]},
-                },
+                "secrets": {"postgres_password": {"file": str(postgres)}},
+                "services": services,
             },
             separators=(",", ":"),
         )
@@ -502,22 +541,48 @@ def _remove_private_input_namespace(
         os.close(root)
 
 
+def _synthetic_integration_config(*, gemini_value: str, feishu_value: str) -> str:
+    """一份**合成的** `integrations.json`；值是随机生成的假串，不来自任何真实账号。"""
+    return (
+        json.dumps(
+            {
+                "generation": 1,
+                "gemini": {"enabled": False, "api_key": gemini_value},
+                "feishu": {
+                    "enabled": False,
+                    "app_id": "cli_smoke",
+                    "app_secret": feishu_value,
+                },
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
 def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
+    config_namespace = _create_private_input_namespace(input_root)
     postgres_secret = namespace.path / "postgres_password"
-    feishu_secret = namespace.path / "feishu_app_secret"
-    gemini_secret = namespace.path / "gemini_api_key"
     identity = namespace.path / "feishu-identities.json"
     override = namespace.path / "compose-smoke-inputs.json"
+    config_file = config_namespace.path / _CONFIG_FILE_NAME
     created: list[_OwnedInput] = []
+    config_created: list[_OwnedInput] = []
     try:
         postgres_value, postgres_owned = _create_secret(postgres_secret)
         created.append(postgres_owned)
-        feishu_value, feishu_owned = _create_secret(feishu_secret)
-        created.append(feishu_owned)
         gemini_value = "AIza" + secrets.token_urlsafe(32)
-        gemini_owned = _create_input(gemini_secret, f"{gemini_value}\n")
-        created.append(gemini_owned)
+        feishu_value = secrets.token_urlsafe(32)
+        config_created.append(
+            _create_input(
+                config_file,
+                _synthetic_integration_config(
+                    gemini_value=gemini_value, feishu_value=feishu_value
+                ),
+            )
+        )
         identity_owned = _create_input(
             identity,
             json.dumps(
@@ -536,24 +601,34 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
             override,
             _input_override_document(
                 postgres=postgres_secret,
-                feishu=feishu_secret,
-                gemini=gemini_secret,
+                config_directory=config_namespace.path,
                 identity=identity,
             ),
         )
         created.append(override_owned)
     except BaseException as exc:
-        try:
-            _remove_private_input_namespace(namespace, created)
-        except BaseException:
+        # 两个命名空间都要清，但诊断**只挂一次**：同一条闭集码重复两遍不多给任何
+        # 信息，只会让读者以为发生了两类不同的失败。
+        cleanup_failed = False
+        for target, owned in (
+            (namespace, created),
+            (config_namespace, config_created),
+        ):
+            try:
+                _remove_private_input_namespace(target, owned)
+            except BaseException:
+                cleanup_failed = True
+        if cleanup_failed:
             _safe_add_fixed_note(exc, "SMOKE_INPUT_CLEANUP_FAILED")
         raise
     return _SmokeInputs(
         namespace=namespace,
+        config_namespace=config_namespace,
         sensitive_values=(postgres_value, feishu_value, gemini_value),
         owned_inputs=tuple(created),
+        config_inputs=tuple(config_created),
         override_path=override,
-        model_secret_source=gemini_secret,
+        config_source=config_namespace.path,
     )
 
 
@@ -565,7 +640,7 @@ class ComposeSession:
     files: tuple[Path, ...]
     compose_command: tuple[str, ...]
     sensitive_values: tuple[str, ...] = ()
-    model_secret_source: Path | None = None
+    config_source: Path | None = None
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
     _resource_owner: ComposeSession | None = None
@@ -589,7 +664,7 @@ class ComposeSession:
             files=files,
             compose_command=self.compose_command,
             sensitive_values=self.sensitive_values,
-            model_secret_source=self.model_secret_source,
+            config_source=self.config_source,
             up_started=self.up_started,
             failure_code=failure_code,
             _resource_owner=self._resource_owner or self,
@@ -655,7 +730,7 @@ def run_smoke(
         ),
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
-        model_secret_source=smoke_inputs.model_secret_source,
+        config_source=smoke_inputs.config_source,
     )
     primary_error: BaseException | None = None
     try:
@@ -679,16 +754,21 @@ def run_smoke(
                     primary_error,
                     "SMOKE_CLEANUP_COMMAND_FAILED",
                 )
-    try:
-        _remove_private_input_namespace(
-            smoke_inputs.namespace,
-            smoke_inputs.owned_inputs,
-        )
-    except BaseException as exc:
-        if primary_error is None:
-            primary_error = exc
-        else:
-            _safe_add_fixed_note(primary_error, "SMOKE_INPUT_CLEANUP_FAILED")
+    input_cleanup_noted = False
+    for target, owned in (
+        (smoke_inputs.namespace, smoke_inputs.owned_inputs),
+        (smoke_inputs.config_namespace, smoke_inputs.config_inputs),
+    ):
+        try:
+            _remove_private_input_namespace(target, owned)
+        except BaseException as exc:
+            if primary_error is None:
+                # 这一条**就是**被抛出的异常；再给它挂一条同名的 note 只是重复。
+                primary_error = exc
+                input_cleanup_noted = True
+            elif not input_cleanup_noted:
+                input_cleanup_noted = True
+                _safe_add_fixed_note(primary_error, "SMOKE_INPUT_CLEANUP_FAILED")
     if primary_error is not None:
         raise primary_error
 
@@ -806,10 +886,16 @@ def _container_env(session: ComposeSession, service: str) -> set[str]:
 
 
 def _require_model_secret_boundary(session: ComposeSession) -> None:
-    """叠加模型 override 后只检查容器元数据，绝不打开 secret 文件。"""
-    if session.model_secret_source is None or not session.model_secret_source.is_absolute():
+    """叠加模型 override 后只检查容器元数据，绝不打开配置文件。
+
+    检查的事实从"Gemini secret 只挂在 worker 上"换成了"配置目录按各进程的角色
+    挂载"——Provider 凭据不再是 Docker secret，而是那个目录里的一份明文文档。
+    要守住的边界没变：``api`` / ``migrate`` / ``postgres`` 根本拿不到它，消费进程
+    只读，只有写配置的 ``web-app`` 可写。
+    """
+    if session.config_source is None or not session.config_source.is_absolute():
         raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
-    expected_source = os.path.normcase(os.path.normpath(session.model_secret_source))
+    expected_source = os.path.normcase(os.path.normpath(session.config_source))
     model_files = (*session.files, _ROOT / "docker-compose.model.yml")
     if session.files and session.files[-1].name == "compose-smoke-inputs.json":
         model_files = (
@@ -875,11 +961,11 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             for item in environment
         ):
             raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
-        secret_mounts = [
+        config_mounts = [
             mount
             for mount in mounts
             if isinstance(mount, dict)
-            and mount.get("Destination") == _GEMINI_SECRET_DESTINATION
+            and mount.get("Destination") == _CONFIG_DESTINATION
         ]
         postgres_mounts = [
             mount
@@ -892,19 +978,31 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
             for item in environment
             if item.startswith("XIAOWEI_GEMINI_ENABLED=")
         ]
+        source = config_mounts[0].get("Source") if len(config_mounts) == 1 else None
+        source_matches = isinstance(source, str) and (
+            os.path.normcase(os.path.normpath(source)) == expected_source
+        )
         if service == "worker":
-            source = secret_mounts[0].get("Source") if secret_mounts else None
             if (
                 enabled != ["XIAOWEI_GEMINI_ENABLED=true"]
-                or len(secret_mounts) != 1
-                or not isinstance(source, str)
-                or os.path.normcase(os.path.normpath(source)) != expected_source
-                or secret_mounts[0].get("RW") is not False
+                or not source_matches
+                or config_mounts[0].get("RW") is not False
                 or len(postgres_mounts) != 1
                 or postgres_mounts[0].get("RW") is not False
             ):
                 raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
-        elif enabled or secret_mounts:
+        elif enabled:
+            # 只有 worker 装配 Gemini；别的进程带上这个开关就是装配面漏了。
+            raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        elif service == "web-app":
+            # 唯一可写的那一个：配置由管理面写入。
+            if not source_matches or config_mounts[0].get("RW") is not True:
+                raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        elif service in _CONFIG_READ_ONLY_SERVICES:
+            if not source_matches or config_mounts[0].get("RW") is not False:
+                raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
+        elif config_mounts:
+            # api / migrate / postgres 根本不需要 Provider 凭据。
             raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
     if set(service_counts) != set(_MODEL_AUDIT_SERVICES) or any(
         count != 1
@@ -945,11 +1043,12 @@ def _require_web_container_boundary(session: ComposeSession) -> None:
         numeric_user.isdecimal() and int(user_name) == 0
     )
     required_environment = {
-        "XIAOWEI_FEISHU_APP_SECRET_FILE=/run/secrets/feishu_app_secret",
         "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
     }
+    # 飞书 App Secret 不再有自己的挂载点：它在 /run/xiaowei-config/integrations.json
+    # 里，而那份目录的读写属性由 _require_model_secret_boundary 逐服务核对。这里只
+    # 保留身份目录——它仍然是一份独立的、必须只读的输入。
     required_mounts = {
-        "/run/secrets/feishu_app_secret",
         "/run/config/feishu-identities.json",
     }
     reference_boundary_ok = all(

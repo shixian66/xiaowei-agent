@@ -43,10 +43,69 @@ _CHANNEL_ONLY_ENVIRONMENT = _FEISHU_LIVE_ENVIRONMENT | {
 }
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Compose 的 ``!override`` / ``!reset`` 是**渲染期指令**，静态读取时按普通序列对待。
+
+    没有这个 loader，``yaml.safe_load`` 一遇到未注册标签就抛 ``ConstructorError``，
+    于是 ``docker-compose.lan.yml`` 一落地，本文件里所有 compose 契约断言立刻全红。
+    """
+
+
+for _tag in ("!override", "!reset"):
+    _ComposeLoader.add_constructor(
+        _tag, lambda loader, node: loader.construct_sequence(node, deep=True)
+    )
+
+
 def _yaml(name: str) -> dict[str, Any]:
-    value = yaml.safe_load((_ROOT / name).read_text(encoding="utf-8"))
+    value = yaml.load(
+        (_ROOT / name).read_text(encoding="utf-8"),
+        Loader=_ComposeLoader,  # noqa: S506 -- 派生自 SafeLoader，只多认两个标签
+    )
     assert isinstance(value, dict)
     return value
+
+
+_CONFIG_TARGET = "/run/xiaowei-config"
+_CONFIG_CONSUMERS = {"worker", "feishu-listener", "channel-worker"}
+
+
+def _config_mount(*, read_only: bool) -> dict[str, Any]:
+    mount: dict[str, Any] = {
+        "type": "bind",
+        "source": "./.config",
+        "target": _CONFIG_TARGET,
+        "bind": {"create_host_path": False},
+    }
+    if read_only:
+        mount["read_only"] = True
+    return mount
+
+
+_COMPOSE_FILES = frozenset(
+    {
+        "docker-compose.yml",
+        "docker-compose.barrier.yml",
+        "docker-compose.feishu.yml",
+        "docker-compose.lan.yml",
+        "docker-compose.m6b-test.yml",
+        "docker-compose.model.yml",
+        "docker-compose.smoke.yml",
+    }
+)
+
+
+def test_every_compose_file_is_registered_and_parses() -> None:
+    """仓库里的每一份 Compose 文件都必须在闭集里，并且**本文件读得动**。
+
+    两件事一起钉住。多出来一份未登记的 override 就是一次没人审过的部署面变更；
+    而"读得动"是 ``_ComposeLoader`` 的承重点——``!override`` 是渲染期指令，
+    ``yaml.safe_load`` 遇到它直接抛 ``ConstructorError``，于是本文件里所有
+    compose 契约断言会因为一个与它们无关的原因全红。
+    """
+    assert {path.name for path in _ROOT.glob("docker-compose*.yml")} == _COMPOSE_FILES
+    for name in sorted(_COMPOSE_FILES):
+        assert isinstance(_yaml(name), dict), name
 
 
 def test_base_compose_has_the_complete_single_image_topology() -> None:
@@ -80,62 +139,55 @@ def test_model_override_is_worker_only_and_retains_postgres_secret() -> None:
         for service in base["services"].values()
     )
     assert "XIAOWEI_GEMINI_ENABLED" not in base["x-app-environment"]
+    # Provider 凭据不再是 Docker secret：override 只剩"这个部署装配了 Gemini"。
     assert override == {
-        "services": {
-            "worker": {
-                "environment": {"XIAOWEI_GEMINI_ENABLED": "true"},
-                "secrets": ["postgres_password", "gemini_api_key"],
-            }
-        },
-        "secrets": {
-            "gemini_api_key": {
-                "file": "./.secrets/gemini_api_key"
-            }
-        },
+        "services": {"worker": {"environment": {"XIAOWEI_GEMINI_ENABLED": "true"}}}
     }
+    assert "secrets" not in override
 
 
-def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
+def _rendered(*files: str, environment: dict[str, str] | None = None) -> dict[str, Any]:
+    """用真实 compose CLI 渲染；没有 CLI 时 skip（本文件既有做法）。"""
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("Docker CLI is unavailable; compose-smoke remains the no-skip gate")
     command = _resolve_compose_command(docker=docker, runner=_default_runner)
+    arguments: list[str] = [*command]
+    for name in files:
+        arguments.extend(("-f", str(_ROOT / name)))
+    arguments.extend(("config", "--format", "json"))
+    result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
+        arguments,
+        cwd=_ROOT,
+        env=environment if environment is not None else dict(os.environ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_mounts() -> None:
     environment = dict(os.environ)
     environment.pop("GEMINI_API_KEY", None)
     environment["GEMINI_API_KEY_FILE"] = str(
         _ROOT / ".secrets" / "must-not-override-gemini-path"
     )
-    result = subprocess.run(  # noqa: S603 -- binary 由 shutil.which 解析
-        [
-            *command,
-            "-f",
-            str(_ROOT / "docker-compose.yml"),
-            "-f",
-            str(_ROOT / "docker-compose.model.yml"),
-            "config",
-            "--format",
-            "json",
-        ],
-        cwd=_ROOT,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
+    rendered = _rendered(
+        "docker-compose.yml", "docker-compose.model.yml", environment=environment
     )
-    rendered = json.loads(result.stdout)
-    secret = rendered["secrets"]["gemini_api_key"]
-    assert secret["file"] == str(_ROOT / ".secrets" / "gemini_api_key")
-    assert "environment" not in secret
+    # Gemini 不再有 secret 可以被渲染进来；这一条是"已经拆掉"的正面证据。
+    assert "gemini_api_key" not in rendered.get("secrets", {})
     services = rendered["services"]
     assert services["worker"]["environment"]["XIAOWEI_GEMINI_ENABLED"] == "true"
     assert {item["source"] for item in services["worker"]["secrets"]} == {
-        "postgres_password",
-        "gemini_api_key",
+        "postgres_password"
     }
     for name, service in services.items():
-        if name == "worker":
-            continue
-        assert "XIAOWEI_GEMINI_ENABLED" not in service.get("environment", {})
+        if name != "worker":
+            assert "XIAOWEI_GEMINI_ENABLED" not in service.get("environment", {})
         assert "gemini_api_key" not in {
             item["source"] for item in service.get("secrets", ())
         }
@@ -146,6 +198,21 @@ def test_rendered_model_config_keeps_key_out_of_environments_and_non_worker_moun
         )
         for service in services.values()
     )
+
+
+def test_rendered_lan_override_replaces_rather_than_appends_the_port() -> None:
+    """渲染结果**只有一条**端口映射。
+
+    这条只能靠渲染输出判定：静态读 override 文件永远只看得到它自己写的那一条，
+    看不出基础文件的 loopback 映射有没有被换掉。追加语义会渲染出两条，基础的
+    "只发 loopback" 就成了一句空话。
+    """
+    rendered = _rendered("docker-compose.yml", "docker-compose.lan.yml")
+    ports = rendered["services"]["web-app"]["ports"]
+    assert len(ports) == 1
+    assert ports[0]["host_ip"] == "0.0." + "0.0"
+    assert ports[0]["published"] == "8080"
+    assert not any(port.get("host_ip") == "127.0.0.1" for port in ports)
 
 
 def test_local_environment_exists_in_the_registered_target_directory() -> None:
@@ -197,9 +264,10 @@ def test_compose_resources_remain_project_scoped_named_resources() -> None:
 
 def test_secrets_are_file_references_and_never_environment_values() -> None:
     compose = _yaml("docker-compose.yml")
+    # Provider 凭据走 ``.config/integrations.json``，不再是 Docker secret；
+    # 这里只剩部署前就存在的基础设施凭据。
     assert compose["secrets"] == {
-        "postgres_password": {"file": "./.secrets/postgres_password"},
-        "feishu_app_secret": {"file": "./.secrets/feishu_app_secret"},
+        "postgres_password": {"file": "./.secrets/postgres_password"}
     }
     services = compose["services"]
     for service in services.values():
@@ -210,19 +278,20 @@ def test_secrets_are_file_references_and_never_environment_values() -> None:
             assert environment["POSTGRES_PASSWORD_FILE"] == (
                 "/run/secrets/postgres_" + "password"
             )
-    for name in _CHANNEL_SERVICES:
-        assert services[name]["secrets"] == [
-            "postgres_password",
-            "feishu_app_secret",
-        ]
-    for name in _NON_CHANNEL_APP_SERVICES:
+    for name in _APP_SERVICES | {"postgres"}:
         assert services[name]["secrets"] == ["postgres_password"]
-    assert services["postgres"]["secrets"] == ["postgres_password"]
     assert not (_ROOT / ".secrets/postgres_password").exists()
-    assert not (_ROOT / ".secrets/feishu_app_secret").exists()
+    assert "feishu_app_secret" not in (_ROOT / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
 
 
-def test_feishu_identity_bind_is_read_only_and_scoped_to_its_consumers() -> None:
+def test_feishu_identity_bind_is_read_only_and_only_in_the_feishu_override() -> None:
+    """身份目录是**可选插件的输入**，不属于基础文件。
+
+    硬挂在基础文件上时，干净部署没有 ``./.secrets/feishu-identities.json`` 就会让
+    容器直接起不来（``create_host_path`` 是 false），runbook 第 5 步必然失败。
+    """
     compose = _yaml("docker-compose.yml")
     services = compose["services"]
     assert "configs" not in compose
@@ -233,11 +302,39 @@ def test_feishu_identity_bind_is_read_only_and_scoped_to_its_consumers() -> None
         "read_only": True,
         "bind": {"create_host_path": False},
     }
-    assert services["feishu-listener"]["volumes"] == [expected]
-    assert services["web-app"]["volumes"] == [expected]
-    for name in (_APP_SERVICES | {"postgres"}) - {"feishu-listener", "web-app"}:
+    for name in _APP_SERVICES | {"postgres"}:
         assert expected not in services[name].get("volumes", [])
+
+    override = _yaml("docker-compose.feishu.yml")
+    assert set(override) == {"services"}
+    assert set(override["services"]) == {"feishu-listener", "web-app"}
+    assert override["services"]["feishu-listener"]["volumes"] == [
+        _config_mount(read_only=True),
+        expected,
+    ]
+    assert override["services"]["web-app"]["volumes"] == [
+        _config_mount(read_only=False),
+        expected,
+    ]
     assert not (_ROOT / ".secrets/feishu-identities.json").exists()
+
+
+def test_the_config_directory_is_writable_only_for_the_web_app() -> None:
+    """配置目录的读写属性就是"谁能改这台机器的 Provider 凭据"。
+
+    ``api`` 完全不挂：它既不消费 Provider，也不该在一次读接口的进程里出现明文
+    凭据；三个消费进程只读；只有写配置的 ``web-app`` 可写。
+    """
+    services = _yaml("docker-compose.yml")["services"]
+    for name in _CONFIG_CONSUMERS:
+        assert services[name]["volumes"] == [_config_mount(read_only=True)]
+    assert services["web-app"]["volumes"] == [_config_mount(read_only=False)]
+    for name in (_APP_SERVICES | {"postgres"}) - _CONFIG_CONSUMERS - {"web-app"}:
+        assert all(
+            volume.get("target") != _CONFIG_TARGET
+            for volume in services[name].get("volumes", [])
+            if isinstance(volume, dict)
+        )
 
 
 def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None:
@@ -260,21 +357,23 @@ def test_app_services_are_read_only_unprivileged_and_use_exec_commands() -> None
 
 
 def test_channel_processes_are_profile_gated_and_default_fail_closed() -> None:
+    """飞书两个进程仍是 profile 后的可选插件；``web-app`` 不是。
+
+    Web 是本里程碑的主入口，留在 profile 里等于普通 ``up -d`` 永远拉不起它——
+    runbook 第 5 步会静默什么都不做，而运维要到打不开页面时才发现。
+    """
     compose = _yaml("docker-compose.yml")
     services = compose["services"]
     expected_flags = {
         "feishu-listener": {"XIAOWEI_FEISHU_LISTENER_ENABLED": "false"},
         "channel-worker": {"XIAOWEI_CHANNEL_WORKER_ENABLED": "false"},
-        "web-app": {
-            "XIAOWEI_WEB_APP_ENABLED": "false",
-            "XIAOWEI_FEISHU_OAUTH_ENABLED": "false",
-        },
     }
-    for name in _CHANNEL_SERVICES:
+    for name in _CHANNEL_SERVICES - {"web-app"}:
         assert services[name]["profiles"] == ["m7-channels"]
         environment = services[name]["environment"]
         assert expected_flags[name].items() <= environment.items()
         assert not (_FEISHU_LIVE_ENVIRONMENT & environment.keys())
+    assert "profiles" not in services["web-app"]
 
     assert not (_CHANNEL_ONLY_ENVIRONMENT & compose["x-app-environment"].keys())
     for name in _NON_CHANNEL_APP_SERVICES | {"postgres"}:
@@ -284,6 +383,24 @@ def test_channel_processes_are_profile_gated_and_default_fail_closed() -> None:
         "0.0." + "0.0"
     )
     assert services["web-app"]["environment"]["XIAOWEI_WEB_BIND_PORT"] == "8080"
+
+
+def test_web_switches_are_interpolated_and_still_default_to_closed() -> None:
+    """写字面量时 ``.env`` 改不动它们——Compose 的 ``environment:`` 优先级更高。
+
+    默认值必须仍是关闭：这条改的是"能不能被覆盖"，不是"默认开不开"。
+    """
+    environment = _yaml("docker-compose.yml")["services"]["web-app"]["environment"]
+    expected = {
+        "XIAOWEI_WEB_APP_ENABLED": "false",
+        "XIAOWEI_FEISHU_OAUTH_ENABLED": "false",
+        "XIAOWEI_GEMINI_REAL_TEST_ENABLED": "false",
+        "XIAOWEI_FEISHU_REAL_TEST_ENABLED": "false",
+        "XIAOWEI_WEB_MODE": "https",
+        "XIAOWEI_WEB_PUBLIC_ORIGIN": "",
+    }
+    for key, default in expected.items():
+        assert environment[key] == f"${{{key}:-{default}}}", key
 
 
 def test_compose_healthchecks_use_available_binaries_and_no_shell() -> None:

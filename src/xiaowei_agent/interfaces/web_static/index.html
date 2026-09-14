@@ -116,6 +116,83 @@
           </div>
         </section>
 
+        <!-- 配置面：只有本地管理员能读到 /app/api/config，其余身份这一块保持隐藏。 -->
+        <section class="config-panel is-hidden" id="config-panel" aria-labelledby="config-title">
+          <div class="stage-heading">
+            <div>
+              <p class="eyebrow">PROVIDER CONFIG</p>
+              <h2 id="config-title">Provider 配置</h2>
+              <p>凭据只进不出：保存后页面永远只显示「已配置 / 未配置」。</p>
+            </div>
+            <span class="generation-pill" id="config-generation">代次 —</span>
+          </div>
+
+          <p class="config-notice is-hidden" id="config-restart-notice" role="status">
+            已保存。新配置需要在宿主机重启对应进程后才会生效。
+          </p>
+          <p class="form-message is-hidden" id="config-message" role="alert"></p>
+
+          <article class="config-card" data-provider="gemini">
+            <header class="config-card-head">
+              <h3>Gemini</h3>
+              <span class="config-flag" id="gemini-configured">未配置</span>
+            </header>
+            <dl class="config-fixed">
+              <div><dt>模型</dt><dd id="gemini-model">—</dd></div>
+              <div><dt>接口版本</dt><dd id="gemini-api-version">—</dd></div>
+              <div><dt>出站 Origin</dt><dd id="gemini-origin">—</dd></div>
+            </dl>
+            <label class="config-switch">
+              <input type="checkbox" id="gemini-enabled">
+              <span>启用 Gemini</span>
+            </label>
+            <label class="config-field">
+              <span>API Key</span>
+              <input type="password" id="gemini-api-key" autocomplete="off" placeholder="留空表示不修改">
+            </label>
+            <div class="config-checks">
+              <span class="state-badge" id="check-gemini_connection">—</span>
+              <button class="button button-secondary" id="test-gemini_connection" type="button">测试连接</button>
+            </div>
+            <div class="config-actions">
+              <button class="button button-primary" id="save-gemini" type="button">保存 Gemini</button>
+              <button class="button button-quiet" id="clear-gemini" type="button">清除 Gemini</button>
+            </div>
+          </article>
+
+          <article class="config-card" data-provider="feishu">
+            <header class="config-card-head">
+              <h3>飞书</h3>
+              <span class="config-flag" id="feishu-configured">未配置</span>
+            </header>
+            <dl class="config-fixed">
+              <div><dt>回调地址</dt><dd id="feishu-callback">—</dd></div>
+            </dl>
+            <label class="config-switch">
+              <input type="checkbox" id="feishu-enabled">
+              <span>启用飞书</span>
+            </label>
+            <label class="config-field">
+              <span>App ID</span>
+              <input type="text" id="feishu-app-id" autocomplete="off" placeholder="cli_...">
+            </label>
+            <label class="config-field">
+              <span>App Secret</span>
+              <input type="password" id="feishu-app-secret" autocomplete="off" placeholder="留空表示不修改">
+            </label>
+            <div class="config-checks">
+              <span class="state-badge" id="check-feishu_credentials">—</span>
+              <button class="button button-secondary" id="test-feishu_credentials" type="button">测试凭据</button>
+              <span class="state-badge" id="check-feishu_oauth">—</span>
+              <button class="button button-secondary" id="test-feishu_oauth" type="button">测试 OAuth 回调</button>
+            </div>
+            <div class="config-actions">
+              <button class="button button-primary" id="save-feishu" type="button">保存飞书</button>
+              <button class="button button-quiet" id="clear-feishu" type="button">清除飞书</button>
+            </div>
+          </article>
+        </section>
+
         <section class="task-stage" aria-labelledby="current-task-title">
           <div class="stage-heading">
             <div>

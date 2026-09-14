@@ -120,6 +120,10 @@ _ALLOWED_INTERNAL_BY_FILE = {
     "interfaces/integration_config_file.py": {
         "xiaowei_agent.contracts",
     },
+    "interfaces/config_preflight.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/provider_probe.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.contracts",

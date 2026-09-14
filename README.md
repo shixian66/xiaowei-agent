@@ -225,10 +225,13 @@ export XIAOWEI_WEB_APP_ENABLED=false
 export XIAOWEI_FEISHU_OAUTH_ENABLED=false
 ```
 
-`docker-compose.yml` 以 `m7-channels` profile 声明 `feishu-listener`、`channel-worker` 与
-`web-app`，四个开关在基础文件中都固定为 `false`。它们与 API/Worker 共用同一镜像；
-listener/worker 不发布宿主端口。Web 容器内使用 HTTP `0.0.0.0:8080`，宿主只发布
-`127.0.0.1:8080`，因此基础 Compose 不能通过服务器或局域网 IP 访问。
+`docker-compose.yml` 以 `m7-channels` profile 声明 `feishu-listener` 与 `channel-worker`；
+**`web-app` 自 RI5 起不在 profile 里**——它是本地管理面的主入口，普通 `up -d` 就应拉起它。
+Web 相关的四个开关（`XIAOWEI_WEB_APP_ENABLED`、`XIAOWEI_FEISHU_OAUTH_ENABLED` 与两个
+`*_REAL_TEST_ENABLED`）在基础文件里写成 `${...:-false}`：默认仍然关闭，但 `.env` 真的能覆盖它们。
+写成字面量时 Compose 的 `environment:` 优先级高于 `.env`，改了也不会生效。
+它们与 API/Worker 共用同一镜像；listener/worker 不发布宿主端口。Web 容器内使用 HTTP
+`0.0.0.0:8080`，宿主只发布 `127.0.0.1:8080`，因此基础 Compose 不能通过服务器或局域网 IP 访问。
 
 `http://127.0.0.1:8080/healthz` 和 `/readyz` 只供本机健康检查，不能用来完成浏览器登录。
 OAuth 浏览器入口仍必须使用已经备案的 HTTPS SSO 域名，并由 Compose 外部的 TLS/反向代理转发到
@@ -266,41 +269,118 @@ watchdog，且不重试；两者都没有读取
 `admin` 拥有当前渠道权限闭集。映射在 listener 或 Web app 装配时一次读取，修改后必须重启对应
 进程才生效。
 
-Compose 启动 Web 前要准备三个已被 Git 忽略的本地文件：
+Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 
 - `.secrets/postgres_password`
-- `.secrets/feishu_app_secret`
-- `.secrets/feishu-identities.json`
 
-`.secrets/` 保持 `0700`，三个文件写完后保持 `0444`。App secret 只能写入文件，不能放进环境变量、
-命令行、日志或已跟踪的 Compose 文件；请使用不会回显、不会进入 shell 历史的本地方式写入。
+`.secrets/` 保持 `0700`，文件写完后保持 `0444`。
 
-启用 Gemini model override 时，再准备固定文件 `.secrets/gemini_api_key`，同样保持 `0444`。
-这是唯一包含 key 明文的宿主文件；不要把 key 或文件路径写进 `.env`。模型名、endpoint、timeout
-等仍是代码固定值，不需要填写。
+**Provider 凭据不再是 Docker secret。** 自 RI5 起 Gemini API Key 与飞书 App ID / App Secret 的
+唯一真源是 `.config/integrations.json`，由本地管理面写入。`.config/` 已被 `.gitignore` 与
+`.dockerignore` 忽略；`web-app` 以读写方式挂载它，`worker` / `feishu-listener` / `channel-worker`
+只读挂载，`api` 完全不挂。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
 
-基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，应把下面这种 override 存在已忽略的
-`.secrets/docker-compose.feishu-local.yml`，再替换本机的 App ID 与 HTTPS SSO origin；不要把真实值提交：
+启用飞书 OAuth 时另外准备 `.secrets/feishu-identities.json`，并叠加 `docker-compose.feishu.yml`；
+不启用飞书时**不需要**这个文件——它不在基础 Compose 里，干净部署不会因为缺它而起不来。
 
-```yaml
-services:
-  web-app:
-    environment:
-      XIAOWEI_WEB_APP_ENABLED: "true"
-      XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
-      XIAOWEI_FEISHU_IDENTITY_FILE: /run/config/feishu-identities.json
-      XIAOWEI_WEB_PUBLIC_ORIGIN: https://sso.example.invalid
-```
+#### 首启顺序（RI5 本地管理面）
 
-数据库与 migration 就绪后，显式启用 profile 和 override：
+**这几步不能跳过，也不能换顺序。** 第 8 步之前套用 LAN override，初始口令 `admin/admin`
+就会暴露给同网段。
+
+1. 建目录。容器以 UID/GID `10001` 运行，属主对不上时 Web 起得来但**存不下配置**——
+   管理员会在填完表单点保存时才发现：
+
+   ```bash
+   mkdir -p .config && chmod 700 .config
+   # Linux Docker Engine 另需（macOS Docker Desktop 跳过）：
+   sudo chown 10001:10001 .config
+   ```
+
+2. 在 `.env` 写入首启参数。这些键现在真的会被 Compose 插值消费：
+
+   ```bash
+   XIAOWEI_WEB_APP_ENABLED=true
+   XIAOWEI_WEB_MODE=lan_http
+   XIAOWEI_WEB_PUBLIC_ORIGIN=http://127.0.0.1:8080
+   ```
+
+   `lan_http` 接受 canonical loopback，因此首启阶段不必先架 HTTPS。
+
+3. 探测本机可用的 Compose 命令。**不要假定 `docker compose` 存在**——本机实测只有
+   `docker-compose 5.5.1`，`docker compose` 返回 `unknown command`：
+
+   ```bash
+   if docker compose version >/dev/null 2>&1; then
+     compose() { docker compose "$@"; }
+   elif docker-compose version >/dev/null 2>&1; then
+     compose() { docker-compose "$@"; }
+   else
+     echo "no compose CLI" >&2; return 1
+   fi
+   ```
+
+   **必须用 shell 函数，不能用 `COMPOSE="docker compose"` 加 `$COMPOSE`。** zsh 对未加引号的
+   参数展开不做分词，`$COMPOSE` 会被当成一个名为 `docker compose`（含空格）的命令，直接
+   `command not found`；bash 下碰巧能用，zsh 下必错。后续步骤统一写 `compose ...`。
+
+4. **先跑预检，成功后才启动 Web**：
+
+   ```bash
+   compose run --rm --no-deps \
+     -v "$PWD/.config:/run/xiaowei-config" \
+     web-app python -m xiaowei_agent.interfaces.config_preflight
+   ```
+
+   只应输出 `preflight: ok`。预检写的是哨兵文件 `.preflight-probe.json` 并在退出前删除，
+   不会生成也不会改动 `integrations.json`。失败时**不要**继续——目录属主或权限不对，
+   Web 起来也存不下配置。
+
+5. 启动。基础文件只发布 `127.0.0.1:8080`，`web-app` 已不在 profile 里：
+
+   ```bash
+   compose up -d
+   ```
+
+6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
+
+7. 改密完成后，再把 `.env` 的 public origin 改成局域网地址：
+
+   ```bash
+   XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
+   ```
+
+8. 叠加 LAN override 重建：
+
+   ```bash
+   compose -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
+   ```
+
+   重建后核对渲染结果**只有一条**端口映射：
+
+   ```bash
+   compose -f docker-compose.yml -f docker-compose.lan.yml config | grep -A3 'ports:'
+   ```
+
+9. 从局域网地址用新密码重新登录。旧 Cookie 因 origin digest 变化已失效，属预期。
+
+启用飞书时额外叠加 `-f docker-compose.feishu.yml` 并准备 `./.secrets/feishu-identities.json`。
+
+**残余风险**：在第 6 步之前套用 LAN override，`admin/admin` 会暴露给同网段。补救是改密后
+重建 Web 并撤销全部 `local_admin` session。
+
+#### 飞书 OAuth
+
+基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，在 `.env` 打开
+`XIAOWEI_FEISHU_OAUTH_ENABLED=true` 并设置 HTTPS SSO origin，然后叠加飞书 override：
 
 ```bash
-docker compose -f docker-compose.yml -f .secrets/docker-compose.feishu-local.yml \
-  --profile m7-channels up -d --wait --no-deps web-app
+compose -f docker-compose.yml -f docker-compose.feishu.yml \
+  up -d --force-recreate web-app
 ```
 
-如果本机只有 standalone CLI，把命令开头的 `docker compose` 换成 `docker-compose`。回滚时先停止
-`web-app`，并把私有 override 中的 Web/OAuth 两个开关都改回 `false`；再次创建容器前不得保留单边开启。
+App ID 与 App Secret 在管理面填写，不进 `.env`、不进命令行、不进任何已跟踪文件。回滚时先停止
+`web-app`，把 `.env` 里的 Web/OAuth 两个开关都改回 `false`；再次创建容器前不得保留单边开启。
 listener 与 channel-worker 仍保持关闭，直到各自取得独立现场许可。离线验证不构成真实渠道授权。
 
 ### 集成测试（M4）
@@ -367,18 +447,20 @@ docker compose down --volumes --remove-orphans
 python -m scripts.compose_smoke
 ```
 
-脚本要求 Docker Compose 2.24.4 或更新版本。RI3 PR 3B 在同一 workflow 的末段临时叠加
-`docker-compose.model.yml`，创建一次性的拆分 fake key 文件，只通过 Docker
-inspect 的 label/environment/mount 元数据证明 worker 获得固定只读 mount、所有已创建的
-非 worker 容器都没有该 mount；脚本不打开或输出 secret 文件。基础 Compose 仍默认关闭模型。
+脚本要求 Docker Compose 2.24.4 或更新版本。自 RI5 起同一 workflow 的末段临时叠加
+`docker-compose.model.yml`，只通过 Docker inspect 的 label/environment/mount 元数据证明
+**配置目录按各进程的角色挂载**：`worker` / `feishu-listener` / `channel-worker` 只读、
+`web-app` 可写、`api` / `migrate` / `postgres` 完全没有；脚本不打开或输出配置文件。
+基础 Compose 仍默认关闭模型。
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
-下创建一次性的 `0700` UUID 私有目录，以 `O_EXCL` 写入四个 fake 输入和一个不含 secret 值的
-JSON Compose override；override 把全部 fake secret/config（含 Gemini key 文件）引用指向该私有
-目录，不读取或覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离该
-目录，再核对目录与五个已知文件的 inode，且不递归
-删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
+下创建**两个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令、身份文件与不含
+secret 值的 JSON Compose override，另一个只放一份合成的 `integrations.json`。两者分开是必要的
+——配置目录是**整目录**挂进容器的，与口令同目录时那份口令会一起出现在 worker 的
+`/run/xiaowei-config` 下。override 把配置目录与身份文件的引用都指向这两个私有目录，不读取或
+覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离目录，再核对目录与
+各自已知文件的 inode，且不递归删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地
 `HTTPConnection` 请求一次受信 Host 的 `/oauth/feishu/start`，核对 302、官方 Location、一次性
 state 和安全 cookie；随后用直接 IP Host 证明固定 403，并把 state 加入日志泄漏扫描。它不请求

@@ -3093,6 +3093,82 @@ git add Dockerfile docker-compose.yml docker-compose.model.yml docker-compose.sm
 git commit -m "feat(ri5): move provider credentials to a mounted config directory"
 ```
 
+
+#### 执行记录（Task 8）
+
+**未联网、未部署、未调用真实 Provider。** `docker-compose config` 是纯静态渲染，不拉镜像、
+不起容器；`python -m scripts.compose_smoke` **没有执行**——它会 build 镜像（拉依赖源）并
+`up` 一整套容器，属于"联网 + 部署"，超出本轮授权。它的 136 条脚本测试与全部 Compose 契约
+测试都是绿的，但**真机 smoke 未取得**，这一条留给 Task 9 的现场验收。
+
+**diff 摘要**
+
+| 文件 | 变化 |
+|---|---|
+| `Dockerfile` | `--uid 10001 --gid 10001` |
+| `docker-compose.yml` | `web-app` 移出 profile；六个 Web 开关改插值；`.config` 按角色挂载；删 `feishu_app_secret` secret 与身份文件 bind |
+| `docker-compose.model.yml` | 删 `gemini_api_key` secret，只剩装配开关 |
+| `docker-compose.lan.yml`（新） | `ports: !override` |
+| `docker-compose.feishu.yml`（新） | 身份文件 bind + 各自的 `.config` 挂载 |
+| `interfaces/config_preflight.py`（新） | 哨兵文件预检，闭集输出 |
+| `web_static/index.html` / `app.js` / `app.css` | 配置面板 |
+| `scripts/compose_smoke.py` | 两个私有命名空间；合成 `integrations.json` 取代两个 Provider secret |
+| `README.md` | 九步首启 runbook、残余风险、smoke 说明 |
+| `.gitignore` / `.dockerignore` | `.config` |
+
+**相关测试**：`tests/security/test_ri5_compose_boundary.py`（新，21）、
+`tests/contract/test_compose_contract.py`（+2，改 6）、
+`tests/contract/test_compose_smoke_script.py`（改 12）。
+
+**四条基线**：`3781 passed, 237 skipped` / `1402 security passed, 80 skipped` /
+`ruff: All checks passed!` / `mypy: 175 source files` / `git diff --check` 干净。
+
+**反证（逐条改坏 → 变红 → 恢复）**
+
+```text
+web-app 回到 m7-channels profile      -> 4 failed
+Web 开关写回字面量                    -> 2 failed
+LAN override 改成追加而不是 !override -> 3 failed
+身份文件搬回基础 compose              -> 3 failed
+api 也挂配置目录                      -> 2 failed
+worker 的配置挂载去掉只读             -> 2 failed
+Dockerfile 回到分配式 uid             -> 1 failed
+预检哨兵文件名写成 integrations.json  -> 2 failed
+预检不删哨兵文件                      -> 2 failed
+_yaml 换回 safe_load                  -> 1 failed（补断言后）
+新增一份未登记的 compose 文件         -> 1 failed
+前端把固定模型名抄错                  -> 1 failed
+恢复后                                175 passed
+```
+
+**"`_yaml` 换回 safe_load"第一次没变红。** 计划说加 `_ComposeLoader` 是因为
+`test_compose_contract.py` 会因 `!override` 全红——但我把 LAN 相关断言放进了新的边界文件，
+那个 loader 于是谁都不需要，成了一条"看着在守、其实没守"的死代码。补
+`test_every_compose_file_is_registered_and_parses`：它用 `_yaml()` 读**每一份** compose 文件
+（含 LAN override），既让 loader 真正承重，又顺带把"仓库里多出一份没人审过的 override"
+变成可检测的事。
+
+**六处需要留痕的判断**
+
+1. **`docker-compose.model.yml` 只剩一个开关。** Gemini Key 与飞书凭据同处一份
+   `integrations.json`，再留一个 Docker secret 就是第二条凭据路径。
+2. **身份文件从基础文件移进 `docker-compose.feishu.yml`。** `create_host_path: false` 的 bind
+   在文件缺失时让容器**直接起不来**：干净部署（不启用飞书）会卡在 runbook 第 5 步。
+3. **compose_smoke 用两个私有命名空间。** 配置目录是**整目录**挂进容器的；与 postgres 口令
+   同目录时，那份口令会一起出现在 worker 的 `/run/xiaowei-config` 下。
+4. **smoke 的 override 不需要 `!override`。** 实测 Compose 按**目标路径**合并卷：同一个
+   `/run/xiaowei-config` 目标会被 override 整条替换。因此生成的仍是 JSON，文件名与既有
+   断言都不用动。
+5. **清理诊断只挂一次。** 两个命名空间都清理失败时重复挂同一条闭集码，会让读者以为发生了
+   两类不同的失败；第一条本身就成为被抛出的异常时，更不该再给它挂一条同名 note。
+6. **前端那三个 Gemini 常量是抄的。** 静态资源拿不到 Python 常量，抄本身不是问题——**抄了
+   之后没人比对**才是。`test_the_page_shows_the_same_fixed_gemini_constants_as_the_adapter`
+   就是那个比对。
+
+另外，计划里说 `docker-compose.smoke.yml` 还带着 `XIAOWEI_FEISHU_APP_ID` / `_SECRET_FILE`
+两行——实际已经不在了，早前的 Task 已经清掉。`_require_web_container_boundary` 里那条
+`XIAOWEI_FEISHU_APP_SECRET_FILE=` 断言则确实还在，本轮删除。
+
 ---
 
 ### Task 9: 全量验收与交接

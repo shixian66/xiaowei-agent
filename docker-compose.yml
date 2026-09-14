@@ -76,6 +76,13 @@ services:
   worker:
     <<: *app-service
     command: ["python", "-m", "xiaowei_agent.interfaces.worker"]
+    volumes:
+      - type: bind
+        source: ./.config
+        target: /run/xiaowei-config
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -87,13 +94,10 @@ services:
     environment:
       <<: *app-environment
       XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
-    secrets:
-      - postgres_password
-      - feishu_app_secret
     volumes:
       - type: bind
-        source: ./.secrets/feishu-identities.json
-        target: /run/config/feishu-identities.json
+        source: ./.config
+        target: /run/xiaowei-config
         read_only: true
         bind:
           create_host_path: false
@@ -108,31 +112,41 @@ services:
     environment:
       <<: *app-environment
       XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
-    secrets:
-      - postgres_password
-      - feishu_app_secret
+    volumes:
+      - type: bind
+        source: ./.config
+        target: /run/xiaowei-config
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       migrate:
         condition: service_completed_successfully
 
+  # 本里程碑的主入口，**不在 profile 里**：普通 ``docker compose up -d`` 就该拉起
+  # 它，否则 runbook 第 5 步永远启动不了 Web。飞书那两个进程仍留在 m7-channels，
+  # 因为飞书是可选插件。
   web-app:
     <<: *app-service
-    profiles: ["m7-channels"]
     command: ["python", "-m", "xiaowei_agent.interfaces.web_app"]
     environment:
       <<: *app-environment
-      XIAOWEI_WEB_APP_ENABLED: "false"
-      XIAOWEI_FEISHU_OAUTH_ENABLED: "false"
+      # 全部用带默认值的插值：写字面量时 Compose 的 environment 优先级高于 .env，
+      # 于是 `.env` 里改这些键**不会生效**，而运维只会以为自己改了。
+      # 默认值一律保持关闭，"默认关闭"这条承诺不变。
+      XIAOWEI_WEB_APP_ENABLED: "${XIAOWEI_WEB_APP_ENABLED:-false}"
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "${XIAOWEI_FEISHU_OAUTH_ENABLED:-false}"
+      XIAOWEI_WEB_MODE: "${XIAOWEI_WEB_MODE:-https}"
+      XIAOWEI_WEB_PUBLIC_ORIGIN: "${XIAOWEI_WEB_PUBLIC_ORIGIN:-}"
+      XIAOWEI_GEMINI_REAL_TEST_ENABLED: "${XIAOWEI_GEMINI_REAL_TEST_ENABLED:-false}"
+      XIAOWEI_FEISHU_REAL_TEST_ENABLED: "${XIAOWEI_FEISHU_REAL_TEST_ENABLED:-false}"
       XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
       XIAOWEI_WEB_BIND_PORT: "8080"
-    secrets:
-      - postgres_password
-      - feishu_app_secret
+    # 唯一可写的那一份：配置由管理面写入，其余进程只读。
     volumes:
       - type: bind
-        source: ./.secrets/feishu-identities.json
-        target: /run/config/feishu-identities.json
-        read_only: true
+        source: ./.config
+        target: /run/xiaowei-config
         bind:
           create_host_path: false
     depends_on:
@@ -151,11 +165,11 @@ services:
       retries: 30
       start_period: 5s
 
+# Provider 凭据不再走 Docker secret：它们由管理面写进 ``.config/integrations.json``，
+# 一份明文、一处真源。这里只剩数据库口令，它是部署前就存在的基础设施凭据。
 secrets:
   postgres_password:
     file: ./.secrets/postgres_password
-  feishu_app_secret:
-    file: ./.secrets/feishu_app_secret
 
 volumes:
   postgres_data:

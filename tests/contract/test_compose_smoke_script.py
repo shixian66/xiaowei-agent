@@ -38,12 +38,12 @@ class ModelAuditRunner(RecordingRunner):
         services: tuple[str, ...],
         *,
         failure_at: str | None = None,
-        gemini_source: str = "/workspace/fixtures/fake-gemini-key",
+        config_source: str = "/workspace/fixtures/private-config",
         worker_environment: tuple[str, ...] = ("XIAOWEI_GEMINI_ENABLED=true",),
     ) -> None:
         super().__init__()
         self.failure_at = failure_at
-        self.gemini_source = gemini_source
+        self.config_source = config_source
         self.worker_environment = worker_environment
         self.service_by_container = {
             f"model-container-{index}": service
@@ -70,18 +70,21 @@ class ModelAuditRunner(RecordingRunner):
             service = self.service_by_container[call[-1]]
             mounts: list[dict[str, object]] = []
             environment: list[str] = []
-            if service == "worker":
+            if service in (*compose_smoke._CONFIG_READ_ONLY_SERVICES, "web-app"):
                 mounts = [
                     {
-                        "Source": self.gemini_source,
-                        "Destination": "/run/secrets/gemini_api_key",
-                        "RW": False,
-                    },
+                        "Source": self.config_source,
+                        "Destination": "/run/xiaowei-config",
+                        "RW": service == "web-app",
+                    }
+                ]
+            if service == "worker":
+                mounts.append(
                     {
                         "Destination": "/run/secrets/postgres_password",
                         "RW": False,
-                    },
-                ]
+                    }
+                )
                 environment = list(self.worker_environment)
             return subprocess.CompletedProcess(
                 argv,
@@ -365,7 +368,8 @@ def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
             else ["SMOKE_INPUT_CLEANUP_FAILED"]
         )
     assert len([call for call in runner.calls if "down" in call]) == 1
-    assert input_cleanup_calls == 1
+    # 输入命名空间与配置目录命名空间各清一次。
+    assert input_cleanup_calls == 2
     assert list((tmp_path / ".secrets").iterdir()) == []
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
@@ -471,12 +475,16 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
                 service = call[-1].removesuffix("-id")
                 mounts: list[dict[str, object]] = []
                 environment: list[str] = []
-                if service == "worker" or leak_to_api:
+                writable = service == "web-app"
+                if (
+                    service in ("worker", "feishu-listener", "channel-worker", "web-app")
+                    or leak_to_api
+                ):
                     mounts = [
                         {
-                            "Source": "/workspace/fixtures/fake-gemini-key",
-                            "Destination": "/run/secrets/gemini_api_key",
-                            "RW": False,
+                            "Source": "/workspace/fixtures/private-config",
+                            "Destination": "/run/xiaowei-config",
+                            "RW": writable,
                         }
                     ]
                 if service == "worker":
@@ -505,7 +513,7 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
         sensitive_values=("AIza" + "fake-smoke-value",),
-        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+        config_source=Path("/workspace/fixtures/private-config"),
     )
 
     if leak_to_api:
@@ -554,7 +562,7 @@ def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+        config_source=Path("/workspace/fixtures/private-config"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -570,7 +578,7 @@ def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+        config_source=Path("/workspace/fixtures/private-config"),
     )
 
     compose_smoke._require_model_secret_boundary(session)
@@ -581,12 +589,12 @@ def test_model_secret_smoke_rejects_an_unexpected_host_source() -> None:
         docker="/usr/bin/docker",
         runner=ModelAuditRunner(
             compose_smoke._MODEL_AUDIT_SERVICES,
-            gemini_source="/workspace/fixtures/unexpected-gemini-key",
+            config_source="/workspace/fixtures/unexpected-config",
         ),
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+        config_source=Path("/workspace/fixtures/private-config"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -615,7 +623,7 @@ def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        model_secret_source=Path("/workspace/fixtures/fake-gemini-key"),
+        config_source=Path("/workspace/fixtures/private-config"),
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -806,13 +814,12 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         observed_sensitive_values = session.sensitive_values
         override = json.loads(session.files[-1].read_text(encoding="utf-8"))
         postgres = Path(override["secrets"]["postgres_password"]["file"])
-        feishu = Path(override["secrets"]["feishu_app_secret"]["file"])
-        identities = Path(
-            override["services"]["web-app"]["volumes"][0]["source"]
-        )
-        gemini = Path(override["secrets"]["gemini_api_key"]["file"])
-        assert session.model_secret_source == gemini
-        observed_paths = (postgres, feishu, identities, gemini)
+        web_volumes = override["services"]["web-app"]["volumes"]
+        config_directory = Path(web_volumes[0]["source"])
+        identities = Path(web_volumes[1]["source"])
+        config_file = config_directory / "integrations.json"
+        assert session.config_source == config_directory
+        observed_paths = (postgres, identities, config_file)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
@@ -824,10 +831,17 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
             "environment_id": "dev",
             "entries": [],
         }
+        # 合成配置里的两个假串必须都在脱敏名单里：它们会随容器日志与 inspect
+        # 输出流过多处，漏掉一个就等于漏掉一整条泄露通道。
+        document = json.loads(config_file.read_text(encoding="utf-8"))
         assert postgres.read_text(encoding="utf-8").strip() in session.sensitive_values
-        assert feishu.read_text(encoding="utf-8").strip() in session.sensitive_values
-        assert gemini.read_text(encoding="utf-8").strip() in session.sensitive_values
-        assert str(gemini) not in session.sensitive_values
+        assert document["gemini"]["api_key"] in session.sensitive_values
+        assert document["feishu"]["app_secret"] in session.sensitive_values
+        assert str(config_file) not in session.sensitive_values
+        # 配置目录是独占的：postgres 口令与 override 文档都不在里面。
+        assert sorted(path.name for path in config_directory.iterdir()) == [
+            "integrations.json"
+        ]
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -859,29 +873,34 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", override.parent.name)
         assert stat.S_IMODE(override.parent.stat().st_mode) == 0o700
         document = json.loads(override.read_text(encoding="utf-8"))
+        assert set(document["secrets"]) == {"postgres_password"}
         postgres = Path(document["secrets"]["postgres_password"]["file"])
-        feishu = Path(document["secrets"]["feishu_app_secret"]["file"])
-        identity_mount = document["services"]["web-app"]["volumes"][0]
+        config_mount, identity_mount = document["services"]["web-app"]["volumes"]
         identity = Path(identity_mount["source"])
-        gemini = Path(document["secrets"]["gemini_api_key"]["file"])
-        assert session.model_secret_source == gemini
-        assert {path.parent for path in (postgres, feishu, identity, gemini)} == {
-            override.parent
-        }
-        assert {path.name for path in (postgres, feishu, identity, gemini)} == {
+        config_directory = Path(config_mount["source"])
+        assert session.config_source == config_directory
+        assert {path.parent for path in (postgres, identity)} == {override.parent}
+        assert {path.name for path in (postgres, identity)} == {
             "postgres_password",
-            "feishu_app_secret",
             "feishu-identities.json",
-            "gemini_api_key",
         }
+        # 配置目录是**另一个**私有命名空间：与 postgres 口令同目录时，整目录挂载
+        # 会把那份口令也送进 worker 的 /run/xiaowei-config。
+        assert config_directory.parent == input_root
+        assert config_directory != override.parent
+        assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", config_directory.name)
         assert identity_mount["target"] == "/run/config/feishu-identities.json"
         assert identity_mount["read_only"] is True
-        assert document["services"]["feishu-listener"]["volumes"] == [
-            identity_mount
-        ]
+        assert config_mount["target"] == "/run/xiaowei-config"
+        assert "read_only" not in config_mount  # web-app 是唯一可写的那一个
+        listener_volumes = document["services"]["feishu-listener"]["volumes"]
+        assert listener_volumes[1] == identity_mount
+        assert listener_volumes[0]["read_only"] is True
+        for name in ("worker", "channel-worker"):
+            assert document["services"][name]["volumes"] == [listener_volumes[0]]
+        assert "api" not in document["services"]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
-        assert str(gemini) in override_text
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -939,8 +958,6 @@ def test_partial_private_input_failure_cleans_only_the_private_namespace(
         (3, RuntimeError),
         (4, KeyboardInterrupt),
         (4, RuntimeError),
-        (5, KeyboardInterrupt),
-        (5, RuntimeError),
     ],
 )
 def test_smoke_input_bundle_cleans_prior_files_after_any_base_exception(
@@ -1012,7 +1029,8 @@ def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
 
     assert caught.value is primary_error
     assert caught.value.__notes__ == ["SMOKE_INPUT_CLEANUP_FAILED"]
-    assert cleanup_calls == 1
+    # 两个私有命名空间（输入 + 配置目录）各清一次，诊断仍只有一条。
+    assert cleanup_calls == 2
     assert list(input_root.iterdir()) == []
 
 
@@ -1052,7 +1070,8 @@ def test_smoke_input_bundle_cleanup_preserves_a_note_rejecting_base_error(
 
     assert caught.value is primary_error
     assert primary_error.attempted_notes == ["SMOKE_INPUT_CLEANUP_FAILED"]
-    assert cleanup_calls == 1
+    # 两个私有命名空间各清一次；拒绝挂 note 的异常上也只尝试挂一次。
+    assert cleanup_calls == 2
     assert list(input_root.iterdir()) == []
 
 
@@ -2009,25 +2028,22 @@ def _web_inspect_payload(
     *,
     user: str = "xiaowei",
     read_only: bool = True,
-    secret_writable: bool = False,
-    include_secret_mount: bool = True,
+    identity_writable: bool = False,
     include_identity_mount: bool = True,
     duplicate_identity_mount: bool = False,
     environment: list[str] | None = None,
 ) -> str:
+    """飞书 App Secret 不再有自己的挂载点——它在配置目录的那份 JSON 里。
+
+    因此这里只剩身份目录：它仍然是一份独立的、必须只读且**恰好一个**的输入。
+    配置目录的读写属性由 ``_require_model_secret_boundary`` 逐服务核对。
+    """
     mounts: list[dict[str, object]] = []
-    if include_secret_mount:
-        mounts.append(
-            {
-                "Destination": "/run/secrets/feishu_app_secret",
-                "RW": secret_writable,
-            }
-        )
     if include_identity_mount:
         mounts.append(
             {
                 "Destination": "/run/config/feishu-identities.json",
-                "RW": False,
+                "RW": identity_writable,
             }
         )
     if duplicate_identity_mount:
@@ -2041,10 +2057,7 @@ def _web_inspect_payload(
         [
             user,
             environment
-            or [
-                "XIAOWEI_FEISHU_APP_SECRET_FILE=/run/secrets/feishu_app_secret",
-                "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
-            ],
+            or ["XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json"],
             read_only,
             mounts,
         ]
@@ -2151,15 +2164,13 @@ def test_web_euid_command_failure_exposes_only_a_fixed_error() -> None:
         _web_inspect_payload(user="0"),
         _web_inspect_payload(user="+0:1000"),
         _web_inspect_payload(read_only=False),
-        _web_inspect_payload(secret_writable=True),
-        _web_inspect_payload(include_secret_mount=False),
+        _web_inspect_payload(identity_writable=True),
         _web_inspect_payload(include_identity_mount=False),
         _web_inspect_payload(duplicate_identity_mount=True),
         _web_inspect_payload(
             environment=[
-                "XIAOWEI_FEISHU_APP_SECRET_FILE=/run/secrets/feishu_app_secret",
-                "XIAOWEI_FEISHU_APP_SECRET_FILE=/tmp/alternate",
                 "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
+                "XIAOWEI_FEISHU_IDENTITY_FILE=/tmp/alternate",
             ]
         ),
         _web_inspect_payload(environment=["LEAK=private-fake-secret"]),

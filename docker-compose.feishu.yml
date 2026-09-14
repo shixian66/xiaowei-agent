@@ -1,0 +1,31 @@
+# 启用飞书时才叠加。身份目录文件不在基础文件里，因为它是**可选插件的输入**：
+# 硬挂在基础文件上时，干净部署没有 ./.secrets/feishu-identities.json 就会让容器
+# 直接起不来（bind 的 create_host_path 是 false），runbook 第 5 步必然失败。
+services:
+  feishu-listener:
+    volumes:
+      - type: bind
+        source: ./.config
+        target: /run/xiaowei-config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.secrets/feishu-identities.json
+        target: /run/config/feishu-identities.json
+        read_only: true
+        bind:
+          create_host_path: false
+  web-app:
+    volumes:
+      - type: bind
+        source: ./.config
+        target: /run/xiaowei-config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.secrets/feishu-identities.json
+        target: /run/config/feishu-identities.json
+        read_only: true
+        bind:
+          create_host_path: false

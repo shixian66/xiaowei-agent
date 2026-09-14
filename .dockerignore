@@ -9,6 +9,7 @@ docs
 .env.*
 !.env.example
 .secrets
+.config
 .smoke
 __pycache__
 *.pyc

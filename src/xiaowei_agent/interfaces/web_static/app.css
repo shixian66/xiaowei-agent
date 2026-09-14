@@ -338,3 +338,24 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* 配置面 */
+.config-panel { display: flex; flex-direction: column; gap: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+.generation-pill { align-self: center; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; font-weight: 700; }
+.config-notice { margin: 0; padding: 10px 14px; border-radius: 12px; background: var(--brand-soft, #eef2ff); font-size: 13px; }
+.config-card { display: flex; flex-direction: column; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; }
+.config-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.config-card-head h3 { margin: 0; font-size: 16px; }
+.config-flag { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
+.config-fixed { display: flex; flex-wrap: wrap; gap: 18px; margin: 0; font-size: 13px; }
+.config-fixed dt { color: var(--muted, #6b7280); font-size: 12px; }
+.config-fixed dd { margin: 2px 0 0; font-family: ui-monospace, SFMono-Regular, monospace; word-break: break-all; }
+.config-switch { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.config-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.config-field input { padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.config-checks { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.state-badge { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
+.state-badge[data-state="available"] { border-color: var(--green, #16a34a); color: var(--green, #16a34a); }
+.state-badge[data-state="test_failed"] { border-color: var(--red); color: var(--red); }
+.config-actions { display: flex; gap: 10px; }
+.config-actions button[disabled], .config-checks button[disabled] { opacity: 0.5; cursor: not-allowed; }
