@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
 
+from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
 from xiaowei_agent.persistence.postgres import PostgresWebSessionStore
 from xiaowei_agent.persistence.rows import (
@@ -29,6 +30,7 @@ from xiaowei_agent.persistence.web_session import (
     OAuthStateCapacityError,
     RotateWebSessionCommand,
     WebSession,
+    WebSessionLookup,
 )
 
 
@@ -57,6 +59,7 @@ def oauth_state_digests(memory_state):
 bind(globals(), WEB_SESSION_STORE_CASES)
 
 _NOW = dt.datetime(2026, 9, 9, 9, 0, tzinfo=dt.UTC)
+_ORIGIN_DIGEST = "a1" * 32
 
 
 def test_oauth_state_capacity_contract_is_fixed_and_non_sensitive() -> None:
@@ -121,6 +124,10 @@ def test_persisted_models_hold_only_digests_subject_and_time_facts() -> None:
         "issued_at",
         "expires_at",
         "revoked_at",
+        # RI5：签发来源与 origin 绑定。两者都不是 secret——前者是闭集枚举，
+        # 后者是 origin 的摘要，都不能反推出 cookie 或主体身份。
+        "auth_source",
+        "public_origin_digest",
     }
     forbidden = {
         "state",
@@ -156,6 +163,8 @@ def test_web_session_schema_is_digest_only_and_mirrors_time_invariants() -> None
         "issued_at",
         "expires_at",
         "revoked_at",
+        "auth_source",
+        "public_origin_digest",
     }
     state_constraints = {
         item.name for item in WEB_OAUTH_STATES.constraints if item.name is not None
@@ -168,6 +177,7 @@ def test_web_session_schema_is_digest_only_and_mirrors_time_invariants() -> None
         "ck_web_oauth_states_consumption_window",
     }
     assert session_constraints >= {
+        "ck_web_sessions_auth_source_closed",
         "ck_web_sessions_expiry_after_issue",
         "ck_web_sessions_revocation_after_issue",
     }
@@ -196,14 +206,35 @@ def test_session_rotation_requires_a_new_digest_and_bounded_ttl() -> None:
             session_digest="a" * 64,
             previous_session_digest="a" * 64,
             subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=_ORIGIN_DIGEST,
             ttl_seconds=3600,
         )
     with pytest.raises(ValidationError):
         RotateWebSessionCommand(
             session_digest="a" * 64,
             subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=_ORIGIN_DIGEST,
             ttl_seconds=86_401,
         )
+
+
+def test_session_issuance_must_state_its_source_and_origin() -> None:
+    """两个新字段必填：给默认值等于允许调用方漏传而静默写错绑定。"""
+    for missing in ("auth_source", "public_origin_digest"):
+        values = {
+            "session_digest": "a" * 64,
+            "subject_ref": "subject-alice",
+            "auth_source": IdentitySource.FEISHU,
+            "public_origin_digest": _ORIGIN_DIGEST,
+            "ttl_seconds": 3600,
+        }
+        del values[missing]
+        with pytest.raises(ValidationError):
+            RotateWebSessionCommand(**values)
+    with pytest.raises(ValidationError):
+        WebSessionLookup(session_digest="a" * 64)
 
 
 def test_oauth_state_and_session_row_mappings_are_exact_round_trips() -> None:
@@ -219,6 +250,8 @@ def test_oauth_state_and_session_row_mappings_are_exact_round_trips() -> None:
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(hours=1),
         revoked_at=None,
+        auth_source=IdentitySource.FEISHU,
+        public_origin_digest=_ORIGIN_DIGEST,
     )
 
     state_row = oauth_state_to_row(state)
@@ -258,6 +291,8 @@ def test_oauth_state_and_session_row_mappings_are_exact_round_trips() -> None:
             {
                 "session_digest": "b" * 64,
                 "subject_ref": "subject-alice",
+                "auth_source": IdentitySource.FEISHU,
+                "public_origin_digest": _ORIGIN_DIGEST,
                 "issued_at": _NOW,
                 "expires_at": _NOW,
                 "revoked_at": None,
@@ -269,6 +304,8 @@ def test_oauth_state_and_session_row_mappings_are_exact_round_trips() -> None:
             {
                 "session_digest": "b" * 64,
                 "subject_ref": "subject-alice",
+                "auth_source": IdentitySource.FEISHU,
+                "public_origin_digest": _ORIGIN_DIGEST,
                 "issued_at": _NOW,
                 "expires_at": _NOW + dt.timedelta(hours=1),
                 "revoked_at": _NOW - dt.timedelta(seconds=1),

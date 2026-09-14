@@ -20,6 +20,7 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
     ReadinessReport,
+    WebMode,
 )
 from xiaowei_agent.interfaces import web_app as web_app_module
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
@@ -201,6 +202,7 @@ def _service(
         ),
         oauth=oauth,
         public_origin="https://ops.example.test",
+        mode=WebMode.HTTPS,
         oauth_state_ttl_seconds=300,
         session_ttl_seconds=3600,
         token_factory=lambda: next(tokens),
@@ -335,6 +337,7 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
         ),
         oauth=oauth,
         public_origin="https://ops.example.test",
+        mode=WebMode.HTTPS,
         oauth_state_ttl_seconds=300,
         session_ttl_seconds=3600,
         oauth_timeout_seconds=0.01,
@@ -470,7 +473,7 @@ def test_public_origin_is_an_origin_not_a_url_path(
     clock, memory_state, public_origin: str
 ) -> None:
     principal = _principal()
-    with pytest.raises(ValueError, match="web public origin must use https"):
+    with pytest.raises(ValueError, match="web public origin does not match the web mode"):
         WebAuthService(
             sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
             identities=StaticFeishuIdentityDirectory(
@@ -478,7 +481,8 @@ def test_public_origin_is_an_origin_not_a_url_path(
             ),
             oauth=_OAuth(),
             public_origin=public_origin,
-            oauth_state_ttl_seconds=300,
+            mode=WebMode.HTTPS,
+        oauth_state_ttl_seconds=300,
             session_ttl_seconds=3600,
         )
 

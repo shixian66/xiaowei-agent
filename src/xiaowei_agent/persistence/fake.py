@@ -26,6 +26,7 @@ from xiaowei_agent.contracts import (
     ApprovalRequest,
     ChannelKind,
     GrantRejection,
+    IdentitySource,
     LeaseGrant,
     ProjectionState,
     RetryDecision,
@@ -88,6 +89,12 @@ from xiaowei_agent.persistence.decisions import (
     may_acquire_lease,
     may_renew_lease,
     stale_lease_sort_key,
+)
+from xiaowei_agent.persistence.local_admin import (
+    LOCAL_ADMIN_SUBJECT_REF,
+    ChangePasswordCommand,
+    LocalAdminNotFoundError,
+    LocalAdminRecord,
 )
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.store import (
@@ -442,6 +449,71 @@ class InMemoryChannelStore:
             )
 
 
+class InMemoryLocalAdminStore:
+    """与 session 存储**共用同一把锁和同一份事实**的本地管理员实现。
+
+    共用是承重的：改密要在一次原子操作里同时改口令和撤销全部旧 session，
+    两边各持一份状态就复现不出这条不变量。
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    async def seed_if_absent(self, *, password_hash: str) -> bool:
+        async with self._lock:
+            if self._state.local_admin is not None:
+                return False
+            self._state.local_admin = LocalAdminRecord(
+                password_hash=password_hash, must_change_password=True
+            )
+            return True
+
+    async def get(self) -> LocalAdminRecord:
+        async with self._lock:
+            record = self._state.local_admin
+            if not isinstance(record, LocalAdminRecord):
+                raise LocalAdminNotFoundError
+            return record
+
+    async def change_password_and_rotate_session(
+        self, *, command: ChangePasswordCommand
+    ) -> LocalAdminRecord:
+        async with self._lock:
+            if self._state.local_admin is None:
+                raise LocalAdminNotFoundError
+            now = self._clock()
+            record = LocalAdminRecord(
+                password_hash=command.password_hash, must_change_password=False
+            )
+            self._state.local_admin = record
+            # 先撤销全部旧的，再插入新的——顺序反过来会把刚签发的一起撤掉。
+            for digest, session in list(self._state.web_sessions.items()):
+                if (
+                    session.auth_source is IdentitySource.LOCAL_ADMIN
+                    and session.revoked_at is None
+                ):
+                    self._state.web_sessions[digest] = session.model_copy(
+                        update={"revoked_at": now}
+                    )
+            self._state.web_sessions[command.new_session_digest] = WebSession(
+                session_digest=command.new_session_digest,
+                subject_ref=LOCAL_ADMIN_SUBJECT_REF,
+                issued_at=now,
+                expires_at=now
+                + _dt.timedelta(seconds=command.session_ttl_seconds),
+                auth_source=IdentitySource.LOCAL_ADMIN,
+                public_origin_digest=command.public_origin_digest,
+            )
+            return record
+
+
 class InMemoryWebSessionStore:
     """与其他内存存储共锁的 OAuth state 和浏览器 session 实现。"""
 
@@ -511,6 +583,8 @@ class InMemoryWebSessionStore:
                 subject_ref=command.subject_ref,
                 issued_at=now,
                 expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+                auth_source=command.auth_source,
+                public_origin_digest=command.public_origin_digest,
             )
             previous_digest = command.previous_session_digest
             if previous_digest is not None:
@@ -529,6 +603,7 @@ class InMemoryWebSessionStore:
                 session is None
                 or session.revoked_at is not None
                 or self._clock() >= session.expires_at
+                or session.public_origin_digest != lookup.public_origin_digest
             ):
                 raise WebSessionNotFoundError
             return session

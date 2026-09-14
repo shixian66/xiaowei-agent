@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 from xiaowei_agent.contracts import (
     AwareDatetime,
     Contract,
+    IdentitySource,
     Sha256Hex,
     StrictInt,
     StrictStr,
@@ -67,13 +68,15 @@ class OAuthState(Contract):
 
 
 class WebSession(Contract):
-    """只保存随机 cookie 摘要、飞书主体引用与时效事实。"""
+    """只保存随机 cookie 摘要、主体引用、签发来源与时效事实。"""
 
     session_digest: Sha256Hex
     subject_ref: StrictStr
     issued_at: AwareDatetime
     expires_at: AwareDatetime
     revoked_at: AwareDatetime | None = None
+    auth_source: IdentitySource
+    public_origin_digest: Sha256Hex
 
     @model_validator(mode="after")
     def _time_facts_are_consistent(self) -> Self:
@@ -94,10 +97,19 @@ class ConsumeOAuthStateCommand(Contract):
 
 
 class RotateWebSessionCommand(Contract):
+    """签发一个新 session。
+
+    ``auth_source`` 与 ``public_origin_digest`` **必填、无默认值**：给默认值等于
+    允许调用方漏传而静默写入一个错误的绑定，而这两列正是"谁签发的"和"在哪个
+    origin 下有效"的唯一记录。
+    """
+
     session_digest: Sha256Hex
     subject_ref: StrictStr
     ttl_seconds: StrictInt = Field(gt=0, le=86_400)
     previous_session_digest: Sha256Hex | None = None
+    auth_source: IdentitySource
+    public_origin_digest: Sha256Hex
 
     @model_validator(mode="after")
     def _rotation_uses_a_new_digest(self) -> Self:
@@ -107,7 +119,14 @@ class RotateWebSessionCommand(Contract):
 
 
 class WebSessionLookup(Contract):
+    """按 digest 查 session，并同时核对它绑定的 public origin。
+
+    origin digest 是**查询条件**而不是返回后再比：放在 store 层过滤，任何调用方
+    都不可能忘记比对。
+    """
+
     session_digest: Sha256Hex
+    public_origin_digest: Sha256Hex
 
 
 class RevokeWebSessionCommand(Contract):

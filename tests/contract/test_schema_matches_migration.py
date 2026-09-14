@@ -17,6 +17,7 @@ import io
 import re
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -30,12 +31,20 @@ from xiaowei_agent.persistence.schema import (
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
+    WEB_SESSIONS,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
 
 # 迁移自己的记账表，不属于业务 schema，比较时排除。
 _ALEMBIC_BOOKKEEPING = "alembic_version"
+
+# 被后续 revision 用 ALTER 演进过的表。它们的 CREATE TABLE 是**当初**那一版，逐字
+# 比对必然不等于今天的 ``schema.py``——这正是冻结历史快照应有的样子。这些表改由
+# ``test_altered_table_head_has_all_declared_columns_and_constraints`` 覆盖：它扫的是
+# 完整 upgrade SQL（含 ALTER），因此新增列或约束漏进迁移仍会转红。
+# 两处共用同一个集合，避免"加进跳过集却忘了补 head 检查"这种漂移。
+_ALTERED_AFTER_CREATION = (TASKS, TASK_SUBMISSIONS, WEB_SESSIONS)
 
 
 def _offline_upgrade_sql() -> str:
@@ -87,21 +96,27 @@ def test_each_table_ddl_matches_the_schema_module() -> None:
     emitted = _create_table_statements(_offline_upgrade_sql())
     dialect = postgresql.dialect()
     for table in ALL_TABLES:
-        if table in {TASKS, TASK_SUBMISSIONS}:
+        if table in _ALTERED_AFTER_CREATION:
             continue
         expected = _normalise(str(CreateTable(table).compile(dialect=dialect)))
         assert emitted[table.name] == expected, f"{table.name} 的迁移 DDL 与 schema.py 不一致"
 
 
-def test_task_head_has_all_declared_columns_and_constraints() -> None:
-    """后续 revision 用 ALTER 演进 tasks；head 仍须与活 schema 的名称集合一致。"""
+@pytest.mark.parametrize(
+    "table", _ALTERED_AFTER_CREATION, ids=[t.name for t in _ALTERED_AFTER_CREATION]
+)
+def test_altered_table_head_has_all_declared_columns_and_constraints(
+    table: sa.Table,
+) -> None:
+    """后续 revision 用 ALTER 演进的表；head 仍须与活 schema 的名称集合一致。"""
     sql = _offline_upgrade_sql()
-    declared_columns = {column.name for column in TASKS.columns}
-    for column in declared_columns:
-        assert re.search(rf"\b{re.escape(column)}\b", sql), column
-    declared_constraints = {item.name for item in TASKS.constraints if item.name is not None}
+    for column in {column.name for column in table.columns}:
+        assert re.search(rf"\b{re.escape(column)}\b", sql), f"{table.name}.{column}"
+    declared_constraints = {
+        item.name for item in table.constraints if item.name is not None
+    }
     for constraint in declared_constraints:
-        assert constraint in sql
+        assert constraint in sql, f"{table.name}: {constraint}"
 
 
 def test_m5_execution_columns_are_declared_with_expected_types() -> None:
@@ -145,6 +160,15 @@ def test_rev_0003_has_the_expected_revision_chain() -> None:
 
     assert revision.revision == "0003_task_submissions"
     assert revision.down_revision == "0002_task_execution_columns"
+
+
+def test_rev_0010_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0010_local_admin_and_provider_state as revision,
+    )
+
+    assert revision.revision == "0010_local_admin_and_provider_state"
+    assert revision.down_revision == "0009_task_parent_context"
 
 
 def test_rev_0009_has_the_expected_revision_chain() -> None:

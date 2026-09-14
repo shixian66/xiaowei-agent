@@ -120,6 +120,11 @@ _ALLOWED_INTERNAL_BY_FILE = {
     "interfaces/integration_config_file.py": {
         "xiaowei_agent.contracts",
     },
+    "interfaces/local_admin_auth.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
     "interfaces/feishu_identity.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
@@ -193,6 +198,7 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.trace",
     },
     "interfaces/web_auth.py": {
+        "xiaowei_agent.config",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.persistence",

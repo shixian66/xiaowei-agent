@@ -48,9 +48,9 @@ async def test_readiness_requires_database_head_and_assembly(
     monkeypatch.setattr(
         database,
         "_current_revision",
-        lambda _: "0009_task_parent_context",
+        lambda _: "0010_local_admin_and_provider_state",
     )
-    connection = _Connection(revision="0009_task_parent_context")
+    connection = _Connection(revision="0010_local_admin_and_provider_state")
     probe = PostgresReadinessProbe(engine=_Engine(connection), assembled=True)
     report = await probe.check()
     assert report.database_ok is True

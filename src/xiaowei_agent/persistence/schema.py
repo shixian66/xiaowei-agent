@@ -461,6 +461,8 @@ WEB_SESSIONS: Final = sa.Table(
     sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("auth_source", sa.Text, nullable=False),
+    sa.Column("public_origin_digest", sa.CHAR(64), nullable=False),
     sa.CheckConstraint(
         "expires_at > issued_at",
         name="ck_web_sessions_expiry_after_issue",
@@ -469,8 +471,85 @@ WEB_SESSIONS: Final = sa.Table(
         "revoked_at IS NULL OR revoked_at >= issued_at",
         name="ck_web_sessions_revocation_after_issue",
     ),
+    sa.CheckConstraint(
+        "auth_source IN ('local_admin', 'feishu')",
+        name="ck_web_sessions_auth_source_closed",
+    ),
 )
-"""浏览器 session；不保存 cookie 明文、权限或租户环境快照。"""
+"""浏览器 session；不保存 cookie 明文、权限或租户环境快照。
+
+``public_origin_digest`` 把 session 绑在签发它的 public origin 上：换模式或换
+origin 之后旧 session 必然对不上，等价于全体登出，而不是在新 origin 下继续有效。
+"""
+
+LOCAL_ADMINS: Final = sa.Table(
+    "local_admins",
+    METADATA,
+    sa.Column("id", sa.SmallInteger, primary_key=True, autoincrement=False),
+    sa.Column("password_hash", sa.Text, nullable=False),
+    sa.Column("must_change_password", sa.Boolean, nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("id = 1", name="ck_local_admins_single_row"),
+)
+"""本地管理员；CHECK 把表锁成最多一行，不存在"第二个管理员"这种状态。"""
+
+SERVICE_CONFIG_STATE: Final = sa.Table(
+    "service_config_state",
+    METADATA,
+    sa.Column("service_name", sa.Text, primary_key=True),
+    sa.Column("provider", sa.Text, primary_key=True),
+    sa.Column("loaded_generation", sa.Integer, nullable=False),
+    sa.Column("load_status", sa.Text, nullable=False),
+    sa.Column("loaded_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "loaded_generation > 0",
+        name="ck_service_config_state_generation_positive",
+    ),
+    sa.CheckConstraint(
+        "load_status IN ('loaded', 'invalid')",
+        name="ck_service_config_state_status_closed",
+    ),
+)
+"""各进程的加载回执。
+
+``invalid`` 表示"读到了这一代但没读成"。它与"缺回执"一样落到 PENDING_RESTART，
+不产生第六个页面状态；该列只供页面显示原因提示。文件缺失或整体损坏时读不出
+generation，此时**不写行**——``loaded_generation > 0`` 的 CHECK 意味着硬凑一个
+代次就是伪造证据。
+"""
+
+PROVIDER_TEST_STATE: Final = sa.Table(
+    "provider_test_state",
+    METADATA,
+    sa.Column("check_name", sa.Text, primary_key=True),
+    sa.Column("tested_generation", sa.Integer, nullable=False),
+    sa.Column("test_status", sa.Text, nullable=False),
+    sa.Column("tested_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("duration_ms", sa.Integer, nullable=False),
+    sa.Column("error_code", sa.Text, nullable=True),
+    sa.Column("error_message", sa.Text, nullable=True),
+    sa.CheckConstraint(
+        "check_name IN ('gemini_connection', 'feishu_credentials', 'feishu_oauth')",
+        name="ck_provider_test_state_check_name_closed",
+    ),
+    sa.CheckConstraint(
+        "tested_generation > 0",
+        name="ck_provider_test_state_generation_positive",
+    ),
+    sa.CheckConstraint(
+        "test_status IN ('passed', 'failed')",
+        name="ck_provider_test_state_status_closed",
+    ),
+    sa.CheckConstraint(
+        "duration_ms >= 0 AND duration_ms <= 600000",
+        name="ck_provider_test_state_duration_bounded",
+    ),
+    sa.CheckConstraint(
+        "(test_status = 'passed') = (error_code IS NULL)",
+        name="ck_provider_test_state_error_matches_status",
+    ),
+)
+"""控制面探针结果；通过与错误码互斥由 CHECK 保证，不靠调用方自觉。"""
 
 ALL_TABLES: Final = (
     TASKS,
@@ -486,4 +565,7 @@ ALL_TABLES: Final = (
     PROJECTION_SUBSCRIPTIONS,
     WEB_OAUTH_STATES,
     WEB_SESSIONS,
+    LOCAL_ADMINS,
+    SERVICE_CONFIG_STATE,
+    PROVIDER_TEST_STATE,
 )

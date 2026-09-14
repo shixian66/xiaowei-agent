@@ -60,6 +60,7 @@ class ChannelPermission(StrEnum):
 
 class IdentitySource(StrEnum):
     FEISHU = "feishu"
+    LOCAL_ADMIN = "local_admin"
 
 
 class ProviderName(StrEnum):

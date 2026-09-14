@@ -814,7 +814,7 @@ web_sessions  (新增两列)
   public_origin_digest char(64) not null
 ```
 
-- [ ] **Step 1: 写失败契约测试（schema）**
+- [x] **Step 1: 写失败契约测试（schema）**
 
 `tests/contract/test_ri5_schema.py`：
 
@@ -863,7 +863,7 @@ def test_new_tables_are_registered() -> None:
     assert {"local_admins", "service_config_state", "provider_test_state"} <= names
 ```
 
-- [ ] **Step 2: 写失败测试——HTTPS helper 拆分（本 Task 的承重项）**
+- [x] **Step 2: 写失败测试——HTTPS helper 拆分（本 Task 的承重项）**
 
 `tests/security/test_ri5_origin_split.py`：
 
@@ -901,7 +901,7 @@ def test_the_two_helpers_are_not_the_same_object() -> None:
     assert "mode" not in web_auth._provider_https_url.__code__.co_varnames
 ```
 
-- [ ] **Step 3: 写失败测试——口令与管理员边界**
+- [x] **Step 3: 写失败测试——口令与管理员边界**
 
 `tests/unit/test_local_admin_auth.py`：
 
@@ -984,13 +984,13 @@ def test_feishu_principal_with_admin_permission_cannot_reach_config_routes():
 
 每条用 `tests/fakes` 下既有的 in-memory session store fake 驱动；按注释里的规格写出完整断言后再写实现。
 
-- [ ] **Step 4: 跑三组测试确认全部失败**
+- [x] **Step 4: 跑三组测试确认全部失败**
 
 Run: `python -m pytest tests/contract/test_ri5_schema.py tests/security/test_ri5_origin_split.py tests/unit/test_local_admin_auth.py -q`
 
 Expected: FAIL —— `AttributeError: module 'xiaowei_agent.persistence.schema' has no attribute 'LOCAL_ADMINS'`；`_provider_https_url` / `public_origin_is_safe` / `local_admin_auth` 不存在。
 
-- [ ] **Step 5: 实现 schema 与 migration（写完不提交）**
+- [x] **Step 5: 实现 schema 与 migration（写完不提交）**
 
 `schema.py` 按上表追加三个 `sa.Table` 并加入 `ALL_TABLES`；给 `WEB_SESSIONS` 追加两列。
 
@@ -1008,7 +1008,7 @@ down_revision: str | None = "0009_task_parent_context"
 做完这一步**不要 commit、不要 git add**：`web_sessions` 已经多了两个非空列，而 `postgres.py:990`
 的 `web_session_to_row()` 仍按旧列集插入，既有 session 测试此刻必红。直接进入 Step 6。
 
-- [ ] **Step 6: 实现拆分、认证与 session 写入面**
+- [x] **Step 6: 实现拆分、认证与 session 写入面**
 
 `web_auth.py` 改动（**这是承重改动，按此顺序做**）：
 
@@ -1115,13 +1115,13 @@ async def change_password_and_rotate_session(
 - 所有既有 `RotateWebSessionCommand(...)` 构造点（含 `tests/fakes` 下的 in-memory store）同步补参，
   `python -m pytest tests/ -q` 必须重新全绿——这正是本 Task 不能在 Step 5 断开提交的原因。
 
-- [ ] **Step 7: 跑 schema 契约测试与既有一致性测试**
+- [x] **Step 7: 跑 schema 契约测试与既有一致性测试**
 
 Run: `python -m pytest tests/contract/test_ri5_schema.py tests/contract/test_schema_matches_migration.py tests/contract/test_migration_guard.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 8: 加集成测试并对真实 PostgreSQL 跑**
+- [x] **Step 8: 加集成测试并对真实 PostgreSQL 跑**
 
 `tests/integration/test_ri5_schema_migration.py` 沿用该目录既有 fixture（`PYTEST_POSTGRES_DSN`），断言：升级到 head 后三张表存在、`local_admins` 插入第二行被 CHECK 拒绝、`provider_test_state` 插入未知 `check_name` 被拒绝、`test_status='passed'` 且 `error_code` 非空被拒绝。
 
@@ -1129,13 +1129,13 @@ Run: `python -m pytest tests/integration/test_ri5_schema_migration.py -q`
 
 Expected: PASS（无 DSN 时该目录既有 fixture 会 skip，属正常）。
 
-- [ ] **Step 9: 跑认证与边界测试确认通过**
+- [x] **Step 9: 跑认证与边界测试确认通过**
 
 Run: `python -m pytest tests/security/test_ri5_origin_split.py tests/unit/test_local_admin_auth.py tests/security/test_local_admin_boundary.py tests/security/test_web_auth_boundary.py -q`
 
 Expected: PASS，且既有 `test_web_auth_boundary.py` 不回归。
 
-- [ ] **Step 10: 反证承重（必须做，ADR-014 R2 明文要求）**
+- [x] **Step 10: 反证承重（必须做，ADR-014 R2 明文要求）**
 
 把第 2 步的拆分撤掉——让 `_authorization_url_is_safe` 改用 `public_origin_is_safe(..., mode=WebMode.LAN_HTTP)`——确认 `test_provider_authorization_url_is_always_https_only` 变红；恢复后重新全绿。
 
@@ -1143,7 +1143,7 @@ Expected: PASS，且既有 `test_web_auth_boundary.py` 不回归。
 PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_ri5_origin_split.py -q -p no:cacheprovider
 ```
 
-- [ ] **Step 11: 跑全量后一次性提交（本 Task 唯一一次提交）**
+- [x] **Step 11: 跑全量后一次性提交（本 Task 唯一一次提交）**
 
 Run: `python -m pytest -q && python -m pytest -m security -q && ruff check . && mypy src`
 
@@ -1168,6 +1168,51 @@ git add \
   tests/security/test_local_admin_boundary.py
 git commit -m "feat(ri5): add local admin auth, provider state schema and the https gate split"
 ```
+
+**Task 3 执行记录（2026-09-14）：** 四条基线全绿——`3606 passed, 237 skipped`（Task 2 后 3573）、
+`1322 security passed`、`ruff` 通过、`mypy` 169 files 通过。**只有最后一次提交**，schema 与
+session 写入面在同一个提交里。五条反证全部按预期变红后恢复：
+
+```text
+放宽 _provider_https_url 的协议门     -> test_ri5_origin_split                        3 failed
+去掉 get_session 的 origin 过滤       -> 两条 origin 绑定用例                          2 failed
+改密时先插入后撤销                    -> test_change_password_is_atomic...             1 failed
+认证不检查 auth_source                -> test_a_feishu_session_cannot_authenticate...  1 failed
+verify_password 采纳封装里的 n        -> test_encoded_parameters_are_checked_not...    1 failed
+恢复后                                                                                47 passed
+```
+
+五处与计划文字不同：
+
+1. **digest 域收敛成三个公开函数。** 计划只说给 `WebAuthService` 加 `_origin_digest`，但本地
+   管理员登录写的是**同一张** `web_sessions` 表。两条认证路径各自写一遍 `domain="web-session:v1"`
+   就会出现两处域字符串，一旦其中一处改动，同一个 cookie 会算出两个 digest，session 在另一条
+   路径上直接查不到。因此在 `web_auth.py` 提取 `web_session_digest()` / `web_csrf_token()` /
+   `web_origin_digest()`，三个域字符串在全仓库各出现**恰好一次**，`local_admin_auth` 直接复用。
+
+2. **origin 绑定做成查询条件而不是返回后再比。** `WebSessionLookup` 增加必填
+   `public_origin_digest`，store 层按它过滤——调用方不可能忘记比对。两个新字段都**不给默认值**：
+   给默认值等于允许漏传而静默写入错误的绑定。
+
+3. **`test_schema_matches_migration.py` 的跳过集与补偿检查原本可以各自漂移。** `WEB_SESSIONS`
+   被 `rev_0010` 用 ALTER 加列，其 `CREATE TABLE` 是 rev_0007 的历史快照，逐字比对必然不等。
+   仓库既有做法是把这类表放进硬编码跳过集（`TASKS`、`TASK_SUBMISSIONS`），但补偿用的
+   head 检查只覆盖 `TASKS`——加进跳过集却忘补 head 检查就会静默失去覆盖。改为共用一个
+   `_ALTERED_AFTER_CREATION` 元组，head 检查按它参数化，三张表都被覆盖。
+
+4. **`InMemoryLocalAdminStore` 与 session store 共用同一把锁和同一份 `InMemoryPersistenceState`。**
+   改密要在一次原子操作里同时改口令和撤销全部旧 session，两边各持一份状态就复现不出这条
+   不变量，反证 3 也就钉不住。
+
+5. **闭集守卫登记**（均为刻意设计的人工审查点）：`IdentitySource` 闭集加 `local_admin`；
+   `_ALTERED_AFTER_CREATION`、`_ALLOWED_INTERNAL_BY_FILE`（两个新 interface 文件）、
+   `_TASK_VIEW_PROCESS_ALLOWED_MODULES`（`persistence.local_admin`）；migration head 字面量
+   `0009_task_parent_context` → `0010_local_admin_and_provider_state`（`test_readiness.py`
+   与 `test_migration_paths.py` 共 6 处）。这些文件都按 `git status` 精确补进了 `git add`。
+
+`tests/integration/test_ri5_schema_migration.py` 的 8 条在无 `PYTEST_POSTGRES_DSN` 时 skip，
+与该目录既有 integration 用例一致（本机基线 237 skipped）。CHECK 行为的真实验证留到有
+PostgreSQL 的环境。
 ---
 
 ### Task 4: 运行消费迁移——四个 composition root 改读 JSON

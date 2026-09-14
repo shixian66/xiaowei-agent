@@ -99,7 +99,7 @@ def test_channel_enums_are_exact_closed_sets() -> None:
         "submit_readonly_task",
         "admin_all_safe_tasks",
     }
-    assert {item.value for item in IdentitySource} == {"feishu"}
+    assert {item.value for item in IdentitySource} == {"feishu", "local_admin"}
     assert {item.value for item in ChannelKind} == {
         "feishu_private",
         "feishu_group",

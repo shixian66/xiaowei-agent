@@ -9,6 +9,7 @@ from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    WebMode,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
@@ -125,6 +126,7 @@ def _service(
             identities=directory,
             oauth=oauth_port,
             public_origin="https://ops.example.test",
+            mode=WebMode.HTTPS,
             oauth_state_ttl_seconds=300,
             session_ttl_seconds=3600,
             token_factory=_token_factory(*tokens),

@@ -41,6 +41,7 @@ class InMemoryPersistenceState:
         ] = {}
         self.oauth_states: dict[str, OAuthState] = {}
         self.web_sessions: dict[str, WebSession] = {}
+        self.local_admin: Any | None = None
         self.next_fencing_token = 1
         self.next_projection_fencing_token = 1
         self.next_created_seq = 1

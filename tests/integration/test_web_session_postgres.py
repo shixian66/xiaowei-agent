@@ -6,6 +6,7 @@ import pytest
 import sqlalchemy as sa
 from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
 
+from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.persistence.migrations.guards import MigrationSafetyError
 from xiaowei_agent.persistence.postgres import PostgresWebSessionStore
 from xiaowei_agent.persistence.schema import WEB_OAUTH_STATES
@@ -90,6 +91,8 @@ async def test_rev_0007_downgrade_rejects_web_auth_data_without_authorization(
         command=RotateWebSessionCommand(
             session_digest="b" * 64,
             subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest="a1" * 32,
             ttl_seconds=3600,
         )
     )

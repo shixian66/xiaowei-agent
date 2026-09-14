@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
@@ -17,6 +18,9 @@ from xiaowei_agent.persistence.web_session import (
     WebSessionLookup,
     WebSessionNotFoundError,
 )
+
+_ORIGIN_DIGEST = "a1" * 32
+_OTHER_ORIGIN_DIGEST = "b2" * 32
 
 
 def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]]) -> None:
@@ -251,6 +255,8 @@ async def test_session_rotation_revokes_the_previous_cookie_digest(
         command=RotateWebSessionCommand(
             session_digest="e" * 64,
             subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=_ORIGIN_DIGEST,
             ttl_seconds=3600,
         )
     )
@@ -258,7 +264,10 @@ async def test_session_rotation_revokes_the_previous_cookie_digest(
     assert first.revoked_at is None
     assert (
         await web_sessions.get_session(
-            lookup=WebSessionLookup(session_digest=first.session_digest)
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=first.session_digest,
+            )
         )
         == first
     )
@@ -268,17 +277,25 @@ async def test_session_rotation_revokes_the_previous_cookie_digest(
             session_digest="f" * 64,
             previous_session_digest=first.session_digest,
             subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=_ORIGIN_DIGEST,
             ttl_seconds=3600,
         )
     )
 
     with pytest.raises(WebSessionNotFoundError):
         await web_sessions.get_session(
-            lookup=WebSessionLookup(session_digest=first.session_digest)
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=first.session_digest,
+            )
         )
     assert (
         await web_sessions.get_session(
-            lookup=WebSessionLookup(session_digest=second.session_digest)
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=second.session_digest,
+            )
         )
         == second
     )
@@ -297,6 +314,8 @@ async def test_rotation_collision_does_not_revoke_the_current_session(
             command=RotateWebSessionCommand(
                 session_digest=digest,
                 subject_ref=subject_ref,
+                auth_source=IdentitySource.FEISHU,
+                public_origin_digest=_ORIGIN_DIGEST,
                 ttl_seconds=3600,
             )
         )
@@ -307,13 +326,18 @@ async def test_rotation_collision_does_not_revoke_the_current_session(
                 session_digest=occupied_digest,
                 previous_session_digest=current_digest,
                 subject_ref="subject-alice",
+                auth_source=IdentitySource.FEISHU,
+                public_origin_digest=_ORIGIN_DIGEST,
                 ttl_seconds=3600,
             )
         )
 
     assert (
         await web_sessions.get_session(
-            lookup=WebSessionLookup(session_digest=current_digest)
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=current_digest,
+            )
         )
     ).subject_ref == "subject-alice"
 
@@ -328,6 +352,8 @@ async def test_expired_and_revoked_sessions_share_the_hidden_not_found_result(
             command=RotateWebSessionCommand(
                 session_digest=digest,
                 subject_ref="subject-alice",
+                auth_source=IdentitySource.FEISHU,
+                public_origin_digest=_ORIGIN_DIGEST,
                 ttl_seconds=60,
             )
         )
@@ -343,8 +369,68 @@ async def test_expired_and_revoked_sessions_share_the_hidden_not_found_result(
     for digest in (expired_digest, revoked_digest, "5" * 64):
         with pytest.raises(WebSessionNotFoundError, match="web session not found"):
             await web_sessions.get_session(
-                lookup=WebSessionLookup(session_digest=digest)
+                lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=digest,
             )
+            )
+
+
+async def test_a_session_is_invisible_under_a_different_public_origin(
+    web_sessions: Any,
+) -> None:
+    """origin 绑定是查询条件，不是返回后再比。
+
+    换模式或换 origin 之后旧 session 必须整体失效——否则一个在 lan_http 下签发的
+    cookie 会在 HTTPS 部署里继续有效，反之亦然。
+    """
+    issued = await web_sessions.rotate_session(
+        command=RotateWebSessionCommand(
+            session_digest="7" * 64,
+            subject_ref="subject-alice",
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=_ORIGIN_DIGEST,
+            ttl_seconds=3600,
+        )
+    )
+
+    with pytest.raises(WebSessionNotFoundError, match="web session not found"):
+        await web_sessions.get_session(
+            lookup=WebSessionLookup(
+                public_origin_digest=_OTHER_ORIGIN_DIGEST,
+                session_digest=issued.session_digest,
+            )
+        )
+    assert (
+        await web_sessions.get_session(
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=issued.session_digest,
+            )
+        )
+        == issued
+    )
+
+
+async def test_the_auth_source_is_persisted_as_issued(web_sessions: Any) -> None:
+    issued = await web_sessions.rotate_session(
+        command=RotateWebSessionCommand(
+            session_digest="8" * 64,
+            subject_ref="admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+            public_origin_digest=_ORIGIN_DIGEST,
+            ttl_seconds=3600,
+        )
+    )
+    assert issued.auth_source is IdentitySource.LOCAL_ADMIN
+    assert (
+        await web_sessions.get_session(
+            lookup=WebSessionLookup(
+                public_origin_digest=_ORIGIN_DIGEST,
+                session_digest=issued.session_digest,
+            )
+        )
+    ).auth_source is IdentitySource.LOCAL_ADMIN
 
 
 WEB_SESSION_STORE_CASES = (
@@ -361,6 +447,8 @@ WEB_SESSION_STORE_CASES = (
     test_session_rotation_revokes_the_previous_cookie_digest,
     test_rotation_collision_does_not_revoke_the_current_session,
     test_expired_and_revoked_sessions_share_the_hidden_not_found_result,
+    test_a_session_is_invisible_under_a_different_public_origin,
+    test_the_auth_source_is_persisted_as_issued,
 )
 
 ALL_GROUPS = {"web_session_store": WEB_SESSION_STORE_CASES}

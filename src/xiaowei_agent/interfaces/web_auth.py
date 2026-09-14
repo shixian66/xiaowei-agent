@@ -13,7 +13,14 @@ from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from pydantic import AfterValidator, Field
 
-from xiaowei_agent.contracts import AuthenticatedPrincipal, Contract, StrictStr
+from xiaowei_agent.config import canonical_web_public_origin
+from xiaowei_agent.contracts import (
+    AuthenticatedPrincipal,
+    Contract,
+    IdentitySource,
+    StrictStr,
+    WebMode,
+)
 from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityDirectory,
     FeishuIdentityNotFoundError,
@@ -159,7 +166,33 @@ def _digest(*, domain: str, secret: str) -> str:
     return sha256(f"{domain}:{secret}".encode()).hexdigest()
 
 
-def _split_https_url(value: str) -> SplitResult | None:
+def web_session_digest(session_cookie: str) -> str:
+    """session cookie 的存储摘要。
+
+    公开而不是私有：本地管理员登录写的是**同一张** ``web_sessions`` 表，两条
+    认证路径必须用同一个域，否则同一个 cookie 会算出两个 digest，session 在
+    另一条路径上直接查不到。域常量因此只能有一处。
+    """
+    return _digest(domain="web-session:v1", secret=session_cookie)
+
+
+def web_csrf_token(session_cookie: str) -> str:
+    """由当前 session cookie 派生的 CSRF token；同理只能有一处。"""
+    return _digest(domain="csrf:v1", secret=session_cookie)
+
+
+def web_origin_digest(public_origin: str) -> str:
+    """public origin 的摘要；session 的 origin 绑定用它。"""
+    return _digest(domain="web-origin:v1", secret=public_origin)
+
+
+def _provider_https_url(value: str) -> SplitResult | None:
+    """Provider 侧 URL 的 HTTPS 硬门。
+
+    **不接受也不感知 ``mode``。** RI5 对本方 origin 放开 http 只是部署形态，
+    Provider 授权/令牌端点在任何模式下都必须是 HTTPS——两者共用一个 helper，
+    放宽本方就等于同时放宽了对方。
+    """
     if _has_control(value):
         return None
     try:
@@ -178,15 +211,19 @@ def _split_https_url(value: str) -> SplitResult | None:
     return parsed
 
 
-def _public_origin_is_safe(value: str) -> bool:
-    parsed = _split_https_url(value)
-    return parsed is not None and parsed.path in {"", "/"} and not parsed.query
+def public_origin_is_safe(value: str, *, mode: WebMode) -> bool:
+    """本方 public origin 是否满足该模式的形态要求。"""
+    try:
+        canonical_web_public_origin(value, mode=mode)
+    except ValueError:
+        return False
+    return True
 
 
 def _authorization_url_is_safe(value: str, *, expected_state: str) -> bool:
     if len(value) > 8192:
         return False
-    parsed = _split_https_url(value)
+    parsed = _provider_https_url(value)
     if parsed is None:
         return False
     try:
@@ -210,13 +247,14 @@ class WebAuthService:
         identities: FeishuIdentityDirectory,
         oauth: FeishuOAuthPort,
         public_origin: str,
+        mode: WebMode,
         oauth_state_ttl_seconds: int,
         session_ttl_seconds: int,
         oauth_timeout_seconds: float = FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
         token_factory: Callable[[], str] = _random_secret,
     ) -> None:
-        if not _public_origin_is_safe(public_origin):
-            raise ValueError("web public origin must use https")
+        if not public_origin_is_safe(public_origin, mode=mode):
+            raise ValueError("web public origin does not match the web mode")
         if not 0 < oauth_state_ttl_seconds <= 600:
             raise ValueError("oauth state ttl is out of range")
         if not 0 < session_ttl_seconds <= 86_400:
@@ -228,7 +266,11 @@ class WebAuthService:
         self._sessions = sessions
         self._identities = identities
         self._oauth = oauth
+        self._mode = mode
         self._public_origin = public_origin.rstrip("/")
+        # session 绑定到签发它的 origin：换模式或换 origin 之后，旧 session 的
+        # digest 必然对不上，等价于全体登出。
+        self._origin_digest = web_origin_digest(self._public_origin)
         self._redirect_uri = f"{self._public_origin}/oauth/feishu/callback"
         self._oauth_state_ttl_seconds = oauth_state_ttl_seconds
         self._session_ttl_seconds = session_ttl_seconds
@@ -342,16 +384,18 @@ class WebAuthService:
 
         cookie = self._new_secret()
         previous_digest = (
-            _digest(domain="web-session:v1", secret=previous_session_cookie)
+            web_session_digest(previous_session_cookie)
             if _secret_is_valid(previous_session_cookie)
             else None
         )
         await self._sessions.rotate_session(
             command=RotateWebSessionCommand(
-                session_digest=_digest(domain="web-session:v1", secret=cookie),
+                session_digest=web_session_digest(cookie),
                 previous_session_digest=previous_digest,
                 subject_ref=identity.subject_ref,
                 ttl_seconds=self._session_ttl_seconds,
+                auth_source=IdentitySource.FEISHU,
+                public_origin_digest=self._origin_digest,
             )
         )
         return IssuedWebSession(
@@ -368,9 +412,8 @@ class WebAuthService:
         try:
             session = await self._sessions.get_session(
                 lookup=WebSessionLookup(
-                    session_digest=_digest(
-                        domain="web-session:v1", secret=session_cookie
-                    )
+                    session_digest=web_session_digest(session_cookie),
+                    public_origin_digest=self._origin_digest,
                 )
             )
             principal = self._identities.resolve(subject_ref=session.subject_ref)
@@ -380,7 +423,7 @@ class WebAuthService:
             raise WebAuthenticationError
         return AuthenticatedWebSession(
             principal=principal,
-            csrf_token=_digest(domain="csrf:v1", secret=session_cookie),
+            csrf_token=web_csrf_token(session_cookie),
         )
 
     def validate_state_change(
@@ -395,7 +438,7 @@ class WebAuthService:
             raise WebOriginError
         if not _secret_is_valid(session_cookie):
             raise WebCsrfError
-        expected = _digest(domain="csrf:v1", secret=session_cookie)
+        expected = web_csrf_token(session_cookie)
         if not _secret_is_valid(csrf_token) or not _constant_time_ascii_equal(
             csrf_token, expected
         ):
@@ -407,9 +450,7 @@ class WebAuthService:
             return
         await self._sessions.revoke_session(
             command=RevokeWebSessionCommand(
-                session_digest=_digest(
-                    domain="web-session:v1", secret=session_cookie
-                )
+                session_digest=web_session_digest(session_cookie)
             )
         )
 
@@ -431,4 +472,8 @@ __all__ = [
     "WebOAuthStateError",
     "WebOAuthUnavailableError",
     "WebOriginError",
+    "public_origin_is_safe",
+    "web_csrf_token",
+    "web_origin_digest",
+    "web_session_digest",
 ]

@@ -20,6 +20,7 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
     ReadinessReport,
+    WebMode,
 )
 from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
 from xiaowei_agent.interfaces import feishu_sdk as feishu_sdk_module
@@ -153,6 +154,7 @@ def _web_app(
         ),
         oauth=oauth,
         public_origin=public_origin,
+        mode=WebMode.HTTPS,
         oauth_state_ttl_seconds=300,
         session_ttl_seconds=3600,
         token_factory=lambda: next(token_values),

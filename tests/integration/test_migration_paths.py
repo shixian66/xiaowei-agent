@@ -208,7 +208,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0009_task_parent_context"
+    assert revision == "0010_local_admin_and_provider_state"
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -276,7 +276,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         step_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_step_executions")
         )
-    assert revision == "0009_task_parent_context"
+    assert revision == "0010_local_admin_and_provider_state"
     assert step_count == 1
 
     async with clean_database.begin() as connection:
@@ -417,7 +417,7 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
         advisory_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_model_advisories")
         )
-    assert revision == "0009_task_parent_context"
+    assert revision == "0010_local_admin_and_provider_state"
     assert (intent_count, advisory_count) == (1, 1)
 
     async with clean_database.begin() as connection:
@@ -548,7 +548,7 @@ async def test_rev_0009_downgrade_requires_authorization_for_parent_links(
         revision = await connection.scalar(
             sa.text("SELECT version_num FROM alembic_version")
         )
-        assert revision == "0009_task_parent_context"
+        assert revision == "0010_local_admin_and_provider_state"
         await connection.run_sync(
             run_downgrade,
             "0008_model_artifacts",

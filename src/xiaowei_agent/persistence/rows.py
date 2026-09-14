@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     ChannelKind,
     Contract,
     DestinationKind,
+    IdentitySource,
     IntentDraft,
     ModelAdvisory,
     ModelUsage,
@@ -327,6 +328,8 @@ def web_session_to_row(session: "WebSession") -> dict[str, Any]:
         "issued_at": session.issued_at,
         "expires_at": session.expires_at,
         "revoked_at": session.revoked_at,
+        "auth_source": session.auth_source.value,
+        "public_origin_digest": session.public_origin_digest,
     }
 
 
@@ -340,6 +343,8 @@ def row_to_web_session(row: Mapping[Any, Any]) -> "WebSession":
         issued_at=row["issued_at"],
         expires_at=row["expires_at"],
         revoked_at=row["revoked_at"],
+        auth_source=IdentitySource(row["auth_source"]),
+        public_origin_digest=row["public_origin_digest"],
     )
 
 

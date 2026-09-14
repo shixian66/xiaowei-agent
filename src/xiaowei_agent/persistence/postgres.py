@@ -983,6 +983,8 @@ class PostgresWebSessionStore:
             subject_ref=command.subject_ref,
             issued_at=now,
             expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+            auth_source=command.auth_source,
+            public_origin_digest=command.public_origin_digest,
         )
         async with _write_transaction(self._engine) as connection:
             row = (
@@ -1018,6 +1020,8 @@ class PostgresWebSessionStore:
             WEB_SESSIONS.c.session_digest == lookup.session_digest,
             WEB_SESSIONS.c.revoked_at.is_(None),
             WEB_SESSIONS.c.expires_at > now,
+            # origin 绑定放在查询条件里：调用方不可能忘记比对。
+            WEB_SESSIONS.c.public_origin_digest == lookup.public_origin_digest,
         )
         async with self._engine.connect() as connection:
             row = (await connection.execute(statement)).mappings().first()
