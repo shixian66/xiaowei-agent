@@ -550,7 +550,7 @@ def _synthetic_integration_config(*, gemini_value: str, feishu_value: str) -> st
                 "gemini": {"enabled": False, "api_key": gemini_value},
                 "feishu": {
                     "enabled": False,
-                    "app_id": "cli_smoke",
+                    "app_id": _WEB_APP_ID,
                     "app_secret": feishu_value,
                 },
             },

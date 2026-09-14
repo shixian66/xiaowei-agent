@@ -630,6 +630,18 @@ def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
         compose_smoke._require_model_secret_boundary(session)
 
 
+def test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke() -> None:
+    """The config fixture and OAuth response checker must not keep separate app IDs."""
+    value = json.loads(
+        compose_smoke._synthetic_integration_config(
+            gemini_value="AIza" + "fake-smoke-key",
+            feishu_value="fake-feishu-secret",
+        )
+    )
+
+    assert value["feishu"]["app_id"] == compose_smoke._WEB_APP_ID
+
+
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
