@@ -21,6 +21,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
@@ -38,6 +39,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 # 迁移自己的记账表，不属于业务 schema，比较时排除。
 _ALEMBIC_BOOKKEEPING = "alembic_version"
+_ALEMBIC_VERSION_NUM_MAX_LENGTH = 32
 
 # 被后续 revision 用 ALTER 演进过的表。它们的 CREATE TABLE 是**当初**那一版，逐字
 # 比对必然不等于今天的 ``schema.py``——这正是冻结历史快照应有的样子。这些表改由
@@ -47,7 +49,7 @@ _ALEMBIC_BOOKKEEPING = "alembic_version"
 _ALTERED_AFTER_CREATION = (TASKS, TASK_SUBMISSIONS, WEB_SESSIONS)
 
 
-def _offline_upgrade_sql() -> str:
+def _alembic_config() -> Config:
     config = Config(str(_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(_ROOT / config.get_main_option(
         "script_location", ""
@@ -56,6 +58,11 @@ def _offline_upgrade_sql() -> str:
     # 而不是任何真实实例——离线模式不连它，但把真实地址写进测试等于把连接串提交
     # 进仓库。
     config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline/offline")
+    return config
+
+
+def _offline_upgrade_sql() -> str:
+    config = _alembic_config()
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         command.upgrade(config, "head", sql=True)
@@ -167,8 +174,20 @@ def test_rev_0010_has_the_expected_revision_chain() -> None:
         rev_0010_local_admin_and_provider_state as revision,
     )
 
-    assert revision.revision == "0010_local_admin_and_provider_state"
+    assert revision.revision == "0010_local_admin_provider"
     assert revision.down_revision == "0009_task_parent_context"
+
+
+def test_revision_ids_fit_the_default_alembic_version_column() -> None:
+    """Alembic 默认 ``version_num`` 是 varchar(32)，超长 ID 会在真实 Postgres 上炸。"""
+    scripts = ScriptDirectory.from_config(_alembic_config())
+    too_long = sorted(
+        script.revision
+        for script in scripts.walk_revisions()
+        if len(script.revision) > _ALEMBIC_VERSION_NUM_MAX_LENGTH
+    )
+
+    assert too_long == []
 
 
 def test_rev_0009_has_the_expected_revision_chain() -> None:

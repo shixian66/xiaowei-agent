@@ -997,7 +997,7 @@ Expected: FAIL —— `AttributeError: module 'xiaowei_agent.persistence.schema'
 migration 文件头部：
 
 ```python
-revision: str = "0010_local_admin_and_provider_state"
+revision: str = "0010_local_admin_provider"
 down_revision: str | None = "0009_task_parent_context"
 ```
 
@@ -1207,7 +1207,7 @@ verify_password 采纳封装里的 n        -> test_encoded_parameters_are_check
 5. **闭集守卫登记**（均为刻意设计的人工审查点）：`IdentitySource` 闭集加 `local_admin`；
    `_ALTERED_AFTER_CREATION`、`_ALLOWED_INTERNAL_BY_FILE`（两个新 interface 文件）、
    `_TASK_VIEW_PROCESS_ALLOWED_MODULES`（`persistence.local_admin`）；migration head 字面量
-   `0009_task_parent_context` → `0010_local_admin_and_provider_state`（`test_readiness.py`
+   `0009_task_parent_context` → `0010_local_admin_provider`（`test_readiness.py`
    与 `test_migration_paths.py` 共 6 处）。这些文件都按 `git status` 精确补进了 `git add`。
 
 `tests/integration/test_ri5_schema_migration.py` 的 8 条在无 `PYTEST_POSTGRES_DSN` 时 skip，

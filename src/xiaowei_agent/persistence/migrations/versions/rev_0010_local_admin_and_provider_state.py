@@ -1,6 +1,6 @@
 """Add local admin, provider state tables and bind sessions to their origin.
 
-Revision ID: 0010_local_admin_and_provider_state
+Revision ID: 0010_local_admin_provider
 Revises: 0009_task_parent_context
 """
 
@@ -13,7 +13,7 @@ from xiaowei_agent.persistence.migrations.guards import (
     require_destructive_authorization,
 )
 
-revision: str = "0010_local_admin_and_provider_state"
+revision: str = "0010_local_admin_provider"
 down_revision: str | None = "0009_task_parent_context"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
