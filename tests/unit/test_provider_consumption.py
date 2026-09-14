@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 
-from xiaowei_agent.application.integration_state import LoadReceipt
+from xiaowei_agent.application.integration_state import (
+    SERVICE_FEISHU_LISTENER,
+    SERVICE_WORKER,
+    LoadReceipt,
+)
 from xiaowei_agent.config import Settings
 from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
 
@@ -51,7 +55,9 @@ def test_json_disabled_provider_yields_no_credential(
     """.env 装配了，但 JSON 里 enabled=false —— 两层与关系，最终不启用。"""
     path = _write_config(tmp_path, gemini={"enabled": False, "api_key": "k" * 8})
     creds, _ = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(path)
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(path),
     )
     assert creds.gemini_api_key is None
 
@@ -62,7 +68,9 @@ def test_json_cannot_enable_a_provider_the_env_did_not_assemble(
     """JSON 不能反向启动 Compose 中未装配的进程。"""
     path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
     creds, receipts = load_provider_credentials(
-        settings=settings_all_disabled, path=str(path)
+        settings=settings_all_disabled,
+        service_name=SERVICE_WORKER,
+        path=str(path),
     )
     assert creds.gemini_api_key is None
     assert receipts == {}  # 未启用的服务不写回执，不会造成永久「待应用」
@@ -73,7 +81,9 @@ def test_both_layers_true_yields_the_credential(
 ) -> None:
     path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
     creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(path)
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(path),
     )
     assert creds.gemini_api_key == "k" * 8
     assert receipts[("worker", "gemini")].status == "loaded"
@@ -84,7 +94,9 @@ def test_absent_file_writes_no_receipt_and_does_not_crash(
 ) -> None:
     """读不出文件就没有可信 generation，不得伪造一个写进回执。"""
     creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(tmp_path / "missing.json")
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(tmp_path / "missing.json"),
     )
     assert creds.gemini_api_key is None
     assert receipts == {}
@@ -96,7 +108,9 @@ def test_corrupt_file_writes_no_receipt_and_does_not_crash(
     bad = tmp_path / "integrations.json"
     bad.write_text("{not json", encoding="utf-8")
     creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(bad)
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(bad),
     )
     assert creds.gemini_api_key is None
     assert receipts == {}
@@ -108,7 +122,9 @@ def test_readable_file_with_a_bad_provider_subtree_writes_an_invalid_receipt(
     """文件本身可读 -> generation 可信 -> 该 Provider 记 invalid。"""
     path = _write_config(tmp_path, generation=7, gemini={"enabled": True})  # 缺 api_key
     creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(path)
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(path),
     )
     assert creds.gemini_api_key is None
     assert receipts[("worker", "gemini")] == LoadReceipt(generation=7, status="invalid")
@@ -124,7 +140,9 @@ def test_a_listener_writes_only_its_own_feishu_receipt(
         feishu={"enabled": True, "app_id": "cli_x", "app_secret": "s" * 8},
     )
     creds, receipts = load_provider_credentials(
-        settings=settings_with_feishu_listener, path=str(path)
+        settings=settings_with_feishu_listener,
+        service_name=SERVICE_FEISHU_LISTENER,
+        path=str(path),
     )
     assert creds.feishu_app_secret == "s" * 8
     assert creds.gemini_api_key is None  # listener 没装配 Gemini
@@ -216,7 +234,9 @@ def test_a_broken_symlink_does_not_produce_an_unconfigured_startup(
     link = tmp_path / "integrations.json"
     link.symlink_to(tmp_path / "nowhere.json")
     creds, receipts = load_provider_credentials(
-        settings=settings_with_gemini_assembled, path=str(link)
+        settings=settings_with_gemini_assembled,
+        service_name=SERVICE_WORKER,
+        path=str(link),
     )
     assert creds.gemini_api_key is None
     assert receipts == {}  # 读不出可信 generation，不写回执

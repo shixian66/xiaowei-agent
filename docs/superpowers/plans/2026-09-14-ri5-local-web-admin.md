@@ -2462,6 +2462,61 @@ worker 启动时不写加载回执          -> 1 failed
 真正挡住它的是 `StrictStr` 自己的"不得为空或首尾空白"规则，比 `SecretRef` 更靠下一层。
 行为契约（400 且不替换文件）成立，但这条不变量由哪一层持有与我原先以为的不同。
 
+#### 复审修复（P1：加载回执跨进程背书）
+
+`069c937` 被评审驳回，一条 P1：任何一个进程启动都会替**所有**兄弟进程写"已加载第 N 代"
+的回执，页面因此从"待应用"跳到"待测试/可用"，而那些服务可能没重启、没读过这一代、甚至
+没启动成功。
+
+**根因不在写入点，在产出点。** `load_provider_credentials()` 用全局 `Settings` 算出
+`required_services()` 的**全集**当作回执；四个入口只是把它原样落库。我上一轮把写入挪到
+三个进程入口，解决的是"什么时候写"，没有触及"写的是谁的名字"。
+
+**修复**：`load_provider_credentials()` 增加**无默认值**的 `service_name: str | None`，
+只为本进程那一个服务名产出回执；`None` 表示"本次装配不作证"（内存栈、注入凭据的离线
+证明），结果是空回执。身份由**装配函数**填而不是调用方传参——一个栈装配了哪条链路，就
+决定了它能为哪个服务作证；让调用方自报身份等于允许它谎报。
+
+**同路径连带修的三处：**
+
+1. `tests/contract/test_ri5_load_receipts.py` 那条测试名字说"listener 只写自己的回执"，
+   断言却允许 `worker/gemini` 一起出现——是它把缺陷锁成了绿。换成四个服务名的参数化
+   反例，且**必须在四个开关全开时跑**：只开一条链路时"本进程集合"与"全局集合"恰好相等，
+   错误实现也看不出来。
+2. 三个入口的注释写着"`build_postgres_local_stack` 同时服务 API 与 Worker"——事实错误，
+   internal-api 走的是 `build_postgres_task_view_stack`。理由错了会把下一个人引向错误的
+   修法，一并改掉。
+3. 两个真实飞书 adapter 的构造点写着 `cast(str, credentials.feishu_app_id)`。配置缺失时
+   两个字段都是 `None`，`cast` 只骗过类型检查，失败推迟到 SDK 内部，异常可能带 URL 或
+   响应正文，而入口只允许记闭集诊断。改为 `_feishu_credentials_or_fail()` 在构造前拒绝；
+   注入的 transport / message port 自带凭据，不走这条路。
+
+**刻意没改**：凭据的取值范围仍用全局 `required_services()`。凭据问的是"这次部署装配了
+这条链路吗"，回执问的是"谁在作证"——两个不同的问题，把它们合成一个集合正是这条 P1 的
+根因，分开之后就不该再让其中一个去迁就另一个。
+
+反证（逐条改坏、验证变红、恢复）：
+
+```text
+回执退回全局服务集合（原缺陷）        -> 5 failed
+service_name=None 被当成「作证全部」   -> 8 failed
+listener 装配时报成 worker            -> 1 failed
+serve_web 报成 worker                 -> 1 failed
+真实飞书 adapter 退回 cast(str, None) -> 1 failed
+恢复后                                80 passed
+```
+
+评审那条复现的结果现在是每进程一条：
+
+```text
+worker           -> [('worker', 'gemini')]
+feishu_listener  -> [('feishu_listener', 'feishu')]
+channel_worker   -> [('channel_worker', 'feishu')]
+web              -> [('web', 'feishu')]
+
+gemini_state_if_only_web_recorded= pending_restart
+```
+
 ---
 
 ### Task 7: 三个控制面探针

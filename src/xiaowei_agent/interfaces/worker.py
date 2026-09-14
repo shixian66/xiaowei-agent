@@ -46,9 +46,9 @@ async def run_worker(settings: Settings) -> int:
     configure_logging(settings)
     stack = await build_postgres_local_stack(settings=settings)
     # 加载回执在**开始服务之前**落库：管理面第一次打开就必须看到这个进程实际
-    # 加载的代次，而不是"还没人来问过所以显示待应用"。回执只归属本进程自己启用
-    # 的链路，写在入口而不是共享的装配函数里——``build_postgres_local_stack``
-    # 同时服务 API 与 Worker，写在那里等于替另一个进程背书。
+    # 加载的代次，而不是"还没人来问过所以显示待应用"。回执的**归属**由装配函数
+    # 按本进程装配了哪条链路算出（见 ``_resolved_credentials``），入口只负责在
+    # 真正开始服务之前把它落库——装配成功但没起来的进程不该留下"我在跑第 N 代"。
     await stack.provider_state.record_load(receipts=stack.load_receipts)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

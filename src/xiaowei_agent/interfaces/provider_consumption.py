@@ -108,9 +108,23 @@ def _feishu_credential(config: IntegrationConfig) -> tuple[str | None, str | Non
 
 
 def load_provider_credentials(
-    *, settings: Settings, path: str = DEFAULT_INTEGRATION_CONFIG_PATH
+    *,
+    settings: Settings,
+    service_name: str | None,
+    path: str = DEFAULT_INTEGRATION_CONFIG_PATH,
 ) -> tuple[ProviderCredentials, Mapping[tuple[str, str], LoadReceipt]]:
-    """读一次文件，同时产出本进程的凭据与它要写的加载回执。
+    """读一次文件，同时产出本进程的凭据与**它自己**要写的加载回执。
+
+    ``service_name`` 是调用方的身份声明，**没有默认值**：一条回执的含义是"服务 S
+    正在跑第 N 代配置"，只有身为 S 的那个进程能作证。之前这里把
+    :func:`required_services` 的全集直接写成回执，于是任何一个进程启动都替所有
+    兄弟进程签了字——Web 一起来就能让页面从"待应用"跳到"待测试"，而 worker 可能
+    根本没重启、没读过这一代，甚至没起来。传 ``None`` 表示"本次装配不为任何服务
+    作证"（内存栈、注入凭据的离线证明），结果是空回执，不会假绿。
+
+    凭据与回执的取值范围**刻意不同**：凭据问的是"这次部署装配了这条链路吗"，由
+    `.env` 开关决定；回执问的是"谁在作证"。把两者合成一个集合正是上面那条跨进程
+    背书的根因。
 
     三种情况都**不抛异常、不阻止进程启动**：
 
@@ -142,14 +156,20 @@ def load_provider_credentials(
         ProviderName.GEMINI: gemini_key is not None,
         ProviderName.FEISHU: feishu_app_secret is not None,
     }
-    receipts: dict[tuple[str, str], LoadReceipt] = {
-        (service_name, provider.value): LoadReceipt(
-            generation=config.generation,
-            status="loaded" if available[provider] else "invalid",
-        )
-        for provider, service_names in required.items()
-        for service_name in service_names
-    }
+    # 只为**自己**签字：本进程的服务名必须真的在这个 Provider 的消费者里，才有
+    # 一条属于它的回执。兄弟服务的那几条由它们各自启动时写。
+    receipts: dict[tuple[str, str], LoadReceipt] = (
+        {}
+        if service_name is None
+        else {
+            (service_name, provider.value): LoadReceipt(
+                generation=config.generation,
+                status="loaded" if available[provider] else "invalid",
+            )
+            for provider, service_names in required.items()
+            if service_name in service_names
+        }
+    )
     return (
         ProviderCredentials(
             gemini_api_key=gemini_key if required[ProviderName.GEMINI] else None,

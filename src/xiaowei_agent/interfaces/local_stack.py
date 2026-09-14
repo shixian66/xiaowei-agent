@@ -13,6 +13,11 @@ from xiaowei_agent.application.capability_runtime import CapabilityBindingRegist
 from xiaowei_agent.application.default_capabilities import (
     build_default_capability_bindings,
 )
+from xiaowei_agent.application.integration_state import (
+    SERVICE_CHANNEL_WORKER,
+    SERVICE_FEISHU_LISTENER,
+    SERVICE_WORKER,
+)
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.config import Settings
@@ -235,6 +240,22 @@ class WebStackConfigurationError(RuntimeError):
     """Web 窄栈的 credential 或身份文件配置不可用。"""
 
 
+def _feishu_credentials_or_fail(credentials: ProviderCredentials) -> tuple[str, str]:
+    """把一对可能为 ``None`` 的飞书凭据变成确定的装配失败或一对真值。
+
+    调用点原本写 ``cast(str, credentials.feishu_app_id)``——`integrations.json`
+    缺失、损坏或飞书那一节没开时两个字段都是 ``None``，``cast`` 只骗过类型检查，
+    ``None`` 会一路传进真实 SDK adapter。那时的失败发生在 SDK 内部，异常可能带上
+    URL 或响应正文，而入口只允许记闭集诊断。这里在构造真实 adapter **之前**拒绝，
+    把它变成一次可预期的、不带外部细节的装配失败。
+
+    只挡真实 adapter：注入的 transport / message port 自带凭据，不走这条路。
+    """
+    if credentials.feishu_app_id is None or credentials.feishu_app_secret is None:
+        raise ValueError("feishu credentials are not configured")
+    return credentials.feishu_app_id, credentials.feishu_app_secret
+
+
 @dataclass(frozen=True)
 class StarRocksLiveAssembly:
     """代码评审后显式注入的 M6b 物理身份与 Evidence 授权。"""
@@ -265,7 +286,10 @@ class _Ready:
 
 
 def _resolved_credentials(
-    settings: Settings, credentials: ProviderCredentials | None
+    settings: Settings,
+    credentials: ProviderCredentials | None,
+    *,
+    service_name: str | None,
 ) -> tuple[ProviderCredentials, Mapping[tuple[str, str], LoadReceipt]]:
     """注入优先；没注入就从默认路径读一次，并一并交出这次读取的回执。
 
@@ -275,10 +299,13 @@ def _resolved_credentials(
     凭据与回执必须出自**同一次读取**：分两次读会让"页面上说加载了第几代"与
     "进程实际用的是哪一代"在两次读取之间的保存里错开一代。注入凭据时没有读取，
     因此也没有回执——离线证明用的栈不该伪造一条"我加载过第几代"。
+
+    ``service_name`` 由**装配函数**填，不是调用方传进来的参数：一个栈装配了哪条
+    链路，就决定了它能为哪个服务作证。让调用方自己报身份等于允许它谎报。
     """
     if credentials is not None:
         return credentials, {}
-    return load_provider_credentials(settings=settings)
+    return load_provider_credentials(settings=settings, service_name=service_name)
 
 
 def _utc_now() -> dt.datetime:
@@ -753,7 +780,9 @@ async def build_postgres_feishu_listener_stack(
 
     if not settings.feishu_listener_enabled:
         raise ValueError("Feishu listener is disabled")
-    credentials, load_receipts = _resolved_credentials(settings, credentials)
+    credentials, load_receipts = _resolved_credentials(
+        settings, credentials, service_name=SERVICE_FEISHU_LISTENER
+    )
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -787,14 +816,10 @@ async def build_postgres_feishu_listener_stack(
             runtime=runtime,
             channel_store=channel_store,
         )
-        inbound = (
-            transport
-            if transport is not None
-            else FeishuSdkInboundTransport(
-                app_id=cast(str, credentials.feishu_app_id),
-                app_secret=cast(str, credentials.feishu_app_secret),
-            )
-        )
+        inbound = transport
+        if inbound is None:
+            app_id, app_secret = _feishu_credentials_or_fail(credentials)
+            inbound = FeishuSdkInboundTransport(app_id=app_id, app_secret=app_secret)
         listener = FeishuListener(
             app_id=cast(str, credentials.feishu_app_id),
             tenant_key=cast(str, settings.feishu_tenant_key),
@@ -841,7 +866,9 @@ async def build_postgres_channel_worker_stack(
 
     if not settings.channel_worker_enabled:
         raise ValueError("channel worker is disabled")
-    credentials, load_receipts = _resolved_credentials(settings, credentials)
+    credentials, load_receipts = _resolved_credentials(
+        settings, credentials, service_name=SERVICE_CHANNEL_WORKER
+    )
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -866,15 +893,14 @@ async def build_postgres_channel_worker_stack(
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
-        messages = (
-            message_port
-            if message_port is not None
-            else FeishuSdkMessageAdapter(
-                app_id=cast(str, credentials.feishu_app_id),
-                app_secret=cast(str, credentials.feishu_app_secret),
+        messages = message_port
+        if messages is None:
+            app_id, app_secret = _feishu_credentials_or_fail(credentials)
+            messages = FeishuSdkMessageAdapter(
+                app_id=app_id,
+                app_secret=app_secret,
                 timeout_seconds=settings.feishu_api_timeout_seconds,
             )
-        )
         service = ChannelProjectionService(
             runtime=runtime,
             task_store=task_store,
@@ -1056,8 +1082,15 @@ async def build_postgres_local_stack(
     starrocks_live_assembly: StarRocksLiveAssembly | None = None,
     credentials: ProviderCredentials | None = None,
 ) -> LocalStack:
-    """用一个 AsyncEngine 装配 API/Worker 共用的 PostgreSQL 本地栈。"""
-    resolved_credentials, load_receipts = _resolved_credentials(settings, credentials)
+    """用一个 AsyncEngine 装配带执行权的 PostgreSQL 本地栈。
+
+    这个栈带 Runner 与 Gateway，**只有 Worker 进程用它**（internal-api 走的是
+    :func:`build_postgres_task_view_stack` 那条无执行权的窄栈），因此它产出的加载
+    回执固定归属 ``worker``。
+    """
+    resolved_credentials, load_receipts = _resolved_credentials(
+        settings, credentials, service_name=SERVICE_WORKER
+    )
     engine = create_database_engine(settings)
 
     async def close() -> None:

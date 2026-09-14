@@ -1140,7 +1140,14 @@ async def test_channel_worker_stack_disposes_engine_when_port_assembly_fails(
 
     with pytest.raises(RuntimeError, match="constant message port assembly failure"):
         await build_postgres_channel_worker_stack(
-            settings=_channel_worker_settings(tmp_path / "missing-secret")
+            settings=_channel_worker_settings(tmp_path / "missing-secret"),
+            # 凭据必须显式注入：没有它们，装配在**构造真实 adapter 之前**就被
+            # ``_feishu_credentials_or_fail`` 拒绝，这条用例要验的 dispose 分支
+            # 反而走不到。
+            credentials=ProviderCredentials(
+                feishu_app_id="cli_dispose",
+                feishu_app_secret="dispose-" + "fixture-secret",
+            ),
         )
     assert engine.disposed is True
 

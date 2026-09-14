@@ -35,6 +35,7 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmitCommand,
 )
 from xiaowei_agent.application.integration_state import (
+    SERVICE_WEB,
     ProviderDisplayState,
     compute_display_state,
     current_generation,
@@ -1431,7 +1432,11 @@ async def serve_web(settings: Settings) -> int:
 
     # 回执与凭据出自**同一次读取**：分两次读会让"页面上说加载了第几代"与
     # "进程实际用的是哪一代"在两次读取之间的保存里错开一代。
-    credentials, receipts = load_provider_credentials(settings=settings)
+    # ``service_name`` 只能是 ``web``：Web 进程唯一能作证的是它自己加载了第几代，
+    # worker / listener / channel worker 那几条由它们各自启动时写。
+    credentials, receipts = load_provider_credentials(
+        settings=settings, service_name=SERVICE_WEB
+    )
     oauth: FeishuOAuthPort | None = None
     membership: FeishuMembershipPort | None = None
     if (
