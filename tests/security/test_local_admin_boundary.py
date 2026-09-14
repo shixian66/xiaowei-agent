@@ -87,6 +87,36 @@ async def test_password_hash_never_appears_in_any_returned_payload(
         assert authenticated.csrf_token not in rendered
 
 
+async def test_the_password_hash_never_survives_repr_or_dump(
+    clock, memory_state
+) -> None:
+    """哈希不是明文口令，但它是离线爆破的输入，同样不得进日志或响应体。"""
+    from xiaowei_agent.persistence.local_admin import ChangePasswordCommand
+
+    _service_tuple = await _service(clock, memory_state)
+    record = await _service_tuple[1].get()
+    command = ChangePasswordCommand(
+        password_hash=record.password_hash,
+        new_session_digest="c" * 64,
+        public_origin_digest=web_origin_digest(_ORIGIN),
+        session_ttl_seconds=3600,
+    )
+
+    for rendered in (
+        repr(record),
+        str(record),
+        repr(record.model_dump()),
+        record.model_dump_json(),
+        repr(command),
+        str(command),
+        repr(command.model_dump()),
+        command.model_dump_json(),
+    ):
+        assert record.password_hash not in rendered
+    # 非凭据字段仍然可见。
+    assert "must_change_password" in repr(record)
+
+
 async def test_session_is_bound_to_the_public_origin_that_created_it(
     clock, memory_state
 ) -> None:

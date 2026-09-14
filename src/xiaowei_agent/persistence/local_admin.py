@@ -39,10 +39,19 @@ class LocalAdminNotFoundError(LocalAdminStoreError, LookupError):
         super().__init__("local admin not found")
 
 
+SecretHash = StrictStr
+"""口令哈希的标记类型。
+
+名字以 ``Secret`` 开头是有意义的：凡是这样标注的字段都必须同时写
+``exclude=True`` 与 ``repr=False``（见 ``tests/security/test_secret_field_exposure.py``）。
+哈希不是明文口令，但它是凭据材料——进了日志或响应体就等于把离线爆破的输入交出去。
+"""
+
+
 class LocalAdminRecord(Contract):
     """本地管理员的持久化事实；只有哈希，没有明文。"""
 
-    password_hash: StrictStr
+    password_hash: SecretHash = Field(exclude=True, repr=False)
     must_change_password: bool
 
 
@@ -53,7 +62,7 @@ class ChangePasswordCommand(Contract):
     所有随机来源集中在认证服务一处。
     """
 
-    password_hash: StrictStr
+    password_hash: SecretHash = Field(exclude=True, repr=False)
     new_session_digest: Sha256Hex
     public_origin_digest: Sha256Hex
     session_ttl_seconds: StrictInt = Field(gt=0, le=86_400)

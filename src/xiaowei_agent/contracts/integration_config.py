@@ -1,9 +1,13 @@
 """`integrations.json` 的严格契约：Provider 明文凭据的唯一真源。
 
-Secret 字段用 ``Field(exclude=True)`` 从 ``model_dump()`` 里摘掉，取值只能过
+Secret 字段必须**同时**写 ``exclude=True`` 与 ``repr=False``，取值只能过
 :meth:`GeminiIntegration.secret_value` / :meth:`FeishuIntegration.secret_value`。
-默认序列化会进日志、错误响应与调试输出，把 secret 留在默认路径上等于把它交给
-所有这些通道；显式访问器让每一次读取都在源码里看得见。
+
+**两个标志各挡一条通道，缺一不可**：``exclude=True`` 只作用于 ``model_dump()``
+与 ``model_dump_json()``；``repr()`` 和 ``str()`` 走的是另一条路径，不受它影响。
+只写 ``exclude=True`` 的对象一旦进异常链、调试日志或测试失败输出，完整 Key 会被
+原样打印出来。这条义务挂在类型上而不是字段名上——凡是标注为 ``Secret*`` 的字段
+都必须两个标志齐全，由 ``tests/security/test_secret_field_exposure.py`` 机械核对。
 """
 
 import unicodedata
@@ -31,7 +35,7 @@ class GeminiIntegration(Contract):
     """Gemini 的启用开关与 API Key。"""
 
     enabled: bool = False
-    api_key: SecretRef | None = Field(default=None, exclude=True)
+    api_key: SecretRef | None = Field(default=None, exclude=True, repr=False)
 
     def secret_value(self) -> str:
         """显式读取 API Key；未配置时抛 ``ValueError``。"""
@@ -45,7 +49,7 @@ class FeishuIntegration(Contract):
 
     enabled: bool = False
     app_id: StrictStr | None = None
-    app_secret: SecretRef | None = Field(default=None, exclude=True)
+    app_secret: SecretRef | None = Field(default=None, exclude=True, repr=False)
 
     def secret_value(self) -> str:
         """显式读取 App Secret；未配置时抛 ``ValueError``。"""

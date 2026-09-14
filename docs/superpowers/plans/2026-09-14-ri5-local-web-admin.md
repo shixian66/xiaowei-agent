@@ -1613,6 +1613,34 @@ read_or_absent 改回 exists()   -> test_read_or_absent_does_not_swallow...     
 
 比计划清单多改到的既有测试共 13 个文件，均已按 `git status` 精确补进 `git add`。
 
+**Task 2/4 补修（2026-09-14，复审发现的 P1）：** `IntegrationConfig` 的两个 secret 字段只写了
+`exclude=True`，`repr()` 与 `str()` 仍会打印完整的 Gemini Key 与飞书 App Secret。
+
+根因不是漏了一个参数，而是我在 Task 4 的记录里已经写明「Pydantic 默认 `repr` 与 `model_dump()`
+都会带上字段值」，却只给 `ProviderCredentials` 加了 `repr=False`，Task 2 的 `Contract` 字段只做了
+一半。当时的用例断言的是 `repr(dumped)`——已经 dump 过的字典——看起来在测 `repr`，实际上
+只写 `exclude=True` 的实现同样全绿（反证 1 复现了这一点：修复前的写法下那条用例仍 `1 passed`）。
+
+沿同一路径扫描，`persistence/local_admin.py` 的两个 `password_hash` 是同类：`LocalAdminRecord`
+两条通道都漏（连 `model_dump()` 都带），`ChangePasswordCommand` 漏 `repr`。哈希不是明文口令，
+但它是离线爆破的输入，同样不能进日志或响应体。四处一起修。
+
+**按字段名做守卫不成立**：实测名字模式会误杀 `idempotency_key` / `tenant_key` / `reason_key`，
+又漏掉 `password_hash`。义务改挂在**类型**上——凡标注为 `Secret*` 的字段必须 `exclude=True`
+且 `repr=False`，由 `tests/security/test_secret_field_exposure.py` 用 AST 机械核对，并带一条
+反空跑用例（扫不到已知字段就变红）。新增 `SecretHash` 标记类型给两个 `password_hash`。
+
+```text
+去掉 repr=False（修复前写法）     -> repr 用例 + 结构守卫        3 failed
+  同一状态下旧的 model_dump 用例 -> 仍然                        1 passed  ← 当初的假绿
+去掉 exclude=True                -> 结构守卫                    2 failed
+LocalAdminRecord 去掉两个标志    -> 口令哈希用例 + 结构守卫      3 failed
+把 SecretHash 改回 StrictStr     -> 反空跑用例                  1 failed
+恢复后                                                          20 passed
+```
+
+四条基线：`3626 passed, 237 skipped`、`1331 security passed`、`ruff` 通过、`mypy` 171 files 通过。
+
 ---
 
 ### Task 5: Web 装配解耦、模式化 Cookie 与登录路由
