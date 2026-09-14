@@ -44,11 +44,20 @@
 - Consumes: 无
 - Produces: 一份「开工前基线」记录，供后续 Task 判断某个失败是不是自己引入的
 
-- [ ] **Step 1: 同步依赖**
+- [ ] **Step 1: 同步依赖并激活虚拟环境**
+
+本机**没有裸 `python` 命令**，`.venv` 也不会自动激活。四条基线命令里的 `python` 全部指
+`.venv` 里那个，所以必须先激活（或全程用 `.venv/bin/python` 显式调用）：
 
 ```bash
 uv sync --extra dev --frozen
+source .venv/bin/activate
+python -V            # 应为 Python 3.11.x，且路径在 .venv 下
+which python         # 应指向 <repo>/.venv/bin/python
 ```
+
+后续所有 Task 的 `python -m pytest ...` 都默认在这个已激活的 shell 里执行。新开终端要重新
+`source`，否则会命中「command not found: python」而不是真正的测试失败。
 
 - [ ] **Step 2: 跑四条基线并记录**
 
@@ -1015,8 +1024,40 @@ git commit -m "feat(ri5): add local admin auth and split the provider https gate
 - Produces:
   - `def session_cookie_name(mode: WebMode) -> str`——HTTPS 返回 `"__Host-xiaowei-session"`，`lan_http` 返回 `"xiaowei-session"`
   - `def oauth_state_cookie_name(mode: WebMode) -> str`——同理 `"__Host-xiaowei-oauth-state"` / `"xiaowei-oauth-state"`
-  - `WebStack.local_admin_auth: LocalAdminAuthService`
+  - `WebStack.local_admin_auth: LocalAdminAuthService`（必填）
   - `WebStack.oauth_available: bool`——飞书 OAuth 是否装配成功
+  - **改为 Optional 的四个 `WebStack` 字段**（`local_stack.py:189-193`），其余字段不动：
+
+    ```text
+    auth: WebAuthService | None = None            # 飞书 OAuth 登录服务
+    oauth_port: FeishuOAuthPort | None = None
+    membership: FeishuMembershipPort | None = None
+    identity_directory: FeishuIdentityDirectory | None = None
+    ```
+
+  - `TaskAccessService.__init__` 的 `membership` 改为 `FeishuMembershipPort | None`
+    （`channel_access.py:125`）；为 `None` 时，任何**需要群成员校验**的读取路径一律
+    **fail-closed 拒绝**（返回既有的 not-found 语义，不降级为放行）。本地管理员只看自己的任务
+    与 admin 全量安全任务，不依赖群成员校验，因此该 fail-closed 不影响 RI5 闭环。
+  - `create_app()` 最终签名（`web_app.py:540`）：
+
+    ```python
+    def create_app(
+        *,
+        auth: WebAuthService | None,            # 飞书 OAuth；不可用时为 None
+        local_admin_auth: LocalAdminAuthService,  # 必填，本地登录始终可用
+        oauth_available: bool,
+        settings: Settings,
+        readiness: ReadinessProbe,
+        task_access: TaskAccessService,
+        submissions: ChannelSubmissionService,
+        clock: Clock,
+        policy_revision: str,
+    ) -> FastAPI: ...
+    ```
+
+    `auth is None` 时**不注册** `/oauth/feishu/start` 与 `/oauth/feishu/callback` 两条路由——
+    不是注册后再返回 503，避免出现「路由在但永远失败」的假入口（M7 §2.5 禁止假入口）。
   - `def validate_unauthenticated_origin(*, origin: str | None, content_type: str | None) -> None`
     ——未登录状态变更的窄校验：只核对固定 public origin 与 `application/json`，**不**要求 CSRF token
   - 新路由：`POST /app/api/login`、`POST /app/api/change-password`（既有 `POST /app/api/logout` 复用）
@@ -1047,6 +1088,33 @@ async def test_local_admin_seed_failure_makes_the_web_not_ready():
 def test_cookie_names_and_flags_follow_the_web_mode():
     # https -> __Host- 前缀且 secure=True 且设置 HSTS
     # lan_http -> 普通名、secure 缺省、不设 HSTS；两种都 HttpOnly/SameSite=Lax/Path=/
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_oauth_routes_are_absent_when_feishu_is_unavailable():
+    # Given feishu_oauth_enabled=false（另一例：身份目录加载抛异常）
+    # When  请求 /oauth/feishu/start 与 /oauth/feishu/callback
+    # Then  两条都 404（不是 503）——不留「路由在但永远失败」的假入口
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_membership_none_fails_closed_for_group_scoped_reads():
+    # Given TaskAccessService 的 membership 为 None
+    # When  读取一个需要群成员校验的任务
+    # Then  按既有 not-found 语义拒绝；断言**没有**降级为放行
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_local_admin_paths_work_with_membership_none():
+    # Given membership 为 None
+    # When  本地管理员读「我的任务」与 admin 全量安全任务
+    # Then  正常返回——该 fail-closed 不得波及 RI5 闭环
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+
+async def test_bad_origin_does_not_take_down_the_whole_web():
+    # Given feishu_oauth_enabled=true 但 WebAuthService 构造因 origin 非法抛 ValueError
+    # Then  build_postgres_web_stack 仍成功，oauth_available 为 False，readyz 仍 ready
     raise NotImplementedError("按规格写出断言后删除本行")
 
 async def test_before_first_change_password_other_routes_are_refused():
@@ -1087,7 +1155,47 @@ Expected: FAIL —— `build_postgres_web_stack` 仍在 `local_stack.py:855` 抛
 
 - [ ] **Step 3: 实现装配解耦**
 
-`local_stack.py:855` 的判断改为 `if not settings.web_app_enabled: raise ValueError("Web app is disabled")`。飞书身份目录与 `WebAuthService` 的装配包进 `try/except FeishuIdentityConfigurationError`，失败时 `auth = None`、`oauth_available = False`，**不** dispose engine、**不** 抛出。`WebStack` 增加 `local_admin_auth` 与 `oauth_available` 字段，`public_origin` 改读 `settings.web_public_origin`，并把 `mode=settings.web_mode` 传给 `WebAuthService`。
+`local_stack.py:855` 的判断改为 `if not settings.web_app_enabled: raise ValueError("Web app is disabled")`。
+
+飞书那一组依赖整体变成**可选块**。判定条件是双层开关同时为真，即
+`settings.feishu_oauth_enabled and credentials.feishu_app_id and credentials.feishu_app_secret`：
+
+```python
+auth: WebAuthService | None = None
+oauth_port_or_none: FeishuOAuthPort | None = None
+membership_or_none: FeishuMembershipPort | None = None
+identity_directory: FeishuIdentityDirectory | None = None
+oauth_available = False
+
+if settings.feishu_oauth_enabled and credentials.feishu_app_secret is not None:
+    try:
+        identity_directory = load_feishu_identity_directory(settings)
+        auth = WebAuthService(
+            sessions=web_session_store,
+            identities=identity_directory,
+            oauth=oauth,
+            public_origin=cast(str, settings.web_public_origin),
+            mode=settings.web_mode,
+            oauth_state_ttl_seconds=settings.web_oauth_state_ttl_seconds,
+            session_ttl_seconds=settings.web_session_ttl_seconds,
+            oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
+        )
+        oauth_port_or_none, membership_or_none = oauth, membership
+        oauth_available = True
+    except (FeishuIdentityConfigurationError, ValueError):
+        # 只标记不可用；不 dispose engine，不抛出，Web 进程照常起来
+        auth = None
+        oauth_available = False
+```
+
+注意捕获集合要含 `ValueError`——`WebAuthService.__init__` 对 origin/ttl 非法就是抛它，不能让它
+把整个 Web 打挂。
+
+本地管理员那一组是**必填**：store 构造与 seed 失败仍走既有 `except Exception: await
+engine.dispose(); raise`，使 composition 不成立、Web 不进入 ready（这正是设计要求的
+「seed 失败时 Web 不 ready」）。
+
+`TaskAccessService` 用 `membership=membership_or_none` 构造；`create_app()` 按上面的最终签名调用。
 
 本地管理员 seed 在 `build_postgres_web_stack` 内、migration-head 检查之后执行：`await local_admin_store.seed_if_absent(password_hash=hash_password("admin"))`。seed 抛错则按既有 `except Exception: await engine.dispose(); raise` 路径走，使 composition 不成立。
 
@@ -1158,11 +1266,28 @@ git commit -m "feat(ri5): decouple web assembly from feishu and add local admin 
 - Consumes: Task 2 的 `IntegrationConfig` / `read_integration_config` / `write_integration_config`；Task 3 的三张表；Task 4 的 `LOCAL_ADMIN`
 - Produces:
   - `class ProviderDisplayState(StrEnum)`：`UNCONFIGURED="unconfigured"`、`PENDING_RESTART="pending_restart"`、`LOAD_FAILED="load_failed"`、`PENDING_TEST="pending_test"`、`AVAILABLE="available"`、`TEST_FAILED="test_failed"`
-  - `def compute_display_state(*, check_name, enabled, required, current_generation, receipts, test) -> ProviderDisplayState`
-    ——`receipts: Mapping[tuple[str, str], LoadReceipt]`，`LoadReceipt` 同时携带
-    `generation: int` 与 `status: Literal["loaded", "invalid"]`；**只有 `status == "loaded"` 且
-    `generation == current_generation` 才算已加载**，`invalid` 必须落到独立的 `LOAD_FAILED`，
-    不得被当成「待测试」
+  - 完整签名（调用方必须显式告知「该等哪些服务」，否则无法判断某个已启用服务缺回执）：
+
+    ```python
+    def compute_display_state(
+        *,
+        provider: ProviderName,
+        enabled: bool,
+        required_fields_present: bool,
+        current_generation: int,
+        required_service_names: frozenset[str],
+        receipts: Mapping[tuple[str, str], LoadReceipt],
+        test: TestResult | None,
+    ) -> ProviderDisplayState: ...
+    ```
+
+    - `required_service_names`：本次部署中**实际启用且需要该 Provider** 的服务名闭集，由调用方
+      从 `Settings` 的装配开关算出（例如 Gemini 在只开 worker 时是 `frozenset({"worker"})`）。
+      为空集表示没有服务需要它——此时不存在「待应用」，直接进入测试判定，避免永久卡在待应用。
+    - `receipts`：`Mapping[(service_name, provider), LoadReceipt]`。判定「已加载」要求
+      `required_service_names` 中**每一个**服务都有 `status == "loaded"` 且
+      `generation == current_generation` 的回执；**缺回执**算未加载，**任一 `invalid`** 算加载失败。
+    - `test: TestResult | None`，`class TestResult(Contract): status: Literal["passed","failed"]; generation: StrictInt`
   - `class LoadReceipt(Contract): generation: StrictInt = Field(gt=0); status: Literal["loaded", "invalid"]`
   - `UNCONFIGURED_GENERATION: Final[int] = 0`——文件不存在时的逻辑代次
   - `def read_or_absent(path: str) -> IntegrationConfig | None`——文件不存在返回 `None`；
@@ -1182,10 +1307,23 @@ from xiaowei_agent.application.integration_state import (
 )
 
 
+from xiaowei_agent.application.integration_state import LoadReceipt, TestResult
+from xiaowei_agent.contracts import ProviderName
+
+
+def _loaded(generation: int = 2) -> LoadReceipt:
+    return LoadReceipt(generation=generation, status="loaded")
+
+
 def _state(**kw: object) -> S:
     base = dict(
-        check_name="gemini_connection", enabled=True, required=True,
-        current_generation=2, receipts={("worker", "gemini"): 2}, test=None,
+        provider=ProviderName.GEMINI,
+        enabled=True,
+        required_fields_present=True,
+        current_generation=2,
+        required_service_names=frozenset({"worker"}),
+        receipts={("worker", "gemini"): _loaded()},
+        test=None,
     )
     base.update(kw)
     return compute_display_state(**base)  # type: ignore[arg-type]
@@ -1193,26 +1331,55 @@ def _state(**kw: object) -> S:
 
 def test_disabled_or_missing_config_is_unconfigured() -> None:
     assert _state(enabled=False) is S.UNCONFIGURED
-    assert _state(required=False) is S.UNCONFIGURED
+    assert _state(required_fields_present=False) is S.UNCONFIGURED
 
 
 def test_an_invalid_load_receipt_is_not_pending_test() -> None:
     """服务读到了当前代次但判定无效，必须是独立失败态，不能冒充「待测试」。"""
-    from xiaowei_agent.application.integration_state import LoadReceipt
-
     receipts = {("worker", "gemini"): LoadReceipt(generation=2, status="invalid")}
     assert _state(receipts=receipts) is S.LOAD_FAILED
 
 
 def test_a_stale_invalid_receipt_is_still_pending_restart() -> None:
-    from xiaowei_agent.application.integration_state import LoadReceipt
-
     receipts = {("worker", "gemini"): LoadReceipt(generation=1, status="invalid")}
     assert _state(receipts=receipts) is S.PENDING_RESTART
 
 
+def test_a_required_service_without_any_receipt_is_pending_restart() -> None:
+    """两个服务都需要飞书时，只有一个上报回执不算生效。"""
+    assert (
+        _state(
+            required_service_names=frozenset({"worker", "feishu-listener"}),
+            receipts={("worker", "gemini"): _loaded()},
+        )
+        is S.PENDING_RESTART
+    )
+
+
+def test_every_required_service_must_report_the_current_generation() -> None:
+    assert (
+        _state(
+            required_service_names=frozenset({"worker", "web"}),
+            receipts={("worker", "gemini"): _loaded(), ("web", "gemini"): _loaded()},
+        )
+        is S.PENDING_TEST
+    )
+
+
+def test_no_required_service_means_no_pending_restart() -> None:
+    """没有服务需要它时不得永久停在待应用。"""
+    assert _state(required_service_names=frozenset(), receipts={}) is S.PENDING_TEST
+
+
+def test_receipts_from_unrelated_services_are_ignored() -> None:
+    assert (
+        _state(receipts={("api", "gemini"): _loaded(), ("worker", "gemini"): _loaded()})
+        is S.PENDING_TEST
+    )
+
+
 def test_service_has_not_loaded_the_current_generation_is_pending_restart() -> None:
-    assert _state(receipts={("worker", "gemini"): 1}) is S.PENDING_RESTART
+    assert _state(receipts={("worker", "gemini"): _loaded(1)}) is S.PENDING_RESTART
     assert _state(receipts={}) is S.PENDING_RESTART
 
 
@@ -1221,17 +1388,22 @@ def test_loaded_but_untested_is_pending_test() -> None:
 
 
 def test_stale_test_result_does_not_count_as_tested() -> None:
-    assert _state(test=("passed", 1)) is S.PENDING_TEST
+    assert _state(test=TestResult(status="passed", generation=1)) is S.PENDING_TEST
 
 
 def test_current_generation_results_decide_available_or_failed() -> None:
-    assert _state(test=("passed", 2)) is S.AVAILABLE
-    assert _state(test=("failed", 2)) is S.TEST_FAILED
+    assert _state(test=TestResult(status="passed", generation=2)) is S.AVAILABLE
+    assert _state(test=TestResult(status="failed", generation=2)) is S.TEST_FAILED
 
 
 def test_unconfigured_wins_over_every_later_rule() -> None:
-    """顺序断言：1 优先于 2-5。"""
-    assert _state(enabled=False, receipts={}, test=("failed", 2)) is S.UNCONFIGURED
+    """顺序断言：1 优先于其余全部。"""
+    assert (
+        _state(
+            enabled=False, receipts={}, test=TestResult(status="failed", generation=2)
+        )
+        is S.UNCONFIGURED
+    )
 ```
 
 - [ ] **Step 2: 写失败测试——配置 API 边界**
@@ -1568,7 +1740,13 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 **Interfaces:**
 - Consumes: Task 2 的 `read_or_absent` / `IntegrationConfig`；Task 1 的 `Settings.gemini_enabled` 等装配开关
 - Produces:
-  - `class ProviderCredentials(Contract)`：`gemini_api_key: str | None`、`feishu_app_id: str | None`、`feishu_app_secret: str | None`
+  - `@dataclass(frozen=True, slots=True) class ProviderCredentials`：
+    `gemini_api_key: str | None = field(default=None, repr=False)`、
+    `feishu_app_id: str | None = None`、
+    `feishu_app_secret: str | None = field(default=None, repr=False)`
+    ——**刻意不用 `Contract`**：Pydantic 模型默认 `repr` 与 `model_dump()` 会带上字段值，明文 Key
+    一旦进异常链、日志或调试输出就泄露。frozen dataclass + `repr=False` 让 `repr()` 只显示
+    `app_id`，两个 secret 不出现。`app_id` 不是 secret，保留在 `repr` 里便于排障。
   - `def load_provider_credentials(*, settings: Settings, path: str = DEFAULT_INTEGRATION_CONFIG_PATH) -> tuple[ProviderCredentials, dict[str, LoadReceipt]]`
     ——一次读取，同时产出凭据与本进程要写的加载回执
   - `GeminiModelAdapter.__init__` 新增必填 keyword-only `api_key: str`，**不再自带路径常量**
@@ -1629,6 +1807,57 @@ def test_gemini_adapter_no_longer_owns_a_path_constant():
     from xiaowei_agent.interfaces import gemini_model
 
     assert not hasattr(gemini_model, "GEMINI_SECRET_FILE")
+
+
+def test_every_feishu_adapter_takes_an_in_memory_secret():
+    """四个 adapter 都不得再收文件路径——否则会把明文 Secret 当路径 open()。"""
+    import inspect
+
+    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+    from xiaowei_agent.interfaces.feishu_sdk import (
+        FeishuSdkInboundTransport,
+        FeishuSdkMembershipAdapter,
+        FeishuSdkMessageAdapter,
+    )
+
+    for adapter in (
+        FeishuOAuthAdapter,
+        FeishuSdkInboundTransport,
+        FeishuSdkMessageAdapter,
+        FeishuSdkMembershipAdapter,
+    ):
+        params = inspect.signature(adapter.__init__).parameters
+        assert "app_secret" in params, adapter.__name__
+        assert "app_secret_file" not in params, adapter.__name__
+
+
+def test_credentials_repr_hides_the_secrets():
+    from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
+
+    gemini = "g" + "-fake-key"
+    feishu = "f" + "-fake-secret"
+    creds = ProviderCredentials(
+        gemini_api_key=gemini, feishu_app_id="cli_x", feishu_app_secret=feishu
+    )
+    rendered = repr(creds)
+    assert gemini not in rendered
+    assert feishu not in rendered
+    assert "cli_x" in rendered  # app_id 不是 secret，保留便于排障
+
+
+def test_no_feishu_adapter_reads_the_filesystem_at_construction(monkeypatch):
+    """反例：构造期或请求期都不得再 open() 任何文件。"""
+    import builtins
+
+    opened: list[str] = []
+    real_open = builtins.open
+    monkeypatch.setattr(
+        builtins, "open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1]
+    )
+    from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
+
+    FeishuOAuthAdapter(app_id="cli_x", app_secret="s" * 8, timeout_seconds=5.0)
+    assert opened == []
 ```
 
 - [ ] **Step 2: 写失败测试——旧真源彻底消失**
@@ -1689,8 +1918,26 @@ Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` �
 | `local_stack.py:804-805` | channel worker stack 同上 |
 | `web_app.py:777-778,788-789` | Web 自己的 OAuth adapter 与成员 adapter 同上；`oauth_available` 为假时不构造这两个 adapter |
 
-飞书 SDK seam（`feishu_sdk.py:191` 的 `FeishuSdkInboundTransport.__init__(*, app_id, app_secret_file)`）
-改为接收 `app_secret: str` 而非文件路径，内部删除 `feishu_sdk.py:166` 的 `_read_secret_file`。
+**飞书 adapter 共有四个，全部收文件路径，必须一起改**——只改入站那一个，其余三个会把 JSON 里的
+明文 Secret 当成路径去 `open()`，必然 `SecretFileError`：
+
+| adapter | 位置 | 现签名 | 改为 |
+| --- | --- | --- | --- |
+| OAuth | `feishu_oauth.py:229` | `__init__(*, app_id, app_secret_file, timeout_seconds)` | `app_secret: str` |
+| 入站长连接 | `feishu_sdk.py:191` | `__init__(*, app_id, app_secret_file)` | `app_secret: str` |
+| 消息发送 | `feishu_sdk.py:433` | `__init__(*, app_id, app_secret_file, ...)` | `app_secret: str` |
+| 成员查询 | `feishu_sdk.py:539` | `__init__(*, tenant_id, app_id, app_secret_file)` | `app_secret: str` |
+
+同时删除两处路径读取 helper 及其全部调用点：`feishu_sdk.py:166` 的 `_read_secret_file`
+（调用点 `:208`、`:452`、`:568`）与 `feishu_oauth.py:18` 对 `read_secret_file` 的 import
+（调用点 `:245` 构造期预读、`:315` 每次请求重读）。
+
+注意 `feishu_oauth.py:245` 现在会在**构造期**预读一次做校验，`:315` 每次请求**重读**文件；改成
+内存 secret 后这两处都消失——secret 在装配时一次注入，adapter 不再触碰文件系统。这也顺带去掉了
+「运行期文件被换掉」这一类不确定性。
+
+`interfaces/secret_file.py` 的 `read_secret_file()` **保留不动**，它继续服务 PostgreSQL 与
+StarRocks；本 Task 只是让飞书与 Gemini 不再走它。
 
 `config.py` 删除 `feishu_app_id` 与 `feishu_app_secret_file` 两个字段、`shared` 元组对应项与
 `_FIELD_TO_ENV` 两个条目，并同步 `.env.example`（`test_env_example_clean.py` 断言键集合全等）。
@@ -1732,15 +1979,16 @@ git commit -m "feat(ri5): consume provider credentials from the integration conf
 - Modify: `docker-compose.model.yml`（删除 `gemini_api_key` secret）
 - Create: `docker-compose.lan.yml`
 - Create: `docker-compose.feishu.yml`
-- Create: `scripts/ri5_config_preflight.py`
+- Create: `src/xiaowei_agent/interfaces/config_preflight.py`（**不能放 `scripts/`**——`Dockerfile:8` 只 `COPY src ./src` 与 `alembic.ini`，`scripts/` 不进镜像，容器内执行必然 `ModuleNotFoundError`）
 - Modify: `src/xiaowei_agent/interfaces/web_static/index.html`、`app.js`、`app.css`
+- Modify: `scripts/compose_smoke.py`（`compose_smoke.py:48` 的 `_GEMINI_SECRET_DESTINATION`、`:393-411` 的 secrets 与 identity mount、`:507-508` 的两个 secret 路径）
 - Modify: `README.md`、`.gitignore`、`.dockerignore`
 - Test: `tests/contract/test_compose_contract.py`
 - Test: `tests/security/test_ri5_compose_boundary.py`
 
 **Interfaces:**
 - Consumes: 前 8 个 Task 的全部产出
-- Produces: `docker-compose.lan.yml`（只覆盖 `web-app` 的 `ports`）、`python -m scripts.ri5_config_preflight`
+- Produces: `docker-compose.lan.yml`（**替换**而非追加 `web-app` 的 `ports`）、`docker-compose.feishu.yml`、`python -m xiaowei_agent.interfaces.config_preflight`
 
 - [ ] **Step 1: 写失败契约测试**
 
@@ -1795,6 +2043,14 @@ def test_dockerfile_pins_the_numeric_uid_and_gid():
 
 def test_read_only_rootfs_and_dropped_caps_are_unchanged():
     # read_only: true、cap_drop: [ALL]、no-new-privileges:true 三项逐服务仍在
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_lan_override_replaces_rather_than_appends_the_port():
+    # 渲染 base + lan 后，web-app.ports 长度恰为 1，且不含 127.0.0.1:8080
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_preflight_module_lives_inside_the_packaged_source():
+    # Dockerfile 只 COPY src；断言 config_preflight 在 src/xiaowei_agent/ 下且不在 scripts/
     raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
@@ -1853,18 +2109,23 @@ RUN groupadd --system --gid 10001 xiaowei \
 
 `docker-compose.model.yml` 删除 `gemini_api_key` secret 与 worker 的对应挂载，只保留 `XIAOWEI_GEMINI_ENABLED=true`。
 
-`docker-compose.lan.yml` 只含：
+`docker-compose.lan.yml` 必须**替换**基础映射，不能追加。Compose 对 `ports` 默认是**合并**语义，
+直接写一条新端口会渲染出 `127.0.0.1:8080` 与 `0.0.0.0:8080` **两条**，基础 loopback 映射并没有被
+换掉——这既不是设计要的效果，也让「基础只发 loopback」的断言形同虚设。用 `!override`：
 
 ```yaml
 services:
   web-app:
-    ports:
+    ports: !override
       - "0.0.0.0:8080:8080"
 ```
 
+`!override` 需要 Compose ≥ 2.24.4（与 ADR-015 D7 记录的项目支持下限一致）。Task 9 的契约测试必须
+断言**渲染结果只有一条映射**，而不是只断言新映射存在。
+
 `.gitignore` / `.dockerignore` 追加 `.config/`。
 
-`scripts/ri5_config_preflight.py` 以镜像内用户执行「建目录 → 建同目录临时文件 → chmod 0600 → 原子替换 → 重新读取」，只打印 `preflight: ok` 或闭集失败码，**绝不打印文件内容**。
+`src/xiaowei_agent/interfaces/config_preflight.py` 以镜像内用户执行「建目录 → 建同目录临时文件 → chmod 0600 → 原子替换 → 重新读取」，只打印 `preflight: ok` 或闭集失败码，**绝不打印文件内容**。它复用 Task 2 的 `write_integration_config` / `read_integration_config`，不另写一份文件逻辑。
 
 - [ ] **Step 4: 实现前端面板**
 
@@ -1892,47 +2153,75 @@ services:
 
    `lan_http` 接受 canonical loopback，所以首启阶段不必先用 HTTPS 模式。
 
-3. **先跑预检，成功后才启动 Web**：
+3. 探测本机可用的 Compose 命令。**不要假定 `docker compose` 存在**——本机实测只有
+   `docker-compose 5.5.1`，`docker compose` 返回 `unknown command`：
 
    ```bash
-   docker compose run --rm --no-deps \
+   if docker compose version >/dev/null 2>&1; then
+     COMPOSE="docker compose"
+   elif docker-compose version >/dev/null 2>&1; then
+     COMPOSE="docker-compose"
+   else
+     echo "no compose CLI" >&2; exit 1
+   fi
+   ```
+
+   后续步骤统一用 `$COMPOSE`；README 里两种写法都给出。
+
+4. **先跑预检，成功后才启动 Web**：
+
+   ```bash
+   $COMPOSE run --rm --no-deps \
      -v "$PWD/.config:/run/xiaowei-config" \
-     web-app python -m scripts.ri5_config_preflight
+     web-app python -m xiaowei_agent.interfaces.config_preflight
    ```
 
    只应输出 `preflight: ok`。失败时**不要**继续——目录属主或权限不对，Web 起来也存不下配置。
 
-4. 启动（基础文件只发布 `127.0.0.1:8080`；`web-app` 已不在 profile 里，普通 up 即可拉起）：
+5. 启动（基础文件只发布 `127.0.0.1:8080`；`web-app` 已不在 profile 里，普通 up 即可拉起）：
 
    ```bash
-   docker compose up -d
+   $COMPOSE up -d
    ```
 
-5. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
+6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
 
-6. 改密完成后，再改 `.env` 的 public origin 为局域网地址：
+7. 改密完成后，再改 `.env` 的 public origin 为局域网地址：
 
    ```bash
    XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
    ```
 
-7. 叠加 LAN override 重建：
+8. 叠加 LAN override 重建：
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
+   $COMPOSE -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
    ```
 
-8. 从局域网地址用新密码重新登录（旧 Cookie 因 origin digest 变化已失效，属预期）。
+   重建后核对渲染结果**只有一条**端口映射：
+
+   ```bash
+   $COMPOSE -f docker-compose.yml -f docker-compose.lan.yml config | grep -A3 'ports:'
+   ```
+
+9. 从局域网地址用新密码重新登录（旧 Cookie 因 origin digest 变化已失效，属预期）。
 
 启用飞书时额外叠加 `-f docker-compose.feishu.yml` 并准备 `./.secrets/feishu-identities.json`；
 不启用飞书时无需该文件。
 
 并写明**残余风险**：第 3 步之前套用 LAN override，`admin/admin` 会暴露给同网段；补救是改密后重建 Web 并撤销全部 `local_admin` session。
 
+**`scripts/compose_smoke.py` 必须一起迁移**，否则它会继续构造已被删除的 `gemini_api_key` /
+`feishu_app_secret` secret 并挂到 `/run/secrets/...`，本 Task 结束时必然失败。改动点：`:48` 删
+`_GEMINI_SECRET_DESTINATION`；`:393-411` 的 `secrets` 段删两个 Provider secret，改为生成一份
+**合成的** `.config/integrations.json`（值用拆开写的假串，见 Global Constraints）并按 `web-app`
+读写、其余只读挂载；`:507-508` 删 `feishu_secret` 路径。identity mount 随
+`docker-compose.feishu.yml` 走，只在启用飞书的 smoke 分支叠加。
+
 Run:
 
 ```bash
-python -m pytest tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py -q
+python -m pytest tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py -q
 python -m scripts.compose_smoke
 ```
 
@@ -1941,7 +2230,7 @@ Expected: PASS。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add Dockerfile docker-compose.yml docker-compose.model.yml docker-compose.lan.yml scripts/ri5_config_preflight.py src/xiaowei_agent/interfaces/web_static README.md .gitignore .dockerignore tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py
+git add Dockerfile docker-compose.yml docker-compose.model.yml docker-compose.lan.yml docker-compose.feishu.yml src/xiaowei_agent/interfaces/config_preflight.py scripts/compose_smoke.py src/xiaowei_agent/interfaces/web_static README.md .gitignore .dockerignore tests/security/test_ri5_compose_boundary.py tests/contract/test_compose_contract.py tests/contract/test_compose_smoke_script.py
 git commit -m "feat(ri5): move provider credentials to a mounted config directory"
 ```
 
