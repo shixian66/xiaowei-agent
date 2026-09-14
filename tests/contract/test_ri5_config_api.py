@@ -759,3 +759,50 @@ async def test_an_explicit_null_is_refused_like_an_empty_string(
 
     assert response.status_code == 400
     assert config_path.read_text(encoding="utf-8") == original
+
+
+async def test_config_routes_refuse_before_the_forced_password_change(
+    tmp_path, clock, memory_state
+) -> None:
+    """反例：``admin/admin`` 还没改掉时，配置面一个字节都不该动。
+
+    首启那几分钟是整条链路最脆弱的窗口——初始口令是公开常量，而这几条路由写的是
+    这台机器的明文 Provider 凭据。顺序必须是"先改密、再配置"，不能是"先配置、
+    顺便提醒你改密"。
+    """
+    app, admins, _, provider_state, config_path = _build(tmp_path, clock, memory_state)
+    await admins.seed_if_absent(
+        password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD)
+    )
+    async with _client(app) as client:
+        await client.post(
+            "/app/api/login",
+            content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+            headers=_json_headers(),
+        )
+        # 页面里渲染的 token 是真实浏览器唯一拿得到的那一个；用它才说明这条拒绝
+        # 不是"缺 CSRF"而是"必须先改密"。
+        carried = _CSRF_META_RE.search((await client.get("/app")).text)
+        assert carried is not None
+        token = carried.group(1)
+
+        read = await client.get("/app/api/config")
+        written = await client.put(
+            "/app/api/config",
+            content=json.dumps({"gemini": {"enabled": True, "api_key": _GEMINI_KEY}}),
+            headers=_json_headers(token),
+        )
+        cleared = await client.post(
+            "/app/api/config/clear",
+            content=json.dumps({"provider": "gemini"}),
+            headers=_json_headers(token),
+        )
+
+    for response in (read, written, cleared):
+        assert response.status_code == 403
+        assert response.json() == {"error": {"code": "password_change_required"}}
+    # 文件没被创建，状态表里也没有任何行。
+    assert not config_path.exists()
+    snapshot = await provider_state.snapshot()
+    assert snapshot.receipts == {}
+    assert snapshot.tests == {}

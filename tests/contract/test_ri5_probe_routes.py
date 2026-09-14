@@ -807,3 +807,54 @@ async def test_probe_routes_reject_a_feishu_principal_with_admin_permission(
     snapshot = await built["provider_state"].snapshot()
     assert set(snapshot.tests) == {"feishu_credentials"}
     assert memory_state.oauth_states == {}
+
+
+async def test_probe_routes_refuse_before_the_forced_password_change(
+    tmp_path, clock, memory_state
+) -> None:
+    """反例：改密之前，三个测试项一个都不能触发。
+
+    与配置面同一条理由：初始口令是公开常量。这里更进一步——探针会发起**真实
+    出站**，用一个还没被真正接管的账号去点它，等于让任何拿到首启窗口的人替这台
+    机器发一次带凭据的请求。
+    """
+    gemini = _Spy(result={"ok": True})
+    feishu = _Spy(result={"ok": True})
+    built = _build(
+        tmp_path,
+        clock,
+        memory_state,
+        gemini_probe=gemini,
+        feishu_probe=feishu,
+        gemini_real_test_enabled=True,
+        feishu_real_test_enabled=True,
+    )
+    _write_config(built["config_path"])
+    await _passed_credentials(built)
+    await built["admins"].seed_if_absent(
+        password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD)
+    )
+    async with _client(built["app"]) as client:
+        await client.post(
+            "/app/api/login",
+            content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+            headers=_json_headers(),
+        )
+        carried = _CSRF_META_RE.search((await client.get("/app")).text)
+        assert carried is not None
+        token = carried.group(1)
+        for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):
+            response = await client.post(
+                f"/app/api/config/test/{name}", headers=_json_headers(token)
+            )
+            assert response.status_code == 403, name
+            assert response.json() == {
+                "error": {"code": "password_change_required"}
+            }
+
+    # 一次出站都没有，也没有签发 OAuth state、没有写下任何新结果。
+    assert gemini.calls == []
+    assert feishu.calls == []
+    assert memory_state.oauth_states == {}
+    snapshot = await built["provider_state"].snapshot()
+    assert set(snapshot.tests) == {"feishu_credentials"}

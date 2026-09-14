@@ -3230,6 +3230,43 @@ git add AGENT_HANDOFF.md
 git commit -m "docs(ri5): record the local web admin implementation evidence"
 ```
 
+
+#### 执行记录（Task 9）
+
+**四条基线**：`3783 passed, 237 skipped` / `1402 security passed, 80 skipped` /
+`ruff: All checks passed!` / `mypy: 175 source files` / `git diff --check` 干净。
+与 Task 0 记录的开工前基线相比无新增失败。
+
+**Step 3 的两条判据都无输出**：
+
+```text
+grep -rn "web_detail_base_url|/run/secrets/gemini_api_key|feishu_app_secret_file" src/   -> 无
+grep -n  "gemini_api_key|feishu_app_secret" docker-compose*.yml .env.example            -> 无
+```
+
+逐条核对的边界（全部确认**没有**发生）：`docker.sock` 挂载（仅 `web_models.py` 的一句注释提到
+它，说明为什么不挂）；基础 compose 的非 loopback 发布（`api` 与 `web-app` 都是 `127.0.0.1`）；
+新 migration（`alembic/` 与 `schema.py` 本轮零改动，`web_oauth_states` 没有新列）；新的执行进程
+或 dispatch lane（`config_preflight` 是一次性预检命令，不 serve、不调度）；Web 取得模型端口
+（`provider_probe` 的导入闭包里没有 runners/tools/capabilities）；探针创建 Task/Evidence
+（`test_probe_never_creates_a_task_submission_or_evidence` 承重）。
+
+**Step 2 未按原样执行，改为在 ASGI 层补齐等价断言。** 原步骤要求 `compose up` 后用浏览器实跑；
+它需要 build 镜像并启动整套容器，属于联网与部署，超出本轮授权。逐条核对时发现 Step 2 里有**一条
+断言没有任何测试覆盖**——"改密前访问 `/app/api/config` 返回 403"。补两条：
+
+- `test_config_routes_refuse_before_the_forced_password_change`
+- `test_probe_routes_refuse_before_the_forced_password_change`
+
+两条都用**页面里渲染的** CSRF token（真实浏览器唯一拿得到的那一个），因此拒绝的原因确实是"必须
+先改密"而不是"缺 CSRF"；并断言此时文件未被创建、状态表零行、OAuth state 零签发、探针零出站。
+反证：把 `local_admin_session` 的 `session_allowed_to_work` 换成 `session_of` -> 2 failed，恢复后
+44 passed。
+
+其余 Step 2 断言（`/healthz`、`/readyz` 200；保存后 generation 递增并显示"待应用"；回执齐备后转
+"待测试"）此前已被 Task 5/6 的契约测试覆盖。**但这些都不是真机证据**，已在
+`AGENT_HANDOFF.md` 的「RI5 未验证项」里逐条写明。
+
 ---
 
 ## Explicitly Out of Scope

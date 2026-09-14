@@ -6,9 +6,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在主 checkout `/Users/kloenguyen/Desktop/agent`，分支 `claude/ri5-local-web-admin` 基于 `origin/main@28f193200651ea4df4925b1481b971687f1003a5`。M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
+| 项目目录 | 当前在主 checkout `/Users/kloenguyen/Desktop/agent`，分支 `claude/ri5-implementation` 基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`。M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-14（Asia/Shanghai） |
-| 阶段 | **RI3 PR 3A–3D 已合入，PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”。RI5 的设计与 ADR 修订已于 2026-09-14 成套接受并合入 `main`（PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40)，ff 合并，无合并提交）；RI5 实现计划已写出、等待复审，源码尚未开始。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **RI3 PR 3A–3D 已合入，PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”。RI5 的设计与 ADR 修订已成套接受并合入 `main`（PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40)）；RI5 实现计划 Task 0–9 已在 `claude/ri5-implementation` 上离线实现完毕，等待 PR 复审与合入。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -56,10 +56,11 @@
 | RI3 PR 3C 合入 | 基于 `main@2d60dd9ed3d9e01a0089613c9a69384d5c8f1acc`；最终受审 head `bc1812e72dada63a83776bfb159a04c970153c66`。PR [#36](https://github.com/shixian66/xiaowei-agent/pull/36) 的 run [`34730018472`](https://github.com/shixian66/xiaowei-agent/actions/runs/34730018472) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `2d40f7040dae6488ef983589c5655b6c330c529d` 合入 `main`，且合入树与受审 head 无差异。交付 grant-fenced insert-once intent/advisory、`rev_0008_model_artifacts`、entry-scoped heartbeat、MODEL trace、surface-derived 慢查询投影与终态 readback，证据等级仍为 `tests` |
 | RI3 PR 3D 合入 | 基于 `main@c06ea393c814f461ed76ccd070a0804a9ab3cc8c`；最终受审 head `c2d82ede1035b5ca6f8c175c618d4d6837196ce3`。PR [#38](https://github.com/shixian66/xiaowei-agent/pull/38) 的 run [`34736983148`](https://github.com/shixian66/xiaowei-agent/actions/runs/34736983148) 精确绑定该 head，八项全绿；项目负责人批准后以 squash commit `fb6718cc6f295206c7c125a887b34d2ee762e71f` 合入 `main`，且合入树与受审 head 无差异。交付统一 `TaskId` 域、直接 parent 的 Web 预检、worker 全链复核、脱敏后历史预算复核、确定性投影损坏拒绝、`rev_0009_task_parent_context` 与显式 Web 继续交互；旧的无父任务 hash 字节保持不变，父任务不改变幂等 scope。证据等级仍为 `tests` |
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
-| RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个（三轮复审后定稿：补入 Task 0 环境同步、Task 4 运行消费迁移，并把 schema 与本地管理员认证合并为 Task 3 以免中途打坏既有 session 写入）。**等待复审，未获通过前不写源码。** 依赖同步与 `.venv` 激活是计划的 Task 0（源码开工第一步），此前的纯文档阶段不联网；Gemini/飞书两个真实测试开关默认 `false`，实现与本地验收全程外部调用数为 0 |
-| 下一步 | **复审 RI5 实现计划；通过后才在 `claude/ri5-local-web-admin` 上按 TDD 写源码，并在源码开工前执行 `uv sync --extra dev --frozen` 与 ADR-008 四条完整基线。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
+| RI5 实现基线 | 分支 `claude/ri5-implementation`，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，Task 0–9 共 **13 个提交**（Task 5、6 各有一轮复审补修）：`548a3fd` `fc14c97` `af4679b` `320b4c7` `4511880` `4a80b07` `9c51a7c` `be3d05e` `069c937` `725852a` `68aed34` `cdb7eaf` + 本条交接。证据等级 **`tests`**：`python -m pytest -q` 3783 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。**未开 PR、未跑 CI、未合入 `main`** |
+| 下一步 | **对 `claude/ri5-implementation` 开 PR 并复审；合入后由项目负责人在真机按 README 首启 runbook 实跑一次本地闭环（本轮未执行，见下方 RI5 未验证项）。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务。**RI5 目前只有文档与计划，零行实现源码** |
+| 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务。**RI5 的实现源码在 `claude/ri5-implementation` 上，尚未合入 `main`** |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
@@ -306,6 +307,39 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 ## 8. 验证记录
 
 ### 已验证
+
+- **RI5 本地管理面已离线实现完毕，证据等级 `tests`**：`claude/ri5-implementation` 上 12 个实现提交
+  交付 `.config/integrations.json` 单一明文真源、本地管理员登录与强制改密、`lan_http` / `https`
+  两种 Web 模式、配置读写 API、加载回执与五态页面模型、三个控制面探针，以及 Compose/Dockerfile/
+  前端面板/首启 runbook。四条基线全绿（数字见上表）。
+
+  **每个 Task 都做了反证**：逐条把源码改坏、确认对应测试变红、再恢复复跑。累计 40 余条，全部记在
+  实现计划文档的「执行记录」里。其中 **三条第一次没有变红**，都已如实记录并补测试或更正判断：
+  空串拒绝实际由 `StrictStr` 在更低一层持有（行为契约成立，但持有层与原判断不同）；"配置面不再
+  限定本地管理员"最初只测了匿名请求，补上一个持 `ADMIN_ALL_SAFE_TASKS` 的**已登录**飞书主体后
+  才承重；`_ComposeLoader` 一度是谁都不需要的死代码，补 `test_every_compose_file_is_registered_and_parses`
+  之后才真正承重。
+
+  **两轮外部复审驳回，都按共同根因修复而非按评论位置打补丁**：`9c51a7c` 的三个 P1（真实进程入口
+  仍强制飞书 OAuth、真实浏览器首启闭环拿不到 CSRF、`WebAuthService` 缺 `auth_source` 校验）；
+  `069c937` 的一个 P1（加载回执用全局服务集合产出，任何一个进程启动都会替所有兄弟进程签字，页面
+  会从"待应用"假跳到"待测试"）。后者的根因在**产出点**而不是写入点，修法是给
+  `load_provider_credentials()` 加一个无默认值的 `service_name`，并由装配函数而非调用方填写。
+
+### RI5 未验证项（本轮**没有**做）
+
+- **真机本地闭环未实跑。** 实现计划 Task 9 Step 2 要求按 README 首启 runbook 跑一遍
+  `compose up` 并在浏览器完成登录/改密/配置保存。本轮**没有执行**：它需要 build 镜像（拉依赖源）
+  并启动一整套容器，属于联网与部署，超出本轮授权。等价断言已在 ASGI 层由契约测试覆盖——包括
+  首启强制改密之前配置面与三个测试项全部 403 且不落任何一行——但**这不是真机证据**。
+- **`python -m scripts.compose_smoke` 未执行**，同一原因。它自身的 136 条脚本测试与全部 Compose
+  契约测试是绿的，`docker-compose config` 的静态渲染也已核对（LAN override 渲染出且仅出一条端口
+  映射），但真机 smoke 未取得。
+- **真实 Gemini 调用、真实飞书调用全部未做。** 两个真实测试开关全程 `false`，三个探针只被注入的
+  spy 驱动过；两个真实 transport 只在被 monkeypatch 的情况下走过错误映射分支，没有构造过任何
+  SDK client。RI3 PR 3E 与 RI2 的现场 GO 仍未下达。
+- **未部署、未 canary、未用户验收。** TLS/Ingress/证书属 RI6，本轮不涉及。
+- **未开 PR、未跑 CI。** 上表的四条基线是本机 `.venv` 的结果。
 
 - **RI3 PR 3D 已完成本地根因/边界验证、独立审查、CI 与合入**：从
   `0c17e9defe305a7ae871376d04762d541f19d147` 起新增显式 Web 父任务、持久化外键、两阶段访问复核、
