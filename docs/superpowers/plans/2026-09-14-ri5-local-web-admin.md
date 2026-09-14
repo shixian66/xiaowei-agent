@@ -33,6 +33,40 @@
 
 ---
 
+### Task 0: 环境同步与基线复核
+
+本机 `.venv` 缺 `google-genai` 与 `lark-oapi`（RI1/RI3 依赖，`pyproject.toml` 已钉），4 个测试文件
+无法收集、8 个用例失败。后续每个 Task 都要求四条基线全绿，因此必须先把环境补齐，**不能**留到最后。
+
+**Files:** 无（只同步环境并记录基线）
+
+**Interfaces:**
+- Consumes: 无
+- Produces: 一份「开工前基线」记录，供后续 Task 判断某个失败是不是自己引入的
+
+- [ ] **Step 1: 同步依赖**
+
+```bash
+uv sync --extra dev --frozen
+```
+
+- [ ] **Step 2: 跑四条基线并记录**
+
+```bash
+python -m pytest -q
+python -m pytest -m security -q
+ruff check .
+mypy src
+```
+
+Expected: 四条全绿。若仍有失败，**先修环境或停下来报告，不要开工**——后续 Task 的「全绿」判据建立在这一步之上。
+
+- [ ] **Step 3: 记录基线**
+
+把四条命令的尾部输出记进本 Task 的执行记录。后续任一 Task 出现失败时，先与这份基线对比，确认是本轮引入而非既有。
+
+---
+
 ### Task 1: Web 模式、单一 public origin 与双层启用开关
 
 把 `web_detail_base_url` 机械重命名为 `web_public_origin`，引入 `XIAOWEI_WEB_MODE`，并解开 `web_app_enabled == feishu_oauth_enabled` 的耦合。这是纯配置契约层，先落地才能让后续 Task 有稳定字段名可用。
@@ -568,6 +602,8 @@ service_config_state
   provider            text
   loaded_generation   integer not null CHECK (loaded_generation > 0)
   load_status         text not null CHECK (load_status IN ('loaded','invalid'))
+                      -- invalid 必须进入页面状态计算（Task 6 的 LoadReceipt）：
+                      -- 它既不是「尚未加载」也不是「已加载待测试」，是独立失败态
   loaded_at           timestamptz not null
   primary key (service_name, provider)
 
@@ -701,7 +737,14 @@ git commit -m "feat(ri5): add local admin and provider state schema"
   - `IdentitySource.LOCAL_ADMIN = "local_admin"`
   - `def hash_password(password: str) -> str` / `def verify_password(password: str, encoded: str) -> bool`（`local_admin_auth.py`）
   - `class LocalAdminRecord(Contract): password_hash: StrictStr; must_change_password: bool`
-  - `class LocalAdminStore(Protocol)`：`seed_if_absent(*, password_hash: str) -> bool`、`get() -> LocalAdminRecord`、`change_password(*, password_hash: str) -> None`
+  - `class LocalAdminStore(Protocol)`：
+    - `async def seed_if_absent(*, password_hash: str) -> bool`
+    - `async def get() -> LocalAdminRecord`
+    - `async def change_password_and_rotate_session(*, command: ChangePasswordCommand) -> LocalAdminRecord`
+      ——**一次提交内**完成四件事：更新 `password_hash`、置 `must_change_password=false`、
+      撤销**全部** `auth_source='local_admin'` 的既有 session、插入新 session 行。密码更新与
+      session 变更因此不再跨两个 Store，不会出现「密码已改但旧 session 还活着」的中间态。
+  - `class ChangePasswordCommand(Contract)`：`password_hash: StrictStr`、`new_session_digest: Sha256Hex`、`public_origin_digest: Sha256Hex`、`session_ttl_seconds: StrictInt = Field(gt=0, le=86_400)`
   - `class LocalAdminAuthService`：`async def login(*, password: str, previous_session_cookie: str | None) -> IssuedWebSession`、`async def change_password(*, session_cookie: str, current: str, new: str) -> IssuedWebSession`
   - `def _provider_https_url(value: str) -> SplitResult | None`（原 `_split_https_url` 语义，仅供 provider URL）
   - `def public_origin_is_safe(value: str, *, mode: WebMode) -> bool`
@@ -777,29 +820,55 @@ def test_encoding_records_algorithm_and_parameters() -> None:
 def test_malformed_encodings_are_rejected_without_raising() -> None:
     for bad in ["", "scrypt$1$", "bcrypt$x$y$z", "scrypt$9$16384$8$1$aa$bb"]:
         assert verify_password("pw", bad) is False
+
+
+def test_encoded_parameters_are_checked_not_trusted() -> None:
+    """封装里的 n/r/p 不得被当成计算输入，否则可被降成廉价运算或内存耗尽。"""
+    password = "pw" + "-placeholder"
+    encoded = hash_password(password)
+    _, version, _, r, p, salt, dk = encoded.split("$")
+    weakened = "$".join(["scrypt", version, "2", r, p, salt, dk])
+    inflated = "$".join(["scrypt", version, "1048576", r, p, salt, dk])
+    assert verify_password(password, weakened) is False
+    assert verify_password(password, inflated) is False
+
+
+def test_truncated_salt_or_hash_is_rejected() -> None:
+    import base64
+
+    password = "pw" + "-placeholder"
+    kind, version, n, r, p, _, dk = hash_password(password).split("$")
+    short_salt = base64.b64encode(b"\x00" * 4).decode("ascii")
+    assert verify_password(password, "$".join([kind, version, n, r, p, short_salt, dk])) is False
 ```
 
 `tests/security/test_local_admin_boundary.py`（标 `security`）：
 
 ```python
-def test_local_admin_principal_is_fixed(): ...
+def test_local_admin_principal_is_fixed():
     # tenant_id=dev-local / environment_id=dev / actor=admin / 三项权限
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_password_hash_never_appears_in_any_api_or_log_payload(): ...
+def test_password_hash_never_appears_in_any_api_or_log_payload():
     # 登录/改密/查询三条路径的响应体与结构化日志里都不得出现 password_hash 片段
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_session_is_bound_to_the_public_origin_that_created_it(): ...
+def test_session_is_bound_to_the_public_origin_that_created_it():
     # 用 origin A 签发的 session，在 origin B 下 authenticate 必须 WebAuthenticationError
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_change_password_revokes_every_other_local_admin_session(): ...
+def test_change_password_revokes_every_other_local_admin_session():
     # 改密前签发两个 local_admin session；改密后旧的两个都 authenticate 失败，
     # 新轮换出的那个可用；同一事务内完成
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_before_first_change_only_login_change_password_and_logout_are_allowed(): ...
+def test_before_first_change_only_login_change_password_and_logout_are_allowed():
     # must_change_password=true 时，其余 /app/api/* 一律 403 且闭集码为 password_change_required
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_feishu_principal_with_admin_permission_cannot_reach_config_routes(): ...
+def test_feishu_principal_with_admin_permission_cannot_reach_config_routes():
     # 持 ADMIN_ALL_SAFE_TASKS 的 FEISHU principal 访问配置与探针路由一律 403
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 每条用 `tests/fakes` 下既有的 in-memory session store fake 驱动；按注释里的规格写出完整断言后再写实现。
@@ -844,20 +913,66 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, encoded: str) -> bool:
+    """只接受本模块固定参数的封装；封装里的 n/r/p 不被信任为计算输入。"""
     try:
         kind, version, n, r, p, salt_b64, dk_b64 = encoded.split("$")
-        if kind != "scrypt" or version != _ENCODING_VERSION:
-            return False
-        candidate = hashlib.scrypt(
-            password.encode("utf-8"), salt=base64.b64decode(salt_b64, validate=True),
-            n=int(n), r=int(r), p=int(p), dklen=_SCRYPT_DKLEN,
-        )
-    except (ValueError, TypeError, binascii.Error):
+    except ValueError:
         return False
-    return hmac.compare_digest(candidate, base64.b64decode(dk_b64, validate=True))
+    # 参数是被**核对**的，不是被采纳的：不匹配直接拒绝，避免攻击者用
+    # n=2 的封装把校验降成廉价运算，也避免用超大 n 做内存耗尽。
+    if (
+        kind != "scrypt"
+        or version != _ENCODING_VERSION
+        or (n, r, p) != (str(_SCRYPT_N), str(_SCRYPT_R), str(_SCRYPT_P))
+    ):
+        return False
+    try:
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(dk_b64, validate=True)
+    except (ValueError, binascii.Error):
+        return False
+    if len(salt) != 16 or len(expected) != _SCRYPT_DKLEN:
+        return False
+    candidate = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt,
+        n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_DKLEN,
+    )
+    return hmac.compare_digest(candidate, expected)
 ```
 
-`LocalAdminAuthService.change_password` 在**一个事务**内更新哈希、置 `must_change_password=false`、轮换当前 session、撤销所有其余 `auth_source='local_admin'` 的 session。
+`LocalAdminAuthService.change_password` 先用 `verify_password` 核对 `current`，再生成新 session
+secret，然后把四件事交给**同一个** `LocalAdminStore.change_password_and_rotate_session()`：
+
+```python
+async def change_password_and_rotate_session(
+    self, *, command: ChangePasswordCommand
+) -> LocalAdminRecord:
+    async with self._engine.begin() as connection:          # 单个事务
+        await connection.execute(
+            sa.update(LOCAL_ADMINS)
+            .where(LOCAL_ADMINS.c.id == 1)
+            .values(
+                password_hash=command.password_hash,
+                must_change_password=False,
+                updated_at=self._clock(),
+            )
+        )
+        await connection.execute(                            # 先撤销全部旧的
+            sa.update(WEB_SESSIONS)
+            .where(
+                WEB_SESSIONS.c.auth_source == IdentitySource.LOCAL_ADMIN.value,
+                WEB_SESSIONS.c.revoked_at.is_(None),
+            )
+            .values(revoked_at=self._clock())
+        )
+        await connection.execute(                            # 再插入新的
+            sa.insert(WEB_SESSIONS).values(...)
+        )
+    ...
+```
+
+顺序不能颠倒：先撤销再插入，才不会把刚签发的新 session 一起撤掉。`LocalAdminStore` 由此成为
+唯一同时触及 `local_admins` 与 `web_sessions` 的写入口；`WebSessionStore` 不参与改密路径。
 
 `contracts/enums.py` 的 `IdentitySource` 追加 `LOCAL_ADMIN = "local_admin"`。
 
@@ -902,32 +1017,66 @@ git commit -m "feat(ri5): add local admin auth and split the provider https gate
   - `def oauth_state_cookie_name(mode: WebMode) -> str`——同理 `"__Host-xiaowei-oauth-state"` / `"xiaowei-oauth-state"`
   - `WebStack.local_admin_auth: LocalAdminAuthService`
   - `WebStack.oauth_available: bool`——飞书 OAuth 是否装配成功
+  - `def validate_unauthenticated_origin(*, origin: str | None, content_type: str | None) -> None`
+    ——未登录状态变更的窄校验：只核对固定 public origin 与 `application/json`，**不**要求 CSRF token
   - 新路由：`POST /app/api/login`、`POST /app/api/change-password`（既有 `POST /app/api/logout` 复用）
+  - `GET /app` 在未登录时返回登录壳（不再 401/302）
 
 - [ ] **Step 1: 写失败测试**
 
 `tests/security/test_ri5_web_assembly.py`（标 `security`）：
 
 ```python
-async def test_web_starts_without_any_feishu_configuration(): ...
+async def test_web_starts_without_any_feishu_configuration():
     # web_app_enabled=true, feishu_oauth_enabled=false -> build_postgres_web_stack 成功，
     # stack.oauth_available is False
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-async def test_feishu_oauth_assembly_failure_does_not_kill_the_process(): ...
+async def test_feishu_oauth_assembly_failure_does_not_kill_the_process():
     # 身份目录加载失败 -> oauth_available False，但 stack 仍可用、readyz 仍 ready
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-async def test_gemini_never_participates_in_web_readiness(): ...
+async def test_gemini_never_participates_in_web_readiness():
     # 无论 gemini 配置如何，readyz 只看 database/migration head/assembled
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-async def test_local_admin_seed_failure_makes_the_web_not_ready(): ...
+async def test_local_admin_seed_failure_makes_the_web_not_ready():
     # seed 抛错 -> composition 不成立 -> readyz 非 200
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_cookie_names_and_flags_follow_the_web_mode(): ...
+def test_cookie_names_and_flags_follow_the_web_mode():
     # https -> __Host- 前缀且 secure=True 且设置 HSTS
     # lan_http -> 普通名、secure 缺省、不设 HSTS；两种都 HttpOnly/SameSite=Lax/Path=/
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-async def test_before_first_change_password_other_routes_are_refused(): ...
-    # must_change_password=true 时 GET /app/api/config -> 403 闭集码
+async def test_before_first_change_password_other_routes_are_refused():
+    # must_change_password=true 时 GET /app/api/config -> 403 闭集码 password_change_required
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+async def test_first_login_succeeds_without_any_csrf_token() -> None:
+    # Given 干净数据库（seed 出 admin/admin），浏览器无任何 cookie
+    # When  POST /app/api/login，带正确 Origin 与 application/json，不带 CSRF token
+    # Then  200，且响应 Set-Cookie 含 session；这条是首启闭环的入口，必须能过
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+async def test_login_still_requires_the_exact_origin_and_json_content_type() -> None:
+    # Given 无 cookie
+    # When  Origin 为 http://evil.example（另一例：Content-Type 为 text/plain）
+    # Then  403，且不签发任何 session
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+async def test_change_password_still_requires_session_csrf() -> None:
+    # Given 已登录且 must_change_password=true
+    # When  POST /app/api/change-password 不带 CSRF token
+    # Then  403，口令未改变
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+async def test_unauthenticated_app_shell_is_a_login_page() -> None:
+    # Given 无 cookie
+    # When  GET /app
+    # Then  200，正文含口令输入框；不含任务列表、配置面板；
+    #       oauth_available 为假时不含飞书 OAuth 入口
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -944,7 +1093,41 @@ Expected: FAIL —— `build_postgres_web_stack` 仍在 `local_stack.py:855` 抛
 
 `web_app.py` 改动：把两个 `Final` cookie 常量替换为上述两个按模式取名的函数；`_set_secret_cookie`/`_clear_secret_cookie` 增加 keyword-only `secure: bool` 参数由调用方按模式传入；HSTS 响应头只在 `WebMode.HTTPS` 下设置。登录/退出路径必须**同时清理两个已知 cookie 名**，避免切模式后残留。
 
-新增两条路由，均走既有 `validate_state_change`（Origin + CSRF）：`POST /app/api/login`（body `{"password": "..."}`）与 `POST /app/api/change-password`（body `{"current": "...", "new": "..."}`）。`must_change_password=true` 时，除 login / change-password / logout / `/healthz` / `/readyz` 外的所有 `/app/api/*` 一律返回 403 闭集码 `password_change_required`。
+**登录必须能在没有 session 的情况下完成。** 现有 `web_auth.py:386` 的 `validate_state_change()`
+用 `_digest(domain="csrf:v1", secret=session_cookie)` 派生 CSRF token——未登录用户拿不到 session
+cookie，因此也不可能提供合法 token。若让 `POST /app/api/login` 复用它，首次登录**必然 403**。
+
+因此分成两档，且只有登录这一条走窄档：
+
+| 路由 | Origin | Content-Type | Session CSRF |
+| --- | --- | --- | --- |
+| `POST /app/api/login` | 必须精确等于固定 public origin | 必须 `application/json` | **不要求** |
+| `POST /app/api/change-password` | 必须 | 必须 | **要求** |
+| `POST /app/api/logout` | 必须 | 必须 | **要求** |
+| `PUT/POST /app/api/config*` | 必须 | 必须 | **要求** |
+
+新增 `validate_unauthenticated_origin()`，只做前两项校验：
+
+```python
+def validate_unauthenticated_origin(
+    self, *, origin: str | None, content_type: str | None
+) -> None:
+    """未登录状态变更的窄校验；不派生也不检查 CSRF token。"""
+    if not _constant_time_ascii_equal(origin, self._public_origin):
+        raise WebOriginError
+    if content_type is None or content_type.split(";")[0].strip() != "application/json":
+        raise WebCsrfError
+```
+
+`Origin` 头精确匹配固定 public origin 已足以挡住跨站表单提交（跨站请求无法伪造 `Origin`），
+而 `SameSite=Lax` 的 cookie 在此刻还不存在，所以登录这一步没有可被 CSRF 滥用的既有权限。
+
+**`GET /app` 未登录时必须返回登录壳**，不能 401 或跳转 OAuth——否则本地管理员没有任何入口能拿到
+表单去登录。登录壳只含口令输入、提交脚本与 `Origin` 所需的同源资源，不加载任务列表、配置面板或
+OAuth 入口；飞书 OAuth 入口只有在 `oauth_available` 为真时才渲染。
+
+`must_change_password=true` 时，除 login / change-password / logout / `/healthz` / `/readyz` 外的
+所有 `/app/api/*` 一律返回 403 闭集码 `password_change_required`；`GET /app` 返回改密壳。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -974,8 +1157,16 @@ git commit -m "feat(ri5): decouple web assembly from feishu and add local admin 
 **Interfaces:**
 - Consumes: Task 2 的 `IntegrationConfig` / `read_integration_config` / `write_integration_config`；Task 3 的三张表；Task 4 的 `LOCAL_ADMIN`
 - Produces:
-  - `class ProviderDisplayState(StrEnum)`：`UNCONFIGURED="unconfigured"`、`PENDING_RESTART="pending_restart"`、`PENDING_TEST="pending_test"`、`AVAILABLE="available"`、`TEST_FAILED="test_failed"`
+  - `class ProviderDisplayState(StrEnum)`：`UNCONFIGURED="unconfigured"`、`PENDING_RESTART="pending_restart"`、`LOAD_FAILED="load_failed"`、`PENDING_TEST="pending_test"`、`AVAILABLE="available"`、`TEST_FAILED="test_failed"`
   - `def compute_display_state(*, check_name, enabled, required, current_generation, receipts, test) -> ProviderDisplayState`
+    ——`receipts: Mapping[tuple[str, str], LoadReceipt]`，`LoadReceipt` 同时携带
+    `generation: int` 与 `status: Literal["loaded", "invalid"]`；**只有 `status == "loaded"` 且
+    `generation == current_generation` 才算已加载**，`invalid` 必须落到独立的 `LOAD_FAILED`，
+    不得被当成「待测试」
+  - `class LoadReceipt(Contract): generation: StrictInt = Field(gt=0); status: Literal["loaded", "invalid"]`
+  - `UNCONFIGURED_GENERATION: Final[int] = 0`——文件不存在时的逻辑代次
+  - `def read_or_absent(path: str) -> IntegrationConfig | None`——文件不存在返回 `None`；
+    其余错误（符号链接、非正规文件、schema 非法）仍抛 `IntegrationConfigError`
   - `class ProviderStateStore(Protocol)`：`record_load(...)`、`record_test(...)`、`snapshot() -> ProviderStateSnapshot`
   - 路由：`GET /app/api/config`、`PUT /app/api/config`、`POST /app/api/config/clear`
 
@@ -1003,6 +1194,21 @@ def _state(**kw: object) -> S:
 def test_disabled_or_missing_config_is_unconfigured() -> None:
     assert _state(enabled=False) is S.UNCONFIGURED
     assert _state(required=False) is S.UNCONFIGURED
+
+
+def test_an_invalid_load_receipt_is_not_pending_test() -> None:
+    """服务读到了当前代次但判定无效，必须是独立失败态，不能冒充「待测试」。"""
+    from xiaowei_agent.application.integration_state import LoadReceipt
+
+    receipts = {("worker", "gemini"): LoadReceipt(generation=2, status="invalid")}
+    assert _state(receipts=receipts) is S.LOAD_FAILED
+
+
+def test_a_stale_invalid_receipt_is_still_pending_restart() -> None:
+    from xiaowei_agent.application.integration_state import LoadReceipt
+
+    receipts = {("worker", "gemini"): LoadReceipt(generation=1, status="invalid")}
+    assert _state(receipts=receipts) is S.PENDING_RESTART
 
 
 def test_service_has_not_loaded_the_current_generation_is_pending_restart() -> None:
@@ -1033,32 +1239,55 @@ def test_unconfigured_wins_over_every_later_rule() -> None:
 `tests/contract/test_ri5_config_api.py`：
 
 ```python
-def test_get_config_never_returns_secret_values(): ...
+def test_get_config_never_returns_secret_values():
     # 响应里只有 enabled / configured(bool) / app_id / generation / 各项状态
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_put_without_a_secret_field_keeps_the_existing_value(): ...
+def test_put_without_a_secret_field_keeps_the_existing_value():
     # 先写入 secret，再 PUT 一个不含该字段的 body；重新读文件，secret 原值不变
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_put_with_a_new_secret_replaces_it_and_bumps_generation(): ...
+def test_put_with_a_new_secret_replaces_it_and_bumps_generation():
     # generation: n -> n+1
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_empty_string_never_clears_a_secret(): ...
+def test_empty_string_never_clears_a_secret():
     # 必须用 POST /app/api/config/clear
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_clear_action_removes_the_secret_and_bumps_generation(): ...
+def test_clear_action_removes_the_secret_and_bumps_generation():
     # POST /app/api/config/clear 后该 secret 不存在，generation 递增
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_invalid_payload_does_not_replace_the_current_file(): ...
+def test_invalid_payload_does_not_replace_the_current_file():
     # 校验失败时文件内容与 mtime 不变
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_config_routes_reject_a_feishu_principal_with_admin_permission(): ...
+def test_config_routes_reject_a_feishu_principal_with_admin_permission():
     # GET / PUT / clear / test 四条路由都只接受 IdentitySource.LOCAL_ADMIN
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_put_response_states_restart_required(): ...
+def test_put_response_states_restart_required():
     # 成功响应含 {"generation": n+1, "restart_required": true}
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_model_and_endpoint_are_read_only(): ...
+def test_model_and_endpoint_are_read_only():
     # 请求体带 model/endpoint/api_version -> 422，固定常量不可编辑
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_first_save_on_a_clean_deployment_creates_generation_1() -> None:
+    # Given .config 目录存在但 integrations.json 不存在
+    # When  GET /app/api/config
+    # Then  200，两个 Provider 都是 unconfigured，generation 为 0
+    # When  PUT 一份带 gemini.api_key 的合法 body
+    # Then  文件被创建，generation == 1，restart_required 为 true
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_a_corrupt_file_is_not_treated_as_absent() -> None:
+    # Given integrations.json 存在但 JSON 非法（另一例：是符号链接）
+    # When  GET /app/api/config
+    # Then  返回闭集故障码而不是 unconfigured；PUT 被拒绝且不替换该文件
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -1075,7 +1304,33 @@ Expected: FAIL —— 模块与路由不存在。
 
 各进程启动时写加载回执：只为**自己实际启用且需要**的 Provider 写——worker 写 `("worker","gemini")`，feishu listener / channel worker 写 `(..., "feishu")`，web 写自己实际消费的两项。读不到或 schema 无效时写 `load_status='invalid'`，**不阻止进程启动**。
 
-`PUT /app/api/config` 在单个 Web 进程内用 `asyncio.Lock` 串行执行「读当前 generation → 合并未携带字段 → 校验 → `write_integration_config` 原子替换」，成功后返回 `{"generation": n+1, "restart_required": true}`。
+**干净部署必须能保存第一份配置。** runbook 只 `mkdir .config`，此时 `integrations.json`
+**不存在**；而 `read_integration_config()` 要求文件存在且 `generation > 0`，`PUT` 又要先读当前
+generation。若不处理，第一次保存没有起点，整条闭环卡死在第一步。
+
+因此在应用层区分「文件不存在」与「文件非法」：
+
+```python
+def read_or_absent(path: str) -> IntegrationConfig | None:
+    """文件不存在 = 尚未配置；其余异常仍然 fail-closed。"""
+    if not os.path.exists(path):
+        return None
+    return read_integration_config(path)
+
+
+def current_generation(config: IntegrationConfig | None) -> int:
+    return UNCONFIGURED_GENERATION if config is None else config.generation
+```
+
+`UNCONFIGURED_GENERATION = 0` 只是**逻辑**代次，不写进文件——文件里的 `generation` 仍恒 `> 0`，
+Task 2 的契约不变。第一次成功保存写 `0 + 1 = 1`。
+
+符号链接、非正规文件、超长、schema 非法这些情况**不**走这条路径，仍抛 `IntegrationConfigError`
+并拒绝保存——「不存在」是未配置，「存在但坏」是故障，两者不能混。
+
+`PUT /app/api/config` 在单个 Web 进程内用 `asyncio.Lock` 串行执行「`read_or_absent` → 合并未携带
+字段（配置不存在时按全空起步）→ 校验 → `write_integration_config` 原子替换」，成功后返回
+`{"generation": n+1, "restart_required": true}`。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -1211,41 +1466,49 @@ def test_probe_never_creates_a_task_submission_or_evidence() -> None:
     # Given 一个记录调用次数的 fake TaskStore 与 evidence writer
     # When  依次触发三个探针路由
     # Then  两个 fake 的写入次数均为 0
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_probe_never_reaches_the_tool_gateway() -> None:
     # Given 一个记录调用次数的 ToolGateway spy
     # When  依次触发三个探针路由
     # Then  spy 调用次数为 0
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_probe_does_not_change_readiness() -> None:
     # Given readyz 在探针前返回 200
     # When  一个探针以 failed 收场
     # Then  readyz 仍返回 200
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_oauth_test_state_cannot_be_consumed_by_the_login_path() -> None:
     # Given 用 OAUTH_TEST_STATE_DOMAIN 签发的 state
     # When  把它送进登录 callback
     # Then  抛 WebOAuthStateError，且未签发任何 session
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_login_state_cannot_be_consumed_by_the_test_path() -> None:
     # Given 用 "oauth-state:v1" 签发的 state
     # When  把它送进测试 callback 分支
     # Then  被拒绝，且 provider_test_state 无写入
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_oauth_test_callback_requires_a_live_local_admin_session() -> None:
     # Given 一个有效测试 state，但请求不带 session cookie（另一例：session 已撤销）
     # When  命中测试 callback 分支
     # Then  返回拒绝，provider_test_state 行数为 0
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_oauth_test_branch_issues_no_cookie_and_no_session() -> None:
     # Given 有效测试 state + 有效 LOCAL_ADMIN session
     # When  测试 callback 成功完成 code exchange
     # Then  响应无任何 Set-Cookie 头，且 session store 的 rotate_session 调用次数为 0
+    raise NotImplementedError("按规格写出断言后删除本行")
 
 def test_oauth_test_requires_passing_feishu_credentials_first() -> None:
     # Given 当前 generation 的 feishu_credentials 不是 passed
     # When  POST /app/api/config/test/feishu_oauth
     # Then  返回闭集拒绝码，且未签发任何 state
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1283,7 +1546,183 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 
 ---
 
-### Task 8: Compose、Dockerfile、前端面板与 runbook
+### Task 8: 运行消费迁移——四个 composition root 改读 JSON
+
+前面几个 Task 建了新真源、记了加载回执，但**没有任何真实消费链改过**：Gemini adapter 仍读
+`gemini_model.py:41` 的 `/run/secrets/gemini_api_key`，飞书 adapter 仍从
+`Settings.feishu_app_id` / `feishu_app_secret_file` 取值（`web_app.py:777-778`、`web_app.py:788-789`、
+`local_stack.py:729-730`、`local_stack.py:734`、`local_stack.py:804-805`）。不做这一步，Task 9
+一删旧 secret 挂载，两个 Provider 就全部断供——闭环跑不通。
+
+本 Task 删除旧真源、让四个装配点从 JSON 读取，并按双层开关装配。
+
+**Files:**
+- Modify: `src/xiaowei_agent/interfaces/gemini_model.py`（删除 `GEMINI_SECRET_FILE:41`、改 `_build_client:198`、`__all__:328`）
+- Modify: `src/xiaowei_agent/interfaces/local_stack.py`（`local_stack.py:729-730`、`:734`、`:804-805`）
+- Modify: `src/xiaowei_agent/interfaces/web_app.py`（`web_app.py:777-778`、`:788-789`）
+- Modify: `src/xiaowei_agent/config.py`（删除 `feishu_app_id:228`、`feishu_app_secret_file:229`，同步 `shared` 元组 `:369` 与 `_FIELD_TO_ENV:517-518`）
+- Modify: `.env.example`
+- Test: `tests/unit/test_provider_consumption.py`
+- Test: `tests/security/test_ri5_no_legacy_secret_path.py`
+
+**Interfaces:**
+- Consumes: Task 2 的 `read_or_absent` / `IntegrationConfig`；Task 1 的 `Settings.gemini_enabled` 等装配开关
+- Produces:
+  - `class ProviderCredentials(Contract)`：`gemini_api_key: str | None`、`feishu_app_id: str | None`、`feishu_app_secret: str | None`
+  - `def load_provider_credentials(*, settings: Settings, path: str = DEFAULT_INTEGRATION_CONFIG_PATH) -> tuple[ProviderCredentials, dict[str, LoadReceipt]]`
+    ——一次读取，同时产出凭据与本进程要写的加载回执
+  - `GeminiModelAdapter.__init__` 新增必填 keyword-only `api_key: str`，**不再自带路径常量**
+
+- [ ] **Step 1: 写失败测试——双层开关与断供行为**
+
+`tests/unit/test_provider_consumption.py`：
+
+```python
+import pytest
+from xiaowei_agent.application.integration_state import LoadReceipt
+from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
+
+
+def test_json_disabled_provider_yields_no_credential(tmp_path, settings_with_gemini_assembled):
+    """.env 装配了，但 JSON 里 enabled=false —— 两层与关系，最终不启用。"""
+    path = _write_config(tmp_path, gemini={"enabled": False, "api_key": "k" * 8})
+    creds, _ = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
+    assert creds.gemini_api_key is None
+
+
+def test_json_cannot_enable_a_provider_the_env_did_not_assemble(tmp_path, settings_all_disabled):
+    """JSON 不能反向启动 Compose 中未装配的进程。"""
+    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
+    creds, receipts = load_provider_credentials(settings=settings_all_disabled, path=str(path))
+    assert creds.gemini_api_key is None
+    assert receipts == {}  # 未启用的服务不写回执，不会造成永久「待应用」
+
+
+def test_both_layers_true_yields_the_credential(tmp_path, settings_with_gemini_assembled):
+    path = _write_config(tmp_path, gemini={"enabled": True, "api_key": "k" * 8})
+    creds, receipts = load_provider_credentials(settings=settings_with_gemini_assembled, path=str(path))
+    assert creds.gemini_api_key == "k" * 8
+    assert receipts[("worker", "gemini")].status == "loaded"
+
+
+def test_absent_file_is_invalid_not_a_crash(tmp_path, settings_with_gemini_assembled):
+    """配置缺失只标记该 Provider 无效，进程仍须能启动。"""
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(tmp_path / "missing.json")
+    )
+    assert creds.gemini_api_key is None
+    assert receipts[("worker", "gemini")].status == "invalid"
+
+
+def test_corrupt_file_is_invalid_not_a_crash(tmp_path, settings_with_gemini_assembled):
+    bad = tmp_path / "integrations.json"
+    bad.write_text("{not json", encoding="utf-8")
+    creds, receipts = load_provider_credentials(
+        settings=settings_with_gemini_assembled, path=str(bad)
+    )
+    assert creds.gemini_api_key is None
+    assert receipts[("worker", "gemini")].status == "invalid"
+
+
+def test_gemini_adapter_no_longer_owns_a_path_constant():
+    """adapter 只接受注入的 key，不得自己去文件系统找。"""
+    from xiaowei_agent.interfaces import gemini_model
+
+    assert not hasattr(gemini_model, "GEMINI_SECRET_FILE")
+```
+
+- [ ] **Step 2: 写失败测试——旧真源彻底消失**
+
+`tests/security/test_ri5_no_legacy_secret_path.py`（标 `security`）：
+
+```python
+import pathlib
+
+import pytest
+
+pytestmark = pytest.mark.security
+
+_SRC = pathlib.Path(__file__).resolve().parents[2] / "src"
+
+
+def test_no_source_file_references_the_legacy_provider_secret_paths() -> None:
+    """只扫 src/：ADR、迁移说明和本测试自身当然会提到旧路径，那是历史记录。"""
+    banned = ("/run/secrets/gemini_api_key", "feishu_app_secret_file", "feishu_app_id")
+    offenders = [
+        f"{path.relative_to(_SRC)}:{n}"
+        for path in _SRC.rglob("*.py")
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        for token in banned
+        if token in line
+    ]
+    assert offenders == [], f"旧 Provider 凭据真源仍被引用：{offenders}"
+
+
+def test_settings_no_longer_exposes_the_legacy_feishu_fields() -> None:
+    from xiaowei_agent.config import _FIELD_TO_ENV, Settings
+
+    assert "feishu_app_id" not in Settings.model_fields
+    assert "feishu_app_secret_file" not in Settings.model_fields
+    assert "XIAOWEI_FEISHU_APP_ID" not in _FIELD_TO_ENV.values()
+    assert "XIAOWEI_FEISHU_APP_SECRET_FILE" not in _FIELD_TO_ENV.values()
+```
+
+- [ ] **Step 3: 跑测试确认失败**
+
+Run: `python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q`
+
+Expected: FAIL —— `provider_consumption` 不存在；`GEMINI_SECRET_FILE` 仍在；`Settings` 仍有两个飞书字段。
+
+- [ ] **Step 4: 迁移四个装配点**
+
+新增 `src/xiaowei_agent/interfaces/provider_consumption.py`，实现 `load_provider_credentials()`：
+用 Task 6 的 `read_or_absent` 读一次文件，按「`.env` 装配开关 AND JSON `enabled`」决定每个 Provider
+是否产出凭据；**只为本进程实际启用且需要的 Provider** 写回执（未启用的不写，避免永久「待应用」）；
+文件缺失或非法时凭据为 `None`、回执 `status="invalid"`，**不抛异常、不阻止进程启动**。
+
+四个装配点改法：
+
+| 位置 | 改法 |
+| --- | --- |
+| `gemini_model.py:41,198,328` | 删除 `GEMINI_SECRET_FILE` 与 `_secret_reader` 默认路径读取；`__init__` 改收必填 `api_key: str`，`_build_client` 直接用它 |
+| `local_stack.py:729-730,734` | feishu listener stack 的 `app_id`/`app_secret_file` 改为注入 `credentials.feishu_app_id` / `feishu_app_secret` |
+| `local_stack.py:804-805` | channel worker stack 同上 |
+| `web_app.py:777-778,788-789` | Web 自己的 OAuth adapter 与成员 adapter 同上；`oauth_available` 为假时不构造这两个 adapter |
+
+飞书 SDK seam（`feishu_sdk.py:191` 的 `FeishuSdkInboundTransport.__init__(*, app_id, app_secret_file)`）
+改为接收 `app_secret: str` 而非文件路径，内部删除 `feishu_sdk.py:166` 的 `_read_secret_file`。
+
+`config.py` 删除 `feishu_app_id` 与 `feishu_app_secret_file` 两个字段、`shared` 元组对应项与
+`_FIELD_TO_ENV` 两个条目，并同步 `.env.example`（`test_env_example_clean.py` 断言键集合全等）。
+
+- [ ] **Step 5: 跑测试确认通过**
+
+Run:
+
+```bash
+python -m pytest tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py -q
+python -m pytest -q
+python -m pytest -m security -q
+```
+
+Expected: 全绿。既有飞书/Gemini 测试若因构造参数变化而失败，按新签名调整**测试的构造方式**，
+不得为了让测试过而保留旧路径读取。
+
+- [ ] **Step 6: 反证承重**
+
+把「JSON `enabled` 与 `.env` 开关取 AND」改成只看 JSON，确认
+`test_json_cannot_enable_a_provider_the_env_did_not_assemble` 变红；恢复后全绿。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/xiaowei_agent/interfaces/provider_consumption.py src/xiaowei_agent/interfaces/gemini_model.py src/xiaowei_agent/interfaces/feishu_sdk.py src/xiaowei_agent/interfaces/local_stack.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/config.py .env.example tests/unit/test_provider_consumption.py tests/security/test_ri5_no_legacy_secret_path.py
+git commit -m "feat(ri5): consume provider credentials from the integration config"
+```
+
+---
+
+### Task 9: Compose、Dockerfile、前端面板与 runbook
 
 删掉两条旧 secret 路径，钉死 UID/GID，加 `.config` 挂载、LAN override 与预检脚本，补配置面板与首启顺序文档。
 
@@ -1292,6 +1731,7 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 - Modify: `docker-compose.yml`（`secrets:` 于 `docker-compose.yml:154-158`；各服务 `secrets` 列表）
 - Modify: `docker-compose.model.yml`（删除 `gemini_api_key` secret）
 - Create: `docker-compose.lan.yml`
+- Create: `docker-compose.feishu.yml`
 - Create: `scripts/ri5_config_preflight.py`
 - Modify: `src/xiaowei_agent/interfaces/web_static/index.html`、`app.js`、`app.css`
 - Modify: `README.md`、`.gitignore`、`.dockerignore`
@@ -1299,7 +1739,7 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 - Test: `tests/security/test_ri5_compose_boundary.py`
 
 **Interfaces:**
-- Consumes: 前 7 个 Task 的全部产出
+- Consumes: 前 8 个 Task 的全部产出
 - Produces: `docker-compose.lan.yml`（只覆盖 `web-app` 的 `ports`）、`python -m scripts.ri5_config_preflight`
 
 - [ ] **Step 1: 写失败契约测试**
@@ -1307,32 +1747,55 @@ git commit -m "feat(ri5): add the three control-plane provider probes"
 `tests/security/test_ri5_compose_boundary.py`（标 `security`，用 `PyYAML` 静态解析，沿用 `test_compose_contract.py` 既有读取方式）：
 
 ```python
-def test_base_compose_publishes_only_loopback(): ...
+def test_base_compose_publishes_only_loopback():
     # web-app ports == ["127.0.0.1:8080:8080"]；任何服务都不得出现 0.0.0.0
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_lan_override_only_changes_the_web_port(): ...
+def test_lan_override_only_changes_the_web_port():
     # docker-compose.lan.yml 顶层只含 services.web-app.ports
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_the_old_provider_secrets_are_gone(): ...
+def test_web_app_is_not_gated_behind_a_profile():
+    # web-app 无 profiles 键；feishu-listener / channel-worker 仍在 m7-channels
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_web_switches_are_interpolated_not_hardcoded():
+    # web-app.environment 里这些键的值形如 ${VAR:-false}，而非字面量 "false"；
+    # 默认值必须仍是关闭
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_base_compose_does_not_require_the_feishu_identity_file():
+    # 基础文件里没有 feishu-identities.json 的 bind；它只出现在 docker-compose.feishu.yml
+    # 反例：干净 checkout（无 .secrets/）下 `docker compose config` 仍可渲染
+    raise NotImplementedError("按规格写出断言后删除本行")
+
+def test_the_old_provider_secrets_are_gone():
     # 两个 compose 文件里都不再有 gemini_api_key / feishu_app_secret
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_api_does_not_mount_the_integration_config(): ...
+def test_api_does_not_mount_the_integration_config():
     # api 服务的 volumes 中不含 .config 或 /run/xiaowei-config
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_web_mounts_the_config_directory_read_write(): ...
+def test_web_mounts_the_config_directory_read_write():
     # web-app 的挂载项无 :ro 后缀
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_worker_and_feishu_mount_it_read_only(): ...
+def test_worker_and_feishu_mount_it_read_only():
     # worker / feishu-listener / channel-worker 的挂载项都以 :ro 结尾
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_container_target_path_is_fixed(): ...
+def test_container_target_path_is_fixed():
     # /run/xiaowei-config
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_dockerfile_pins_the_numeric_uid_and_gid(): ...
+def test_dockerfile_pins_the_numeric_uid_and_gid():
     # --uid 10001 --gid 10001
+    raise NotImplementedError("按规格写出断言后删除本行")
 
-def test_read_only_rootfs_and_dropped_caps_are_unchanged(): ...
+def test_read_only_rootfs_and_dropped_caps_are_unchanged():
     # read_only: true、cap_drop: [ALL]、no-new-privileges:true 三项逐服务仍在
+    raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1350,7 +1813,43 @@ RUN groupadd --system --gid 10001 xiaowei \
  && useradd --system --uid 10001 --gid 10001 --home /app xiaowei
 ```
 
-`docker-compose.yml`：顶层 `secrets:` 删除 `feishu_app_secret`，各服务 `secrets` 列表只留 `postgres_password`；`web-app` 加 `volumes: - ./.config:/run/xiaowei-config`，`worker` 与两个飞书服务加 `- ./.config:/run/xiaowei-config:ro`，`api` 不加。`read_only: true`、`cap_drop: ALL`、`no-new-privileges` 一律不动。
+`docker-compose.yml` 有**三处**会让 runbook 直接跑不起来，必须一并改：
+
+**(a) `web-app` 在 `m7-channels` profile 里**（`docker-compose.yml:119`）。普通 `docker compose up -d`
+根本不会启动它。RI5 的 Web 是本里程碑的主入口，把 `web-app` 移出 profile，成为默认服务；
+`feishu-listener` 与 `channel-worker` 保持在 `m7-channels`，因为飞书仍是可选插件。
+
+**(b) 开关是硬编码字面量**（`docker-compose.yml:123-124` 的 `XIAOWEI_WEB_APP_ENABLED: "false"`、
+`XIAOWEI_FEISHU_OAUTH_ENABLED: "false"`）。`.env` 里改这两个值**不会**覆盖它们——Compose 的
+`environment:` 字面量优先。改为带默认值的插值，默认仍是关闭：
+
+```yaml
+  web-app:
+    <<: *app-service
+    command: ["python", "-m", "xiaowei_agent.interfaces.web_app"]
+    environment:
+      <<: *app-environment
+      XIAOWEI_WEB_APP_ENABLED: "${XIAOWEI_WEB_APP_ENABLED:-false}"
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "${XIAOWEI_FEISHU_OAUTH_ENABLED:-false}"
+      XIAOWEI_WEB_MODE: "${XIAOWEI_WEB_MODE:-https}"
+      XIAOWEI_WEB_PUBLIC_ORIGIN: "${XIAOWEI_WEB_PUBLIC_ORIGIN:-}"
+      XIAOWEI_GEMINI_REAL_TEST_ENABLED: "${XIAOWEI_GEMINI_REAL_TEST_ENABLED:-false}"
+      XIAOWEI_FEISHU_REAL_TEST_ENABLED: "${XIAOWEI_FEISHU_REAL_TEST_ENABLED:-false}"
+      XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
+      XIAOWEI_WEB_BIND_PORT: "8080"
+```
+
+默认值一律保持关闭，所以「默认关闭」的既有承诺不变；只是现在 `.env` 真的能覆盖。
+
+**(c) 身份文件是硬挂载且 `create_host_path: false`**（`docker-compose.yml:129-135`）。飞书 OAuth
+已降级为可选插件，但这个 bind 仍然必需——干净部署没有 `./.secrets/feishu-identities.json` 时
+**容器直接起不来**，runbook 第 2 步必然失败。把它移出基础文件，挪进新的
+`docker-compose.feishu.yml` override，只在启用飞书时叠加。
+
+其余照旧：顶层 `secrets:` 删除 `feishu_app_secret`，各服务 `secrets` 列表只留 `postgres_password`；
+`web-app` 加 `volumes: - ./.config:/run/xiaowei-config`，`worker` 与两个飞书服务加
+`- ./.config:/run/xiaowei-config:ro`，`api` 不加。`read_only: true`、`cap_drop: ALL`、
+`no-new-privileges` 一律不动。
 
 `docker-compose.model.yml` 删除 `gemini_api_key` secret 与 worker 的对应挂载，只保留 `XIAOWEI_GEMINI_ENABLED=true`。
 
@@ -1375,12 +1874,58 @@ services:
 
 `README.md` 增加不可跳过的首启顺序：
 
-1. `mkdir -p .config && chmod 700 .config`（Linux 另需 `chown 10001:10001 .config`）；
-2. `docker compose up -d`（只发布 `127.0.0.1:8080`）；
-3. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**；
-4. 改 `.env` 的 `XIAOWEI_WEB_MODE=lan_http` 与 `XIAOWEI_WEB_PUBLIC_ORIGIN`；
-5. `docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app`；
-6. 从局域网地址用新密码重新登录。
+1. 建目录：
+
+   ```bash
+   mkdir -p .config && chmod 700 .config
+   # Linux Docker Engine 另需（macOS Docker Desktop 跳过）：
+   sudo chown 10001:10001 .config
+   ```
+
+2. 在 `.env` 写入首启参数（这些键现在真的会被 Compose 插值消费）：
+
+   ```bash
+   XIAOWEI_WEB_APP_ENABLED=true
+   XIAOWEI_WEB_MODE=lan_http
+   XIAOWEI_WEB_PUBLIC_ORIGIN=http://127.0.0.1:8080
+   ```
+
+   `lan_http` 接受 canonical loopback，所以首启阶段不必先用 HTTPS 模式。
+
+3. **先跑预检，成功后才启动 Web**：
+
+   ```bash
+   docker compose run --rm --no-deps \
+     -v "$PWD/.config:/run/xiaowei-config" \
+     web-app python -m scripts.ri5_config_preflight
+   ```
+
+   只应输出 `preflight: ok`。失败时**不要**继续——目录属主或权限不对，Web 起来也存不下配置。
+
+4. 启动（基础文件只发布 `127.0.0.1:8080`；`web-app` 已不在 profile 里，普通 up 即可拉起）：
+
+   ```bash
+   docker compose up -d
+   ```
+
+5. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
+
+6. 改密完成后，再改 `.env` 的 public origin 为局域网地址：
+
+   ```bash
+   XIAOWEI_WEB_PUBLIC_ORIGIN=http://192.168.1.20:8080
+   ```
+
+7. 叠加 LAN override 重建：
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d --force-recreate web-app
+   ```
+
+8. 从局域网地址用新密码重新登录（旧 Cookie 因 origin digest 变化已失效，属预期）。
+
+启用飞书时额外叠加 `-f docker-compose.feishu.yml` 并准备 `./.secrets/feishu-identities.json`；
+不启用飞书时无需该文件。
 
 并写明**残余风险**：第 3 步之前套用 LAN override，`admin/admin` 会暴露给同网段；补救是改密后重建 Web 并撤销全部 `local_admin` session。
 
@@ -1402,27 +1947,29 @@ git commit -m "feat(ri5): move provider credentials to a mounted config director
 
 ---
 
-### Task 9: 全量验收与交接
+### Task 10: 全量验收与交接
 
 **Files:**
 - Modify: `AGENT_HANDOFF.md`
-- Review: Task 1–8 改动的全部文件
+- Review: Task 0–9 改动的全部文件
 
-- [ ] **Step 1: 同步依赖并跑完整基线**
+- [ ] **Step 1: 跑完整基线**
+
+依赖已在 Task 0 同步过，这里不重复 `uv sync`。
 
 ```bash
-uv sync --extra dev --frozen
 python -m pytest -q
 python -m pytest -m security -q
 ruff check .
 mypy src
 ```
 
-Expected: 四条全绿。若 `google-genai` / `lark-oapi` 相关用例仍失败，先确认是环境未同步而非本轮回归——用 `origin/main` 的树在同一 venv 复跑对比失败集合。
+Expected: 四条全绿，且与 Task 0 记录的开工前基线对比无新增失败。若出现失败，先判断是本轮引入
+还是既有——必要时用 `origin/main` 的树在同一 venv 复跑对比失败集合。
 
 - [ ] **Step 2: 本地闭环验证**
 
-按 Task 8 Step 5 的 runbook 实跑一遍，记录：
+按 Task 9 Step 5 的 runbook 实跑一遍，记录：
 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
@@ -1437,7 +1984,18 @@ Expected: `200`、`200`；`admin/admin` 登录后被强制改密；改密前访�
 
 确认改动中**没有**：任何 Secret 值进入响应/日志/数据库/页面、`docker.sock` 挂载、任意 endpoint 或路径输入、新执行进程或 dispatch lane、Web 取得模型端口、探针创建 Task/Evidence、`web_oauth_states` 的新列、基础 compose 的非 loopback 发布。
 
-再跑一次 `grep -rn "web_detail_base_url\|gemini_api_key\|feishu_app_secret" --exclude-dir=.git --exclude-dir=__pycache__ .`，确认旧真源已彻底移除。
+再确认旧真源已从**运行代码**中移除。注意：ADR、migration 说明、handoff 与迁移测试自身**必然**
+会提到旧路径（那是历史记录与反例），所以**不能**以「全仓 grep 零输出」作为验收条件。判据是：
+
+```bash
+# 判据一：src/ 下零命中（这一条由 Task 8 的 test_no_source_file_references_the_legacy_provider_secret_paths 承重）
+grep -rn "web_detail_base_url\|/run/secrets/gemini_api_key\|feishu_app_secret_file" src/ --exclude-dir=__pycache__
+
+# 判据二：compose 与 .env.example 下零命中
+grep -n "gemini_api_key\|feishu_app_secret" docker-compose*.yml .env.example
+```
+
+两条都应无输出。其余目录的命中逐条人工确认属于「历史记录」或「反例断言」，不得机械清零。
 
 - [ ] **Step 4: 更新 handoff 并提交**
 
