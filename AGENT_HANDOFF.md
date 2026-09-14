@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目目录 | 当前在主 checkout `/Users/kloenguyen/Desktop/agent`，分支 `claude/ri5-implementation` 基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`。M6b worktree 保留在 `/Users/kloenguyen/.codex/worktrees/5f7e/agent` |
 | 截止时间 | 2026-09-14（Asia/Shanghai） |
-| 阶段 | **RI3 PR 3A–3D 已合入，PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”。RI5 的设计与 ADR 修订已成套接受并合入 `main`（PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40)）；RI5 实现计划 Task 0–9 已在 `claude/ri5-implementation` 上离线实现完毕，等待 PR 复审与合入。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **RI3 PR 3A–3D 已合入，PR 3E 尚未开始，仍等待独立的“RI3 Gemini test-env GO”。RI5 的设计与 ADR 修订已成套接受并合入 `main`（PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40)）；RI5 实现以 PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42) 为交付载体，CI/合入状态以 GitHub 与当前 `main` 为准。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——上述验收 SHA 已以 `--ff-only` 快进合入，无合并提交，历史未改写 |
@@ -58,7 +58,7 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | **PR #42 CI 全绿后合入；合入后由项目负责人在真机按 README 首启 runbook 实跑一次本地闭环（本轮未执行，见下方 RI5 未验证项）。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
+| 下一步 | **RI5 合入后由项目负责人在真机按 README 首启 runbook 实跑一次本地闭环（本轮未执行，见下方 RI5 未验证项）。** RI3 PR 3E 仍等待项目负责人单独下达“RI3 Gemini test-env GO”；RI2 现场 GO、RI4 真实验证、H 层生产只读、部署、canary、用户验收和 M8 均保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已交付 M5 API/CLI/Worker/migration/Compose、三个 fake 闭环、M6b 默认关闭的 StarRocks adapter、RI1 默认关闭的 OAuth/Web 装配，以及 RI3 PR 3B–3D 的默认关闭 Gemini adapter、durable 模型编排和显式 Web 父任务上下文；仍未连接任何真实运维目标或模型服务。RI5 实现以 PR #42 / 当前 `main` 实时状态为准 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
