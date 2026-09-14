@@ -2177,7 +2177,7 @@ WebAuthService 去掉 auth_source 校验       -> 1 failed
   - `class ProviderStateStore(Protocol)`：`record_load(...)`、`record_test(...)`、`snapshot() -> ProviderStateSnapshot`
   - 路由：`GET /app/api/config`、`PUT /app/api/config`、`POST /app/api/config/clear`
 
-- [ ] **Step 1: 写失败测试——状态机（纯函数，先钉死顺序）**
+- [x] **Step 1: 写失败测试——状态机（纯函数，先钉死顺序）**
 
 `tests/unit/test_integration_state.py`：
 
@@ -2295,7 +2295,7 @@ def test_unconfigured_wins_over_every_later_rule() -> None:
     )
 ```
 
-- [ ] **Step 2: 写失败测试——配置 API 边界**
+- [x] **Step 2: 写失败测试——配置 API 边界**
 
 `tests/contract/test_ri5_config_api.py`：
 
@@ -2351,13 +2351,13 @@ def test_a_corrupt_file_is_not_treated_as_absent() -> None:
     raise NotImplementedError("按规格写出断言后删除本行")
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `python -m pytest tests/unit/test_integration_state.py tests/contract/test_ri5_config_api.py -q`
 
 Expected: FAIL —— 模块与路由不存在。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 `compute_display_state` 严格按设计的五步顺序短路返回，不做任何合并或猜测。
 
@@ -2389,18 +2389,78 @@ Task 2 的契约不变。第一次成功保存写 `0 + 1 = 1`。
 字段（配置不存在时按全空起步）→ 校验 → `write_integration_config` 原子替换」，成功后返回
 `{"generation": n+1, "restart_required": true}`。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `python -m pytest tests/unit/test_integration_state.py tests/contract/test_ri5_config_api.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/xiaowei_agent/application/integration_state.py src/xiaowei_agent/persistence/provider_state.py src/xiaowei_agent/interfaces/web_app.py src/xiaowei_agent/interfaces/worker.py src/xiaowei_agent/interfaces/feishu_listener.py src/xiaowei_agent/interfaces/feishu_worker.py tests/unit/test_integration_state.py tests/contract/test_ri5_config_api.py
 git commit -m "feat(ri5): add the config api, load receipts and provider display state"
 ```
+
+**执行记录（2026-09-14）：** 四条基线 `3708 passed, 237 skipped` / `1359 security passed` /
+`ruff` 通过 / `mypy` 173 files 通过。与计划文本的偏差与根因如下。
+
+1. **`LoadReceipt` / `TestResult` 从 `application/` 移到 `contracts/provider_state.py`。**
+   计划把它们放在 `application/integration_state.py`（Task 4 已落地），但 `persistence` 的分层
+   规则只允许依赖 `contracts` / `planning` / `persistence`——`persistence/provider_state.py` 一
+   引用就违反分层，`test_module_layering` 立刻转红。这两个形状同时被三层用到：application 的状
+   态机拿它判定、persistence 的两个 store 拿它落库和读出、interfaces 的加载器拿它产出，正是
+   `contracts` 的定义。让 persistence 自己抄一份行形状是这条链路上最容易出现的漂移，不取。
+   `application/integration_state.py` 保留状态机、四个服务名常量与 `UNCONFIGURED_GENERATION`。
+
+2. **回执写在**入口**而不是共享的装配函数里。** 计划的 Files 已经点名 `worker.py` /
+   `feishu_listener.py` / `feishu_worker.py`，实现时确认这是**必须**的：
+   `build_postgres_local_stack` 同时服务 internal-api 与 Worker，写在那里等于让 API 进程替
+   Worker 背书一条"我加载了第 N 代"的假证据。三个栈因此各带 `provider_state` 与
+   `load_receipts` 两个字段，由各自入口在**开始服务之前**落库。`_resolved_credentials` 改为同
+   时返回凭据与回执——两者必须出自同一次读取，分两次读会在中间那次保存里错开一代。
+   注入凭据时没有读取，因此也没有回执；内存栈同理，不伪造代次。
+
+3. **`required_services_for_check()`：测试项与 Provider 不是一一对应。** 页面有三项而 Provider
+   只有两个，两个飞书测试项共用同一份加载回执却等的不是同一组服务——`feishu_oauth` 只活在 Web
+   进程里，listener 有没有重启和它无关。混成一个集合会让其中一项永远停在"待应用"。
+
+4. **`PUT` 一度整条绕过 body 上限。** `JsonBodyLimitMiddleware` 只匹配 `POST`，而配置保存是
+   `PUT`——它恰好是唯一一个会被原样写进磁盘文件的入口。中间件因此增加 `methods` 闭集参数，
+   Web 注册 `{"POST", "PUT"}`；反证见下表。这与 Task 5 "每一个 JSON 写入口都必须在白名单里"
+   是同一条不变量，只是那一轮只检查了路径、没检查方法。
+
+5. **"已配置"与 `required_fields_present` 合并为一处判定 `_required_fields_present()`。**
+   两处各写一份会出现"显示已配置、状态却是未配置"的自相矛盾页面——飞书尤其容易，它有两个必填
+   字段，只看 `app_secret` 会把"填了 Secret 没填 App ID"算成已配置。
+
+6. **`WebConfigClearRequest.provider` 单字段放开 `strict`。** 模型整体 `strict=True` 时枚举只
+   接受枚举实例，而请求体里来的必然是 JSON 字符串，不放开就没有任何合法请求。改用 `Literal`
+   会把 `ProviderName` 这个闭集抄成第二份，不取。
+
+7. **显式 `null` 与空串一样被拒**，规则写在 `_ConfigUpdate` 基类上而不是每个字段上。
+   `null` 比空串更隐蔽：它会被"未携带 = 保留原值"那条规则悄悄吸收，请求返回 200 而什么都没
+   发生。写在字段上迟早会漏掉一个新增字段。
+
+8. **`TestResult` 加 `__test__ = False`。** 名字以 `Test` 开头，pytest 会尝试把它当测试类收集
+   并每次打一条 `PytestCollectionWarning`。类名是计划钉死的，只关掉收集。
+
+```text
+状态机漏掉「尚未加载」这一步        -> 6 failed
+invalid 回执被当成已加载           -> 1 failed
+损坏文件被当成尚未配置             -> 2 failed
+配置面不再限定本地管理员           -> 1 failed
+body 上限只认 POST                -> 1 failed
+worker 启动时不写加载回执          -> 1 failed
+「已配置」只看 secret             -> 1 failed
+测试项等服务集合缺一条分支          -> 4 failed
+去掉「显式 null 不是清除」         -> 5 failed
+恢复后                            83 passed
+```
+
+**一条反证没有变红，值得记下来。** "把 `_secret_ref` 的空串检查去掉"之后空串仍被拒绝——
+真正挡住它的是 `StrictStr` 自己的"不得为空或首尾空白"规则，比 `SecretRef` 更靠下一层。
+行为契约（400 且不替换文件）成立，但这条不变量由哪一层持有与我原先以为的不同。
 
 ---
 

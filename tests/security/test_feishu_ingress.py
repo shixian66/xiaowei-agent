@@ -77,6 +77,8 @@ def test_listener_stack_field_surface_has_no_execution_authority() -> None:
     assert names == {
         "listener",
         "transport",
+        "provider_state",
+        "load_receipts",
         "runtime",
         "task_store",
         "channel_store",

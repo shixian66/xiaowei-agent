@@ -23,7 +23,12 @@ async def _send_error(send: Send, *, status: int, code: str) -> None:
 
 
 class JsonBodyLimitMiddleware:
-    """只缓冲显式登记的 JSON POST，最大内存占用被 limit 硬限制。"""
+    """只缓冲显式登记的 JSON 写入口，最大内存占用被 limit 硬限制。
+
+    ``methods`` 是**方法闭集**而不是写死的 ``POST``：RI5 的配置保存是 ``PUT``，
+    只认 ``POST`` 会让它整条绕过 body 上限与 media-type 门——那是一条没有大小
+    限制的缓冲入口，而这个中间件存在的全部理由就是不留这种入口。
+    """
 
     def __init__(
         self,
@@ -31,15 +36,17 @@ class JsonBodyLimitMiddleware:
         *,
         limit: int,
         paths: frozenset[str] = frozenset({"/v1/tasks"}),
+        methods: frozenset[str] = frozenset({"POST"}),
     ) -> None:
         self._app = app
         self._limit = limit
         self._paths = paths
+        self._methods = methods
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if not (
             scope["type"] == "http"
-            and scope["method"] == "POST"
+            and scope["method"] in self._methods
             and scope["path"] in self._paths
         ):
             await self._app(scope, receive, send)

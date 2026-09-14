@@ -214,6 +214,9 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     )
     web_app = create_app(
         auth=web.auth,
+        local_admin_auth=web.local_admin_auth,
+        oauth_available=web.oauth_available,
+        provider_state=web.provider_state,
         settings=settings,
         readiness=web.readiness,
         task_access=web.task_access_service,

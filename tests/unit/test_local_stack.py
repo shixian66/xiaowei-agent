@@ -766,6 +766,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "task_store",
         "channel_store",
         "web_session_store",
+        "provider_state",
         "identity_directory",
         "task_access_service",
         "submission_service",
@@ -968,6 +969,8 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     assert {field.name for field in fields(FeishuListenerStack)} == {
         "listener",
         "transport",
+        "provider_state",
+        "load_receipts",
         "runtime",
         "task_store",
         "channel_store",
@@ -1069,6 +1072,8 @@ async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
     assert {field.name for field in fields(ChannelWorkerStack)} == {
         "service",
         "message_port",
+        "provider_state",
+        "load_receipts",
         "runtime",
         "task_store",
         "channel_store",

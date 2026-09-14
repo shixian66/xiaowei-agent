@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
-from tests.fakes.web_auth import NoLocalAdmin
+from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -185,6 +185,7 @@ def _web_app(
             submissions=Submissions(),
             clock=clock,
             policy_revision="policy-2026-09-01",
+            provider_state=EmptyProviderState(),
         ),
         oauth,
     )
@@ -534,6 +535,9 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("POST", "/app/api/logout"),
         ("POST", "/app/api/login"),
         ("POST", "/app/api/change-password"),
+        ("GET", "/app/api/config"),
+        ("PUT", "/app/api/config"),
+        ("POST", "/app/api/config/clear"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/detail.js"),
@@ -896,6 +900,7 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         auth = object()
         local_admin_auth = NoLocalAdmin()
         oauth_available = True
+        provider_state = EmptyProviderState()
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
@@ -1287,6 +1292,7 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
         auth = object()
         local_admin_auth = NoLocalAdmin()
         oauth_available = True
+        provider_state = EmptyProviderState()
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()

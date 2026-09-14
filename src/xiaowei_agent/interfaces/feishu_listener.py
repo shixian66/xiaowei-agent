@@ -264,6 +264,11 @@ async def _run(settings: Settings) -> int:
 
     try:
         stack = await build_postgres_feishu_listener_stack(settings=settings)
+        # 加载回执在**开始服务之前**落库：管理面第一次打开就必须看到这个进程实际
+        # 加载的代次，而不是"还没人来问过所以显示待应用"。回执只归属本进程自己启用
+        # 的链路，写在入口而不是共享的装配函数里——``build_postgres_local_stack``
+        # 同时服务 API 与 Worker，写在那里等于替另一个进程背书。
+        await stack.provider_state.record_load(receipts=stack.load_receipts)
         return await serve_listener(stack=stack)
     except Exception:
         # SDK/provider 异常可能携带 URL、ticket 或响应正文，入口只记闭集诊断。

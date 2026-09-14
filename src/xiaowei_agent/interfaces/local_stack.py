@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -18,6 +18,7 @@ from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
+    LoadReceipt,
     ModelInvocationProfile,
     ReadinessProbe,
     ReadinessReport,
@@ -33,7 +34,11 @@ from xiaowei_agent.persistence.database import (
     create_database_engine,
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
-from xiaowei_agent.persistence.fake import InMemoryChannelStore, InMemoryTaskStore
+from xiaowei_agent.persistence.fake import (
+    InMemoryChannelStore,
+    InMemoryProviderStateStore,
+    InMemoryTaskStore,
+)
 from xiaowei_agent.persistence.local_admin import PostgresLocalAdminStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.model_artifacts import (
@@ -48,6 +53,10 @@ from xiaowei_agent.persistence.postgres import (
     PostgresPlanStore,
     PostgresTaskStore,
     PostgresWebSessionStore,
+)
+from xiaowei_agent.persistence.provider_state import (
+    PostgresProviderStateStore,
+    ProviderStateStore,
 )
 from xiaowei_agent.persistence.store import Clock, TaskStore
 
@@ -124,6 +133,8 @@ class _PostResultBarrierGateway:
 @dataclass(frozen=True)
 class LocalStack:
     runtime: XiaoweiRuntime
+    provider_state: ProviderStateStore
+    load_receipts: Mapping[tuple[str, str], LoadReceipt]
     task_store: TaskStore
     plan_store: PlanStore
     evidence_ledger: EvidenceLedger
@@ -160,6 +171,8 @@ class FeishuListenerStack:
 
     listener: FeishuListener
     transport: FeishuInboundTransport
+    provider_state: ProviderStateStore
+    load_receipts: Mapping[tuple[str, str], LoadReceipt]
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
@@ -178,6 +191,8 @@ class ChannelWorkerStack:
 
     service: ChannelProjectionService
     message_port: ChannelMessagePort
+    provider_state: ProviderStateStore
+    load_receipts: Mapping[tuple[str, str], LoadReceipt]
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
@@ -205,6 +220,7 @@ class WebStack:
     task_store: TaskStore
     channel_store: ChannelStore
     web_session_store: WebSessionStore
+    provider_state: ProviderStateStore
     identity_directory: FeishuIdentityDirectory | None
     task_access_service: TaskAccessService
     submission_service: ChannelSubmissionService
@@ -250,16 +266,19 @@ class _Ready:
 
 def _resolved_credentials(
     settings: Settings, credentials: ProviderCredentials | None
-) -> ProviderCredentials:
-    """注入优先；没注入就从默认路径读一次。
+) -> tuple[ProviderCredentials, Mapping[tuple[str, str], LoadReceipt]]:
+    """注入优先；没注入就从默认路径读一次，并一并交出这次读取的回执。
 
     读失败不抛：断供的后果是"这条链路不装配"，由各装配点自己判断，而不是让整个
     进程起不来——那会让一份坏配置把已经在跑的服务一起拖死。
+
+    凭据与回执必须出自**同一次读取**：分两次读会让"页面上说加载了第几代"与
+    "进程实际用的是哪一代"在两次读取之间的保存里错开一代。注入凭据时没有读取，
+    因此也没有回执——离线证明用的栈不该伪造一条"我加载过第几代"。
     """
     if credentials is not None:
-        return credentials
-    resolved, _ = load_provider_credentials(settings=settings)
-    return resolved
+        return credentials, {}
+    return load_provider_credentials(settings=settings)
 
 
 def _utc_now() -> dt.datetime:
@@ -433,6 +452,8 @@ def _assemble_local_stack(
     monotonic: MonotonicClock,
     starrocks_live_assembly: StarRocksLiveAssembly | None,
     credentials: ProviderCredentials,
+    provider_state: ProviderStateStore,
+    load_receipts: Mapping[tuple[str, str], LoadReceipt],
 ) -> LocalStack:
     from xiaowei_agent.application.context import ContextAssembler
     from xiaowei_agent.application.runtime import XiaoweiRuntime
@@ -607,6 +628,8 @@ def _assemble_local_stack(
 
     return LocalStack(
         runtime=runtime,
+        provider_state=provider_state,
+        load_receipts=load_receipts,
         task_store=task_store,
         plan_store=plan_store,
         evidence_ledger=ledger,
@@ -663,6 +686,9 @@ def build_in_memory_local_stack(
         monotonic=monotonic,
         starrocks_live_assembly=starrocks_live_assembly,
         credentials=ProviderCredentials() if credentials is None else credentials,
+        provider_state=InMemoryProviderStateStore(clock=clock, state=state),
+        # 内存栈不读文件，因此没有任何可信 generation 可上报。
+        load_receipts={},
     )
 
 
@@ -727,7 +753,7 @@ async def build_postgres_feishu_listener_stack(
 
     if not settings.feishu_listener_enabled:
         raise ValueError("Feishu listener is disabled")
-    credentials = _resolved_credentials(settings, credentials)
+    credentials, load_receipts = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -783,6 +809,8 @@ async def build_postgres_feishu_listener_stack(
         return FeishuListenerStack(
             listener=listener,
             transport=inbound,
+            provider_state=PostgresProviderStateStore(engine=engine, clock=clock),
+            load_receipts=load_receipts,
             runtime=runtime,
             task_store=task_store,
             channel_store=channel_store,
@@ -813,7 +841,7 @@ async def build_postgres_channel_worker_stack(
 
     if not settings.channel_worker_enabled:
         raise ValueError("channel worker is disabled")
-    credentials = _resolved_credentials(settings, credentials)
+    credentials, load_receipts = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -859,6 +887,8 @@ async def build_postgres_channel_worker_stack(
         return ChannelWorkerStack(
             service=service,
             message_port=messages,
+            provider_state=PostgresProviderStateStore(engine=engine, clock=clock),
+            load_receipts=load_receipts,
             runtime=runtime,
             task_store=task_store,
             channel_store=channel_store,
@@ -930,6 +960,7 @@ async def build_postgres_web_stack(
         model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
+        provider_state = PostgresProviderStateStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
             task_store=task_store,
@@ -1002,6 +1033,7 @@ async def build_postgres_web_stack(
             task_store=task_store,
             channel_store=channel_store,
             web_session_store=web_session_store,
+            provider_state=provider_state,
             identity_directory=identity_directory,
             task_access_service=task_access_service,
             submission_service=submission_service,
@@ -1025,7 +1057,7 @@ async def build_postgres_local_stack(
     credentials: ProviderCredentials | None = None,
 ) -> LocalStack:
     """用一个 AsyncEngine 装配 API/Worker 共用的 PostgreSQL 本地栈。"""
-    resolved_credentials = _resolved_credentials(settings, credentials)
+    resolved_credentials, load_receipts = _resolved_credentials(settings, credentials)
     engine = create_database_engine(settings)
 
     async def close() -> None:
@@ -1050,6 +1082,8 @@ async def build_postgres_local_stack(
             monotonic=monotonic,
             starrocks_live_assembly=starrocks_live_assembly,
             credentials=resolved_credentials,
+            provider_state=PostgresProviderStateStore(engine=engine, clock=clock),
+            load_receipts=load_receipts,
         )
     except Exception:
         await engine.dispose()

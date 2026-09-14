@@ -121,6 +121,8 @@ def test_channel_worker_stack_field_surface_has_no_execution_authority() -> None
     assert names == {
         "service",
         "message_port",
+        "provider_state",
+        "load_receipts",
         "runtime",
         "task_store",
         "channel_store",

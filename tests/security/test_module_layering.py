@@ -201,6 +201,10 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.log",
+        # RI5：配置面要读加载回执与测试结果，因此持有 ProviderStateStore 这个端口。
+        # 与 local_admin_auth.py / web_auth.py 同一模式：接口层拿 store 契约，
+        # 具体实现仍由 local_stack 装配注入。
+        "xiaowei_agent.persistence",
         "xiaowei_agent.trace",
     },
     "interfaces/web_auth.py": {

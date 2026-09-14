@@ -360,6 +360,7 @@ def _app(clock: Any, memory_state: Any, *, mode: WebMode = WebMode.HTTPS) -> Any
     from xiaowei_agent.interfaces.web_auth import web_origin_digest
     from xiaowei_agent.persistence.fake import (
         InMemoryLocalAdminStore,
+        InMemoryProviderStateStore,
         InMemoryWebSessionStore,
     )
 
@@ -400,6 +401,7 @@ def _app(clock: Any, memory_state: Any, *, mode: WebMode = WebMode.HTTPS) -> Any
         submissions=_Unused(),
         clock=clock,
         policy_revision="policy-2026-09-01",
+        provider_state=InMemoryProviderStateStore(clock=clock, state=memory_state),
     )
     return app, admins, origin, INITIAL_LOCAL_ADMIN_PASSWORD, hash_password
 
@@ -593,21 +595,24 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
     oversize = json.dumps({"password": "x" * 200_000})
 
     async with _client(app) as client:
-        for path in (
-            "/app/api/login",
-            "/app/api/change-password",
-            "/app/api/config",
-            "/app/api/config/clear",
-            "/app/api/config/test/gemini_connection",
-            "/app/api/config/test/feishu_credentials",
-            "/app/api/config/test/feishu_oauth",
+        for method, path in (
+            ("POST", "/app/api/login"),
+            ("POST", "/app/api/change-password"),
+            # 配置保存是 PUT。中间件只认 POST 时这一条会整条绕过 body 上限，
+            # 而它恰好是唯一一个会被原样写进磁盘文件的入口。
+            ("PUT", "/app/api/config"),
+            ("POST", "/app/api/config/clear"),
+            ("POST", "/app/api/config/test/gemini_connection"),
+            ("POST", "/app/api/config/test/feishu_credentials"),
+            ("POST", "/app/api/config/test/feishu_oauth"),
         ):
-            response = await client.post(
+            response = await client.request(
+                method,
                 path,
                 content=oversize,
                 headers={"origin": origin, "content-type": "application/json"},
             )
-            # 中间件必须在路由分发之前挡下：尚不存在的 config 路由也不能返回 404。
+            # 中间件必须在路由分发之前挡下：尚不存在的探针路由也不能返回 404。
             assert response.status_code == 413, path
 
 

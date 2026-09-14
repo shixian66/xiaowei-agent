@@ -18,6 +18,7 @@
 
 import datetime as _dt
 import uuid
+from collections.abc import Mapping
 from typing import Final, TypeVar
 
 from xiaowei_agent.contracts import (
@@ -28,6 +29,7 @@ from xiaowei_agent.contracts import (
     GrantRejection,
     IdentitySource,
     LeaseGrant,
+    LoadReceipt,
     ProjectionState,
     RetryDecision,
     ScopeTaskPageQuery,
@@ -40,6 +42,7 @@ from xiaowei_agent.contracts import (
     TaskRecord,
     TaskStatus,
     TaskSubmission,
+    TestResult,
     TraceEvent,
     TransitionResult,
 )
@@ -97,6 +100,10 @@ from xiaowei_agent.persistence.local_admin import (
     LocalAdminRecord,
 )
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+from xiaowei_agent.persistence.provider_state import (
+    ProviderStateSnapshot,
+    RecordTestCommand,
+)
 from xiaowei_agent.persistence.store import (
     Clock,
     ContextMismatchError,
@@ -446,6 +453,42 @@ class InMemoryChannelStore:
                     command,
                     now=self._clock(),
                 )
+            )
+
+
+class InMemoryProviderStateStore:
+    """``ProviderStateStore`` 的单进程实现；与其它端口共用同一把锁。"""
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    async def record_load(
+        self, *, receipts: Mapping[tuple[str, str], LoadReceipt]
+    ) -> None:
+        if not receipts:
+            # 空映射不是"清空"：旧回执仍是"上次加载了第几代"的事实。
+            return
+        async with self._lock:
+            self._state.load_receipts.update(receipts)
+
+    async def record_test(self, *, command: RecordTestCommand) -> None:
+        async with self._lock:
+            self._state.provider_tests[command.check_name.value] = TestResult(
+                status=command.status, generation=command.generation
+            )
+
+    async def snapshot(self) -> ProviderStateSnapshot:
+        async with self._lock:
+            return ProviderStateSnapshot(
+                receipts=self._state.load_receipts,
+                tests=self._state.provider_tests,
             )
 
 

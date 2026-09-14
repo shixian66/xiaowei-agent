@@ -34,6 +34,11 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionService,
     ChannelSubmitCommand,
 )
+from xiaowei_agent.application.integration_state import (
+    ProviderDisplayState,
+    compute_display_state,
+    current_generation,
+)
 from xiaowei_agent.application.task_view_runtime import (
     ApplicationFailure,
     classify_application_exception,
@@ -49,15 +54,29 @@ from xiaowei_agent.contracts import (
     TASK_ID_PATTERN,
     AuthenticatedPrincipal,
     ChannelKind,
+    FeishuIntegration,
+    GeminiIntegration,
+    IdentitySource,
+    IntegrationConfig,
+    ProviderName,
     ReadinessProbe,
     WebMode,
 )
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
+from xiaowei_agent.interfaces.integration_config_file import (
+    DEFAULT_INTEGRATION_CONFIG_PATH,
+    IntegrationConfigError,
+    write_integration_config,
+)
 from xiaowei_agent.interfaces.local_admin_auth import (
     LocalAdminAuthenticationError,
     LocalAdminAuthService,
+)
+from xiaowei_agent.interfaces.provider_consumption import (
+    read_or_absent,
+    required_services_for_check,
 )
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
@@ -74,7 +93,16 @@ from xiaowei_agent.interfaces.web_auth import (
 )
 from xiaowei_agent.interfaces.web_models import (
     WebChangePasswordRequest,
+    WebConfigChecks,
+    WebConfigClearRequest,
+    WebConfigSaved,
+    WebConfigUpdateRequest,
+    WebConfigView,
     WebCurrentUser,
+    WebFeishuConfigUpdate,
+    WebFeishuConfigView,
+    WebGeminiConfigUpdate,
+    WebGeminiConfigView,
     WebLoginRequest,
     WebTaskAccepted,
     WebTaskDetail,
@@ -82,6 +110,11 @@ from xiaowei_agent.interfaces.web_models import (
     WebTaskSubmitRequest,
 )
 from xiaowei_agent.log import configure_logging
+from xiaowei_agent.persistence.provider_state import (
+    CheckName,
+    ProviderStateSnapshot,
+    ProviderStateStore,
+)
 from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
 _BodyT = TypeVar("_BodyT", bound=BaseModel)
@@ -482,6 +515,10 @@ async def _task_snapshot_unavailable(_: Request, __: Exception) -> Response:
     return _error(503, "unavailable")
 
 
+async def _config_unavailable(_: Request, __: Exception) -> Response:
+    return _error(503, "unavailable")
+
+
 async def _application_error(_: Request, exc: Exception) -> Response:
     failure = classify_application_exception(exc)
     if failure is ApplicationFailure.CONFLICT:
@@ -717,6 +754,166 @@ async def _task_submit_body(request: Request) -> WebTaskSubmitRequest:
         raise _WebInputError from None
 
 
+class _WebForbiddenError(RuntimeError):
+    """已认证但不是本地管理员。
+
+    与 401 严格分开：401 是"你是谁我不知道"，403 是"我知道你是谁，但这台机器的
+    配置不归你管"。把两者合并会让飞书用户看到一个登录提示，然后无论怎么登都没用。
+    """
+
+
+class _ConfigUnavailableError(RuntimeError):
+    """`integrations.json` 存在但读不了。
+
+    **绝不能**降级成"未配置"：那样下一次保存会拿 ``generation=0`` 起步，
+    把一份仍在被各进程使用的配置整个覆盖掉。"不存在"是未配置，"存在但坏"是故障。
+    """
+
+
+def _integration_config_or_unavailable(path: str) -> IntegrationConfig | None:
+    """读当前配置；``None`` 表示文件尚不存在（干净部署的正常起点）。"""
+    try:
+        return read_or_absent(path)
+    except IntegrationConfigError:
+        raise _ConfigUnavailableError from None
+
+
+def _write_config_or_unavailable(path: str, config: IntegrationConfig) -> None:
+    try:
+        write_integration_config(path, config)
+    except IntegrationConfigError:
+        raise _ConfigUnavailableError from None
+
+
+def _merged_gemini(
+    current: GeminiIntegration, update: WebGeminiConfigUpdate | None
+) -> GeminiIntegration:
+    """未携带的字段保留原值。
+
+    ``None`` 在这里只可能是"未携带"：显式 ``null`` 与空串都已在请求模型里被拒。
+    """
+    if update is None:
+        return current
+    return GeminiIntegration(
+        enabled=current.enabled if update.enabled is None else update.enabled,
+        api_key=current.api_key if update.api_key is None else update.api_key,
+    )
+
+
+def _merged_feishu(
+    current: FeishuIntegration, update: WebFeishuConfigUpdate | None
+) -> FeishuIntegration:
+    if update is None:
+        return current
+    return FeishuIntegration(
+        enabled=current.enabled if update.enabled is None else update.enabled,
+        app_id=current.app_id if update.app_id is None else update.app_id,
+        app_secret=(
+            current.app_secret if update.app_secret is None else update.app_secret
+        ),
+    )
+
+
+def _next_config(
+    current: IntegrationConfig | None,
+    *,
+    gemini: GeminiIntegration,
+    feishu: FeishuIntegration,
+) -> IntegrationConfig:
+    """代次自增。文件不存在时从逻辑代次 ``0`` 起步，第一次保存写 ``1``。"""
+    return IntegrationConfig(
+        generation=current_generation(current) + 1, gemini=gemini, feishu=feishu
+    )
+
+
+def _required_fields_present(
+    provider: ProviderName, config: IntegrationConfig | None
+) -> bool:
+    """该 Provider 的必填字段是否齐备。
+
+    **只有这一处判定**：页面上的"已配置"与状态机的 ``required_fields_present``
+    问的是同一个问题。各写一份会出现"显示已配置、状态却是未配置"这种自相矛盾的页面——
+    飞书尤其容易，它有两个必填字段，只看 secret 就会把"填了 secret 没填 App ID"
+    算成已配置。
+    """
+    if config is None:
+        return False
+    if provider is ProviderName.GEMINI:
+        return config.gemini.api_key is not None
+    return config.feishu.app_id is not None and config.feishu.app_secret is not None
+
+
+def _provider_of(check_name: CheckName) -> ProviderName:
+    """测试项归属的 Provider；两个飞书测试项共用同一份凭据与加载回执。"""
+    if check_name is CheckName.GEMINI_CONNECTION:
+        return ProviderName.GEMINI
+    return ProviderName.FEISHU
+
+
+def _provider_enabled(
+    provider: ProviderName, config: IntegrationConfig | None
+) -> bool:
+    if config is None:
+        return False
+    if provider is ProviderName.GEMINI:
+        return config.gemini.enabled
+    return config.feishu.enabled
+
+
+def _display_state(
+    *,
+    check_name: CheckName,
+    settings: Settings,
+    config: IntegrationConfig | None,
+    snapshot: ProviderStateSnapshot,
+) -> ProviderDisplayState:
+    """把一份配置与一份持久化事实折成某个测试项的页面状态。"""
+    provider = _provider_of(check_name)
+    return compute_display_state(
+        provider=provider,
+        enabled=_provider_enabled(provider, config),
+        required_fields_present=_required_fields_present(provider, config),
+        current_generation=current_generation(config),
+        required_service_names=required_services_for_check(
+            settings, check_name.value
+        ),
+        receipts=snapshot.receipts,
+        test=snapshot.tests.get(check_name.value),
+    )
+
+
+def _config_view(
+    *,
+    settings: Settings,
+    config: IntegrationConfig | None,
+    snapshot: ProviderStateSnapshot,
+) -> WebConfigView:
+    """查询投影：``configured`` 是布尔，两个 secret 永不出现在响应里。"""
+    return WebConfigView(
+        generation=current_generation(config),
+        gemini=WebGeminiConfigView(
+            enabled=_provider_enabled(ProviderName.GEMINI, config),
+            configured=_required_fields_present(ProviderName.GEMINI, config),
+        ),
+        feishu=WebFeishuConfigView(
+            enabled=_provider_enabled(ProviderName.FEISHU, config),
+            configured=_required_fields_present(ProviderName.FEISHU, config),
+            app_id=None if config is None else config.feishu.app_id,
+        ),
+        checks=WebConfigChecks(
+            **{
+                check.value: _display_state(
+                    check_name=check,
+                    settings=settings,
+                    config=config,
+                    snapshot=snapshot,
+                )
+                for check in CheckName
+            }
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class _WebPrincipalSession:
     """两条认证路径的统一结果。
@@ -803,6 +1000,8 @@ def create_app(
     submissions: ChannelSubmissionService,
     clock: Clock,
     policy_revision: str,
+    provider_state: ProviderStateStore,
+    integration_config_path: str = DEFAULT_INTEGRATION_CONFIG_PATH,
 ) -> FastAPI:
     """注册认证与薄任务投影路由，不装配执行 Runtime。
 
@@ -830,6 +1029,8 @@ def create_app(
     app.add_middleware(
         JsonBodyLimitMiddleware,
         limit=settings.api_request_body_limit_bytes,
+        # 配置保存是 PUT；只认 POST 会让它整条绕过 body 上限。
+        methods=frozenset({"POST", "PUT"}),
         # 每一个 JSON 写入口都必须在这里，否则它没有 body 大小上限。
         # 三个 config/test 子路径逐条列全：中间件是精确匹配，不做前缀。
         paths=frozenset(
@@ -846,6 +1047,9 @@ def create_app(
             }
         ),
     )
+    # 一个 Web 进程内串行执行"读当前代次 → 合并 → 原子替换"。本版不支持多写实例，
+    # 因此这把锁就是全部并发控制；它必须随 app 走，不能是模块级的。
+    config_lock = asyncio.Lock()
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
@@ -856,6 +1060,8 @@ def create_app(
     app.add_exception_handler(
         _PasswordChangeRequiredError, _password_change_required
     )
+    app.add_exception_handler(_WebForbiddenError, _forbidden)
+    app.add_exception_handler(_ConfigUnavailableError, _config_unavailable)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
     app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
@@ -1097,6 +1303,74 @@ def create_app(
         )
         return response
 
+    async def local_admin_session(request: Request) -> _WebPrincipalSession:
+        """配置面只服务本地管理员。
+
+        ``ADMIN_ALL_SAFE_TASKS`` 是任务可见范围，不是"能改这台机器的配置"。
+        判定按**签发来源**而不是权限集合：权限集合会随身份目录变，来源不会。
+        """
+        session = await session_allowed_to_work(request)
+        if session.principal.source is not IdentitySource.LOCAL_ADMIN:
+            raise _WebForbiddenError
+        return session
+
+    @app.get("/app/api/config")
+    async def read_config(request: Request) -> dict[str, object]:
+        await local_admin_session(request)
+        config = _integration_config_or_unavailable(integration_config_path)
+        snapshot = await provider_state.snapshot()
+        return _config_view(
+            settings=settings, config=config, snapshot=snapshot
+        ).model_dump(mode="json")
+
+    @app.put("/app/api/config")
+    async def save_config(request: Request) -> dict[str, object]:
+        session = await local_admin_session(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebConfigUpdateRequest)
+        async with config_lock:
+            current = _integration_config_or_unavailable(integration_config_path)
+            updated = _next_config(
+                current,
+                gemini=_merged_gemini(
+                    GeminiIntegration() if current is None else current.gemini,
+                    body.gemini,
+                ),
+                feishu=_merged_feishu(
+                    FeishuIntegration() if current is None else current.feishu,
+                    body.feishu,
+                ),
+            )
+            _write_config_or_unavailable(integration_config_path, updated)
+        return WebConfigSaved(
+            generation=updated.generation, restart_required=True
+        ).model_dump(mode="json")
+
+    @app.post("/app/api/config/clear")
+    async def clear_config(request: Request) -> dict[str, object]:
+        session = await local_admin_session(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebConfigClearRequest)
+        async with config_lock:
+            current = _integration_config_or_unavailable(integration_config_path)
+            gemini = GeminiIntegration() if current is None else current.gemini
+            feishu = FeishuIntegration() if current is None else current.feishu
+            # 清除是整段重置为默认值，不是把某个字段置空：留一半配置在文件里，
+            # 页面会显示"已配置"而实际不可用。
+            if body.provider is ProviderName.GEMINI:
+                gemini = GeminiIntegration()
+            else:
+                feishu = FeishuIntegration()
+            updated = _next_config(current, gemini=gemini, feishu=feishu)
+            _write_config_or_unavailable(integration_config_path, updated)
+        return WebConfigSaved(
+            generation=updated.generation, restart_required=True
+        ).model_dump(mode="json")
+
     # 路由从闭集注册表循环注册，而不是一条一条手写：漏一条就是页面静默 404，
     # 而那种 404 只有真正用浏览器打开才会发现。
     for asset_name, media_type in _STATIC_MEDIA_TYPES.items():
@@ -1155,7 +1429,9 @@ async def serve_web(settings: Settings) -> int:
         load_provider_credentials,
     )
 
-    credentials, _ = load_provider_credentials(settings=settings)  # 回执见 Task 6
+    # 回执与凭据出自**同一次读取**：分两次读会让"页面上说加载了第几代"与
+    # "进程实际用的是哪一代"在两次读取之间的保存里错开一代。
+    credentials, receipts = load_provider_credentials(settings=settings)
     oauth: FeishuOAuthPort | None = None
     membership: FeishuMembershipPort | None = None
     if (
@@ -1195,6 +1471,9 @@ async def serve_web(settings: Settings) -> int:
         raise _WebConfigurationError
 
     try:
+        # 回执在**开始服务之前**落库：页面第一次打开就必须看到这个进程加载的代次，
+        # 而不是"还没人来问过所以显示待应用"。
+        await stack.provider_state.record_load(receipts=receipts)
         app = create_app(
             auth=stack.auth,
             local_admin_auth=stack.local_admin_auth,
@@ -1205,6 +1484,7 @@ async def serve_web(settings: Settings) -> int:
             submissions=stack.submission_service,
             clock=stack.clock,
             policy_revision=stack.policy_revision,
+            provider_state=stack.provider_state,
         )
         server = uvicorn.Server(
             uvicorn.Config(

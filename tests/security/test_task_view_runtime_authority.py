@@ -52,6 +52,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.contracts.plan
     xiaowei_agent.contracts.policy
     xiaowei_agent.contracts.promql_surface
+    xiaowei_agent.contracts.provider_state
     xiaowei_agent.contracts.readiness
     xiaowei_agent.contracts.render
     xiaowei_agent.contracts.request
@@ -92,6 +93,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.persistence.migrations.runner
     xiaowei_agent.persistence.plans
     xiaowei_agent.persistence.postgres
+    xiaowei_agent.persistence.provider_state
     xiaowei_agent.persistence.rows
     xiaowei_agent.persistence.schema
     xiaowei_agent.persistence.store

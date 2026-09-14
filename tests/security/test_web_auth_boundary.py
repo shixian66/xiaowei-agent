@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
-from tests.fakes.web_auth import NoLocalAdmin
+from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 from tests.security.test_task_view_runtime_authority import (
     _TASK_VIEW_PROCESS_ALLOWED_MODULES,
     _loaded_xiaowei_modules_after,
@@ -82,6 +82,7 @@ def _auth_app(
         submissions=_UnusedSubmissions(),
         clock=clock,
         policy_revision="policy-2026-09-01",
+        provider_state=EmptyProviderState(),
     )
 
 
@@ -1087,6 +1088,7 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "task_store",
         "channel_store",
         "web_session_store",
+        "provider_state",
         "identity_directory",
         "task_access_service",
         "submission_service",

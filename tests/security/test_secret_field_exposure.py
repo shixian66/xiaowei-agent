@@ -82,6 +82,8 @@ def test_the_scan_actually_finds_the_known_secret_fields() -> None:
         ("WebLoginRequest", "password"),
         ("WebChangePasswordRequest", "current_password"),
         ("WebChangePasswordRequest", "new_password"),
+        ("WebGeminiConfigUpdate", "api_key"),
+        ("WebFeishuConfigUpdate", "app_secret"),
     } <= names
 
 

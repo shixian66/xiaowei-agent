@@ -12,6 +12,7 @@ from xiaowei_agent.contracts import (
 )
 
 if TYPE_CHECKING:
+    from xiaowei_agent.contracts import LoadReceipt, TestResult
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
@@ -42,6 +43,8 @@ class InMemoryPersistenceState:
         self.oauth_states: dict[str, OAuthState] = {}
         self.web_sessions: dict[str, WebSession] = {}
         self.local_admin: Any | None = None
+        self.load_receipts: dict[tuple[str, str], LoadReceipt] = {}
+        self.provider_tests: dict[str, TestResult] = {}
         self.next_fencing_token = 1
         self.next_projection_fencing_token = 1
         self.next_created_seq = 1

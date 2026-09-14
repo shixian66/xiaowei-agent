@@ -13,12 +13,15 @@ from xiaowei_agent.application.channel_access import (
     TaskSummary,
 )
 from xiaowei_agent.application.channel_submission import SubmittedTask
+from xiaowei_agent.application.integration_state import ProviderDisplayState
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     AwareDatetime,
     ChannelPermission,
     NonEmptyText,
+    ProviderName,
     RenderPayload,
+    SecretRef,
     StrictInt,
     StrictStr,
     TaskId,
@@ -85,6 +88,110 @@ class WebChangePasswordRequest(_WebModel):
 
     current_password: SecretPassword = Field(exclude=True, repr=False)
     new_password: SecretNewPassword = Field(exclude=True, repr=False)
+
+
+ConfigText: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
+"""配置里的非 secret 文本（目前只有飞书 App ID）。
+
+下限是 1 而不是 0：空串在这条链路上唯一可能的含义是"我想清掉它"，而清除必须走
+显式动作。留出空串等于给出第二种清除语义，而它不会触发任何确认。
+"""
+
+
+class _ConfigUpdate(_WebModel):
+    """保存请求里"未携带 = 保留原值"这条语义的共同约束。
+
+    显式 ``null`` 与空串一样被拒绝：两者都是"用一个取值暗示清除"，而清除只能走
+    ``POST /app/api/config/clear``。规则写在基类上，新增字段自动继承——写在每个
+    字段上迟早会漏掉一个。
+    """
+
+    @model_validator(mode="after")
+    def _an_explicit_null_is_not_a_way_to_clear(self) -> Self:
+        if any(getattr(self, name) is None for name in self.model_fields_set):
+            raise ValueError("null does not clear a field; use the clear action")
+        return self
+
+
+class WebGeminiConfigUpdate(_ConfigUpdate):
+    """Gemini 的可编辑字段。模型、端点、API 版本是代码常量，不在这里。"""
+
+    enabled: bool | None = None
+    api_key: SecretRef | None = Field(default=None, exclude=True, repr=False)
+
+
+class WebFeishuConfigUpdate(_ConfigUpdate):
+    """飞书的可编辑字段。"""
+
+    enabled: bool | None = None
+    app_id: ConfigText | None = None
+    app_secret: SecretRef | None = Field(default=None, exclude=True, repr=False)
+
+
+class WebConfigUpdateRequest(_ConfigUpdate):
+    """一次保存请求；两个 Provider 都可以整段不携带。"""
+
+    gemini: WebGeminiConfigUpdate | None = None
+    feishu: WebFeishuConfigUpdate | None = None
+
+
+class WebConfigClearRequest(_WebModel):
+    """显式清除某个 Provider 的全部配置。"""
+
+    # 闭集仍然是 ``ProviderName``；只在这一个字段上放开 ``strict``。模型整体
+    # ``strict=True`` 时枚举只接受枚举实例，而请求体里来的必然是 JSON 字符串——
+    # 不放开就没有任何合法请求。改用 ``Literal`` 会把同一个闭集抄成第二份。
+    provider: ProviderName = Field(strict=False)
+
+
+class WebGeminiConfigView(_WebModel):
+    """Gemini 的查询投影；``configured`` 是布尔，Key 永不回显。"""
+
+    enabled: bool
+    configured: bool
+
+
+class WebFeishuConfigView(_WebModel):
+    """飞书的查询投影；``app_id`` 不是 secret，页面要靠它确认填的是哪个应用。"""
+
+    enabled: bool
+    configured: bool
+    app_id: StrictStr | None
+
+
+class WebConfigChecks(_WebModel):
+    """三个测试项的页面状态。
+
+    写成三个字段而不是一个 ``dict``：测试项是闭集，模型本身就是那份闭集，
+    多一项少一项都会在这里变红。
+    """
+
+    gemini_connection: ProviderDisplayState
+    feishu_credentials: ProviderDisplayState
+    feishu_oauth: ProviderDisplayState
+
+
+class WebConfigView(_WebModel):
+    """``GET /app/api/config`` 的完整响应。
+
+    ``generation`` 为 ``0`` 表示文件尚不存在——干净部署的正常起点，不是错误。
+    """
+
+    generation: StrictInt
+    gemini: WebGeminiConfigView
+    feishu: WebFeishuConfigView
+    checks: WebConfigChecks
+
+
+class WebConfigSaved(_WebModel):
+    """保存与清除的成功响应。
+
+    ``restart_required`` 恒为真：Web 只写文件，不重启任何进程，也不挂
+    ``docker.sock``。配置生效需要宿主机执行一次 Compose 重启。
+    """
+
+    generation: StrictInt
+    restart_required: bool
 
 
 class WebCurrentUser(_WebModel):

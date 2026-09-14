@@ -4,11 +4,17 @@
 每个 `create_app` 调用点都要给一个；各写一份会在下一次签名变更时散落失败。
 """
 
+from collections.abc import Mapping
 from typing import Any
 
+from xiaowei_agent.contracts import LoadReceipt
 from xiaowei_agent.interfaces.local_admin_auth import (
     LocalAdminAuthenticationError,
     LocalAdminSession,
+)
+from xiaowei_agent.persistence.provider_state import (
+    ProviderStateSnapshot,
+    RecordTestCommand,
 )
 
 
@@ -32,4 +38,26 @@ class NoLocalAdmin:
         return False
 
 
-__all__ = ["NoLocalAdmin"]
+class EmptyProviderState:
+    """没有任何回执与测试结果的替身。
+
+    用于不涉及配置面的既有用例：``provider_state`` 是 ``create_app`` 的必填依赖，
+    每个调用点各写一份空实现会在下一次签名变更时散落失败。
+    """
+
+    def __init__(self) -> None:
+        self.recorded: list[Mapping[tuple[str, str], LoadReceipt]] = []
+
+    async def record_load(
+        self, *, receipts: Mapping[tuple[str, str], LoadReceipt]
+    ) -> None:
+        self.recorded.append(receipts)
+
+    async def record_test(self, *, command: RecordTestCommand) -> None:
+        raise AssertionError("not used")  # pragma: no cover
+
+    async def snapshot(self) -> ProviderStateSnapshot:
+        return ProviderStateSnapshot(receipts={}, tests={})
+
+
+__all__ = ["EmptyProviderState", "NoLocalAdmin"]

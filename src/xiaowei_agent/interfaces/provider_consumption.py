@@ -14,10 +14,9 @@ from xiaowei_agent.application.integration_state import (
     SERVICE_FEISHU_LISTENER,
     SERVICE_WEB,
     SERVICE_WORKER,
-    LoadReceipt,
 )
 from xiaowei_agent.config import Settings
-from xiaowei_agent.contracts import IntegrationConfig, ProviderName
+from xiaowei_agent.contracts import IntegrationConfig, LoadReceipt, ProviderName
 from xiaowei_agent.interfaces.integration_config_file import (
     DEFAULT_INTEGRATION_CONFIG_PATH,
     IntegrationConfigMissingError,
@@ -53,7 +52,7 @@ def read_or_absent(path: str) -> IntegrationConfig | None:
         return None
 
 
-def _required_services(settings: Settings) -> Mapping[ProviderName, tuple[str, ...]]:
+def required_services(settings: Settings) -> Mapping[ProviderName, tuple[str, ...]]:
     """本进程实际启用、且需要某个 Provider 的服务名。
 
     一个进程可能同时装配了多条链路（例如 Web 既要飞书又要 Gemini），因此是多对多。
@@ -73,6 +72,25 @@ def _required_services(settings: Settings) -> Mapping[ProviderName, tuple[str, .
         ProviderName.GEMINI: tuple(gemini),
         ProviderName.FEISHU: tuple(feishu),
     }
+
+
+def required_services_for_check(
+    settings: Settings, check_name: str
+) -> frozenset[str]:
+    """某个**测试项**要等哪些服务加载当前 generation。
+
+    与 :func:`required_services` 分开：两个飞书测试项共用同一份加载回执，但等的
+    服务不同——``feishu_oauth`` 只活在 Web 进程里，listener 有没有重启和它无关。
+    把两者混成一个集合会让页面上某一项永远停在"待应用"。
+    """
+    services = required_services(settings)
+    if check_name == "gemini_connection":
+        return frozenset(services[ProviderName.GEMINI])
+    if check_name == "feishu_credentials":
+        return frozenset(services[ProviderName.FEISHU])
+    if check_name == "feishu_oauth":
+        return frozenset({SERVICE_WEB} if settings.feishu_oauth_enabled else ())
+    raise ValueError("unknown check name")
 
 
 def _gemini_credential(config: IntegrationConfig) -> str | None:
@@ -108,7 +126,7 @@ def load_provider_credentials(
     恒 ``> 0``，硬凑一个值等于伪造证据。缺回执在状态机里本就等价于「尚未加载当前
     generation」，页面仍会正确显示「待应用」。
     """
-    required = _required_services(settings)
+    required = required_services(settings)
     config: IntegrationConfig | None = None
     try:
         config = read_or_absent(path)
@@ -148,4 +166,6 @@ __all__: Final = [
     "ProviderCredentials",
     "load_provider_credentials",
     "read_or_absent",
+    "required_services",
+    "required_services_for_check",
 ]

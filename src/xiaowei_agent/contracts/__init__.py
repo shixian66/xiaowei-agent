@@ -119,6 +119,12 @@ from xiaowei_agent.contracts.promql_surface import (
     MAX_PROMQL_WINDOW_MINUTES,
     PromqlSurface,
 )
+from xiaowei_agent.contracts.provider_state import (
+    LoadReceipt,
+    LoadStatus,
+    TestResult,
+    TestStatus,
+)
 from xiaowei_agent.contracts.readiness import ReadinessProbe, ReadinessReport
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
@@ -213,6 +219,8 @@ __all__ = [
     "IntentSource",
     "JsonScalar",
     "LeaseGrant",
+    "LoadReceipt",
+    "LoadStatus",
     "MissingItem",
     "ModelAdvisory",
     "ModelCallKind",
@@ -275,6 +283,8 @@ __all__ = [
     "TaskStatus",
     "TaskSubmission",
     "TaskView",
+    "TestResult",
+    "TestStatus",
     "ToolCall",
     "ToolCallStatus",
     "ToolResult",

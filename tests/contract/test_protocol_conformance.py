@@ -337,3 +337,27 @@ def test_recording_adapter_satisfies_the_tool_adapter_protocol(
 ) -> None:
     adapter: ToolAdapter = recording_adapter  # type: ignore[assignment]
     assert adapter is not None
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.fake:InMemoryProviderStateStore",
+        "xiaowei_agent.persistence.provider_state:PostgresProviderStateStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_every_provider_state_store_implementation_keeps_protocol_keywords(
+    implementation_path: str,
+) -> None:
+    from xiaowei_agent.persistence.provider_state import ProviderStateStore
+
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(ProviderStateStore)
+    # 3：整批写回执 + 写一次测试结果 + 读全量快照，扩约必须显式过审。
+    assert len(methods) == 3, f"ProviderStateStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(ProviderStateStore, method)
+        ), f"{class_name}.{method}"
