@@ -6,6 +6,8 @@
 > 部署与 canary 保留为独立硬门；V2.3 于 2026-09-09 固化“离线范围可单独验收归档，但不满足
 > M7 完整退出门、不解锁真实渠道、只读 V1 或 M8”。V2.4 把六个真实接入阶段映射为
 > RI1–RI6，并修正真实调用许可与 E1 表述；本次纯文档变更本身不授权实现、联网或部署。
+> I0/I1 智能交互入口边界由 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)
+> 冻结为独立路线；I0 合入只代表文档真相闭合，不代表 I1 已实现。
 > **仍未签认的独立授权项**：V2.4 把原 ADR-007 E2 的“生产连接与生产写均默认禁止”拆成 H 层“RI6
 > 可逐项目标授权生产只读连接”和 E2“生产写继续禁止”。项目负责人必须明确知情并单独批准这一
 > 授权面变化；本次 V2.4/RI1 批准不包含该签认。H 层保持关闭，不允许建立生产只读连接。
@@ -77,6 +79,22 @@ StarRocks 现场只读验证；RI5 在 RI1/RI3 配置契约稳定后实现本地
 canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人已批准 RI1 仅按默认关闭、离线实现门开工，
 不授权真实应用、secret、网络调用、部署或 canary。
 
+**I0–I5 智能交互入口路线**（ADR-017）独立于 RI2/RI3/RI4 的真实接入 GO：
+
+```text
+I0 文档与契约
+  → I1 安全分流/澄清/披露
+  → I2 限定领域普通对话
+  → I3 受治理资料查询
+  → I4 用户提供日志分析
+  → I5 真实模型 Eval/灰度/UAT
+```
+
+M8 受控写前只要求 I1 把入口分流、必要澄清、可信槽位、静态只读分类和执行披露屏障做实；
+I2–I4 不是 M8 前置。主动连接 Loki、ELK、Kubernetes、服务器或数据库获取日志属于后续独立能力，
+不由 I4 名称自动授权。I1 不改变 RI2 飞书、RI3 Gemini、RI4 StarRocks、H 层生产只读、部署/canary
+或 E1 的任何真实调用 GO。
+
 ### 3.2 不采用的路线
 
 - 不先横向实现所有抽象层：在没有调用者前，无法证明 DTO、Protocol 和目录边界正确。
@@ -90,7 +108,7 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 所有里程碑共同遵守。**授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工具链与验证命令的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，架构契约的真源是 [ARCHITECTURE.md](ARCHITECTURE.md)；本文只承载里程碑顺序、决策门与验收标准。**
 
 1. 模型只产生 `IntentDraft`、解释或建议，不决定 capability、目标、SQL、审批或工具调用。
-2. 执行链固定为 `IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner(step) → StepAdmission → ToolGateway → Readback（需要时）→ Evidence → Outcome`。
+2. 执行链固定为 `InteractionArtifact → DeterministicInteractionRouter → CapabilityResolver → SlotVerifier → PlanCompiler → PlanStore → ExecutionDisclosure → WorkflowRunner(step) → StepAdmission → ToolGateway → Readback（需要时）→ Evidence → Outcome`；I1 实现前，当前源码仍以 handoff 记录的既有 `IntentDraft → CapabilityResolver → PlanCompiler` 路径为事实。
 3. `StepAdmission` 由 Runner 在每个具体步骤前调用；顺序是 `ToolPolicy → SQLGuard（需要时）→ ApprovalGate（副作用步骤）`。
 4. `CapabilityResolver` 是唯一候选生成真源，shadow 只消费同一份 `CandidateSet` 并 record-only。
 5. 领域代码不能直接持有外部客户端；adapter 只能经 `ToolGateway` 调用。
@@ -139,6 +157,12 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 | RI4 StarRocks 真实只读 | Real Integration | 完成 M6b 延期现场门；只验证已有 operation，最高 `test-env verified` |
 | RI5 本地 Web Admin 简化配置 | Real Integration | 单管理员在局域网 Web 中配置 Gemini/飞书；配置原子保存、宿主机重启、服务加载回执和显式连接测试可证明；不含 StarRocks、版本中心、审批或回滚 |
 | RI6 Compose 部署 / canary / UAT | Real Integration | 生产 override、部署 SHA、回滚、canary 与产品验收分级记录 |
+| I0 文档与契约 | Intelligent Interaction | ADR-017 与四份真相文档冻结智能交互入口；不新增 Python、migration、UI、模型或工具调用 |
+| I1 安全分流/澄清/披露 | Intelligent Interaction | `InteractionArtifact`、确定性 Router、终态澄清、一对一补槽、可信 Params、`ReadClass` 和 `ExecutionDisclosure` 离线闭环 |
+| I2 限定领域普通对话 | Intelligent Interaction | 另立普通对话通道，不调用运维工具，不复用澄清父链当长期记忆 |
+| I3 受治理资料查询 | Intelligent Interaction | 通过受治理资料工具与来源引用回答，不做无来源模型知识查找 |
+| I4 用户提供日志分析 | Intelligent Interaction | 只分析用户主动提供的日志/附件；主动连接日志系统另立 capability 和授权门 |
+| I5 真实模型 Eval / 灰度 / UAT | Intelligent Interaction | 基于真实样本校准分类质量、灰度和用户验收；不替代 RI3 首次 Gemini GO |
 | M8 受控写闭环 | Phase 5 | 测试环境中一条低风险写能力完成审批、恢复、readback 和故障注入验收 |
 | M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter；**不授予 Multi-Agent 权限** |
 
@@ -146,6 +170,7 @@ canary 和用户验收。详细文件与 PR 边界见第 7 节；项目负责人
 完成 M7 现场门、RI4 完成 M6b 现场门，RI6 才允许形成正式部署/canary/UAT 证据。受控写仍是
 另一个独立候选，不由 RI1–RI6 自动解锁。代码测试通过不等于发布，仍需按
 `declared → configured → deployed SHA → tests → canary → user-accepted` 记录最强证据。
+I0–I5 只改变智能入口能力；I1 离线全绿不能写成真实模型、真实飞书、真实目标、部署、灰度或用户验收。
 
 ## 7. 各里程碑实施与退出标准
 
@@ -440,7 +465,7 @@ The typed projector lives in `application/model_advisory.py`, where capability s
 are an allowed dependency. `rendering/` only consumes its validated display result and
 does not import `capabilities` or read the surface.
 
-The second migration adds explicit `parent_task_id`; Web validates only the directly
+I1 前的 RI3 当前源码事实是：the second migration adds explicit `parent_task_id`; Web validates only the directly
 selected parent's ownership/scope/terminal state and Worker revalidates every persisted
 hop before execution. Ancestor drift therefore rejects the created child rather than
 turning a still-valid direct parent into an entry-time 404. Null-parent
@@ -448,6 +473,8 @@ request/submission/scope digest bytes stay frozen.
 Non-null parent enters the semantic request digest and stored submission digest, not the
 scope digest, so any semantic difference (including a different parent) conflicts while
 the same semantic request and normal request_id/trace_id/`as_of` retry changes still reuse.
+ADR-017/I1 目标会删除该通用父历史语义，改用只服务终态澄清的
+`clarification_parent_task_id`。
 Feishu context waits for RI2 evidence.
 RI3 Web parent context does not depend on RI2 live OAuth evidence and does not rewrite
 the existing channel aggregation transaction.

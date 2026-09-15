@@ -139,3 +139,42 @@ def test_the_ri5_gate_binding_is_discriminating() -> None:
         assert phrase not in _RI5_ACCEPTANCE_SET, (
             f"旧形状 {phrase!r} 是 canonical 句的子串，禁用断言会恒假"
         )
+
+
+# --- I0/I1 智能交互入口文档门 -------------------------------------------------
+
+_ADR_017 = _ROOT / "docs/adr/ADR-017-intelligent-interaction-and-clarification.md"
+_ADR_017_REQUIRED_TERMS = (
+    "InteractionKind",
+    "RoutingDisposition",
+    "CLARIFICATION_REQUIRED",
+    "clarification_parent_task_id",
+    "ClarificationRecordStore",
+    "CapabilityInputBinding",
+    "ReadClass",
+    "ExecutionDisclosure",
+)
+
+
+def test_adr_017_freezes_the_i0_i1_interaction_terms() -> None:
+    assert _ADR_017.exists(), "ADR-017 缺失，I0/I1 设计不能只停留在 superpowers 计划稿"
+    text = _ADR_017.read_text(encoding="utf-8")
+    missing = [term for term in _ADR_017_REQUIRED_TERMS if term not in text]
+    assert not missing, f"ADR-017 未冻结这些 I0/I1 术语：{missing}"
+
+
+_I0_TRUTH_DOC_TERMS = {
+    "ARCHITECTURE.md": ("ADR-017", "InteractionArtifact", "DeterministicInteractionRouter"),
+    "DEVELOPMENT_PLAN.md": ("ADR-017", "I0 文档与契约", "I1 安全分流/澄清/披露"),
+    "README.md": ("ADR-017", "智能交互入口"),
+    "AGENT_HANDOFF.md": ("ADR-017", "I0-DOC", "I1 尚未实现"),
+}
+
+
+def test_i0_truth_docs_are_bound_to_adr_017() -> None:
+    missing = {
+        name: [term for term in terms if term not in (_ROOT / name).read_text(encoding="utf-8")]
+        for name, terms in _I0_TRUTH_DOC_TERMS.items()
+    }
+    missing = {name: terms for name, terms in missing.items() if terms}
+    assert not missing, f"I0 真相文档未同步 ADR-017 入口口径：{missing}"

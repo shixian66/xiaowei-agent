@@ -2,6 +2,20 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
+## 0. 本轮 I0-DOC 事实
+
+- 当前文档工作分支：`claude/i0-intelligent-interaction-docs`，基于
+  `origin/main@dccb75db240ae6fa117245399b1c39337f414fc7`。该 SHA 来自 PR #43 规划文档合并后的
+  `main`，本轮未修改 Python 源码、migration、UI、模型端口、工具端口或 Compose。
+- 本轮 I0-DOC 目标：新增 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)，并同步
+  `ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md` 与本文，把智能交互入口、终态澄清、
+  `ReadClass` 与执行披露边界写入项目真相文档。
+- I0-DOC 尚未合入 `main` 前，只能称为候选文档变更；I1 尚未实现，当前没有
+  `InteractionArtifact`、`DeterministicInteractionRouter`、`CLARIFICATION_REQUIRED` 运行终态、
+  `ClarificationRecordStore`、`SlotVerifier`、Plan schema V2 或 `ExecutionDisclosure` 的源码证据。
+- I0/I1 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
+  不改变 RI2/RI3/RI4/H 层生产只读、RI6 或 E1 的独立 GO 门。
+
 ## 1. 当前基线
 
 | 项目 | 当前值 |
