@@ -1,6 +1,6 @@
 # 小维 Agent 2.0 智能交互入口 I0/I1 总体设计
 
-- 状态：Review Draft V1；输入契约已由项目负责人确认，待 Claude/Codex 按精确 SHA 复审后写入项目真相文档
+- 状态：Review Draft V2；输入契约已由项目负责人确认，已完成首轮调用链复审，待按精确 SHA 再审后写入项目真相文档
 - 规划基线：`main@174fa13c7d64f46cedb6b630209ffebe50cae3f5`
 - 证据等级：当前源码事实 + 只读架构设计；没有实现、运行、部署、灰度或用户验收证据
 - 日期：2026-09-15
@@ -182,7 +182,10 @@ load AcceptedInteractionArtifact
 - 可回退失败只包括：模型未配置、输入不适合发送、已识别 Provider 错误/超时、响应 schema 非法。
 - 任务取消、进程关闭、grant/lease 丢失不得被 fallback 吞掉。
 - save 冲突、grant 失效或持久化失败时，Router/Resolver/Planner/Gateway 全部为零。
-- `ModelCallObservation.request_count` 对分类阶段按单个 attempt 收紧为 `0..1`。
+- 新分类事件使用 `ModelCallKind.INTERACTION`，其 `ModelCallObservation.request_count` 按单个 attempt
+  严格为 `0..1`；`ADVISORY` 继续为 `0..1`。
+- `ModelCallKind.INTENT` 仅兼容读取历史审计事件，允许旧契约的 `0..2`，新 Runtime 禁止再发出。
+  因此不能把 `ModelCallObservation` 的字段级上限全局降为 1，否则已持久化的合法旧事件会失去可读性。
 
 旧 `IntentModelPort.generate_intent()`、第二次 intent 模型调用以及
 `ModelArtifactStore.load_intent/save_intent` 全部淘汰，不保留双轨调用。
@@ -246,12 +249,12 @@ Resolver 没有候选时稳定拒绝，不能回流到 conversation、knowledge 
 CLARIFICATION_REQUIRED:
 - terminal = true
 - resumable = false
-- plan_created = false（路由澄清）或 false（能力补槽澄清）
+- plan_created = false
 - gateway_calls = 0
 - reason_code: closed enum
 - missing_fields: typed field tuple
 - confirmed_slots: canonical full snapshot
-- user_prompt: RenderPayload projection
+- user_prompt: ClarificationPayload 的确定性投影
 ```
 
 本轮保存澄清事实后以 `CLARIFICATION_REQUIRED` 终结。用户回复时创建新 Task，并用
@@ -440,7 +443,7 @@ load 既有 record
 保存后、终态前崩溃，恢复 attempt 读同一 record 后完成终态；禁止先终态后保存。数据库用 `task_id`
 作主键/外键，`record_version=1` check，不增加 consumed 字段、触发器或跨 Store 通用事务框架。
 
-`RenderPayload` 只能从 record 投影。任务状态是 `CLARIFICATION_REQUIRED` 但 record 缺失/损坏时，返回
+`ClarificationPayload` 只能从 record 投影。任务状态是 `CLARIFICATION_REQUIRED` 但 record 缺失/损坏时，返回
 确定性的完整性错误，不从 `terminal_reason` 或原始用户文本临时拼问题。
 
 ## 8. SlotVerifier 与 capability 输入
@@ -622,18 +625,22 @@ capability id/version、plan hash、target fingerprint、具体步骤、有效�
 
 ## 10. 执行披露就绪屏障
 
-这不是渠道送达屏障、用户确认或审批，也不是新任务状态。顺序固定：
+这不是渠道送达屏障、用户确认或审批，也不是新任务状态。首次执行与任何恢复 attempt 都走同一屏障：
 
 ```text
-PlanStore 成功保存不可变 Plan/Target
+start: PlanStore.save → PlanStore.load
+resume: PlanStore.load → drift verification
+→ 得到本 attempt 唯一可用的 StoredPlan
 → 纯函数生成并校验 ExecutionDisclosure
 → DISCLOSURE / OK 审计事件成功持久化
 → StepAdmission
 → 第一次 ToolGateway 调用
 ```
 
-`PipelineStage` 新增 `DISCLOSURE`。Plan 保存、投影、校验或审计写入失败/结果未知时，当前 attempt 直接
-失败并走既有 Worker 恢复；Admission/Gateway 为零，不新增暂停状态机。
+`PipelineStage` 新增 `DISCLOSURE`。屏障位于 Runner 的 `_start`/`_resume` 汇聚后、`_run_steps` 的入口，
+不能只放在 `_start`。投影只能读取 PlanStore 保存后重新读回的 `StoredPlan`；不能读取调用方传入的
+`plan/target`。Plan 保存/读取、投影、校验或审计写入失败/结果未知时，当前 attempt 直接失败并走既有
+Worker 恢复；Admission/Gateway 为零，不新增暂停状态机。
 
 `TaskView` 新增独立 `disclosure` 字段，不复用终态 `RenderPayload`。只要已保存 Plan/Target，非终态和
 终态都能在鉴权通过时查询披露。PlanStore 仍只保存 Plan/Target，不新增 DisclosureStore 或摘要表。
@@ -655,9 +662,10 @@ PlanStore 成功保存不可变 Plan/Target
 不能声称 Web/飞书已送达、用户已阅读或理解。披露事件按有效 attempt 记录 `attempt_number`；崩溃恢复
 可能留下多条，属于合法审计历史，不为 exactly-once 新增锁或唯一约束。副作用步骤仍必须正式审批。
 
-Runtime 在调用 Runner 前加载并重新验证可选父 ClarificationRecord，把不可变父 snapshot 作为本 attempt
-的披露上下文传给 Runner；Runner 不自行查询 ClarificationRecordStore。崩溃恢复会重新加载父记录。核心
-执行事实仍只从已保存 Plan/Target 投影，父 record 只用于核对继承值和计算用户可见的旧值→新值。
+Runtime 在每次调用 Runner 的 `start/resume` 前加载并按 §7.1 重新验证可选父 ClarificationRecord，把
+不可变父 snapshot 作为本 attempt 的披露上下文传给 Runner；Runner 的构造依赖中不得出现
+`ClarificationRecordStore`。崩溃恢复会由 Runtime 重新加载父记录。核心执行事实仍只从已保存
+Plan/Target 投影，父 record 只用于核对继承值和计算用户可见的旧值→新值。
 
 ## 11. 渠道与投影
 
@@ -672,39 +680,68 @@ Runtime 在调用 Runner 前加载并重新验证可选父 ClarificationRecord�
 渠道可以决定如何携带显式引用，但不能自行做关键词分类、补槽、环境判断、候选选择、风险判断或执行。
 不支持交互卡片动作的飞书部署必须提示用户用显式任务引用或创建包含完整参数的新根任务，不能隐式绑定。
 
-`TaskView` 的澄清文案从 ClarificationRecord 投影，披露从 Plan/Target 投影，终态能力结果从
-Plan/Evidence 投影；三者不相互冒充真相源。
+`TaskView` 使用三个独立字段：`render: RenderPayload | None`、
+`clarification: ClarificationPayload | None`、`disclosure: ExecutionDisclosure | None`。presence invariant
+固定为：
+
+- 非终态：`render` 与 `clarification` 都为空；
+- `CLARIFICATION_REQUIRED`：`clarification` 必须非空，`render` 必须为空；
+- 其余终态：`render` 非空且 `clarification` 为空；
+- `disclosure` 与终态正交，只取决于 PlanStore 是否已有可读取且可安全投影的 Plan/Target；无 Plan 的
+  路由澄清、能力补槽澄清和 pre-plan rejection 必须为空。
+
+`ClarificationPayload` 是从 ClarificationRecord 确定性生成的窄用户投影，至少包含闭集
+`reason_code`、类型化 `missing_fields` 与安全 `prompt`；它不是 `RenderPayload` 的特殊分支。披露从
+Plan/Target 投影，终态能力结果从 Plan/Evidence 投影；三者不相互冒充真相源。
 
 ## 12. 持久化迁移
 
-I1 预计新增/修改：
+I1 使用单个 Alembic revision：`revision = "0011_interaction_clarification"`（30 字符），
+`down_revision = "0010_local_admin_provider"`。预计新增/修改：
 
 1. `task_submissions.parent_task_id` → 删除；新增 nullable
    `clarification_parent_task_id`、同表 FK、普通索引与非空唯一约束。
 2. 新表 `task_clarification_records`，`task_id` PK/FK，record JSON/列、version/fencing check。
 3. `task_accepted_intents` 物理表重命名为 `task_interaction_artifacts`，新写入 artifact version 2；旧 V1
    行保留为不可执行历史，不被新 Runtime 解释或升级。活动任务命中 V1 时 fail-closed。
-4. 旧 parent 非空数据检测失败时整次 migration 回滚；清理/保留策略必须另行确认。
+4. upgrade 的旧 parent 非空检查是不可映射数据的前置条件：命中即整次 migration 回滚，不能用
+   destructive flag 把旧关系解释成澄清关系。
+5. downgrade 的 I1 数据丢失检查复用既有 `require_destructive_authorization`；默认返回
+   `DESTRUCTIVE_DOWNGRADE_REJECTED`。它与 upgrade 前置检查是两种语义，不能新造第二套授权开关。
+   只有显式 destructive authorization 才能删除 I1-only clarification、父引用与 V2 artifact；V1 artifact
+   必须保留并随表名恢复。清理/保留策略仍需项目负责人明确授权。
 
 不用数据库 trigger 跨表强制任务状态，也不建设跨 Store 通用事务框架。唯一消费依靠现有关系的唯一
 约束；record 一致性由 Store、grant 和恢复测试承重。
 
 ## 13. 稳定错误与计数口径
 
-I1 至少冻结以下公开 reason code：
+I1 按契约字段冻结 reason code，不能把所有字符串塞进一个宽枚举。
+
+`ClarificationReasonCode` 只能进入 `ClarificationRecord.reason_code` 与 clarify decision：
+
+```text
+interaction.kind_ambiguous
+interaction.environment_assertion_unclear
+capability.fields_missing
+capability.fields_ambiguous
+capability.asset_selector_required
+```
+
+`InteractionRejectionReasonCode` 只能进入 pre-plan `REJECTED`：
 
 ```text
 interaction.route_not_available
-interaction.kind_ambiguous
-interaction.environment_assertion_unclear
 interaction.environment_context_mismatch
 interaction.capability_draft_forbidden
 interaction.capability_draft_missing
 interaction.clarification_subject_incompatible
-capability.fields_missing
-capability.fields_ambiguous
 capability.fields_invalid
-capability.asset_selector_required
+```
+
+Store/提交、Policy、Plan 与 Disclosure 错误继续使用各自的封闭错误域，不进入前两种枚举：
+
+```text
 clarification.parent_already_consumed
 clarification.record_conflict
 clarification.integrity_error
@@ -727,6 +764,8 @@ Router=1、最终 `REJECTED`；Resolver/Planner/Admission/Gateway/ClarificationR
 ### 14.1 交互与模型
 
 - 单个 attempt 最多一次 classifier Port 调用；rule fallback 调用为零。
+- 新 `INTERACTION` observation 的 request_count=2 必须拒绝；历史 `INTENT` observation 的 0..2 仍能读取，
+  但新 Runtime 不得发出 `INTENT`。
 - Provider 返回后在 artifact 保存前/后分别注入崩溃，验证 at-least-once 与持久化 winner。
 - grant 丢失、save 冲突/失败时 Router 和下游全零。
 - 非 capability 携 draft、capability 缺 draft均 fail-closed。
@@ -746,6 +785,8 @@ Router=1、最终 `REJECTED`；Resolver/Planner/Admission/Gateway/ClarificationR
 - PostgreSQL 真实唯一约束测试，不只靠 FakeStore。
 - 跨租户、环境、actor、channel owner 全部统一 not-found；环境切换只能新根任务。
 - 旧 parent 非空 migration fail-closed；不存在静默改义。
+- TaskView 四象限 presence invariant：澄清终态只允许 clarification，其他终态只允许 render，非终态两者
+  都为空；disclosure 独立按已保存 Plan/Target 决定。
 
 ### 14.3 confirmed slots / Params
 
@@ -764,6 +805,8 @@ Router=1、最终 `REJECTED`；Resolver/Planner/Admission/Gateway/ClarificationR
 - `RESTRICTED + SELECT` 在上层不能走 bounded，在强行绕过时仍由 Admission 拒绝，Gateway=0。
 - read_class 纳入 plan hash；V1 Plan/旧审批不能复用。
 - bounded read 的披露 OK 事件严格先于首次 Admission/Gateway。
+- start、审批恢复与崩溃恢复都在 `_run_steps` 入口生成本 attempt 的 disclosure OK；只给 `_start` 加屏障
+  的隔离变异必须让安全测试变红。
 - 缺环境或时间范围时 Gateway=0；用户把写能力称为只读仍进 ApprovalGate。
 - 聊天“确认”不能恢复写任务；审批身份、target、plan hash/fingerprint 任一变化恢复失败。
 - projector 缺失/不一致、披露 audit 写失败时 Admission/Gateway=0。

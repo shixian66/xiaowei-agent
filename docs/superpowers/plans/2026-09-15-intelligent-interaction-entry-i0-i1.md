@@ -17,6 +17,9 @@
 - 每个 PR 从最新 `main` 新建 `claude/<topic>` 分支；不直接在 main 开发，不自行合并或归档。
 - 一个 PR 只处理本节声明的垂直闭环。发现上游契约错误，先停下修上游，不在下游加兼容分支。
 - 行为变更严格 TDD：先观察目标测试因缺失行为失败，再写最小实现；禁止只在实现后补 happy-path 测试。
+- 删除/改名字段、Port、adapter、Store、状态或 planner 签名前，先用精确符号 `rg` 扫描 `src tests`，把
+  每个命中归为“本 PR 修改/删除”或“有证据的保留”；把清单和理由写进 PR 描述。文件在后续 PR 的清单
+  中出现，不能替代当前 PR 的编译/契约责任；实现基线若新增调用者，必须先更新本任务 Files 再编码。
 - 所有用户/模型/日志/网页文本按不可信输入处理；测试中的伪 secret 字面量必须拆开构造，不能在源码形成连续可扫描字符串。
 - 触及 `planning/`、`governance/` 或 `tools/` 的 PR 必须运行 `python -m pytest -m security -q`。
 - 只有最终 I1 候选 SHA 才跑完整四门并形成 closure evidence；单个 PR 先跑相关测试，收尾再跑全量。
@@ -113,7 +116,16 @@ Expected: ADR 尚不存在，测试失败；失败只指向缺失文档/术语�
 - [ ] **Step 2: 写 ADR**
 
 ADR 必须包含：背景、决策、调用链、状态语义、单次消费、模型 at-least-once、槽位 union/UTC/snapshot、
-Capability input 与 operation arguments 分层、ReadClass、披露屏障、迁移、备选方案及变更门。
+Capability input 与 operation arguments 分层、ReadClass、披露屏障、迁移、备选方案及变更门。还必须
+冻结以下接缝，不能留到下游 PR 二选一：
+
+- `TaskView` 的 `render/clarification/disclosure` 三字段与四象限 presence invariant；
+- clarify、pre-plan rejection、Store/Policy/Plan/Disclosure 三组 reason code 的字段归属；
+- 新模型 trace 使用 `ModelCallKind.INTERACTION` 且 0..1，历史 `INTENT` 只读兼容 0..2；
+- Alembic `revision="0011_interaction_clarification"`、`down_revision="0010_local_admin_provider"`，
+  upgrade 前置检查与复用既有 destructive downgrade guard 的不同语义；
+- Runtime 每次 `start/resume` 前验证可选父 record，Runner 不持有该 Store；披露在 `_start/_resume`
+  汇聚后的 `_run_steps` 入口，并只读 PlanStore 返回的 `StoredPlan`。
 
 明确否决：
 
@@ -216,6 +228,7 @@ git commit -m "docs(architecture): define intelligent interaction entry"
 - Create: `tests/unit/test_clarification_contracts.py`
 - Modify: `tests/unit/test_model_contracts.py`
 - Modify: `tests/contract/test_contract_enum_references.py`
+- Modify: `tests/contract/test_task_view_runtime.py`
 - Modify: `tests/security/test_deep_immutability.py`
 - Modify: `tests/security/test_scalar_strictness.py`
 
@@ -242,7 +255,8 @@ def test_interaction_draft_preserves_an_inconsistent_untrusted_candidate() -> No
 
 覆盖：显式 `kind` 判别；`time_range` 不能带 text；UTC canonical；半开区间；受控时区；512 字符/2048
 bytes；字段专属 kind；排序与重复拒绝；RouteSubject slots 恒空；CapabilitySubject 四字段完整；任意 dict
-拒绝。
+拒绝。分别证明 `ClarificationReasonCode`、`InteractionRejectionReasonCode` 和其他领域错误不能交叉写入错误
+字段。
 
 伪 secret 用拆分字符串：
 
@@ -274,17 +288,20 @@ class ClarificationRecord(Contract):
 ```
 
 使用 model validator **验证** canonical UTC/排序，不在 validator 内静默改写。`ConfirmedTextValue` 调用
-`scrub_text` 比较原值；不同即拒绝。
+`scrub_text` 比较原值；不同即拒绝。新增窄 `ClarificationPayload`，它只从 record 投影闭集 reason、
+类型化 missing fields 与安全 prompt；不把 `RenderPayload` 扩成澄清联合。
 
 - [ ] **Step 4: 增加终态**
 
 `TaskStatus.CLARIFICATION_REQUIRED` 加入 `TERMINAL_STATUSES`，`CREATED/PLANNING` 允许转入，终态出边
-为空。调整 TaskView 规则：该状态需要澄清投影，但不能用普通 capability terminal renderer 临时拼接。
+为空。先写四象限 RED：非终态的 render/clarification 都为空；澄清终态只能有 clarification；其余终态
+只能有 render；任一反向组合（包括 CLARIFICATION_REQUIRED + render）都 `ValidationError`。ADR 同时
+冻结 disclosure 与这两项正交，但 `disclosure` 字段及其类型到 Task 4.3 才实现，I1-A 不提前依赖 I1-D。
 
 - [ ] **Step 5: 运行契约测试**
 
 ```bash
-python -m pytest tests/unit/test_interaction_contracts.py tests/unit/test_clarification_contracts.py tests/unit/test_model_contracts.py tests/contract/test_contract_enum_references.py tests/security/test_deep_immutability.py tests/security/test_scalar_strictness.py -q
+python -m pytest tests/unit/test_interaction_contracts.py tests/unit/test_clarification_contracts.py tests/unit/test_model_contracts.py tests/contract/test_contract_enum_references.py tests/contract/test_task_view_runtime.py tests/security/test_deep_immutability.py tests/security/test_scalar_strictness.py -q
 ```
 
 Expected: PASS。
@@ -293,11 +310,16 @@ Expected: PASS。
 
 **Files:**
 
+- Modify: `src/xiaowei_agent/_conformance.py`
 - Create: `src/xiaowei_agent/application/model_interaction.py`
 - Modify: `src/xiaowei_agent/application/model_ports.py`
+- Modify: `src/xiaowei_agent/contracts/enums.py`
+- Modify: `src/xiaowei_agent/contracts/trace_events.py`
 - Modify: `src/xiaowei_agent/interfaces/gemini_model.py`
+- Modify: `src/xiaowei_agent/interfaces/provider_probe.py`
 - Modify: `src/xiaowei_agent/persistence/model_artifacts.py`
 - Modify: `src/xiaowei_agent/persistence/memory.py`
+- Modify: `src/xiaowei_agent/persistence/rows.py`
 - Modify: `src/xiaowei_agent/persistence/schema.py`
 - Modify: `src/xiaowei_agent/persistence/postgres.py`
 - Modify: `src/xiaowei_agent/persistence/database.py`
@@ -305,10 +327,18 @@ Expected: PASS。
 - Delete: `src/xiaowei_agent/application/model_intent.py`
 - Modify: `tests/fakes/model.py`
 - Modify: `tests/suites/model_artifacts.py`
+- Delete: `tests/unit/test_model_intent_service.py`
+- Create: `tests/unit/test_model_interaction_service.py`
+- Modify: `tests/unit/test_model_ports.py`
 - Modify: `tests/contract/test_model_artifact_store.py`
+- Modify: `tests/contract/test_row_mapping.py`
 - Modify: `tests/integration/test_model_artifact_store_postgres.py`
 - Modify: `tests/contract/test_gemini_sdk_seam.py`
 - Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/contract/test_trace_delivery.py`
+- Modify: `tests/contract/test_trace_stages.py`
+- Modify: `tests/evals/test_ri3_model_safety.py`
+- Modify: `tests/security/test_gemini_credential_boundary.py`
 - Modify: `tests/security/test_model_context_boundary.py`
 - Modify: `tests/security/test_gemini_sdk_boundary.py`
 
@@ -316,6 +346,9 @@ Expected: PASS。
 
 证明：`InteractionClassifierPort.classify(request)` 是唯一分类端口；单 attempt 0..1；retryable Provider
 错误立即 fallback；CancelledError、shutdown/grant loss 不 fallback；模型响应无法填写 provider/usage。
+新写 observation 使用 `ModelCallKind.INTERACTION`，其 request_count=2 必须 ValidationError。历史 `ModelCallKind.INTENT`
+仅用于反序列化 0..2 审计事件，并加反证保证新 Runtime 不会发出该 kind；
+字段级 `le=2` 因历史兼容保留，不能用它放宽 `INTERACTION` validator。
 
 ```python
 class InteractionClassifierPort(Protocol):
@@ -341,6 +374,18 @@ class InteractionClassifierPort(Protocol):
 
 方法改为 `load_interaction/save_interaction`。表重命名为 `task_interaction_artifacts`；新写入 version=2；
 保留既有 V1 行但新 Runtime 不解释、不升级。数据库约束允许历史 1 与新 2，应用写入口只产生 2。
+`rows.py` 的映射同步改为 `interaction_artifact_to_row/row_to_interaction_artifact`；测试证明 V2 行往返
+一致，V1 行只作为历史保留并在新 Runtime 读取路径稳定拒绝，不能加载为 V2 或补默认值。
+
+该 migration 从创建时就固定：
+
+```python
+revision = "0011_interaction_clarification"
+down_revision = "0010_local_admin_provider"
+```
+
+`tests/contract/test_schema_matches_migration.py` 在 Task 1.4/1.5 随完整 DDL 一起承重 revision chain、活表
+集合和 32 字符上限；这里不得临时使用更长 revision id。
 
 `ClarificationContext` 的 subject+snapshot 必须进入 `interaction_input_digest()`；父原文和 Render/Evidence
 不得进入 request 或摘要。
@@ -353,16 +398,19 @@ metadata。provider schema 非法映射现有安全 error/fallback，不回显 p
 - [ ] **Step 5: 删除旧调用真源**
 
 删除 `IntentModelPort`、`IntentModelResult`、`ModelIntentRequest.history`、旧 retry loop 和
-`load_intent/save_intent`。Advisory Port/Store 保持原职责，不随分类重构改义。
+`load_intent/save_intent`。同步 `_conformance.py` 的 real/fake Protocol 对账和 provider probe docstring；
+Runtime/local stack 及其测试的原子切换由紧随其后的 Task 1.3 承担，Task 1.2 不单独提交。
+`IntentModelPort` 不得只从主调用链消失却残留在静态装配或说明中。Advisory Port/Store 保持原职责，
+不随分类重构改义。
 
 - [ ] **Step 6: 验证**
 
 ```bash
-python -m pytest tests/unit/test_model_ports.py tests/unit/test_model_contracts.py tests/unit/test_model_intent_service.py tests/contract/test_model_artifact_store.py tests/integration/test_model_artifact_store_postgres.py tests/contract/test_gemini_sdk_seam.py tests/security/test_model_context_boundary.py tests/security/test_gemini_sdk_boundary.py -q
+python -m pytest tests/unit/test_model_ports.py tests/unit/test_model_contracts.py tests/unit/test_model_interaction_service.py tests/contract/test_model_artifact_store.py tests/contract/test_row_mapping.py tests/integration/test_model_artifact_store_postgres.py tests/contract/test_gemini_sdk_seam.py tests/contract/test_protocol_conformance.py tests/contract/test_trace_delivery.py tests/contract/test_trace_stages.py tests/evals/test_ri3_model_safety.py tests/security/test_gemini_credential_boundary.py tests/security/test_model_context_boundary.py tests/security/test_gemini_sdk_boundary.py -q
 ```
 
-若原测试文件 `test_model_intent_service.py` 不再描述真实对象，将其改名为
-`test_model_interaction_service.py`，并同步明确 `git rm`/`git add`，不保留误导名称。
+测试文件按 Files 中的 Delete/Create 显式改名；精确暂存删除与新增，不保留误导的 intent service/runtime
+分类测试名。
 
 ### Task 1.3：实现纯 Router 与统一 Runtime 路径
 
@@ -374,6 +422,10 @@ python -m pytest tests/unit/test_model_ports.py tests/unit/test_model_contracts.
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
 - Modify: `src/xiaowei_agent/contracts/trace_events.py`
 - Modify: `tests/fakes/runtime.py`
+- Modify: `tests/unit/test_local_stack.py`
+- Delete: `tests/contract/test_runtime_model_intent.py`
+- Create: `tests/contract/test_runtime_interaction_classification.py`
+- Modify: `tests/contract/test_worker_loop.py`
 - Create: `tests/unit/test_interaction_router.py`
 - Create: `tests/contract/test_runtime_interaction_routing.py`
 - Create: `tests/security/test_interaction_router_boundary.py`
@@ -384,6 +436,8 @@ python -m pytest tests/unit/test_model_ports.py tests/unit/test_model_contracts.
 
 逐行覆盖 spec §5.1；spy 精确断言 Resolver/Planner/Gateway 次数。环境 mismatch 正常 attempt 断言最终
 REJECTED、stable reason；崩溃恢复测试只断言每 attempt Router≤1 与全局下游=0，不伪造 Worker exactly-once。
+把旧 runtime model-intent 测试改名并按新 artifact→Router 链重写；worker heartbeat 的模型阶段同步改成
+interaction classifier，不能继续构造已删除的 Port。
 
 - [ ] **Step 2: 实现纯 Router**
 
@@ -393,7 +447,8 @@ Router 输入是获胜 artifact draft、当前 Context、可选父 subject；输
 - [ ] **Step 3: 收敛 Runtime**
 
 `execute_task()` 顺序改为 artifact→Router→分支。`handle()` 不得在 Task 创建前 `_interpret/_resolve/_prepare`；
-改为复用 `submit_task → begin_task_attempt → execute_task → project` 的同一路径。
+改为复用 `submit_task → begin_task_attempt → execute_task → project` 的同一路径。同步 local stack 的
+`interaction_classifier` 装配与测试；旧 `intent_model` 属性不得成为隐藏别名。
 
 规则 fallback：现有 `RuleBasedIntentInterpreter` 只在唯一识别现有 capability 时产生
 `CAPABILITY_REQUEST + IntentDraft`，否则 `UNKNOWN`。删除把 Context environment 塞进 slots 的代码及 required
@@ -407,7 +462,7 @@ environment slot。
 - [ ] **Step 5: 验证**
 
 ```bash
-python -m pytest tests/unit/test_interaction_router.py tests/contract/test_runtime_interaction_routing.py tests/security/test_interaction_router_boundary.py tests/security/test_runtime_bypass.py tests/security/test_intent_interpreter_boundary.py -q
+python -m pytest tests/unit/test_local_stack.py tests/unit/test_interaction_router.py tests/contract/test_runtime_interaction_classification.py tests/contract/test_runtime_interaction_routing.py tests/contract/test_worker_loop.py tests/security/test_interaction_router_boundary.py tests/security/test_runtime_bypass.py tests/security/test_intent_interpreter_boundary.py -q
 ```
 
 ### Task 1.4：实现 ClarificationRecordStore 与可靠终态化
@@ -419,12 +474,14 @@ python -m pytest tests/unit/test_interaction_router.py tests/contract/test_runti
 - Modify: `src/xiaowei_agent/persistence/schema.py`
 - Modify: `src/xiaowei_agent/persistence/postgres.py`
 - Modify: `src/xiaowei_agent/persistence/database.py`
+- Modify: `src/xiaowei_agent/persistence/migrations/versions/rev_0011_interaction_clarification.py`
 - Modify: `src/xiaowei_agent/interfaces/local_stack.py`
 - Modify: `src/xiaowei_agent/application/runtime.py`
 - Modify: `src/xiaowei_agent/application/task_view_runtime.py`
 - Modify: `src/xiaowei_agent/rendering/generic.py`
 - Create: `tests/suites/clarification_records.py`
 - Create: `tests/contract/test_clarification_record_store.py`
+- Modify: `tests/contract/test_schema_matches_migration.py`
 - Create: `tests/integration/test_clarification_record_store_postgres.py`
 - Create: `tests/contract/test_clarification_task_view.py`
 - Create: `tests/security/test_clarification_record_integrity.py`
@@ -443,7 +500,9 @@ python -m pytest tests/unit/test_interaction_router.py tests/contract/test_runti
 - [ ] **Step 3: 实现窄 Store**
 
 内存 store 与 TaskStore 共享 state/lock；PostgreSQL 使用 `INSERT ... ON CONFLICT DO NOTHING` 后比对；表中
-`task_id` PK/FK、version=1、fence>0，不加 trigger/consumed。
+`task_id` PK/FK、version=1、fence>0，不加 trigger/consumed。同步 rev_0011 的建表 DDL 与
+`test_schema_matches_migration.py` 的活 schema 表集合；本 Task 的 PostgreSQL Store 测试不能依赖 Task 1.5
+之后才补表。
 
 - [ ] **Step 4: Runtime 终态化**
 
@@ -452,13 +511,13 @@ CLARIFICATION_REQUIRED。record candidate 的 RouteSubject slots 必为空。
 
 - [ ] **Step 5: TaskView 投影**
 
-新增独立 `clarification` 字段或严格的 clarification RenderPayload 分支（按 ADR-017 选择的唯一契约），
-只能读取 Store record。普通 REJECTED 继续走 preplan rejection；两者不能共用 terminal_reason 临时文案。
+实现 ADR-017 已冻结的独立 `clarification: ClarificationPayload | None` 字段，只能读取 Store record；不使用
+`RenderPayload` 分支。普通 REJECTED 继续走 preplan rejection；两者不能共用 terminal_reason 临时文案。
 
 - [ ] **Step 6: 验证**
 
 ```bash
-python -m pytest tests/contract/test_clarification_record_store.py tests/integration/test_clarification_record_store_postgres.py tests/contract/test_clarification_task_view.py tests/security/test_clarification_record_integrity.py -q
+python -m pytest tests/contract/test_clarification_record_store.py tests/integration/test_clarification_record_store_postgres.py tests/contract/test_clarification_task_view.py tests/contract/test_schema_matches_migration.py tests/security/test_clarification_record_integrity.py -q
 ```
 
 ### Task 1.5：替换父任务关系并实现单次消费
@@ -482,15 +541,28 @@ python -m pytest tests/contract/test_clarification_record_store.py tests/integra
 - Modify: `src/xiaowei_agent/interfaces/web_static/detail.js`
 - Modify: `src/xiaowei_agent/interfaces/feishu_listener.py`
 - Modify: `src/xiaowei_agent/rendering/feishu.py`
+- Modify: `tests/conftest.py`
 - Delete: `tests/unit/test_context_assembler.py`
 - Delete: `tests/security/test_model_parent_context.py`
 - Create: `tests/contract/test_clarification_child_submission.py`
 - Create: `tests/integration/test_clarification_child_concurrency_postgres.py`
 - Create: `tests/security/test_clarification_parent_access.py`
+- Modify: `tests/suites/task_store.py`
+- Modify: `tests/unit/test_hash_vectors.py`
+- Modify: `tests/unit/test_local_stack.py`
+- Modify: `tests/contract/test_channel_access.py`
 - Modify: `tests/contract/test_channel_submission.py`
+- Modify: `tests/contract/test_row_mapping.py`
+- Modify: `tests/contract/test_schema_matches_migration.py`
+- Modify: `tests/contract/test_task_submission.py`
+- Modify: `tests/contract/test_web_static_assets.py`
 - Modify: `tests/contract/test_web_task_api.py`
 - Modify: `tests/contract/test_api_contract.py`
 - Modify: `tests/contract/test_cli_contract.py`
+- Modify: `tests/integration/test_migration_paths.py`
+- Modify: `tests/security/test_api_context_spoofing.py`
+- Modify: `tests/security/test_channel_access_control.py`
+- Modify: `tests/security/test_string_alias_coverage.py`
 - Modify: `tests/security/test_web_task_access.py`
 
 - [ ] **Step 1: 写 RED 反契约/并发测试**
@@ -512,7 +584,10 @@ PostgreSQL 测试必须用两个独立连接/事务制造真实竞争，不能�
 
 - [ ] **Step 2: 实现 digest 与窄 create**
 
-`request_dedup_digest`/`submission_digest` 用字段名 `clarification_parent_task_id`。TaskStore 新增窄方法：
+`request_dedup_digest`/`submission_digest` 用字段名 `clarification_parent_task_id`。同步所有 submission fixture、
+row mapper、访问投影和 hash 构造关键字。冻结的 null-parent digest payload 本身不含 parent key，因此只改
+构造参数，不机械重算既有 golden；新增非空 clarification parent 用例证明不同父任务不会错误去重。
+TaskStore 新增窄方法：
 
 ```python
 async def create_clarification_child(
@@ -528,9 +603,15 @@ async def create_clarification_child(
 
 - [ ] **Step 3: migration fail-closed**
 
-upgrade 开头读取旧 `parent_task_id IS NOT NULL` 计数；非零抛确定错误并让事务回滚。零行时删除旧
-FK/index/column，再创建新字段/FK/index/unique。downgrade 只能恢复 schema 形状，不能把 clarification
-关系伪装成通用历史；若存在非空新关系则同样 fail-closed。
+revision 固定为 `0011_interaction_clarification`，`down_revision` 固定为
+`0010_local_admin_provider`。upgrade 开头读取旧 `parent_task_id IS NOT NULL` 计数；非零抛确定错误并让
+事务回滚，且不能被 destructive flag 绕过。零行时删除旧 FK/index/column，再创建新字段/FK/index/unique。
+
+downgrade 的数据丢失判断复用 `persistence/migrations/guards.py` 的
+`require_destructive_authorization`，默认稳定抛 `DESTRUCTIVE_DOWNGRADE_REJECTED`，不新造 guard/flag。用
+filtered selectable 分别计数 clarification records、非空 clarification parent 和 V2 interaction artifact；
+只有既有 `allow_destructive` 明确授权后才删除 I1-only 数据/关系，V1 artifact 必须保留并随表名恢复。
+upgrade 的“不允许静默解释旧关系”与 downgrade 的“显式授权数据损失”必须分开测试和表述。
 
 - [ ] **Step 4: 删除旧上下文与 UI**
 
@@ -538,21 +619,35 @@ FK/index/column，再创建新字段/FK/index/unique。downgrade 只能恢复 sc
 显式传父字段；飞书只接受结构化卡片动作或显式 task ref，禁止“最近任务”推断。渠道 handler 不做
 Router/slot 判断。
 
+更新 `test_string_alias_coverage.py` 前先让测试打印/报告当前 `found`，逐条核对每个旧
+`parent_task_id` 的归属；再把扫描目标改为 `clarification_parent_task_id` 并用新实测集合更新计数。不能只
+把 7 改成另一个数字。历史 migration `rev_0009_task_parent_context.py` 保持不可变；其中旧字段名是有证据
+的历史保留，不列入修改文件。
+
 - [ ] **Step 5: schema/migration 与渠道验证**
 
 ```bash
-python -m pytest tests/contract/test_schema_matches_migration.py tests/contract/test_migration_guard.py tests/integration/test_migration_paths.py tests/contract/test_clarification_child_submission.py tests/integration/test_clarification_child_concurrency_postgres.py tests/security/test_clarification_parent_access.py tests/contract/test_channel_submission.py tests/contract/test_web_task_api.py tests/contract/test_api_contract.py tests/contract/test_cli_contract.py -q
+python -m pytest tests/contract/test_task_store_contract.py tests/integration/test_task_store_contract_postgres.py tests/contract/test_schema_matches_migration.py tests/contract/test_migration_guard.py tests/integration/test_migration_paths.py tests/contract/test_clarification_child_submission.py tests/integration/test_clarification_child_concurrency_postgres.py tests/contract/test_channel_access.py tests/contract/test_channel_submission.py tests/contract/test_row_mapping.py tests/contract/test_task_submission.py tests/contract/test_web_static_assets.py tests/contract/test_web_task_api.py tests/contract/test_api_contract.py tests/contract/test_cli_contract.py tests/security/test_api_context_spoofing.py tests/security/test_channel_access_control.py tests/security/test_clarification_parent_access.py tests/security/test_string_alias_coverage.py -q
 ```
+
+`test_schema_matches_migration.py` 必须新增 `test_rev_0011_has_the_expected_revision_chain`，把
+`task_clarification_records` 加入活 schema 表集合并把 `task_accepted_intents` 替换为
+`task_interaction_artifacts`；`test_migration_paths.py` 同时覆盖 upgrade 拦旧 parent、downgrade guard、V1
+artifact 保留和 V2 默认拒绝。
 
 ### Task 1.6：I1-A 汇总验证与提交
 
 - [ ] **Step 1: 搜索双轨残留**
 
 ```bash
-rg -n "IntentModelPort|generate_intent|load_intent|save_intent|parent_task_id|ContextAssembler|ModelIntentRequest|context_truncated" src tests
+rg -n "\b(IntentModelPort|generate_intent|load_intent|save_intent|parent_task_id|ContextAssembler|ModelIntentRequest|context_truncated)\b|task_accepted_intents|ModelCallKind\.INTENT" src tests
 ```
 
-Expected: 旧名称为 0；`clarification_parent_task_id` 不因 substring 检查被误判，人工核对结果。
+Expected: 活跃生产/测试调用为 0；结果只允许出现以下逐条说明的兼容事实：不可修改的 rev_0008/rev_0009
+历史 migration、rev_0011 的显式 rename/data guard，以及验证历史 trace/artifact 可读或拒绝策略的专门
+fixture。`ModelCallKind.INTENT` 只允许出现在 enum 定义和历史反序列化测试，新 Runtime 发出点必须为 0。
+使用单词边界确保 `clarification_parent_task_id` 不被 substring 误报；把实际命中及归属附在 PR 证据中，
+不能把预期历史命中伪报成“全局 0”。
 
 - [ ] **Step 2: 相关中档验证**
 
@@ -593,6 +688,7 @@ Codex 以提交 SHA 审查；未通过不得开始 I1-B。
 - Modify: `src/xiaowei_agent/capabilities/specs.py`
 - Modify: `src/xiaowei_agent/capabilities/prometheus_alert.py`
 - Modify: `src/xiaowei_agent/capabilities/asset_inventory.py`
+- Modify: `tests/fakes/capability_bindings.py`
 - Create: `tests/unit/test_capability_input_contracts.py`
 - Modify: `tests/unit/test_capability_spec.py`
 - Modify: `tests/unit/test_capability_runtime_registry.py`
@@ -603,7 +699,9 @@ Codex 以提交 SHA 审查；未通过不得开始 I1-B。
 
 覆盖：CapabilitySpec 必须有 input_schema_ref；binding 缺 verifier/allowlist/projector；三方 schema drift；
 非法 Params 基类；verifier/planner type mismatch；精确类型而非 subclass；input ref 不等于任何 operation
-argument ref 仍可装配；一个 input schema 对多个 argument schema 正常。
+argument ref 仍可装配；一个 input schema 对多个 argument schema 正常。同步
+`tests/fakes/capability_bindings.py` 这个所有 Runtime 契约测试共用的装配源，并用合成可澄清 binding 证明
+缺 `confirmed_slot_projector` 会在 Registry 启动时失败，不能等到 Runtime 才暴露。
 
 - [ ] **Step 2: 实现最小类型**
 
@@ -667,13 +765,18 @@ python -m pytest tests/unit/test_slot_verification.py tests/security/test_confir
 - Modify: `src/xiaowei_agent/planning/starrocks/compiler.py`
 - Modify: `src/xiaowei_agent/capabilities/target.py`
 - Modify: `src/xiaowei_agent/application/default_capabilities.py`
+- Modify: `tests/fakes/admission.py`
+- Modify: `tests/fakes/runner.py`
 - Modify: `tests/unit/test_slow_query_params.py`
 - Modify: `tests/unit/test_plan_compiler.py`
 - Modify: `tests/unit/test_target_resolver.py`
 - Modify: `tests/contract/test_runtime_async_lifecycle.py`
 - Modify: `tests/evals/test_l1_intent.py`
+- Modify: `tests/evals/test_m6b_starrocks_l0.py`
 - Modify: `tests/security/test_model_context_boundary.py`
 - Modify: `tests/security/test_param_injection.py`
+- Modify: `tests/security/test_plan_determinism.py`
+- Modify: `tests/security/test_target_drift.py`
 
 - [ ] **Step 1: RED：Planner 不再接 IntentDraft**
 
@@ -684,7 +787,8 @@ python -m pytest tests/unit/test_slot_verification.py tests/security/test_confir
 
 字段限定 time_range/database/user_name/query_id；复用现有 Identifier 与 `normalise_window` 唯一逻辑；
 `SlowQueryParams` 继承 CapabilityParams 并声明 `input.starrocks.slow_query.v1`。Target resolver 只接 Context+
-Params。
+Params。同步所有直接调用该 target resolver 的 fake、determinism/security 与 M6b L0 用例；不能因为这些
+文件已列在 I1-C/I1-D 就把 I1-B 的签名迁移留到后续 PR。
 
 - [ ] **Step 3: 实现 projector**
 
@@ -694,7 +798,7 @@ Params。
 - [ ] **Step 4: 验证**
 
 ```bash
-python -m pytest tests/unit/test_slow_query_params.py tests/unit/test_plan_compiler.py tests/unit/test_target_resolver.py tests/contract/test_runtime_async_lifecycle.py tests/evals/test_l1_intent.py tests/security/test_model_context_boundary.py tests/security/test_param_injection.py -q
+python -m pytest tests/unit/test_slow_query_params.py tests/unit/test_plan_compiler.py tests/unit/test_target_resolver.py tests/contract/test_runtime_async_lifecycle.py tests/evals/test_l1_intent.py tests/evals/test_m6b_starrocks_l0.py tests/security/test_model_context_boundary.py tests/security/test_param_injection.py tests/security/test_plan_determinism.py tests/security/test_target_drift.py -q
 ```
 
 ### Task 2.4：迁移 Prometheus binding
@@ -709,6 +813,7 @@ python -m pytest tests/unit/test_slow_query_params.py tests/unit/test_plan_compi
 - Modify: `tests/unit/test_prometheus_alert_params.py`
 - Modify: `tests/unit/test_prometheus_alert_plan.py`
 - Modify: `tests/contract/test_prometheus_alert_runtime.py`
+- Modify: `tests/evals/test_m6a_prometheus_l0.py`
 - Modify: `tests/evals/test_m6a_prometheus_l1.py`
 - Modify: `tests/security/test_promql_guard.py`
 
@@ -725,7 +830,7 @@ Router+Resolver，subject 完全一致才 ready。operation/input ref 篡改均 
 - [ ] **Step 3: 验证**
 
 ```bash
-python -m pytest tests/unit/test_prometheus_alert_params.py tests/unit/test_prometheus_alert_plan.py tests/contract/test_prometheus_alert_runtime.py tests/evals/test_m6a_prometheus_l1.py tests/security/test_promql_guard.py -q
+python -m pytest tests/unit/test_prometheus_alert_params.py tests/unit/test_prometheus_alert_plan.py tests/contract/test_prometheus_alert_runtime.py tests/evals/test_m6a_prometheus_l0.py tests/evals/test_m6a_prometheus_l1.py tests/security/test_promql_guard.py -q
 ```
 
 ### Task 2.5：迁移 Asset binding
@@ -740,6 +845,7 @@ python -m pytest tests/unit/test_prometheus_alert_params.py tests/unit/test_prom
 - Modify: `tests/unit/test_asset_plan.py`
 - Modify: `tests/unit/test_asset_target.py`
 - Modify: `tests/contract/test_asset_inventory_runtime.py`
+- Modify: `tests/evals/test_m6a_asset_l0.py`
 - Modify: `tests/evals/test_m6a_asset_l1.py`
 - Modify: `tests/security/test_asset_scope_isolation.py`
 
@@ -756,7 +862,7 @@ python -m pytest tests/unit/test_prometheus_alert_params.py tests/unit/test_prom
 - [ ] **Step 3: 验证**
 
 ```bash
-python -m pytest tests/unit/test_asset_lookup_params.py tests/unit/test_asset_plan.py tests/unit/test_asset_target.py tests/contract/test_asset_inventory_runtime.py tests/evals/test_m6a_asset_l1.py tests/security/test_asset_scope_isolation.py -q
+python -m pytest tests/unit/test_asset_lookup_params.py tests/unit/test_asset_plan.py tests/unit/test_asset_target.py tests/contract/test_asset_inventory_runtime.py tests/evals/test_m6a_asset_l0.py tests/evals/test_m6a_asset_l1.py tests/security/test_asset_scope_isolation.py -q
 ```
 
 ### Task 2.6：接入 capability clarification 与移除旧 prepare
@@ -793,6 +899,12 @@ rg -n "draft: IntentDraft|IntentDraft.*planner|planner\(.*draft|_prepare_" src/x
 ```
 
 Expected: capability planners 不再接收/导入 IntentDraft；没有旧兜底。
+
+不要把所有 `IntentDraft` 命中机械改掉。`capabilities/resolver.py`、`resolver_impl.py`、`contracts/intent.py`
+以及只验证 Resolver/IntentDraft 本身的 `test_error_input_leakage.py`、`test_serialisation_hygiene.py`、
+`test_prometheus_alert_evidence.py`、`test_asset_inventory_evidence.py` 仍是设计允许的候选侧调用者；它们不
+调用旧 Planner 或 target resolver，保留时要在 PR 反向扫描清单中写明证据。真正的完成条件是 Planner、
+target resolver 与 binding fake 不再消费 IntentDraft，而不是仓库字符串命中为零。
 
 - [ ] **Step 4: PR 验证与提交**
 
@@ -979,11 +1091,13 @@ python -m pytest tests/unit/test_execution_disclosure.py tests/security/test_dis
 
 **Files:**
 
+- Modify: `src/xiaowei_agent/application/runtime.py`
 - Modify: `src/xiaowei_agent/contracts/enums.py`
 - Modify: `src/xiaowei_agent/contracts/trace_events.py`
 - Modify: `src/xiaowei_agent/runners/deterministic.py`
 - Modify: `src/xiaowei_agent/runners/runner.py`
 - Modify: `tests/fakes/runner.py`
+- Modify: `tests/contract/test_runtime_async_lifecycle.py`
 - Modify: `tests/contract/test_deterministic_runner.py`
 - Modify: `tests/contract/test_trace_stages.py`
 - Create: `tests/security/test_disclosure_barrier.py`
@@ -991,33 +1105,45 @@ python -m pytest tests/unit/test_execution_disclosure.py tests/security/test_dis
 
 - [ ] **Step 1: RED 顺序/故障测试**
 
-记录 call timeline，严格断言：
+记录 start call timeline，严格断言：
 
 ```text
 plan_store.save
+< plan_store.load
 < disclosure.project
 < durable DISCLOSURE/OK
 < admit_step
 < gateway.invoke
 ```
 
-分别让 Plan save、projection、validation、durable audit 失败/未知，断言 Admission=0、Gateway=0。崩溃
-恢复可产生多条 disclosure event，但每个有效 attempt 必须在本 attempt Admission 前有 OK。
+resume 使用 `plan_store.load < drift verification < disclosure.project < durable DISCLOSURE/OK < admit_step <
+gateway.invoke`。分别让 Plan save/load、projection、validation、durable audit 失败/未知，断言
+Admission=0、Gateway=0。审批恢复与崩溃恢复可产生多条 disclosure event，但每个有效 attempt 必须在本
+attempt Admission 前有 OK。
+
+增加 Runtime 接缝反证：有父引用时，Runtime 在每次 `runner.start/resume` 前加载父 record、按 spec §7.1
+重新核对当前 binding 后传不可变 snapshot；父 record 不兼容时 Runner/Admission/Gateway 均为零。AST/构造
+断言 Runner 依赖中没有 `ClarificationRecordStore`，防止把 Store 查询下沉到执行层。
 
 - [ ] **Step 2: 最小实现**
 
-在 Runner `_start` 保存 Plan/Target 后、任何 `_admit` 前调用 pure projector 并经 DurableTraceSink
-`LOG_AND_DURABLE` 写 `PipelineStage.DISCLOSURE`。不新增 Task status、Store、unique event 或 ACK。
+Runtime 负责上述父 record 接缝，Runner Protocol 只增加可选不可变父 snapshot 参数，不持有 Store。
+Runner 的 `_start` 在 `PlanStore.save` 后立即 `load`，`_resume` 使用已 load 且完成 drift verification 的
+`StoredPlan`；两条路径把同一形状的 StoredPlan 汇聚到 `_run_steps`。屏障只实现一次，放在 `_run_steps`
+入口、任何 `_admit` 前：pure projector → DurableTraceSink `LOG_AND_DURABLE` →
+`PipelineStage.DISCLOSURE/OK`。projector 禁止读取调用方原始 `plan/target`。不新增 Task status、Store、
+unique event 或 ACK。
 
 - [ ] **Step 3: 变异反证**
 
-临时创建隔离 worktree/pycache，移除或交换 disclosure 与 admission 调用，运行
-`tests/security/test_disclosure_barrier.py` 必须红；恢复真实代码后再绿。记录命令与尾部输出，临时变体不提交。
+临时创建隔离 worktree/pycache，分别（1）移除或交换 disclosure 与 admission 调用，（2）把屏障错误移回
+`_start`、让 `_resume` 绕过，运行 `tests/security/test_disclosure_barrier.py` 必须红；恢复真实代码后再绿。
+记录命令与尾部输出，临时变体不提交。
 
 - [ ] **Step 4: 验证**
 
 ```bash
-python -m pytest tests/contract/test_deterministic_runner.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py -q
+python -m pytest tests/contract/test_runtime_async_lifecycle.py tests/contract/test_deterministic_runner.py tests/contract/test_protocol_conformance.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py -q
 ```
 
 ### Task 4.3：TaskView 与渠道一致投影
@@ -1132,14 +1258,16 @@ Expected: PostgreSQL 与 Compose fake 闭环通过；仍不构成真实模型/�
 - [ ] **Step 3: 静态边界扫描**
 
 ```bash
-rg -n "IntentModelPort|generate_intent|load_intent|save_intent|ContextAssembler|parent_task_id|AWAITING_CLARIFICATION|DisclosureStore|consumed" src tests
+rg -n "\b(IntentModelPort|generate_intent|load_intent|save_intent|ContextAssembler|parent_task_id|AWAITING_CLARIFICATION|DisclosureStore|consumed)\b|task_accepted_intents|ModelCallKind\.INTENT" src tests
 rg -n "IntentDraft" src/xiaowei_agent/planning src/xiaowei_agent/application/capability_runtime.py
 git diff --check
 git status --short
 ```
 
-Expected: 无旧运行真源、无 Planner→IntentDraft、无消费状态或披露存储。substring 命中的
-`clarification_parent_task_id` 人工区分并记录。
+Expected: 无旧**运行**真源、无 Planner→IntentDraft、无消费状态或披露存储；旧词只允许出现在
+rev_0008/rev_0009 历史 migration、rev_0011 显式迁移/守卫、历史 trace/artifact 兼容 fixture 中。
+`ModelCallKind.INTENT` 新发出点为零。单词边界避免把 `clarification_parent_task_id` 当旧字段；所有允许
+命中逐条记录，不能宣称全局文本为零。
 
 - [ ] **Step 4: TDD 反证汇总**
 
@@ -1169,9 +1297,9 @@ Expected: 无旧运行真源、无 Planner→IntentDraft、无消费状态或披
 
 ```bash
 git add src/xiaowei_agent/contracts/disclosure.py src/xiaowei_agent/contracts/enums.py src/xiaowei_agent/contracts/trace_events.py src/xiaowei_agent/contracts/task.py src/xiaowei_agent/contracts/__init__.py
-git add src/xiaowei_agent/planning/disclosure.py src/xiaowei_agent/application/capability_runtime.py src/xiaowei_agent/application/task_view_runtime.py src/xiaowei_agent/runners/deterministic.py src/xiaowei_agent/runners/runner.py
-git add src/xiaowei_agent/rendering/feishu.py src/xiaowei_agent/interfaces/web_static/detail.js src/xiaowei_agent/interfaces/web_static/app.js src/xiaowei_agent/interfaces/web_models.py src/xiaowei_agent/capabilities/doc.py docs/CAPABILITIES.md AGENT_HANDOFF.md
-git add tests/unit/test_execution_disclosure.py tests/security/test_disclosure_projection.py tests/fakes/runner.py tests/contract/test_deterministic_runner.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py
+git add src/xiaowei_agent/planning/disclosure.py src/xiaowei_agent/application/capability_runtime.py src/xiaowei_agent/application/runtime.py src/xiaowei_agent/application/task_view_runtime.py src/xiaowei_agent/runners/deterministic.py src/xiaowei_agent/runners/runner.py
+git add src/xiaowei_agent/rendering/feishu.py src/xiaowei_agent/interfaces/web_static/detail.js src/xiaowei_agent/interfaces/web_static/app.js src/xiaowei_agent/interfaces/web_models.py src/xiaowei_agent/capabilities/doc.py docs/CAPABILITIES.md AGENT_HANDOFF.md README.md
+git add tests/unit/test_execution_disclosure.py tests/security/test_disclosure_projection.py tests/fakes/runner.py tests/contract/test_runtime_async_lifecycle.py tests/contract/test_deterministic_runner.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py
 git add tests/contract/test_task_view_runtime.py tests/contract/test_channel_render_parity.py tests/contract/test_feishu_worker.py tests/contract/test_web_static_assets.py tests/security/test_task_view_runtime_authority.py tests/security/test_web_xss.py tests/security/test_capabilities_doc.py
 git add tests/evals/fixtures/i1_interaction_cases.json tests/evals/test_i1_interaction_l0.py tests/evals/test_i1_interaction_l1.py tests/integration/test_i1_interaction_postgres.py tests/integration/test_m7_channel_flow.py tests/contract/test_compose_smoke_script.py tests/security/test_external_content.py tests/security/test_intent_pollution.py tests/security/test_no_network.py
 git commit -m "feat(interaction): enforce execution disclosure barrier"
