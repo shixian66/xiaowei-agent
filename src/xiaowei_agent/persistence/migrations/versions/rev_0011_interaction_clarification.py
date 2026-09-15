@@ -7,12 +7,26 @@ Revises: 0010_local_admin_provider
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
+
+from xiaowei_agent.persistence.migrations.guards import (
+    require_destructive_authorization,
+)
 
 revision: str = "0011_interaction_clarification"
 down_revision: str | None = "0010_local_admin_provider"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+_INTERACTIONS = sa.table(
+    "task_interaction_artifacts",
+    sa.column("artifact_version", sa.Integer()),
+)
+_V2_INTERACTIONS = (
+    sa.select(_INTERACTIONS.c.artifact_version)
+    .where(_INTERACTIONS.c.artifact_version == 2)
+    .subquery()
+)
 
 
 def upgrade() -> None:
@@ -68,6 +82,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not context.is_offline_mode():
+        require_destructive_authorization(
+            op.get_bind(),
+            guarded=((_V2_INTERACTIONS, "task_interaction_artifacts_v2"),),
+        )
+    op.execute(
+        sa.delete(_INTERACTIONS).where(_INTERACTIONS.c.artifact_version == 2)
+    )
     op.drop_constraint(
         "fk_task_interaction_artifacts_task",
         "task_interaction_artifacts",

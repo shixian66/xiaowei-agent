@@ -22,7 +22,15 @@
   `CLARIFICATION_REQUIRED` 持久闭环仍属后续 I1-A/Task 1.4。
 - `rev_0011_interaction_clarification` 已把 `task_accepted_intents` 物理表重命名为
   `task_interaction_artifacts`，新写入 artifact version 2；旧 V1 行保留但 Postgres loader 只解释 V2，
-  防止旧 accepted intent 被新运行路径误执行。
+  防止旧 accepted intent 被新运行路径误执行。复审打回后已补：0011 downgrade 对 V2 interaction rows
+  复用 `require_destructive_authorization`，显式授权时先删除 V2 再恢复旧 CHECK；Postgres
+  `save_interaction()` 只在当前 grant/状态复验通过后把同 task 的 legacy V1 行替换为 V2。
+- 复审打回的 CI head 漂移与 Gemini seam 测试缺口已按根因处理：migration path 测试的当前 head
+  断言改由 Alembic `ScriptDirectory` 提供，并新增契约测试防止最新 revision 与 Alembic head 再分叉；
+  Gemini SDK seam 恢复真实 SDK schema/no-AFC/no-network、close timeout、close error 不遮蔽主错误、
+  外层 cancellation 传播、usage metadata 与 API error 安全归一保护。隔离变异已证明移除 V2 loader 过滤、
+  调大 Gemini close timeout 会使新增测试变红。当前证据仍为本机 `tests` 与本机 PostgreSQL integration，
+  不是 CI、部署、canary 或用户验收。
 - 本轮按复审意见完成 I1-A 契约根因修复：`TaskId` 已移动到 `contracts.ids` leaf module，
   所有 Contract `task_id`/`parent_task_id` 字段复用同一域；`InteractionDraft` 不再携带
   `RoutingDisposition`，该枚举仅保留给后续确定性 Router；`ConfirmedTimeRangeValue` 使用 UTC

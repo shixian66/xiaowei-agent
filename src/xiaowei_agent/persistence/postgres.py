@@ -2242,6 +2242,39 @@ class PostgresModelArtifactStore:
             existing = await self._load_interaction_row(
                 connection, task_id=grant.task_id
             )
+            if existing is None:
+                legacy = (
+                    (
+                        await connection.execute(
+                            sa.select(
+                                TASK_INTERACTION_ARTIFACTS.c.artifact_version
+                            )
+                            .where(
+                                TASK_INTERACTION_ARTIFACTS.c.task_id
+                                == grant.task_id
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if (
+                    legacy is not None
+                    and legacy["artifact_version"] == 1
+                ):
+                    await connection.execute(
+                        sa.delete(TASK_INTERACTION_ARTIFACTS).where(
+                            TASK_INTERACTION_ARTIFACTS.c.task_id
+                            == grant.task_id,
+                            TASK_INTERACTION_ARTIFACTS.c.artifact_version == 1,
+                        )
+                    )
+                    if (await connection.execute(insert)).first() is not None:
+                        return artifact
+                    existing = await self._load_interaction_row(
+                        connection, task_id=grant.task_id
+                    )
             if existing is None or not artifact_matches_candidate(
                 existing, candidate
             ):

@@ -9,14 +9,22 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei_agent.persistence.migrations.guards import MigrationSafetyError
+from xiaowei_agent.persistence.migrations.runner import alembic_config
 from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
 )
+
+
+def _head_revision() -> str:
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head is not None
+    return head
 
 
 async def _table_names(engine: AsyncEngine) -> set[str]:
@@ -208,7 +216,7 @@ async def test_rev_0003_downgrade_rejects_submission_data_by_default(
     async with clean_database.connect() as connection:
         assert await connection.scalar(sa.text("SELECT count(*) FROM task_submissions")) == 1
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0010_local_admin_provider"
+    assert revision == _head_revision()
 
 
 async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
@@ -276,7 +284,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         step_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_step_executions")
         )
-    assert revision == "0010_local_admin_provider"
+    assert revision == _head_revision()
     assert step_count == 1
 
     async with clean_database.begin() as connection:
@@ -417,7 +425,7 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
         advisory_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_model_advisories")
         )
-    assert revision == "0011_interaction_clarification"
+    assert revision == _head_revision()
     assert (interaction_count, advisory_count) == (1, 1)
 
     async with clean_database.begin() as connection:
@@ -549,7 +557,7 @@ async def test_rev_0009_downgrade_requires_authorization_for_parent_links(
         revision = await connection.scalar(
             sa.text("SELECT version_num FROM alembic_version")
         )
-        assert revision == "0010_local_admin_provider"
+        assert revision == _head_revision()
         await connection.run_sync(
             run_downgrade,
             "0008_model_artifacts",
@@ -563,3 +571,70 @@ async def test_rev_0009_downgrade_requires_authorization_for_parent_links(
             {"task_id": child.task_id},
         )
     assert restored_parent is None
+
+
+async def test_rev_0011_downgrade_requires_authorization_for_v2_interactions(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    async with clean_database.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO task_interaction_artifacts "
+                "(task_id, artifact_version, draft, origin, provider, model, "
+                "provider_origin, prompt_revision, schema_revision, input_digest, "
+                "result_digest, usage, created_at, fencing_token) VALUES "
+                "(:task_id, 2, CAST(:draft AS jsonb), 'model', "
+                "'google-gemini-developer-api', 'gemini-3-flash-preview', "
+                "'https://generativelanguage.googleapis.com', "
+                "'i1-interaction-prompt-v1', 'i1-interaction-schema-v1', "
+                ":input_digest, :result_digest, CAST(:usage AS jsonb), now(), 1)"
+            ),
+            {
+                "task_id": task.task_id,
+                "draft": (
+                    '{"proposed_kind":"capability_request",'
+                    '"capability_draft":{"intent":"starrocks.slow_query.diagnose",'
+                    '"slots":{"window_minutes":"30"},"missing":[],"confidence":0.9,'
+                    '"source":"model"},"confidence":0.9,"source":"model"}'
+                ),
+                "input_digest": "a" * 64,
+                "result_digest": "b" * 64,
+                "usage": '{"input_tokens":1,"output_tokens":1}',
+            },
+        )
+
+    run_upgrade, run_downgrade = alembic_runners
+    with pytest.raises(MigrationSafetyError) as exc_info:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0010_local_admin_provider")
+    assert exc_info.value.counts == (("task_interaction_artifacts_v2", 1),)
+
+    async with clean_database.connect() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+        remaining = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_interaction_artifacts")
+        )
+    assert revision == _head_revision()
+    assert remaining == 1
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(
+            run_downgrade,
+            "0010_local_admin_provider",
+            True,
+        )
+        remaining_after_down = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_accepted_intents")
+        )
+        await connection.run_sync(run_upgrade, "head")
+
+    assert remaining_after_down == 0
+    assert "task_interaction_artifacts" in await _table_names(clean_database)

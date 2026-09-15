@@ -199,6 +199,16 @@ def test_rev_0011_has_the_expected_revision_chain() -> None:
     assert revision.down_revision == "0010_local_admin_provider"
 
 
+def test_latest_declared_revision_is_the_alembic_head() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0011_interaction_clarification as revision,
+    )
+
+    assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
+        revision.revision
+    )
+
+
 def test_revision_ids_fit_the_default_alembic_version_column() -> None:
     """Alembic 默认 ``version_num`` 是 varchar(32)，超长 ID 会在真实 Postgres 上炸。"""
     scripts = ScriptDirectory.from_config(_alembic_config())
