@@ -1091,14 +1091,17 @@ python -m pytest tests/unit/test_execution_disclosure.py tests/security/test_dis
 
 **Files:**
 
+- Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `src/xiaowei_agent/application/runtime.py`
 - Modify: `src/xiaowei_agent/contracts/enums.py`
 - Modify: `src/xiaowei_agent/contracts/trace_events.py`
 - Modify: `src/xiaowei_agent/runners/deterministic.py`
+- Modify: `src/xiaowei_agent/runners/fake.py`
 - Modify: `src/xiaowei_agent/runners/runner.py`
 - Modify: `tests/fakes/runner.py`
 - Modify: `tests/contract/test_runtime_async_lifecycle.py`
 - Modify: `tests/contract/test_deterministic_runner.py`
+- Modify: `tests/contract/test_protocol_conformance.py`
 - Modify: `tests/contract/test_trace_stages.py`
 - Create: `tests/security/test_disclosure_barrier.py`
 - Modify: `tests/security/test_admission_bypass.py`
@@ -1125,9 +1128,15 @@ attempt Admission 前有 OK。
 重新核对当前 binding 后传不可变 snapshot；父 record 不兼容时 Runner/Admission/Gateway 均为零。AST/构造
 断言 Runner 依赖中没有 `ClarificationRecordStore`，防止把 Store 查询下沉到执行层。
 
+扩展既有 Protocol conformance 测试，断言新增父 snapshot 参数在 `WorkflowRunner`、`ScriptedRunner`、
+`DeterministicStepRunner` 三处同名、显式 `keyword-only` 且默认值为 `None`；保留完整签名相等断言，禁止
+任一实现用 `**kwargs` 蒙过检查。
+
 - [ ] **Step 2: 最小实现**
 
 Runtime 负责上述父 record 接缝，Runner Protocol 只增加可选不可变父 snapshot 参数，不持有 Store。
+`ScriptedRunner` 与 `DeterministicStepRunner` 必须同步增加同名的显式 keyword-only 可选参数；前者不消费
+该值但仍严格实现 Protocol，`_conformance.py` 对 fake 与真实 Runner 的双锚定继续成立。
 Runner 的 `_start` 在 `PlanStore.save` 后立即 `load`，`_resume` 使用已 load 且完成 drift verification 的
 `StoredPlan`；两条路径把同一形状的 StoredPlan 汇聚到 `_run_steps`。屏障只实现一次，放在 `_run_steps`
 入口、任何 `_admit` 前：pure projector → DurableTraceSink `LOG_AND_DURABLE` →
@@ -1297,9 +1306,9 @@ rev_0008/rev_0009 历史 migration、rev_0011 显式迁移/守卫、历史 trace
 
 ```bash
 git add src/xiaowei_agent/contracts/disclosure.py src/xiaowei_agent/contracts/enums.py src/xiaowei_agent/contracts/trace_events.py src/xiaowei_agent/contracts/task.py src/xiaowei_agent/contracts/__init__.py
-git add src/xiaowei_agent/planning/disclosure.py src/xiaowei_agent/application/capability_runtime.py src/xiaowei_agent/application/runtime.py src/xiaowei_agent/application/task_view_runtime.py src/xiaowei_agent/runners/deterministic.py src/xiaowei_agent/runners/runner.py
+git add src/xiaowei_agent/planning/disclosure.py src/xiaowei_agent/_conformance.py src/xiaowei_agent/application/capability_runtime.py src/xiaowei_agent/application/runtime.py src/xiaowei_agent/application/task_view_runtime.py src/xiaowei_agent/runners/deterministic.py src/xiaowei_agent/runners/fake.py src/xiaowei_agent/runners/runner.py
 git add src/xiaowei_agent/rendering/feishu.py src/xiaowei_agent/interfaces/web_static/detail.js src/xiaowei_agent/interfaces/web_static/app.js src/xiaowei_agent/interfaces/web_models.py src/xiaowei_agent/capabilities/doc.py docs/CAPABILITIES.md AGENT_HANDOFF.md README.md
-git add tests/unit/test_execution_disclosure.py tests/security/test_disclosure_projection.py tests/fakes/runner.py tests/contract/test_runtime_async_lifecycle.py tests/contract/test_deterministic_runner.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py
+git add tests/unit/test_execution_disclosure.py tests/security/test_disclosure_projection.py tests/fakes/runner.py tests/contract/test_runtime_async_lifecycle.py tests/contract/test_deterministic_runner.py tests/contract/test_protocol_conformance.py tests/contract/test_trace_stages.py tests/security/test_disclosure_barrier.py tests/security/test_admission_bypass.py
 git add tests/contract/test_task_view_runtime.py tests/contract/test_channel_render_parity.py tests/contract/test_feishu_worker.py tests/contract/test_web_static_assets.py tests/security/test_task_view_runtime_authority.py tests/security/test_web_xss.py tests/security/test_capabilities_doc.py
 git add tests/evals/fixtures/i1_interaction_cases.json tests/evals/test_i1_interaction_l0.py tests/evals/test_i1_interaction_l1.py tests/integration/test_i1_interaction_postgres.py tests/integration/test_m7_channel_flow.py tests/contract/test_compose_smoke_script.py tests/security/test_external_content.py tests/security/test_intent_pollution.py tests/security/test_no_network.py
 git commit -m "feat(interaction): enforce execution disclosure barrier"
