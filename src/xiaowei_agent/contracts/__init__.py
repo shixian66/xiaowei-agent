@@ -35,6 +35,7 @@ from xiaowei_agent.contracts.channel import (
 )
 from xiaowei_agent.contracts.clarification import (
     CapabilitySubject,
+    ClarificationContext,
     ClarificationPayload,
     ClarificationRecord,
     ClarificationSubject,
@@ -115,6 +116,7 @@ from xiaowei_agent.contracts.model import (
     MAX_MODEL_TEXT_CHARACTERS,
     AdvisoryModelResult,
     IntentModelResult,
+    InteractionClassifierRequest,
     InteractionModelResult,
     ModelAdvisory,
     ModelIntentRequest,
@@ -214,6 +216,7 @@ __all__ = [
     "Channel",
     "ChannelKind",
     "ChannelPermission",
+    "ClarificationContext",
     "ClarificationField",
     "ClarificationPayload",
     "ClarificationReasonCode",
@@ -246,6 +249,7 @@ __all__ = [
     "IntentDraft",
     "IntentModelResult",
     "IntentSource",
+    "InteractionClassifierRequest",
     "InteractionDraft",
     "InteractionKind",
     "InteractionModelResult",

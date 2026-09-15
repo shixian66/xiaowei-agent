@@ -130,6 +130,18 @@ class ClarificationRecord(Contract):
         return self
 
 
+class ClarificationContext(Contract):
+    subject: ClarificationSubject
+    confirmed_slots: tuple[ConfirmedSlot, ...]
+
+    @model_validator(mode="after")
+    def _snapshot_is_canonical(self) -> Self:
+        _validate_slot_snapshot(self.confirmed_slots)
+        if tuple(self.subject.confirmed_slots) != self.confirmed_slots:
+            raise ValueError("subject slots must match the context snapshot")
+        return self
+
+
 class ClarificationPayload(Contract):
     reason_code: ClarificationReasonCode
     missing_fields: tuple[ClarificationField, ...]

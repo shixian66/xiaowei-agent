@@ -103,8 +103,11 @@ class ModelCallObservation(Contract):
 
     @model_validator(mode="after")
     def _request_count_matches_kind(self) -> "ModelCallObservation":
-        if self.call_kind is ModelCallKind.ADVISORY and self.request_count > 1:
-            raise ValueError("advisory model stage permits at most one request")
+        if (
+            self.call_kind in {ModelCallKind.ADVISORY, ModelCallKind.INTERACTION}
+            and self.request_count > 1
+        ):
+            raise ValueError("model stage permits at most one request")
         return self
 
 

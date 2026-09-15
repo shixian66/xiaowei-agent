@@ -15,6 +15,7 @@ from xiaowei_agent.contracts.base import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.clarification import ClarificationContext
 from xiaowei_agent.contracts.intent import (
     INTENT_MISSING_ALLOWLISTS,
     INTENT_SLOT_ALLOWLISTS,
@@ -80,6 +81,18 @@ class ModelIntentRequest(Contract):
     def _history_and_request_are_bounded(self) -> "ModelIntentRequest":
         if sum(map(len, self.history)) > MAX_MODEL_HISTORY_CHARACTERS:
             raise ValueError("model history exceeds the character limit")
+        _require_request_size(self)
+        return self
+
+
+class InteractionClassifierRequest(Contract):
+    """当前轮交互分类请求；不携带通用历史或权限上下文。"""
+
+    user_text: ModelText
+    clarification: ClarificationContext | None = None
+
+    @model_validator(mode="after")
+    def _request_is_bounded(self) -> "InteractionClassifierRequest":
         _require_request_size(self)
         return self
 
@@ -261,6 +274,7 @@ __all__ = [
     "MAX_MODEL_USAGE_TOKENS",
     "AdvisoryModelResult",
     "IntentModelResult",
+    "InteractionClassifierRequest",
     "InteractionModelResult",
     "ModelAdvisory",
     "ModelIntentRequest",

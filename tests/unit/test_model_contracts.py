@@ -35,6 +35,12 @@ def _model_types() -> tuple[type[object], type[object], type[object], type[objec
     )
 
 
+def _interaction_request_type() -> type[object]:
+    from xiaowei_agent.contracts import InteractionClassifierRequest
+
+    return InteractionClassifierRequest
+
+
 def _result_types() -> tuple[
     type[object], type[object], type[object], type[object], type[object]
 ]:
@@ -80,6 +86,34 @@ def test_intent_request_is_strict_immutable_and_bounded() -> None:
             history=(),
             context_truncated=False,
         )
+
+
+def test_interaction_classifier_request_has_only_current_text_and_parent_context() -> None:
+    from xiaowei_agent.contracts import (
+        ClarificationContext,
+        InteractionKind,
+        RouteSubject,
+    )
+
+    interaction_request = _interaction_request_type()
+    parent = ClarificationContext(
+        subject=RouteSubject(kind="route", proposed_kind=InteractionKind.UNKNOWN),
+        confirmed_slots=(),
+    )
+    request = interaction_request(user_text="补充慢查询时间范围", clarification=parent)
+
+    assert set(type(request).model_fields) == {"user_text", "clarification"}
+    assert request.clarification == parent
+    with pytest.raises(ValidationError):
+        interaction_request.model_validate(
+            {
+                "user_text": "检查慢查询",
+                "history": ("must-not-exist",),
+                "context_truncated": False,
+            }
+        )
+    with pytest.raises(ValidationError):
+        interaction_request(user_text="x" * 8_193, clarification=None)
 
 
 def test_intent_request_rejects_more_than_twenty_history_items_and_bool_flag_spoof() -> None:
