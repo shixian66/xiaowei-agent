@@ -9,6 +9,8 @@ from typing import Final, Protocol
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentModelResult,
+    InteractionClassifierRequest,
+    InteractionModelResult,
     ModelErrorCode,
     ModelFallbackCode,
     ModelIntentRequest,
@@ -72,6 +74,14 @@ class IntentModelPort(Protocol):
         ...
 
 
+class InteractionClassifierPort(Protocol):
+    async def classify(
+        self, request: InteractionClassifierRequest
+    ) -> InteractionModelResult:
+        """返回交互候选与 usage；失败时抛安全的 ``ModelPortError``。"""
+        ...
+
+
 class SlowQueryAdvisoryPort(Protocol):
     async def generate_advisory(
         self,
@@ -88,6 +98,7 @@ __all__ = [
     "INTENT_RETRYABLE_ERROR_CODES",
     "MODEL_ERROR_FALLBACK_CODES",
     "IntentModelPort",
+    "InteractionClassifierPort",
     "ModelPortError",
     "SlowQueryAdvisoryPort",
     "fallback_code_for_model_error",

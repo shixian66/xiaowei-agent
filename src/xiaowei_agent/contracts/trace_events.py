@@ -30,6 +30,7 @@ from xiaowei_agent.contracts.enums import (
     StageOutcome,
 )
 from xiaowei_agent.contracts.errors import AgentError
+from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.redaction import scrub_text
 
 
@@ -103,15 +104,18 @@ class ModelCallObservation(Contract):
 
     @model_validator(mode="after")
     def _request_count_matches_kind(self) -> "ModelCallObservation":
-        if self.call_kind is ModelCallKind.ADVISORY and self.request_count > 1:
-            raise ValueError("advisory model stage permits at most one request")
+        if (
+            self.call_kind in {ModelCallKind.ADVISORY, ModelCallKind.INTERACTION}
+            and self.request_count > 1
+        ):
+            raise ValueError("model stage permits at most one request")
         return self
 
 
 class TraceEvent(Contract):
     event_id: StrictStr
     trace_id: TraceId
-    task_id: StrictStr | None
+    task_id: TaskId | None
     stage: PipelineStage
     outcome: StageOutcome
     occurred_at: AwareDatetime

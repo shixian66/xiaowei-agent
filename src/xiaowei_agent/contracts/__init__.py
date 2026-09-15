@@ -33,6 +33,18 @@ from xiaowei_agent.contracts.channel import (
     AuthenticatedPrincipal,
     FeishuProjectionInput,
 )
+from xiaowei_agent.contracts.clarification import (
+    CapabilitySubject,
+    ClarificationContext,
+    ClarificationPayload,
+    ClarificationRecord,
+    ClarificationSubject,
+    ConfirmedSlot,
+    ConfirmedTextValue,
+    ConfirmedTimeRangeValue,
+    ConfirmedValue,
+    RouteSubject,
+)
 from xiaowei_agent.contracts.enums import (
     AdapterStatus,
     ApprovalState,
@@ -41,6 +53,8 @@ from xiaowei_agent.contracts.enums import (
     Channel,
     ChannelKind,
     ChannelPermission,
+    ClarificationField,
+    ClarificationReasonCode,
     DestinationKind,
     EffectClass,
     ErrorCategory,
@@ -49,6 +63,9 @@ from xiaowei_agent.contracts.enums import (
     GrantRejection,
     IdentitySource,
     IntentSource,
+    InteractionKind,
+    InteractionRejectionReasonCode,
+    InteractionSource,
     ModelCallKind,
     ModelErrorCode,
     ModelFallbackCode,
@@ -61,6 +78,7 @@ from xiaowei_agent.contracts.enums import (
     RetryDecision,
     RetryReason,
     RiskLevel,
+    RoutingDisposition,
     SqlGuardRejection,
     StageOutcome,
     StepAttemptDecision,
@@ -80,6 +98,11 @@ from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.external_input import ExternalInput
+from xiaowei_agent.contracts.ids import (
+    TASK_ID_MAX_LENGTH,
+    TASK_ID_PATTERN,
+    TaskId,
+)
 from xiaowei_agent.contracts.integration_config import (
     FeishuIntegration,
     GeminiIntegration,
@@ -87,6 +110,7 @@ from xiaowei_agent.contracts.integration_config import (
     SecretRef,
 )
 from xiaowei_agent.contracts.intent import IntentDraft
+from xiaowei_agent.contracts.interaction import InteractionDraft
 from xiaowei_agent.contracts.model import (
     MAX_ADVISORY_ROWS,
     MAX_MODEL_HISTORY_BYTES,
@@ -97,6 +121,8 @@ from xiaowei_agent.contracts.model import (
     MAX_MODEL_TEXT_CHARACTERS,
     AdvisoryModelResult,
     IntentModelResult,
+    InteractionClassifierRequest,
+    InteractionModelResult,
     ModelAdvisory,
     ModelIntentRequest,
     ModelInvocationProfile,
@@ -136,15 +162,12 @@ from xiaowei_agent.contracts.sql_surface import (
 from xiaowei_agent.contracts.target import ResolvedTarget
 from xiaowei_agent.contracts.task import (
     ALLOWED_TRANSITIONS,
-    TASK_ID_MAX_LENGTH,
-    TASK_ID_PATTERN,
     TERMINAL_STATUSES,
     ActorTaskPageQuery,
     LeaseGrant,
     ScopeTaskPageQuery,
     StoredTaskPage,
     StoredTaskRead,
-    TaskId,
     TaskLookup,
     TaskOutcome,
     TaskRecord,
@@ -191,9 +214,20 @@ __all__ = [
     "CandidateSet",
     "CapabilitySnapshot",
     "CapabilitySpec",
+    "CapabilitySubject",
     "Channel",
     "ChannelKind",
     "ChannelPermission",
+    "ClarificationContext",
+    "ClarificationField",
+    "ClarificationPayload",
+    "ClarificationReasonCode",
+    "ClarificationRecord",
+    "ClarificationSubject",
+    "ConfirmedSlot",
+    "ConfirmedTextValue",
+    "ConfirmedTimeRangeValue",
+    "ConfirmedValue",
     "Contract",
     "DestinationKind",
     "EffectClass",
@@ -217,6 +251,12 @@ __all__ = [
     "IntentDraft",
     "IntentModelResult",
     "IntentSource",
+    "InteractionClassifierRequest",
+    "InteractionDraft",
+    "InteractionKind",
+    "InteractionModelResult",
+    "InteractionRejectionReasonCode",
+    "InteractionSource",
     "JsonScalar",
     "LeaseGrant",
     "LoadReceipt",
@@ -257,6 +297,8 @@ __all__ = [
     "RetryDecision",
     "RetryReason",
     "RiskLevel",
+    "RouteSubject",
+    "RoutingDisposition",
     "ScopeTaskPageQuery",
     "SecretRef",
     "Sha256Hex",

@@ -2,6 +2,8 @@
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import StringIO
 
 import pytest
@@ -42,6 +44,37 @@ class _Writer:
         return len(self.events)
 
 
+class _CaptureHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextmanager
+def _captured_log_sink(
+    *,
+    worker_instance: str | None = None,
+) -> Iterator[tuple[StructuredLogTraceSink, list[logging.LogRecord]]]:
+    """Capture trace logs without depending on root propagation state."""
+    logger = logging.getLogger("xiaowei_agent.trace")
+    handler = _CaptureHandler()
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        yield StructuredLogTraceSink(logger, worker_instance=worker_instance), handler.records
+    finally:
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate
+        logger.removeHandler(handler)
+        handler.close()
+
+
 @pytest.mark.parametrize(
     "delivery",
     [
@@ -76,10 +109,8 @@ async def test_task_scoped_delivery_rejects_an_unscoped_event(
 async def test_terminal_delivery_writes_exactly_one_truthful_log(
     delivery: Delivery,
     state: str,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    sink = StructuredLogTraceSink()
-    with caplog.at_level(logging.INFO):
+    with _captured_log_sink() as (sink, records):
         await sink.emit(
             make_event(
                 stage=PipelineStage.GATEWAY,
@@ -87,19 +118,17 @@ async def test_terminal_delivery_writes_exactly_one_truthful_log(
             ),
             delivery=delivery,
         )
-    assert [record.delivery_state for record in caplog.records] == [state]
+    assert [record.delivery_state for record in records] == [state]
 
 
-async def test_durable_success_writes_once_then_logs_committed(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_durable_success_writes_once_then_logs_committed() -> None:
     writer = _Writer()
-    sink = DurableTraceSink(writer=writer)
     event = make_event(stage=PipelineStage.GATEWAY)
-    with caplog.at_level(logging.INFO):
+    with _captured_log_sink() as (log_sink, records):
+        sink = DurableTraceSink(writer=writer, log_sink=log_sink)
         await sink.emit(event, delivery=Delivery.LOG_AND_DURABLE)
     assert writer.events == [event]
-    assert [record.delivery_state for record in caplog.records] == ["committed"]
+    assert [record.delivery_state for record in records] == ["committed"]
 
 
 @pytest.mark.parametrize(
@@ -112,19 +141,21 @@ async def test_durable_success_writes_once_then_logs_committed(
 async def test_durable_failure_is_not_retried_or_misreported(
     write_outcome: PersistenceWriteOutcome,
     state: str,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     failure = PersistenceUnavailableError(
         category=PersistenceUnavailableCategory.TRANSIENT,
         write_outcome=write_outcome,
     )
     writer = _Writer(failure)
-    sink = DurableTraceSink(writer=writer)
     event = make_event(stage=PipelineStage.GATEWAY)
-    with caplog.at_level(logging.INFO), pytest.raises(PersistenceUnavailableError):
+    with (
+        _captured_log_sink() as (log_sink, records),
+        pytest.raises(PersistenceUnavailableError),
+    ):
+        sink = DurableTraceSink(writer=writer, log_sink=log_sink)
         await sink.emit(event, delivery=Delivery.LOG_AND_DURABLE)
     assert writer.events == [event]
-    assert [record.delivery_state for record in caplog.records] == [state]
+    assert [record.delivery_state for record in records] == [state]
 
 
 async def test_confirmed_integrity_rollback_is_logged_as_failed() -> None:
@@ -135,18 +166,19 @@ async def test_confirmed_integrity_rollback_is_logged_as_failed() -> None:
     assert delivery_for_write_exception(failure) is Delivery.COMMAND_ROLLED_BACK
 
 
-async def test_unexpected_write_failure_is_fail_closed_and_not_confirmed(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_unexpected_write_failure_is_fail_closed_and_not_confirmed() -> None:
     writer = _Writer(RuntimeError("constant"))
-    sink = DurableTraceSink(writer=writer)
-    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="constant"):
+    with (
+        _captured_log_sink() as (log_sink, records),
+        pytest.raises(RuntimeError, match="constant"),
+    ):
+        sink = DurableTraceSink(writer=writer, log_sink=log_sink)
         await sink.emit(
             make_event(stage=PipelineStage.GATEWAY),
             delivery=Delivery.LOG_AND_DURABLE,
         )
     assert len(writer.events) == 1
-    assert [record.delivery_state for record in caplog.records] == ["not_confirmed"]
+    assert [record.delivery_state for record in records] == ["not_confirmed"]
 
 
 async def test_structured_logging_failure_never_becomes_an_audit_failure() -> None:
@@ -167,17 +199,14 @@ async def test_structured_logging_failure_never_becomes_an_audit_failure() -> No
         logger.propagate = True
 
 
-async def test_structured_log_extra_keys_are_an_exact_closed_set(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    sink = StructuredLogTraceSink(worker_instance="worker-1")
-    with caplog.at_level(logging.INFO):
+async def test_structured_log_extra_keys_are_an_exact_closed_set() -> None:
+    with _captured_log_sink(worker_instance="worker-1") as (sink, records):
         await sink.emit(
             make_event(stage=PipelineStage.GATEWAY),
             delivery=Delivery.COMMAND_COMMITTED,
         )
     base = logging.LogRecord("", 0, "", 0, "", (), None).__dict__
-    extra = set(caplog.records[0].__dict__) - set(base) - {"message"}
+    extra = set(records[0].__dict__) - set(base) - {"message"}
     assert extra == {
         "trace_id",
         "task_id",
@@ -194,23 +223,19 @@ async def test_structured_log_extra_keys_are_an_exact_closed_set(
         "detail",
         "worker_instance",
     }
-    assert caplog.records[0].worker_instance == "worker-1"
+    assert records[0].worker_instance == "worker-1"
 
 
-async def test_non_worker_log_still_has_a_null_worker_instance(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.INFO):
-        await StructuredLogTraceSink().emit(
+async def test_non_worker_log_still_has_a_null_worker_instance() -> None:
+    with _captured_log_sink() as (sink, records):
+        await sink.emit(
             make_event(stage=PipelineStage.GATEWAY),
             delivery=Delivery.COMMAND_COMMITTED,
         )
-    assert caplog.records[0].worker_instance is None
+    assert records[0].worker_instance is None
 
 
-async def test_model_log_contains_only_typed_aggregate_metadata(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_model_log_contains_only_typed_aggregate_metadata() -> None:
     observation = ModelCallObservation(
         call_kind=ModelCallKind.INTENT,
         elapsed_ms=12,
@@ -219,8 +244,8 @@ async def test_model_log_contains_only_typed_aggregate_metadata(
         output_tokens=4,
         fallback_code=ModelFallbackCode.INVALID_RESPONSE,
     )
-    with caplog.at_level(logging.INFO):
-        await StructuredLogTraceSink().emit(
+    with _captured_log_sink() as (sink, records):
+        await sink.emit(
             make_event(
                 stage=PipelineStage.MODEL,
                 model=observation,
@@ -228,7 +253,7 @@ async def test_model_log_contains_only_typed_aggregate_metadata(
             delivery=Delivery.COMMAND_COMMITTED,
         )
 
-    assert caplog.records[0].model == {
+    assert records[0].model == {
         "call_kind": "intent",
         "elapsed_ms": 12,
         "request_count": 1,
@@ -253,21 +278,18 @@ async def test_worker_event_trace_survives_the_real_logging_filter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_worker_log_context_is_task_local_and_resets(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.INFO, logger="xiaowei_agent.trace")
-    sink = StructuredLogTraceSink()
+async def test_worker_log_context_is_task_local_and_resets() -> None:
     event = make_event(task_id="task-1", stage=PipelineStage.LIFECYCLE)
 
-    with worker_log_context("worker-context-1"):
-        await sink.emit(event, delivery=Delivery.COMMAND_COMMITTED)
-    await sink.emit(
-        event.model_copy(update={"event_id": "event-after-worker"}),
-        delivery=Delivery.COMMAND_COMMITTED,
-    )
+    with _captured_log_sink() as (sink, records):
+        with worker_log_context("worker-context-1"):
+            await sink.emit(event, delivery=Delivery.COMMAND_COMMITTED)
+        await sink.emit(
+            event.model_copy(update={"event_id": "event-after-worker"}),
+            delivery=Delivery.COMMAND_COMMITTED,
+        )
 
-    assert [record.worker_instance for record in caplog.records] == [
+    assert [record.worker_instance for record in records] == [
         "worker-context-1",
         None,
     ]

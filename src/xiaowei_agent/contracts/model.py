@@ -15,11 +15,13 @@ from xiaowei_agent.contracts.base import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.clarification import ClarificationContext
 from xiaowei_agent.contracts.intent import (
     INTENT_MISSING_ALLOWLISTS,
     INTENT_SLOT_ALLOWLISTS,
     IntentDraft,
 )
+from xiaowei_agent.contracts.interaction import InteractionDraft
 
 MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
 _MAX_UTF8_BYTES_PER_CODE_POINT: Final[int] = 4
@@ -79,6 +81,18 @@ class ModelIntentRequest(Contract):
     def _history_and_request_are_bounded(self) -> "ModelIntentRequest":
         if sum(map(len, self.history)) > MAX_MODEL_HISTORY_CHARACTERS:
             raise ValueError("model history exceeds the character limit")
+        _require_request_size(self)
+        return self
+
+
+class InteractionClassifierRequest(Contract):
+    """当前轮交互分类请求；不携带通用历史或权限上下文。"""
+
+    user_text: ModelText
+    clarification: ClarificationContext | None = None
+
+    @model_validator(mode="after")
+    def _request_is_bounded(self) -> "InteractionClassifierRequest":
         _require_request_size(self)
         return self
 
@@ -175,6 +189,13 @@ class IntentModelResult(Contract):
     usage: ModelUsage
 
 
+class InteractionModelResult(Contract):
+    """一次 interaction 分类调用接受的 DTO 与同次可信 usage。"""
+
+    draft: InteractionDraft
+    usage: ModelUsage
+
+
 class AdvisoryModelResult(Contract):
     """一次 advisory 调用接受的 DTO 与同次可信 usage。"""
 
@@ -199,6 +220,12 @@ class ModelInvocationProfile(Contract):
     intent_schema_revision: Literal["ri3-intent-schema-v1"] = (
         "ri3-intent-schema-v1"
     )
+    interaction_prompt_revision: Literal["i1-interaction-prompt-v1"] = (
+        "i1-interaction-prompt-v1"
+    )
+    interaction_schema_revision: Literal["i1-interaction-schema-v1"] = (
+        "i1-interaction-schema-v1"
+    )
     advisory_prompt_revision: Literal["ri3-advisory-prompt-v1"] = (
         "ri3-advisory-prompt-v1"
     )
@@ -206,10 +233,13 @@ class ModelInvocationProfile(Contract):
         "ri3-advisory-schema-v1"
     )
     intent_thinking_level: Literal["LOW"] = "LOW"
+    interaction_thinking_level: Literal["LOW"] = "LOW"
     advisory_thinking_level: Literal["HIGH"] = "HIGH"
     intent_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
+    interaction_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
     advisory_timeout_seconds: StrictInt = Field(default=180, ge=180, le=180)
     intent_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
+    interaction_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
     advisory_output_tokens: StrictInt = Field(default=4_000, ge=4_000, le=4_000)
 
 
@@ -244,6 +274,8 @@ __all__ = [
     "MAX_MODEL_USAGE_TOKENS",
     "AdvisoryModelResult",
     "IntentModelResult",
+    "InteractionClassifierRequest",
+    "InteractionModelResult",
     "ModelAdvisory",
     "ModelIntentRequest",
     "ModelInvocationProfile",

@@ -35,15 +35,30 @@ def _model_types() -> tuple[type[object], type[object], type[object], type[objec
     )
 
 
-def _result_types() -> tuple[type[object], type[object], type[object], type[object]]:
+def _interaction_request_type() -> type[object]:
+    from xiaowei_agent.contracts import InteractionClassifierRequest
+
+    return InteractionClassifierRequest
+
+
+def _result_types() -> tuple[
+    type[object], type[object], type[object], type[object], type[object]
+]:
     from xiaowei_agent.contracts import (
         AdvisoryModelResult,
         IntentModelResult,
+        InteractionModelResult,
         ModelInvocationProfile,
         ModelUsage,
     )
 
-    return ModelUsage, IntentModelResult, AdvisoryModelResult, ModelInvocationProfile
+    return (
+        ModelUsage,
+        IntentModelResult,
+        InteractionModelResult,
+        AdvisoryModelResult,
+        ModelInvocationProfile,
+    )
 
 
 def test_intent_request_is_strict_immutable_and_bounded() -> None:
@@ -71,6 +86,34 @@ def test_intent_request_is_strict_immutable_and_bounded() -> None:
             history=(),
             context_truncated=False,
         )
+
+
+def test_interaction_classifier_request_has_only_current_text_and_parent_context() -> None:
+    from xiaowei_agent.contracts import (
+        ClarificationContext,
+        InteractionKind,
+        RouteSubject,
+    )
+
+    interaction_request = _interaction_request_type()
+    parent = ClarificationContext(
+        subject=RouteSubject(kind="route", proposed_kind=InteractionKind.UNKNOWN),
+        confirmed_slots=(),
+    )
+    request = interaction_request(user_text="补充慢查询时间范围", clarification=parent)
+
+    assert set(type(request).model_fields) == {"user_text", "clarification"}
+    assert request.clarification == parent
+    with pytest.raises(ValidationError):
+        interaction_request.model_validate(
+            {
+                "user_text": "检查慢查询",
+                "history": ("must-not-exist",),
+                "context_truncated": False,
+            }
+        )
+    with pytest.raises(ValidationError):
+        interaction_request(user_text="x" * 8_193, clarification=None)
 
 
 def test_intent_request_rejects_more_than_twenty_history_items_and_bool_flag_spoof() -> None:
@@ -518,7 +561,7 @@ def test_provider_intent_response_rejects_invalid_confidence(
 def test_model_usage_rejects_non_integer_negative_and_overflow_values(
     field: str, value: object
 ) -> None:
-    model_usage, _, _, _ = _result_types()
+    model_usage, _, _, _, _ = _result_types()
 
     with pytest.raises(ValidationError):
         model_usage.model_validate(
@@ -527,7 +570,7 @@ def test_model_usage_rejects_non_integer_negative_and_overflow_values(
 
 
 def test_model_usage_accepts_nullable_and_signed_64_bit_boundary() -> None:
-    model_usage, _, _, _ = _result_types()
+    model_usage, _, _, _, _ = _result_types()
 
     assert model_usage(input_tokens=None, output_tokens=None).model_dump() == {
         "input_tokens": None,
@@ -539,9 +582,21 @@ def test_model_usage_accepts_nullable_and_signed_64_bit_boundary() -> None:
 
 
 def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable() -> None:
-    model_usage, intent_result, advisory_result, invocation_profile = _result_types()
+    (
+        model_usage,
+        intent_result,
+        interaction_result,
+        advisory_result,
+        invocation_profile,
+    ) = _result_types()
     _, _, _, model_advisory = _model_types()
-    from xiaowei_agent.contracts import IntentDraft, IntentSource
+    from xiaowei_agent.contracts import (
+        IntentDraft,
+        IntentSource,
+        InteractionDraft,
+        InteractionKind,
+        InteractionSource,
+    )
 
     usage = model_usage(input_tokens=12, output_tokens=4)
     intent = intent_result(
@@ -554,6 +609,15 @@ def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable()
         ),
         usage=usage,
     )
+    interaction = interaction_result(
+        draft=InteractionDraft(
+            proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+            capability_draft=intent.draft,
+            confidence=0.5,
+            source=InteractionSource.MODEL,
+        ),
+        usage=usage,
+    )
     advisory = advisory_result(
         advisory=model_advisory(
             analysis="分析", suggestions=(), uncertainties=()
@@ -563,6 +627,7 @@ def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable()
     profile = invocation_profile()
 
     assert set(type(intent).model_fields) == {"draft", "usage"}
+    assert set(type(interaction).model_fields) == {"draft", "usage"}
     assert set(type(advisory).model_fields) == {"advisory", "usage"}
     assert profile.model_dump() == {
         "provider": "google-gemini-developer-api",
@@ -571,13 +636,18 @@ def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable()
         "origin": "https://generativelanguage.googleapis.com",
         "intent_prompt_revision": "ri3-intent-prompt-v1",
         "intent_schema_revision": "ri3-intent-schema-v1",
+        "interaction_prompt_revision": "i1-interaction-prompt-v1",
+        "interaction_schema_revision": "i1-interaction-schema-v1",
         "advisory_prompt_revision": "ri3-advisory-prompt-v1",
         "advisory_schema_revision": "ri3-advisory-schema-v1",
         "intent_thinking_level": "LOW",
+        "interaction_thinking_level": "LOW",
         "advisory_thinking_level": "HIGH",
         "intent_timeout_seconds": 60,
+        "interaction_timeout_seconds": 60,
         "advisory_timeout_seconds": 180,
         "intent_output_tokens": 2_048,
+        "interaction_output_tokens": 2_048,
         "advisory_output_tokens": 4_000,
     }
     with pytest.raises(ValidationError):

@@ -166,6 +166,16 @@ def _harness(clock, *, runtime: _Runtime | None = None) -> _Harness:
     )
 
 
+def test_projection_detail_url_encodes_reserved_characters_without_validating_task_id(
+    clock,
+) -> None:
+    service = _harness(clock).service
+
+    assert service._detail_url("task/with?reserved#chars%") == (
+        "https://ops.example.test/app/tasks/task%2Fwith%3Freserved%23chars%25"
+    )
+
+
 async def _bound_task(
     harness: _Harness,
     context,

@@ -116,6 +116,60 @@ class IntentSource(StrEnum):
     FAKE = "fake"
 
 
+class InteractionSource(StrEnum):
+    MODEL = "model"
+    RULE = "rule"
+    FAKE = "fake"
+
+
+class InteractionKind(StrEnum):
+    CONVERSATION = "conversation"
+    KNOWLEDGE_LOOKUP = "knowledge_lookup"
+    LOG_ANALYSIS = "log_analysis"
+    CAPABILITY_REQUEST = "capability_request"
+    UNKNOWN = "unknown"
+
+
+class RoutingDisposition(StrEnum):
+    PROCEED = "proceed"
+    CLARIFY = "clarify"
+    REFUSE = "refuse"
+
+
+class ClarificationField(StrEnum):
+    TIME_RANGE = "time_range"
+    DATABASE = "database"
+    USER_NAME = "user_name"
+    QUERY_ID = "query_id"
+    ALERT_NAME = "alert_name"
+    INSTANCE = "instance"
+    FINGERPRINT = "fingerprint"
+    ASSET_ID = "asset_id"
+    HOSTNAME = "hostname"
+    IP = "ip"
+
+
+class ClarificationReasonCode(StrEnum):
+    INTERACTION_KIND_AMBIGUOUS = "interaction.kind_ambiguous"
+    INTERACTION_ENVIRONMENT_ASSERTION_UNCLEAR = (
+        "interaction.environment_assertion_unclear"
+    )
+    CAPABILITY_FIELDS_MISSING = "capability.fields_missing"
+    CAPABILITY_FIELDS_AMBIGUOUS = "capability.fields_ambiguous"
+    CAPABILITY_ASSET_SELECTOR_REQUIRED = "capability.asset_selector_required"
+
+
+class InteractionRejectionReasonCode(StrEnum):
+    ROUTE_NOT_AVAILABLE = "interaction.route_not_available"
+    ENVIRONMENT_CONTEXT_MISMATCH = "interaction.environment_context_mismatch"
+    CAPABILITY_DRAFT_FORBIDDEN = "interaction.capability_draft_forbidden"
+    CAPABILITY_DRAFT_MISSING = "interaction.capability_draft_missing"
+    CLARIFICATION_SUBJECT_INCOMPATIBLE = (
+        "interaction.clarification_subject_incompatible"
+    )
+    CAPABILITY_FIELDS_INVALID = "capability.fields_invalid"
+
+
 class ModelErrorCode(StrEnum):
     """供应商错误只允许映射为这些本地安全码。"""
 
@@ -135,6 +189,7 @@ class ModelCallKind(StrEnum):
     """模型 trace 的调用种类闭集。"""
 
     INTENT = "intent"
+    INTERACTION = "interaction"
     ADVISORY = "advisory"
 
 
@@ -197,6 +252,7 @@ class TaskStatus(StrEnum):
     PLANNING = "planning"
     RUNNING = "running"
     AWAITING_APPROVAL = "awaiting_approval"
+    CLARIFICATION_REQUIRED = "clarification_required"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REJECTED = "rejected"

@@ -320,7 +320,7 @@ def test_downgrade_drops_everything_upgrade_created() -> None:
 
 
 def test_task_id_columns_are_text_not_uuid() -> None:
-    """``TaskRecord.task_id`` 是 ``StrictStr``；``uuid`` 列读回的是 ``UUID`` 对象。
+    """``TaskRecord.task_id`` 是 ``TaskId``；``uuid`` 列读回的是 ``UUID`` 对象。
 
     strict 模式会直接拒绝那个对象。写 DDL 时"主键当然用 uuid"的直觉在这里恰好是
     错的，因此钉死。

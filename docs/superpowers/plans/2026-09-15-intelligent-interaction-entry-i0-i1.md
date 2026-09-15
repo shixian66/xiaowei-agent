@@ -220,10 +220,14 @@ git commit -m "docs(architecture): define intelligent interaction entry"
 
 - Create: `src/xiaowei_agent/contracts/interaction.py`
 - Create: `src/xiaowei_agent/contracts/clarification.py`
+- Create: `src/xiaowei_agent/contracts/ids.py`
 - Modify: `src/xiaowei_agent/contracts/enums.py`
 - Modify: `src/xiaowei_agent/contracts/task.py`
 - Modify: `src/xiaowei_agent/contracts/model.py`
 - Modify: `src/xiaowei_agent/contracts/__init__.py`
+- Modify: `src/xiaowei_agent/interfaces/web_static/app.js`
+- Modify: `src/xiaowei_agent/interfaces/web_static/detail.js`
+- Modify: `src/xiaowei_agent/rendering/feishu.py`
 - Create: `tests/unit/test_interaction_contracts.py`
 - Create: `tests/unit/test_clarification_contracts.py`
 - Modify: `tests/unit/test_model_contracts.py`
@@ -231,6 +235,9 @@ git commit -m "docs(architecture): define intelligent interaction entry"
 - Modify: `tests/contract/test_task_view_runtime.py`
 - Modify: `tests/security/test_deep_immutability.py`
 - Modify: `tests/security/test_scalar_strictness.py`
+- Modify: `tests/security/test_string_alias_coverage.py`
+- Modify: `tests/security/test_task_view_runtime_authority.py`
+- Modify: `tests/security/test_terminal_protection.py`
 
 - [ ] **Step 1: 写 RED 的 interaction union 测试**
 

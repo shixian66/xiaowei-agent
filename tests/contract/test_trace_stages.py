@@ -103,6 +103,20 @@ def test_advisory_observation_allows_zero_or_one_request_only() -> None:
         _model_observation(call_kind=ModelCallKind.ADVISORY, request_count=2)
 
 
+def test_interaction_observation_allows_zero_or_one_request_only() -> None:
+    assert _model_observation(
+        call_kind=ModelCallKind.INTERACTION, request_count=1
+    ).request_count == 1
+    with pytest.raises(ValidationError, match="at most one request"):
+        _model_observation(call_kind=ModelCallKind.INTERACTION, request_count=2)
+
+
+def test_legacy_intent_observation_keeps_two_request_history_compatibility() -> None:
+    assert _model_observation(
+        call_kind=ModelCallKind.INTENT, request_count=2
+    ).request_count == 2
+
+
 def test_model_observation_is_present_if_and_only_if_stage_is_model() -> None:
     from tests.fakes.sinks import make_event
 

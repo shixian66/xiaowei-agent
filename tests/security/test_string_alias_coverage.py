@@ -170,6 +170,64 @@ def test_every_parent_task_field_uses_the_shared_task_id_domain() -> None:
     )
 
 
+def test_every_task_id_field_uses_the_shared_task_id_domain() -> None:
+    """所有 Contract.task_id 字段共享同一域，不能各自退回 StrictStr。"""
+    found: list[str] = []
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for cls in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+            for stmt in cls.body:
+                if not (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "task_id"
+                ):
+                    continue
+                location = f"{path.relative_to(SRC)}::{cls.name}.task_id"
+                found.append(location)
+                names = {
+                    node.id
+                    for node in ast.walk(stmt.annotation)
+                    if isinstance(node, ast.Name)
+                }
+                if "TaskId" not in names:
+                    offenders.append(location)
+
+    assert found, "没有扫描到 task_id 字段，检测器可能失效"
+    assert offenders == [], "以下 task_id 未使用 TaskId：\n" + "\n".join(offenders)
+
+
+def test_task_id_domain_has_a_single_definition_source() -> None:
+    """TaskId 域只能在 leaf module 定义一次，其他契约只能 import 复用。"""
+    tracked_names = {
+        "TASK_ID_MAX_LENGTH",
+        "TASK_ID_PATTERN",
+        "TaskId",
+        "ClarificationTaskId",
+        "_CLARIFICATION_TASK_ID_MAX_LENGTH",
+        "_CLARIFICATION_TASK_ID_PATTERN",
+    }
+    definitions: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for stmt in tree.body:
+            targets: list[ast.expr] = []
+            if isinstance(stmt, ast.AnnAssign):
+                targets = [stmt.target]
+            elif isinstance(stmt, ast.Assign):
+                targets = list(stmt.targets)
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in tracked_names:
+                    definitions.append(f"{path.relative_to(SRC)}::{target.id}")
+
+    assert definitions == [
+        "contracts/ids.py::TASK_ID_MAX_LENGTH",
+        "contracts/ids.py::TASK_ID_PATTERN",
+        "contracts/ids.py::TaskId",
+    ]
+
+
 @pytest.mark.parametrize(
     ("annotation", "flagged"),
     [

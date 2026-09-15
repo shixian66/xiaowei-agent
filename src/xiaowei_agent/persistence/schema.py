@@ -7,9 +7,9 @@ append-only 契约载荷主要以 JSONB 保存。任何展开字段都必须由 
 **用 Core 不用 ORM**：ORM 的 identity map 与 flush 时机会让"必须采纳存储层 winner"
 这条不变量更难断言，而并发语义正是 M4 的全部承重点。
 
-**所有映射到 ``StrictStr`` 的列一律 ``Text``，不用 ``UUID``。** ``task_id`` 用 ``uuid``
-列读回的是 ``UUID`` 对象，而 ``TaskRecord.task_id`` 是 ``StrictStr``，strict 模式会
-直接拒绝——写 DDL 时"主键当然用 uuid"的直觉在这里恰好是错的。
+**所有映射到严格字符串域的列一律 ``Text``，不用 ``UUID``。** ``task_id`` 用 ``uuid``
+列读回的是 ``UUID`` 对象，而 ``TaskRecord.task_id`` 是 ``TaskId``，strict 模式会直接
+拒绝——写 DDL 时"主键当然用 uuid"的直觉在这里恰好是错的。
 
 本模块是**迁移之外的第二处 schema 表述**，因此必然有漂移风险。对价是
 ``tests/contract/test_schema_matches_migration.py``：把两边分别编译成 PostgreSQL

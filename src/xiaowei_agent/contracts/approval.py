@@ -27,11 +27,12 @@ from pydantic import model_validator
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, Sha256Hex, StrictStr
 from xiaowei_agent.contracts.enums import ApprovalState, EffectClass
+from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.contracts.policy import PolicyDecision
 
 
 class ApprovalRequest(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     step_id: StrictStr
     plan_hash: Sha256Hex
     target_fingerprint: Sha256Hex

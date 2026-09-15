@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,6 +20,7 @@ from xiaowei_agent.application.task_view_runtime import (
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     ReadinessProbe,
+    TaskId,
     TaskLookup,
     TaskSubmission,
     TaskView,
@@ -35,6 +37,16 @@ class RuntimePort(Protocol):
     async def submit_task(self, *, submission: TaskSubmission) -> TaskView: ...
 
     async def query_task(self, *, lookup: TaskLookup) -> TaskView: ...
+
+
+_TASK_ID_ADAPTER = TypeAdapter(TaskId)
+
+
+def _task_id_or_not_found(task_id: str) -> str:
+    try:
+        return _TASK_ID_ADAPTER.validate_python(task_id, strict=True)
+    except ValidationError:
+        raise StarletteHTTPException(status_code=404) from None
 
 
 def _error(status: int, code: str) -> JSONResponse:
@@ -108,7 +120,7 @@ def create_app(
         with bind_trace_id(trace_id):
             view = await runtime.query_task(
                 lookup=TaskLookup(
-                    task_id=task_id,
+                    task_id=_task_id_or_not_found(task_id),
                     tenant_id=settings.tenant_id,
                     environment_id=settings.environment_id,
                 )

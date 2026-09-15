@@ -5,14 +5,13 @@
 给出确定的拒绝。终态集合与迁移表由测试交叉校验，避免两处各写一份而悄悄漂移。
 """
 
-import re
 from collections.abc import Mapping
 from itertools import pairwise
 from types import MappingProxyType
-from typing import Annotated, Final, Self
+from typing import Final, Self
 from urllib.parse import quote
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
@@ -21,7 +20,9 @@ from xiaowei_agent.contracts.base import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.clarification import ClarificationPayload
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
+from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.contracts.render import RenderPayload
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
 
@@ -32,25 +33,9 @@ TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
         TaskStatus.REJECTED,
         TaskStatus.CANCELED,
         TaskStatus.INDETERMINATE,
+        TaskStatus.CLARIFICATION_REQUIRED,
     }
 )
-
-TASK_ID_MAX_LENGTH: Final[int] = 200
-TASK_ID_PATTERN: Final[str] = (
-    rf"[A-Za-z0-9][A-Za-z0-9._:-]{{0,{TASK_ID_MAX_LENGTH - 1}}}"
-)
-_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
-
-
-def _task_id(value: str) -> str:
-    if _TASK_ID_RE.fullmatch(value) is None:
-        raise ValueError("task_id has an invalid shape")
-    return value
-
-
-TaskId = Annotated[StrictStr, AfterValidator(_task_id)]
-"""任务引用的统一字符串域；与 Web path selector 使用同一完整匹配规则。"""
-
 
 class TaskSubmission(Contract):
     """创建任务时不可变持久化的完整提交事实。"""
@@ -64,7 +49,7 @@ class TaskSubmission(Contract):
 class TaskLookup(Contract):
     """任务查询的存储作用域；M5 不把 actor 当作读取 ACL。"""
 
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
 
@@ -96,15 +81,21 @@ def task_query_path(task_id: str) -> str:
 class TaskView(Contract):
     """入口层可见的任务投影；不暴露租约、版本或失败预算。"""
 
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     render: RenderPayload | None = None
+    clarification: ClarificationPayload | None = None
     query_path: StrictStr
 
     @model_validator(mode="after")
     def _projection_is_consistent(self) -> Self:
-        terminal = self.status in TERMINAL_STATUSES
-        if terminal != (self.render is not None):
+        needs_clarification = self.status is TaskStatus.CLARIFICATION_REQUIRED
+        terminal_with_render = self.status in TERMINAL_STATUSES and not needs_clarification
+        if needs_clarification != (self.clarification is not None):
+            raise ValueError("clarification presence must agree with task status")
+        if self.clarification is not None and self.render is not None:
+            raise ValueError("clarification presence excludes render")
+        if terminal_with_render != (self.render is not None):
             raise ValueError("render presence must agree with terminal status")
         if self.render is not None and self.render.status is not self.status:
             raise ValueError("render status must agree with task status")
@@ -120,6 +111,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
                 TaskStatus.CANCELED,
                 TaskStatus.FAILED,
                 TaskStatus.REJECTED,
+                TaskStatus.CLARIFICATION_REQUIRED,
             }
         ),
         TaskStatus.PLANNING: frozenset(
@@ -128,6 +120,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
                 TaskStatus.FAILED,
                 TaskStatus.CANCELED,
                 TaskStatus.REJECTED,
+                TaskStatus.CLARIFICATION_REQUIRED,
             }
         ),
         TaskStatus.RUNNING: frozenset(
@@ -154,7 +147,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
 
 
 class TaskRecord(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
     actor: StrictStr
@@ -238,7 +231,7 @@ class StoredTaskPage(Contract):
 
 
 class LeaseGrant(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     owner: StrictStr
     expires_at: AwareDatetime
     fencing_token: StrictInt = Field(gt=0)
@@ -257,7 +250,7 @@ class TransitionResult(Contract):
 
 
 class TaskOutcome(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     terminal_reason: StrictStr | None
     evidence_refs: tuple[StrictStr, ...]

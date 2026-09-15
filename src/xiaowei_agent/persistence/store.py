@@ -46,6 +46,7 @@ from xiaowei_agent.contracts import (
     StrictInt,
     StrictStr,
     TaskAttemptRejection,
+    TaskId,
     TaskLookup,
     TaskRecord,
     TaskStatus,
@@ -217,7 +218,7 @@ class DispatchQuery(Contract):
 
 
 class TaskAttemptCommand(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     intent: AttemptIntent
     owner: StrictStr
     ttl_seconds: StrictInt = Field(gt=0)
@@ -332,7 +333,7 @@ def retry_command_digest(command: RetryCommand) -> str:
 
 
 class StepExecutionRecord(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     step_id: StrictStr
     attempt_count: StrictInt = Field(gt=0)
     last_fencing_token: StrictInt = Field(gt=0)
@@ -487,7 +488,7 @@ class TransitionCommand(Contract):
     会被转成枚举。把入参构造成严格契约，这些隐式转换在入口就失败。
     """
 
-    task_id: StrictStr
+    task_id: TaskId
     expected_version: StrictInt = Field(ge=0)
     to_status: TaskStatus
     fencing_token: StrictInt | None = Field(default=None, gt=0)
@@ -515,7 +516,7 @@ class StaleLeaseQuery(Contract):
 class LeaseCommand(Contract):
     """``acquire_lease`` / ``renew_lease`` 的入参 DTO。"""
 
-    task_id: StrictStr
+    task_id: TaskId
     owner: StrictStr
     ttl_seconds: StrictInt = Field(gt=0)
     fencing_token: StrictInt | None = Field(default=None, gt=0)
