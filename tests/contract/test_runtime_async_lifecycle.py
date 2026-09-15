@@ -57,13 +57,13 @@ from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
 
 
 def test_task_view_encodes_its_own_query_path() -> None:
-    task_id = "task/with?reserved#chars%"
+    task_id = "task:with.allowed-chars_1"
     view = TaskView(
         task_id=task_id,
         status=TaskStatus.CREATED,
         query_path=f"/v1/tasks/{quote(task_id, safe='')}",
     )
-    assert view.query_path == "/v1/tasks/task%2Fwith%3Freserved%23chars%25"
+    assert view.query_path == "/v1/tasks/task%3Awith.allowed-chars_1"
 
 
 def test_task_view_rejects_a_mismatched_path_or_render_status() -> None:

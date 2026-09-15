@@ -16,7 +16,6 @@ from xiaowei_agent.contracts import (
     ScopeTaskPageQuery,
     StoredTaskRead,
     StrictInt,
-    StrictStr,
     TaskId,
     TaskLookup,
     TaskRecord,
@@ -62,7 +61,7 @@ class FeishuMembershipPort(Protocol):
 
 class TaskAccessQuery(Contract):
     principal: AuthenticatedPrincipal
-    task_id: StrictStr
+    task_id: TaskId
 
 
 class TaskListQuery(Contract):
@@ -80,7 +79,7 @@ class AccessibleTask(Contract):
 
 
 class TaskSummary(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     request_preview: NonEmptyText = Field(max_length=TASK_SUMMARY_PREVIEW_LIMIT)
     submitted_at: AwareDatetime

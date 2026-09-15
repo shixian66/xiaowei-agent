@@ -596,7 +596,6 @@ def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable()
         InteractionDraft,
         InteractionKind,
         InteractionSource,
-        RoutingDisposition,
     )
 
     usage = model_usage(input_tokens=12, output_tokens=4)
@@ -613,7 +612,6 @@ def test_model_result_wrappers_and_invocation_profile_are_closed_and_immutable()
     interaction = interaction_result(
         draft=InteractionDraft(
             proposed_kind=InteractionKind.CAPABILITY_REQUEST,
-            routing_disposition=RoutingDisposition.PROCEED,
             capability_draft=intent.draft,
             confidence=0.5,
             source=InteractionSource.MODEL,

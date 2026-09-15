@@ -15,6 +15,7 @@ from xiaowei_agent.contracts import (
     Sha256Hex,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskLookup,
 )
 
@@ -62,7 +63,7 @@ class ChannelBinding(Contract):
     """渠道来源与 Runtime 任务的一对一关联；不复制任务事实。"""
 
     binding_id: StrictStr
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
     channel: ChannelKind
@@ -82,7 +83,7 @@ class ProjectionSubscription(Contract):
     """异步渠道投影的持久化状态；任务状态始终回读 TaskStore。"""
 
     subscription_id: StrictStr
-    task_id: StrictStr
+    task_id: TaskId
     destination_kind: DestinationKind
     destination_ref: StrictStr
     source_message_ref: StrictStr | None = None
@@ -124,7 +125,7 @@ class ProjectionSubscription(Contract):
 
 
 class CreateProjectionSubscriptionCommand(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     destination_kind: DestinationKind
     destination_ref: StrictStr
     initial_state: ProjectionState
@@ -141,7 +142,7 @@ class CreateProjectionSubscriptionCommand(Contract):
 
 
 class BindTaskCommand(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
     channel: ChannelKind
@@ -161,7 +162,7 @@ class BindTaskCommand(Contract):
 
 
 class GroupBindingLookup(Contract):
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
 
@@ -169,7 +170,7 @@ class GroupBindingLookup(Contract):
 class ChannelBindingLookup(Contract):
     """按任务与作用域读取唯一渠道绑定，不对渠道种类做推断。"""
 
-    task_id: StrictStr
+    task_id: TaskId
     tenant_id: StrictStr
     environment_id: StrictStr
 
@@ -177,7 +178,7 @@ class ChannelBindingLookup(Contract):
 class GroupBoundTaskIdsQuery(Contract):
     tenant_id: StrictStr
     environment_id: StrictStr
-    task_ids: tuple[StrictStr, ...] = Field(min_length=1, max_length=100)
+    task_ids: tuple[TaskId, ...] = Field(min_length=1, max_length=100)
 
 
 class ProjectionDueQuery(Contract):

@@ -1,10 +1,9 @@
 """I1 终态澄清契约。"""
 
 import datetime as dt
-import re
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import (
     AwareDatetime,
@@ -18,24 +17,10 @@ from xiaowei_agent.contracts.enums import (
     ClarificationReasonCode,
     InteractionKind,
 )
+from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.redaction import scrub_text
 
-_CLARIFICATION_TASK_ID_MAX_LENGTH: Final[int] = 200
-_CLARIFICATION_TASK_ID_PATTERN: Final[str] = (
-    rf"[A-Za-z0-9][A-Za-z0-9._:-]{{0,{_CLARIFICATION_TASK_ID_MAX_LENGTH - 1}}}"
-)
-_CLARIFICATION_TASK_ID_RE: Final[re.Pattern[str]] = re.compile(
-    _CLARIFICATION_TASK_ID_PATTERN
-)
-
-
-def _clarification_task_id(value: str) -> str:
-    if _CLARIFICATION_TASK_ID_RE.fullmatch(value) is None:
-        raise ValueError("task_id has an invalid shape")
-    return value
-
-
-ClarificationTaskId = Annotated[StrictStr, AfterValidator(_clarification_task_id)]
+TimezoneId = Literal["UTC", "Asia/Shanghai"]
 
 
 class ConfirmedTextValue(Contract):
@@ -55,11 +40,14 @@ class ConfirmedTimeRangeValue(Contract):
     kind: Literal["time_range"]
     start_utc: AwareDatetime
     end_utc: AwareDatetime
-    timezone_id: StrictStr
+    timezone_id: TimezoneId
 
     @model_validator(mode="after")
     def _range_is_canonical_utc_and_half_open(self) -> Self:
-        if self.start_utc.tzinfo is not dt.UTC or self.end_utc.tzinfo is not dt.UTC:
+        if (
+            self.start_utc.utcoffset() != dt.timedelta(0)
+            or self.end_utc.utcoffset() != dt.timedelta(0)
+        ):
             raise ValueError("time range endpoints must be canonical UTC")
         if self.start_utc >= self.end_utc:
             raise ValueError("time range must be a non-empty half-open interval")
@@ -114,7 +102,7 @@ def _validate_slot_snapshot(slots: tuple[ConfirmedSlot, ...]) -> None:
 
 class ClarificationRecord(Contract):
     record_version: Literal[1] = 1
-    task_id: ClarificationTaskId
+    task_id: TaskId
     subject: ClarificationSubject
     reason_code: ClarificationReasonCode
     missing_fields: tuple[ClarificationField, ...]

@@ -14,12 +14,17 @@ from xiaowei_agent.contracts import (
     AgentError,
     ApprovalRequest,
     ApprovalState,
+    ClarificationReasonCode,
+    ClarificationRecord,
     ErrorCategory,
     ExternalContent,
     ExternalSource,
+    InteractionKind,
     RenderPayload,
     RenderSection,
+    RouteSubject,
     TaskId,
+    TaskRecord,
     TaskStatus,
 )
 
@@ -95,6 +100,49 @@ def test_task_id_domain_matches_the_web_selector_and_rejects_aliases(bad: object
     )
     with pytest.raises(ValidationError):
         adapter.validate_python(bad, strict=True)
+
+
+def _task_record(task_id: object) -> TaskRecord:
+    return TaskRecord(
+        task_id=task_id,  # type: ignore[arg-type]
+        tenant_id="dev-local",
+        environment_id="dev",
+        actor="alice",
+        idempotency_key="idem-1",
+        request_digest=_HEX,
+        status=TaskStatus.CREATED,
+        version=0,
+        created_seq=1,
+        attempt_number=0,
+        task_failure_count=0,
+        next_attempt_at=None,
+    )
+
+
+def _clarification_record(task_id: object) -> ClarificationRecord:
+    return ClarificationRecord(
+        task_id=task_id,  # type: ignore[arg-type]
+        subject=RouteSubject(kind="route", proposed_kind=InteractionKind.UNKNOWN),
+        reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+        missing_fields=(),
+        confirmed_slots=(),
+        created_at=NOW,
+        fencing_token=1,
+    )
+
+
+@pytest.mark.parametrize("task_id", ["task-1", "a" + ("-" * 199)])
+def test_task_id_records_accept_the_same_domain(task_id: str) -> None:
+    assert _task_record(task_id).task_id == task_id
+    assert _clarification_record(task_id).task_id == task_id
+
+
+@pytest.mark.parametrize("bad", ["_task", "task/path", "a" * 201])
+def test_task_id_records_reject_the_same_bad_shapes(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        _task_record(bad)
+    with pytest.raises(ValidationError):
+        _clarification_record(bad)
 
 
 # --- NonEmptyText:本系统生成的文本 -----------------------------------------

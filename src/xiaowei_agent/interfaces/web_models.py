@@ -229,7 +229,7 @@ class WebCurrentUser(_WebModel):
 
 
 class WebTaskSummary(_WebModel):
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     request_preview: NonEmptyText = Field(max_length=TASK_SUMMARY_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
@@ -265,7 +265,7 @@ class WebTaskPage(_WebModel):
 
 
 class WebTaskAccepted(_WebModel):
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     detail_path: StrictStr
     parent_task_id: TaskId | None = None
@@ -288,7 +288,7 @@ class WebTaskAccepted(_WebModel):
 
 
 class WebTaskDetail(_WebModel):
-    task_id: StrictStr
+    task_id: TaskId
     status: TaskStatus
     request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+import xiaowei_agent.application.model_interaction as model_interaction_module
 from xiaowei_agent.application.model_interaction import (
     ModelInputRejectedError,
     build_interaction_classifier_request,
@@ -24,7 +25,6 @@ from xiaowei_agent.contracts import (
     ModelInvocationProfile,
     ModelUsage,
     RouteSubject,
-    RoutingDisposition,
 )
 
 
@@ -59,7 +59,6 @@ def _model_result(
     return InteractionModelResult(
         draft=InteractionDraft(
             proposed_kind=InteractionKind.CAPABILITY_REQUEST,
-            routing_disposition=RoutingDisposition.PROCEED,
             capability_draft=_capability_draft(source=capability_source),
             confidence=0.8,
             source=source,
@@ -71,7 +70,6 @@ def _model_result(
 def _fallback() -> InteractionDraft:
     return InteractionDraft(
         proposed_kind=InteractionKind.UNKNOWN,
-        routing_disposition=RoutingDisposition.CLARIFY,
         capability_draft=None,
         confidence=0.0,
         source=InteractionSource.RULE,
@@ -130,6 +128,39 @@ async def test_retryable_provider_error_falls_back_without_second_request() -> N
     assert len(port.requests) == 1
     assert result.observation.request_count == 1
     assert result.observation.fallback_code is ModelFallbackCode.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_application_timeout_falls_back_without_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingPort:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        async def classify(self, request: object) -> InteractionModelResult:
+            self.requests.append(request)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    port = BlockingPort()
+    monkeypatch.setattr(
+        model_interaction_module,
+        "_stage_timeout",
+        lambda _seconds: asyncio.timeout(0.01),
+    )
+
+    result = await request_interaction_draft(
+        request=build_interaction_classifier_request(user_text="检查慢查询"),
+        model=port,
+        profile=ModelInvocationProfile(),
+        fallback=_fallback,
+    )
+
+    assert result.draft == _fallback()
+    assert len(port.requests) == 1
+    assert result.observation.request_count == 1
+    assert result.observation.fallback_code is ModelFallbackCode.APPLICATION_TIMEOUT
 
 
 @pytest.mark.asyncio

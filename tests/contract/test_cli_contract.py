@@ -92,7 +92,7 @@ def test_submit_request_contains_only_the_api_body_fields_and_utf8() -> None:
 
 
 def test_get_percent_encodes_the_complete_task_id_and_checks_the_response_id() -> None:
-    task_id = "task/with?reserved#chars%"
+    task_id = "task:with.allowed-chars_1"
     opener = _Opener(_Response(_view(task_id)))
     code, _, _ = _run(
         ["--base-url", "https://localhost:8443", "task", "get", task_id],
@@ -100,7 +100,7 @@ def test_get_percent_encodes_the_complete_task_id_and_checks_the_response_id() -
     )
     assert code == 0
     assert opener.requests[0].full_url.endswith(
-        "/v1/tasks/task%2Fwith%3Freserved%23chars%25"
+        "/v1/tasks/task%3Awith.allowed-chars_1"
     )
 
     mismatch = _Opener(_Response(_view("another-task")))

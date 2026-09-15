@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     Sha256Hex,
     StrictInt,
     StrictStr,
+    TaskId,
     TaskRecord,
     TaskStatus,
 )
@@ -123,14 +124,14 @@ class AdvisoryArtifactCandidate(Contract):
 
 class AcceptedIntentArtifact(IntentArtifactCandidate):
     artifact_version: Literal[1] = MODEL_ARTIFACT_VERSION
-    task_id: StrictStr
+    task_id: TaskId
     created_at: AwareDatetime
     fencing_token: StrictInt = Field(gt=0)
 
 
 class StoredModelAdvisory(AdvisoryArtifactCandidate):
     artifact_version: Literal[1] = MODEL_ARTIFACT_VERSION
-    task_id: StrictStr
+    task_id: TaskId
     created_at: AwareDatetime
     fencing_token: StrictInt = Field(gt=0)
 

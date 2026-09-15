@@ -26,7 +26,6 @@ def _slow_query_draft() -> IntentDraft:
 def test_interaction_draft_preserves_inconsistent_untrusted_candidate() -> None:
     draft = InteractionDraft(
         proposed_kind=InteractionKind.CONVERSATION,
-        routing_disposition=RoutingDisposition.PROCEED,
         capability_draft=_slow_query_draft(),
         confidence=1.0,
         source=InteractionSource.MODEL,
@@ -39,7 +38,6 @@ def test_interaction_draft_preserves_inconsistent_untrusted_candidate() -> None:
 def test_interaction_draft_is_strict_frozen_and_extra_forbid() -> None:
     draft = InteractionDraft(
         proposed_kind=InteractionKind.CAPABILITY_REQUEST,
-        routing_disposition=RoutingDisposition.PROCEED,
         capability_draft=_slow_query_draft(),
         confidence=0.5,
         source=InteractionSource.FAKE,
@@ -50,11 +48,21 @@ def test_interaction_draft_is_strict_frozen_and_extra_forbid() -> None:
     with pytest.raises(ValidationError):
         InteractionDraft(
             proposed_kind=InteractionKind.CAPABILITY_REQUEST,
-            routing_disposition=RoutingDisposition.PROCEED,
             capability_draft=_slow_query_draft(),
             confidence=0.5,
             source=InteractionSource.FAKE,
             tool="must-not-exist",
+        )
+
+
+def test_interaction_draft_rejects_router_disposition_from_untrusted_candidate() -> None:
+    with pytest.raises(ValidationError):
+        InteractionDraft(
+            proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+            routing_disposition=RoutingDisposition.PROCEED,
+            capability_draft=_slow_query_draft(),
+            confidence=0.5,
+            source=InteractionSource.MODEL,
         )
 
 

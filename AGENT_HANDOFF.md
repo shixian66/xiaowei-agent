@@ -18,6 +18,11 @@
 - Task 1.2 已有第一笔 checkpoint：新增 `InteractionClassifierRequest`、`ClarificationContext` 与
   `application/model_interaction.py` 的单次分类调用预算。它尚未接入 `ModelArtifactStore`、
   `XiaoweiRuntime`、Gemini adapter 或任何真实 provider。
+- 本轮按复审意见完成 I1-A 契约根因修复：`TaskId` 已移动到 `contracts.ids` leaf module，
+  所有 Contract `task_id`/`parent_task_id` 字段复用同一域；`InteractionDraft` 不再携带
+  `RoutingDisposition`，该枚举仅保留给后续确定性 Router；`ConfirmedTimeRangeValue` 使用 UTC
+  offset 语义并把 `timezone_id` 收紧为 `UTC`/`Asia/Shanghai` 闭集，JSONB 往返覆盖
+  `ClarificationRecord`/`ClarificationContext`/`ClarificationPayload`。
 - 本分支额外修复了一处测试隔离问题：`tests/contract/test_trace_delivery.py` 不再依赖 root logging
   propagation 或 pytest 共享 `caplog.handler`，避免被 `configure_logging()` 的全局 logger/filter 状态污染。
 - I1-A 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
@@ -29,7 +34,7 @@
 | --- | --- |
 | 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-interaction-entry` 基于 `origin/main@033f3c60be273e5e99d0f371020f123b85692e06` |
 | 截止时间 | 2026-09-15（Asia/Shanghai） |
-| 阶段 | **I1-A 开发中。I0-DOC 已合入 `main`；当前分支完成 Task 1.1 契约切片，并已有 Task 1.2 interaction classifier service checkpoint；尚未实现 Runtime 路由、artifact/store、clarification child、SlotVerifier、ReadClass 或 Disclosure。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **I1-A 开发中。I0-DOC 已合入 `main`；当前分支完成 Task 1.1 契约切片与复审根因修复，并已有 Task 1.2 interaction classifier service checkpoint；尚未实现 Runtime 路由、artifact/store、clarification child、SlotVerifier、ReadClass 或 Disclosure。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |

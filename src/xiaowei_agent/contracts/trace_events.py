@@ -30,6 +30,7 @@ from xiaowei_agent.contracts.enums import (
     StageOutcome,
 )
 from xiaowei_agent.contracts.errors import AgentError
+from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.redaction import scrub_text
 
 
@@ -114,7 +115,7 @@ class ModelCallObservation(Contract):
 class TraceEvent(Contract):
     event_id: StrictStr
     trace_id: TraceId
-    task_id: StrictStr | None
+    task_id: TaskId | None
     stage: PipelineStage
     outcome: StageOutcome
     occurred_at: AwareDatetime

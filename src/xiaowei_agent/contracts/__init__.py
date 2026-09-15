@@ -98,6 +98,11 @@ from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
 from xiaowei_agent.contracts.external import ExternalContent, content_digest
 from xiaowei_agent.contracts.external_input import ExternalInput
+from xiaowei_agent.contracts.ids import (
+    TASK_ID_MAX_LENGTH,
+    TASK_ID_PATTERN,
+    TaskId,
+)
 from xiaowei_agent.contracts.integration_config import (
     FeishuIntegration,
     GeminiIntegration,
@@ -157,15 +162,12 @@ from xiaowei_agent.contracts.sql_surface import (
 from xiaowei_agent.contracts.target import ResolvedTarget
 from xiaowei_agent.contracts.task import (
     ALLOWED_TRANSITIONS,
-    TASK_ID_MAX_LENGTH,
-    TASK_ID_PATTERN,
     TERMINAL_STATUSES,
     ActorTaskPageQuery,
     LeaseGrant,
     ScopeTaskPageQuery,
     StoredTaskPage,
     StoredTaskRead,
-    TaskId,
     TaskLookup,
     TaskOutcome,
     TaskRecord,

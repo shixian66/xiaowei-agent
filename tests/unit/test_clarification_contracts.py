@@ -3,10 +3,11 @@
 import datetime as dt
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from xiaowei_agent.contracts import (
     CapabilitySubject,
+    ClarificationContext,
     ClarificationField,
     ClarificationPayload,
     ClarificationReasonCode,
@@ -16,13 +17,27 @@ from xiaowei_agent.contracts import (
     ConfirmedTimeRangeValue,
     InteractionKind,
     RouteSubject,
+    TaskId,
 )
+from xiaowei_agent.persistence.rows import dump_contract, load_contract
 
 _AT = dt.datetime(2026, 9, 15, 7, 30, tzinfo=dt.UTC)
 
 
 def _text_slot(field: ClarificationField, text: str = "sales") -> ConfirmedSlot:
     return ConfirmedSlot(field=field, value=ConfirmedTextValue(kind="text", text=text))
+
+
+def _time_slot() -> ConfirmedSlot:
+    return ConfirmedSlot(
+        field=ClarificationField.TIME_RANGE,
+        value=ConfirmedTimeRangeValue(
+            kind="time_range",
+            start_utc=dt.datetime(2026, 9, 15, 6, 0, tzinfo=dt.UTC),
+            end_utc=dt.datetime(2026, 9, 15, 7, 0, tzinfo=dt.UTC),
+            timezone_id="Asia/Shanghai",
+        ),
+    )
 
 
 def test_route_subject_cannot_smuggle_capability_slots() -> None:
@@ -75,7 +90,7 @@ def test_confirmed_time_range_requires_canonical_utc_half_open_interval() -> Non
         timezone_id="Asia/Shanghai",
     )
 
-    assert value.start_utc.tzinfo is dt.UTC
+    assert value.start_utc.utcoffset() == dt.timedelta(0)
     with pytest.raises(ValidationError):
         ConfirmedTimeRangeValue(
             kind="time_range",
@@ -91,6 +106,65 @@ def test_confirmed_time_range_requires_canonical_utc_half_open_interval() -> Non
             ),
             end_utc=dt.datetime(2026, 9, 15, 7, 0, tzinfo=dt.UTC),
             timezone_id="Asia/Shanghai",
+        )
+
+
+def test_confirmed_time_range_round_trips_through_json_contract_loader() -> None:
+    value = ConfirmedTimeRangeValue(
+        kind="time_range",
+        start_utc=dt.datetime(2026, 9, 15, 6, 0, tzinfo=dt.UTC),
+        end_utc=dt.datetime(2026, 9, 15, 7, 0, tzinfo=dt.UTC),
+        timezone_id="UTC",
+    )
+
+    assert load_contract(ConfirmedTimeRangeValue, dump_contract(value)) == value
+
+
+def test_clarification_snapshots_with_time_range_round_trip_through_json() -> None:
+    slot = _time_slot()
+    subject = CapabilitySubject(
+        kind="capability",
+        capability_id="starrocks.slow_query.diagnose",
+        capability_version="1.0.0",
+        operation="diagnose",
+        input_schema_ref="input.starrocks.slow_query.v1",
+        confirmed_slots=(slot,),
+    )
+    record = ClarificationRecord(
+        task_id="task-time",
+        subject=subject,
+        reason_code=ClarificationReasonCode.CAPABILITY_FIELDS_MISSING,
+        missing_fields=(ClarificationField.DATABASE,),
+        confirmed_slots=subject.confirmed_slots,
+        created_at=_AT,
+        fencing_token=1,
+    )
+    context = ClarificationContext(
+        subject=subject,
+        confirmed_slots=subject.confirmed_slots,
+    )
+    payload = ClarificationPayload(
+        reason_code=ClarificationReasonCode.CAPABILITY_FIELDS_MISSING,
+        missing_fields=(ClarificationField.DATABASE,),
+        confirmed_slots=subject.confirmed_slots,
+        prompt="请补充数据库名。",
+    )
+
+    assert load_contract(ClarificationRecord, dump_contract(record)) == record
+    assert load_contract(ClarificationContext, dump_contract(context)) == context
+    assert load_contract(ClarificationPayload, dump_contract(payload)) == payload
+
+
+@pytest.mark.parametrize("timezone_id", ["Mars/Phobos", "UTC ", "x" * 4096])
+def test_confirmed_time_range_rejects_unknown_timezone_ids(
+    timezone_id: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        ConfirmedTimeRangeValue(
+            kind="time_range",
+            start_utc=dt.datetime(2026, 9, 15, 6, 0, tzinfo=dt.UTC),
+            end_utc=dt.datetime(2026, 9, 15, 7, 0, tzinfo=dt.UTC),
+            timezone_id=timezone_id,
         )
 
 
@@ -165,6 +239,23 @@ def test_clarification_record_rejects_invalid_task_id_shapes(
             created_at=_AT,
             fencing_token=1,
         )
+
+
+def test_clarification_record_uses_shared_task_id_domain() -> None:
+    task_id = "a" + ("-" * 199)
+    subject = RouteSubject(kind="route", proposed_kind=InteractionKind.UNKNOWN)
+
+    record = ClarificationRecord(
+        task_id=task_id,
+        subject=subject,
+        reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+        missing_fields=(),
+        confirmed_slots=(),
+        created_at=_AT,
+        fencing_token=1,
+    )
+
+    assert TypeAdapter(TaskId).validate_python(task_id, strict=True) == record.task_id
 
 
 def test_clarification_payload_is_safe_and_distinct_from_render_payload() -> None:
