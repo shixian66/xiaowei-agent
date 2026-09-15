@@ -195,6 +195,10 @@ resume: PlanStore.load → drift verification
   → 第一次 ToolGateway 调用
 ```
 
+I1-D 实现时必须同步 trace contract：新增 `PipelineStage.DISCLOSURE`，错误归因阶段从
+当前 RI3 后的十个扩展为十一个阶段。该阶段只表示披露事实与 `DISCLOSURE / OK` 审计事件已
+成功持久化，不表示渠道送达、用户已读、审批通过或真实目标已经联网。
+
 屏障位于 Runner 的 `_start`/`_resume` 汇聚后、`_run_steps` 入口，不能只放在 `_start`。
 投影只读取 PlanStore 重新读回的 `StoredPlan`，不得读取调用方传入的 plan/target。Plan 保存/读取、
 投影、校验或审计写入失败/结果未知时，Admission/Gateway 均为零，当前 attempt 按既有 Worker 恢复。

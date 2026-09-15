@@ -27,8 +27,7 @@
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 正在冻结 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
-> 后续 I1 会在 Resolver 前增加分流、终态澄清、可信槽位、`ReadClass` 和执行披露屏障；当前源码尚未
-> 实现 I1，不能把该设计写成运行能力。
+> 后续 I1 会在 Resolver 前增加分流、终态澄清、可信槽位、`ReadClass` 和执行披露屏障；当前源码尚未实现 I1，不能把该设计写成运行能力。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现

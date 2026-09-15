@@ -465,14 +465,12 @@ The typed projector lives in `application/model_advisory.py`, where capability s
 are an allowed dependency. `rendering/` only consumes its validated display result and
 does not import `capabilities` or read the surface.
 
-I1 前的 RI3 当前源码事实是：the second migration adds explicit `parent_task_id`; Web validates only the directly
-selected parent's ownership/scope/terminal state and Worker revalidates every persisted
-hop before execution. Ancestor drift therefore rejects the created child rather than
-turning a still-valid direct parent into an entry-time 404. Null-parent
-request/submission/scope digest bytes stay frozen.
-Non-null parent enters the semantic request digest and stored submission digest, not the
-scope digest, so any semantic difference (including a different parent) conflicts while
-the same semantic request and normal request_id/trace_id/`as_of` retry changes still reuse.
+I1 前的 RI3 当前源码事实是：第二次 migration 增加显式 `parent_task_id`；Web 只校验用户直接选择的
+父任务 ownership/scope/terminal state，Worker 在执行前重新校验每个已持久化 hop。因此 ancestor drift
+会拒绝已创建子任务，而不是把仍有效的直接父任务变成入口时的 404。空 parent 的
+request/submission/scope digest bytes 保持冻结。非空 parent 进入 semantic request digest 与已存
+submission digest，不进入 scope digest；因此任何语义差异（包括不同 parent）都会冲突，而相同语义请求与
+普通 request_id/trace_id/`as_of` 重试变化仍会复用。
 ADR-017/I1 目标会删除该通用父历史语义，改用只服务终态澄清的
 `clarification_parent_task_id`。
 Feishu context waits for RI2 evidence.
