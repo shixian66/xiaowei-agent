@@ -26,6 +26,8 @@
 > override is used.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
+> 智能交互入口 I0-DOC 正在冻结 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
+> 后续 I1 会在 Resolver 前增加分流、终态澄清、可信槽位、`ReadClass` 和执行披露屏障；当前源码尚未实现 I1，不能把该设计写成运行能力。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现
@@ -41,19 +43,20 @@
 4. 本文件：人类开发者的启动和导航信息。
 5. [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 
-授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)，M7 Web/飞书薄渠道边界见 [ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)，真实飞书 OAuth/Web 激活见 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)，已接受的 Gemini 窄端口与数据边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。
+授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)，M7 Web/飞书薄渠道边界见 [ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)，真实飞书 OAuth/Web 激活见 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)，已接受的 Gemini 窄端口与数据边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。智能交互入口、澄清链、`ReadClass` 与执行披露屏障见 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)；它是 I1 的实施门，不是当前运行证据。
 
 ## 目标能力
 
 第一阶段不是追求“什么都能做”，而是先把一条可验证的只读闭环做扎实：
 
 1. 用户通过 API/CLI 发起自然语言运维问题。
-2. 系统提取结构化意图，并确定性解析 capability、环境和目标。
-3. Planner 生成受约束的读取计划。
-4. Policy 和对应的 SQL AST / 固定模板 PromQL Guard 检查工具调用。
-5. ToolGateway 访问外部系统，生成带来源和限制的证据。
-6. Reflection 只消费已生成的结构化证据，判断是否足以回答并说明限制、缺失和降级；它不追加步骤、不选工具、不改计划。确需额外取数时，只能是计划中预编译的预算内只读分支，由 Runner 按确定性条件执行。
-7. Runtime 生成可审计、可复现的最终回答和任务结果。
+2. I1 目标先形成 `InteractionArtifact`，由确定性 Router 判断普通对话、资料查询、日志分析、需要澄清或 capability 请求。
+3. 只有明确的 capability 请求进入 Resolver；缺槽进入 `CLARIFICATION_REQUIRED` 终态澄清。
+4. `SlotVerifier` 把本轮文本和澄清父记录中的可信槽位升级为专属 Params，Planner 生成受约束计划。
+5. Policy 和对应的 SQL AST / 固定模板 PromQL Guard 检查工具调用，并在首次 Gateway 前完成执行披露。
+6. ToolGateway 访问外部系统，生成带来源和限制的证据。
+7. Reflection 只消费已生成的结构化证据，判断是否足以回答并说明限制、缺失和降级；它不追加步骤、不选工具、不改计划。确需额外取数时，只能是计划中预编译的预算内只读分支，由 Runner 按确定性条件执行。
+8. Runtime 生成可审计、可复现的最终回答和任务结果。
 
 后续再逐步加入审批写操作、飞书/Web 渲染、更多资源域和 LangGraph runner。能力扩展不应改变上述核心契约。
 
@@ -68,7 +71,9 @@
               │
               ▼
         XiaoweiRuntime
- Context → IntentDraft → Resolver → PlanCompiler
+ InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler
+                                      │
+                              PlanStore / Disclosure
                                       │
                               WorkflowRunner
                                       │

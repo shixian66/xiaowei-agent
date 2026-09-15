@@ -15,6 +15,9 @@
 5. `CapabilityResolver` 是唯一候选生成真源；`route_shadow` 只能记录同一份 `CandidateSet` 的对比信息。
 6. DB/资产域允许受限 DSL 型 capability，DSL 只表达资源语义，不能表达任意代码、任意 SQL 或执行绕过。
 7. PostgreSQL 是任务、审批和审计事实的第一存储；checkpoint、缓存和向量索引都不能替代它。
+8. 智能交互入口的目标边界由 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md) 冻结：
+   I1 在 Resolver 前增加 `InteractionArtifact`、`DeterministicInteractionRouter`、终态澄清、
+   `SlotVerifier`、`ReadClass` 与 `ExecutionDisclosure`，但不授予模型执行权。
 
 ## 2. 目标与非目标
 
@@ -56,10 +59,14 @@
                        ┌────────────────┐
                        │ XiaoweiRuntime │ application facade
                        │ Context        │
-                       │ IntentDraft    │
+                       │ InteractionArtifact / IntentDraft
                        │ Resolver       │
+                       │ SlotVerifier   │
                        │ PlanCompiler   │
                        └───────┬────────┘
+                               ▼
+                    PlanStore → ExecutionDisclosure
+                               │
                                ▼
                        ┌────────────────┐
                        │ WorkflowRunner │ durable lifecycle host
@@ -96,12 +103,19 @@ RequestEnvelope
   → Worker.begin_task_attempt
   → Worker heartbeat（覆盖本次 execute_task 与 retry scheduling）
        → XiaoweiRuntime
-            → ContextAssembler（只有显式 parent 时）
-            → load accepted IntentDraft
-            → absent 时 IntentModelPort / deterministic fallback
-            → insert-once accepted IntentDraft
+            → load-or-create AcceptedInteractionArtifact（I1 目标）
+            → DeterministicInteractionRouter（I1 目标）
+                 → conversation / knowledge_lookup / log_analysis: REJECTED
+                 → unclear route: ClarificationRecord → CLARIFICATION_REQUIRED
+                 → capability_request + proceed: continue
             → CapabilityResolver
+            → SlotVerifier（I1 目标：可信槽位升级）
+                 → incomplete: ClarificationRecord → CLARIFICATION_REQUIRED
+                 → invalid: REJECTED
+                 → ready: capability-specific Params
             → PlanCompiler
+            → PlanStore.save / load
+            → ExecutionDisclosure audit barrier（I1 目标）
             → WorkflowRunner
                  → StepAdmission
                       → ToolPolicy
@@ -121,8 +135,8 @@ RequestEnvelope
 
 ### 4.1 模型边界
 
-Only the granted durable Runtime path may call `IntentModelPort`; the existing
-`IntentInterpreter` remains the deterministic fallback and does not own provider access.
+在 I1 尚未实现前，当前 RI3 源码事实仍是：只有获授权的 durable Runtime path 可以调用
+`IntentModelPort`；现有 `IntentInterpreter` 仍是确定性 fallback，不拥有 provider access。
 Provider output passes strict schema and local semantic validation, then the port returns
 the accepted DTO together with trusted nullable `ModelUsage`; usage is the locked SDK's
 normalized metadata narrowed again to local bounds, not part of the model-generated schema.
@@ -225,19 +239,16 @@ task creation, and makes zero model/artifact-store calls. RI3 moves heartbeat ow
 to one small application helper: Worker wraps execute/retry, while `handle()` wraps only
 its post-grant attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
-### 5.3 ContextAssembler
+### 5.3 Interaction Context / Clarification
 
-向 planner 只提供本轮可信执行上下文、已确认槽位和能力摘要；模型可额外接收显式授权的历史摘要与
-获批脱敏证据投影。连续对话只能由 PostgreSQL 中的显式 `parent_task_id` 建链；不按“最近一条”、
-飞书群 ID、root ref 或 provider chat/session 自动串联。父链必须同 actor、tenant、environment、channel
-和 Web binding owner；重新登录不因 session ID 变化丢失上下文。最多 20 个父任务、64,000 字符；
-超出按确定性规则截断。
+I1 目标是淘汰通用父任务历史与 `ContextAssembler` 目标语义。TaskStore 不保存普通 conversation
+history，provider chat/session 也不是任务事实源。连续补槽只通过
+`clarification_parent_task_id` 显式消费一个 `CLARIFICATION_REQUIRED` 父任务；每个子任务都重新鉴权、
+重新分类、重新 Resolver，并由 `SlotVerifier` 从本轮文本与父 `ClarificationRecord.confirmed_slots`
+中确定性生成可信 Params。
 
-`parent_task_id` 是不可信 selector。Web 入口只对用户选择的直接 parent 做 scoped lookup；Worker 的
-`ContextAssembler` 再从持久化 submission/binding 逐跳验证整个有界父链的终态和完整作用域。祖先
-后来漂移不把直接 parent 隐藏成入口 404，但会让已创建子任务在执行前确定性 `REJECTED`。RI3 只增加
-必要的窄读取和校验，不顺带重写当前 task/submission/binding/projection 的提交事务。飞书 reply/thread
-上下文等待 RI2 的真实事件语义证据后复用同一个 assembler；首版不实现。
+`clarification_parent_task_id` 只表示澄清父链，不是任意终态“继续这个任务”。普通对话记忆、资料查询
+历史、用户日志分析上下文和飞书 reply/thread 语义必须另立存储与 ADR，不能扩展澄清链或复用同名字段。
 
 Model context is bounded by field count, row count, Unicode character count and
 serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
@@ -276,13 +287,17 @@ only already-validated display data, does not import `capabilities` or read
 
 ### 5.4 CapabilityRegistry / CapabilityResolver
 
-Registry 是声明和版本索引，不是“关键词总表”，也不是执行器。Resolver 接收 `IntentDraft + RequestContext + CapabilitySnapshot`，只从当前注册快照生成一个 `CandidateSet`，并解释每个候选的必要上下文、拒绝原因和匹配证据。
+Registry 是声明和版本索引，不是“关键词总表”，也不是执行器。Resolver 接收
+`IntentDraft + RequestContext + CapabilitySnapshot`，只从当前注册快照生成一个 `CandidateSet`，并解释
+每个候选的必要上下文、拒绝原因和匹配证据。I1 后只有
+`InteractionKind.CAPABILITY_REQUEST + RoutingDisposition.PROCEED` 才能进入 Resolver；非执行通道只能
+稳定拒绝或进入澄清终态，不能在入口层自造候选。
 
 所有 active 路由和 shadow 观测必须使用这份 `CandidateSet`。shadow 不得再次计算候选；漂移时以 Resolver 的输出为准，shadow 只记录 `observed_disagreement`。
 
 ### 5.5 PlanCompiler
 
-将一个已解析候选编译成 `ExecutionPlan`。PlanCompiler 是确定性的：参数 schema、环境映射、目标解析、SQL 模板/AST、步骤依赖和输出投影都可测试、可复现。模型原文只能作为输入线索，不能作为计划原文写入执行。
+将一个已解析候选编译成 `ExecutionPlan`。PlanCompiler 是确定性的：参数 schema、环境映射、目标解析、SQL 模板/AST、步骤依赖和输出投影都可测试、可复现。模型原文只能作为输入线索，不能作为计划原文写入执行。I1 后 Planner 只接收 capability 专属不可变 Params；原始 `IntentDraft`、普通 dict、日志和网页文本都不能直接成为 Planner 输入。
 
 ### 5.6 WorkflowRunner
 
@@ -384,7 +399,8 @@ preflight 闭合逻辑目标和物理集群；完整决策见
   与 preflight verdict；Evidence builder 逐项比对获批策略。失败结果只允许记为
   `preflight=unverified`，不能借 adapter payload 或 limitations 把失败伪装成已验证。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
-- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。连续对话为显式父任务链，无 `parent_task_id` 时不自动推断历史。
+- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。I1
+  目标删除普通显式父任务历史；澄清补槽只走 `clarification_parent_task_id`，无父引用时不自动推断历史。
 - `AcceptedIntentDraft` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
 - `ModelAdvisory` 是 task 级 insert-once 的可选展示事实；失败时不保存并保留确定性答案。TaskView 只在
@@ -400,8 +416,10 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
 | `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段；Web 的 parent selector 不成为执行字段 |
-| `TaskSubmission` | envelope、context、as_of、parent_task_id（可选） | parent 由 Web scoped lookup 与 Worker 逐跳复核；无父链时旧 request/submission/idempotency digest 字节不漂移 |
+| `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选，I1 目标） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
+| `InteractionDraft` | proposed_kind、capability_draft、confidence、source | 模型/规则的不可信交互候选；`InteractionKind` 与 `RoutingDisposition` 由确定性 Router 采纳或拒绝 |
+| `AcceptedInteractionArtifact` | task_id、artifact_version、draft、origin、provider/model metadata、input/result digest、usage、fencing | I1 的 insert-once 交互事实；替代新运行路径的 accepted intent，模型元数据不来自模型响应 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
 | `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；model origin 绑定模型 profile，rule origin 不绑定 Gemini revision；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
@@ -412,8 +430,11 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ModelPortError` | 闭集 `ModelErrorCode` | application 可消费的 provider-neutral 安全失败；intent 仅将 rate-limit、5xx server 与明确 transport error 列为可重试 |
 | `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
+| `CapabilityInputBinding` | params_type、input_schema_ref、allowed_clarification_fields、slot_verifier、planner、confirmed_slot_projector | I1 的 capability 输入绑定；`CapabilitySpec.input_schema_ref`、binding 和 Params 必须一致 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
-| `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3） |
+| `ClarificationRecord` | task_id、subject、reason_code、missing_fields、confirmed_slots、record_version、fencing | I1 的澄清事实；`ClarificationRecordStore` grant-fenced、insert-once，record 必须先于 `CLARIFICATION_REQUIRED` 终态 |
+| `ReadClass` | BOUNDED、RESTRICTED | I1 的静态只读分类；由 `OperationSpec` 派生并进入 Plan schema V2 / `plan_hash`，当前源码尚未实现 V2 |
+| `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3）。I1-C 目标把 `PLAN_SCHEMA_VERSION` 升到 2 并加入 `PlanStep.read_class`，未实现前仍以源码事实为准 |
 | `PolicyDecision` | allow、reason、risk、policy_revision、obligations | fail-closed，理由结构化 |
 | `ApprovalRequest` | task_id、step_id、plan_hash、target_fingerprint、policy_revision、subject、expires_at、state | 审批与具体步骤绑定；`policy_revision` 使「policy 变化不能静默让旧审批继续生效」可独立断言（ADR-009 D3） |
 | `AdmissionCertificate` | step_id、operation、effect_class、policy_decision、approval_ref、plan_hash、target_fingerprint、tool_call_hash | `StepAdmission` 产出、`ToolGateway` 消费；**同时绑定步骤身份与调用内容**，`tool_call_hash` 覆盖 `ToolCall` 全部字段，使「未经准入即调用工具」与「持合法凭证替换参数」都不可表达（ADR-009 D4） |
@@ -426,6 +447,8 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `EvidenceEnvelope` | facts、source、captured_at、readonly、limitations | 事实与解释分开 |
 | `TaskOutcome` | status、terminal_reason、evidence_refs、render_ref | 终态语义封闭，indeterminate 一等公民 |
 | `RenderPayload` | answer、sections、next_steps、status、refs | 只负责展示投影，不承载执行决策 |
+| `ClarificationPayload` | reason_code、missing_fields、prompt | 只从 `ClarificationRecord` 投影，不是 `RenderPayload` 分支 |
+| `ExecutionDisclosure` | capability、target summary、read disposition、projected slots、external_target_access | 首次 Gateway 前的可查询披露事实；表示计划语义，不表示渠道已送达或真实目标已联网 |
 
 上表是按里程碑演进的稳定契约摘要：原始内核 DTO 的精确类型由 M2 审定，RI3 新增模型事实
 契约的精确字段与类型以已接受的 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 为准。
@@ -505,14 +528,18 @@ closed fallback code). Model-stage free-form detail remains empty. Prompt, respo
 provider error text and credentials are neither trace fields nor persisted artifacts.
 Observation numbers are strict, non-negative and signed-64-bit bounded; total request
 count is 0–2 and advisory is further limited to 0–1.
+ADR-017/I1 将新分类事件改为 `ModelCallKind.INTERACTION`，单 attempt 的
+`ModelCallObservation.request_count` 为 `0..1`；历史 `ModelCallKind.INTENT`
+仍按 `0..2` 只读兼容，`ADVISORY` 仍为 `0..1`，不得把字段级上限全局降为 1。
+I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，错误归因阶段从当前十个
+扩展为十一个阶段；在 I1-D 合入前，当前源码和契约测试仍是 RI3 后的十个阶段。
 
-Parent-aware idempotency changes only the semantic request digest: a non-null
-`parent_task_id` is included in `request_dedup_digest` and the stored
-`submission_digest`, never in `idempotency_scope_digest`. The first digest decides
-same-key semantic conflicts; the full submission digest remains a stored-row
-consistency checksum. Null-parent canonical bytes are frozen unchanged.
-Every create path and the shared submission-integrity readback recompute that semantic
-digest with the persisted parent; creation and later integrity checks cannot use different inputs.
+以下 parent-aware idempotency 是 RI3 当前源码事实；ADR-017/I1 目标会以
+`clarification_parent_task_id` 取代通用父任务历史。当前事实为：非空 `parent_task_id` 进入
+`request_dedup_digest` 和已存 `submission_digest`，但不进入 `idempotency_scope_digest`。前者判定
+同 key 语义冲突，完整 submission digest 只作为存储行一致性 checksum。空 parent 的 canonical bytes
+保持不变。所有创建路径与共享 submission-integrity readback 都必须用持久化 parent 重算该语义 digest；
+创建与后续完整性检查不能使用不同输入。
 
 Worker 复用现有 heartbeat，覆盖整个 `execute_task()` 与 retry scheduling；Runner 不启动第二份。
 RI3 does not add a whole-task deadline. It preserves the current 25-second StarRocks
@@ -555,12 +582,14 @@ M5 已把 `TraceSink.emit` 收窄为必须等待的异步出口，并用显式 `
 建议的通用任务状态：
 
 ```text
-created → planning → running → awaiting_approval → running
-                         ├──→ succeeded
-                         ├──→ failed
-                         ├──→ rejected
-                         ├──→ canceled
-                         └──→ indeterminate
+created → planning
+     ├──→ clarification_required
+     └──→ running → awaiting_approval → running
+               ├──→ succeeded
+               ├──→ failed
+               ├──→ rejected
+               ├──→ canceled
+               └──→ indeterminate
 ```
 
 具体领域的运行状态不强行统一；统一的是 TaskStore 的生命周期、终态和并发语义。任何终态都不可被后到事件改写；恢复时如果状态、计划、目标或 policy revision 不一致，必须重新规划或安全终止。
@@ -759,6 +788,11 @@ Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、L
 获批并实现后才新增 Model，形成十个阶段。Model 只描述 provider/结构化复验；Intent 仍描述最终被
 接受的 model/rule draft。模型失败并成功 fallback 时 Model 为失败、Intent 为成功，根因不会被重复
 记到两个阶段。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3 与 RI3。
+
+ADR-017/I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，位于 PlanStore
+读回/投影校验之后、StepAdmission/Gateway 之前；届时错误归因阶段扩展为十一个阶段。在 I1-D
+合入前，当前源码事实仍是十个阶段。Disclosure 只表示披露事实与审计持久化，不表示渠道送达、
+用户已读、审批通过或真实目标已联网。
 
 ### 13.2 eval 的边界
 

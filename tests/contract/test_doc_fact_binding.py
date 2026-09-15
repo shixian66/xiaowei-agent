@@ -139,3 +139,140 @@ def test_the_ri5_gate_binding_is_discriminating() -> None:
         assert phrase not in _RI5_ACCEPTANCE_SET, (
             f"旧形状 {phrase!r} 是 canonical 句的子串，禁用断言会恒假"
         )
+
+
+# --- I0/I1 智能交互入口文档门 -------------------------------------------------
+
+_ADR_017 = _ROOT / "docs/adr/ADR-017-intelligent-interaction-and-clarification.md"
+_ADR_017_REQUIRED_TERMS = (
+    "InteractionKind",
+    "RoutingDisposition",
+    "CLARIFICATION_REQUIRED",
+    "clarification_parent_task_id",
+    "ClarificationRecordStore",
+    "CapabilityInputBinding",
+    "ReadClass",
+    "ExecutionDisclosure",
+)
+
+
+def test_adr_017_freezes_the_i0_i1_interaction_terms() -> None:
+    assert _ADR_017.exists(), "ADR-017 缺失，I0/I1 设计不能只停留在 superpowers 计划稿"
+    text = _ADR_017.read_text(encoding="utf-8")
+    missing = [term for term in _ADR_017_REQUIRED_TERMS if term not in text]
+    assert not missing, f"ADR-017 未冻结这些 I0/I1 术语：{missing}"
+
+
+_I0_TRUTH_DOC_TERMS = {
+    "ARCHITECTURE.md": (
+        "→ load-or-create AcceptedInteractionArtifact（I1 目标）",
+        "→ DeterministicInteractionRouter（I1 目标）",
+        "PipelineStage.DISCLOSURE",
+        "十一个阶段",
+    ),
+    "DEVELOPMENT_PLAN.md": (
+        "I0 文档与契约",
+        "I1 安全分流/澄清/披露",
+        "InteractionArtifact → DeterministicInteractionRouter → CapabilityResolver → "
+        "SlotVerifier → PlanCompiler",
+    ),
+    "README.md": (
+        "智能交互入口 I0-DOC 正在冻结",
+        "当前源码尚未实现 I1",
+        "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
+    ),
+    "AGENT_HANDOFF.md": (
+        "I0-DOC 目标",
+        "I1 尚未实现，当前没有",
+        "ADR-017",
+    ),
+}
+
+_I0_TRACE_DOC_TERMS = {
+    "docs/adr/ADR-017-intelligent-interaction-and-clarification.md": (
+        "PipelineStage.DISCLOSURE",
+        "十一个阶段",
+        "ModelCallKind.INTERACTION",
+    ),
+    "ARCHITECTURE.md": (
+        "PipelineStage.DISCLOSURE",
+        "十一个阶段",
+        "ModelCallKind.INTERACTION",
+    ),
+}
+
+
+def _missing_i0_truth_terms(docs: dict[str, str]) -> dict[str, list[str]]:
+    missing = {
+        name: [term for term in terms if term not in docs[name]]
+        for name, terms in _I0_TRUTH_DOC_TERMS.items()
+    }
+    return {name: terms for name, terms in missing.items() if terms}
+
+
+def test_i0_truth_docs_are_bound_to_adr_017() -> None:
+    docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
+    missing = _missing_i0_truth_terms(docs)
+    assert not missing, f"I0 真相文档未同步 ADR-017 入口口径：{missing}"
+
+
+def test_i0_trace_docs_are_bound_to_disclosure_stage() -> None:
+    missing = {
+        name: [term for term in terms if term not in (_ROOT / name).read_text(encoding="utf-8")]
+        for name, terms in _I0_TRACE_DOC_TERMS.items()
+    }
+    missing = {name: terms for name, terms in missing.items() if terms}
+    assert not missing, f"I0 trace/错误归因文档未同步披露阶段口径：{missing}"
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    count = text.count(old)
+    assert count == 1, f"测试反例锚点不唯一或不存在：{old!r}"
+    return text.replace(old, new, 1)
+
+
+def test_i0_truth_doc_binding_is_discriminating() -> None:
+    """反例：删除 I0 承重段落时，绑定测试必须能红。"""
+    docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
+
+    readme_i0_status = (
+        "> 智能交互入口 I0-DOC 正在冻结 "
+        "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：\n"
+        "> 后续 I1 会在 Resolver 前增加分流、终态澄清、可信槽位、`ReadClass` "
+        "和执行披露屏障；当前源码尚未实现 I1，不能把该设计写成运行能力。\n"
+    )
+    without_readme_status = {
+        **docs,
+        "README.md": _replace_once(docs["README.md"], readme_i0_status, ""),
+    }
+    readme_missing = _missing_i0_truth_terms(without_readme_status)
+    assert "README.md" in readme_missing
+    assert "当前源码尚未实现 I1" in readme_missing["README.md"]
+
+    arch_i0_chain = (
+        "            → load-or-create AcceptedInteractionArtifact（I1 目标）\n"
+        "            → DeterministicInteractionRouter（I1 目标）\n"
+    )
+    without_arch_chain = {
+        **docs,
+        "ARCHITECTURE.md": _replace_once(docs["ARCHITECTURE.md"], arch_i0_chain, ""),
+    }
+    arch_missing = _missing_i0_truth_terms(without_arch_chain)
+    assert "ARCHITECTURE.md" in arch_missing
+    assert "→ load-or-create AcceptedInteractionArtifact（I1 目标）" in arch_missing[
+        "ARCHITECTURE.md"
+    ]
+
+
+def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
+    stale_phrases = (
+        "Context → IntentDraft → Resolver → PlanCompiler",
+        "ContextAssembler（只有显式 parent 时）",
+    )
+    found = [
+        (name, phrase)
+        for name in _I0_TRUTH_DOC_TERMS
+        for phrase in stale_phrases
+        if phrase in (_ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not found, f"I0 真相文档仍在使用旧入口/父上下文形状：{found}"
