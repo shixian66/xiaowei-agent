@@ -114,6 +114,19 @@ async def test_get_uses_trusted_scope_and_returns_runtime_projection() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("task_id", ["_bad", "a" * 250, "中文", "a b"])
+async def test_get_rejects_malformed_task_id_as_not_found_before_runtime(
+    task_id: str,
+) -> None:
+    service = _Service()
+    response = await _request(_app(service), "GET", f"/v1/tasks/{task_id}")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": {"code": "not_found"}}
+    assert service.lookups == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "status", "code"),
     [

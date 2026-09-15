@@ -23,6 +23,8 @@
   `RoutingDisposition`，该枚举仅保留给后续确定性 Router；`ConfirmedTimeRangeValue` 使用 UTC
   offset 语义并把 `timezone_id` 收紧为 `UTC`/`Asia/Shanghai` 闭集，JSONB 往返覆盖
   `ClarificationRecord`/`ClarificationContext`/`ClarificationPayload`。
+- 本轮二次复审 P2 已关闭：三处任务详情 URL 生成函数恢复对 `quote(..., safe="")` 的承重测试；
+  `/v1/tasks/{task_id}` 对非法 TaskId 形状在构造 `TaskLookup` 前返回 404，且不触达 Runtime。
 - 本分支额外修复了一处测试隔离问题：`tests/contract/test_trace_delivery.py` 不再依赖 root logging
   propagation 或 pytest 共享 `caplog.handler`，避免被 `configure_logging()` 的全局 logger/filter 状态污染。
 - I1-A 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，

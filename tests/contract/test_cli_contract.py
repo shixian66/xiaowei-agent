@@ -66,6 +66,12 @@ def _run(argv: list[str], opener: _Opener) -> tuple[int, str, str]:
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def test_task_query_path_encodes_reserved_characters_without_validating_task_id() -> None:
+    assert task_query_path("task/with?reserved#chars%") == (
+        "/v1/tasks/task%2Fwith%3Freserved%23chars%25"
+    )
+
+
 def test_submit_request_contains_only_the_api_body_fields_and_utf8() -> None:
     opener = _Opener()
     code, _, _ = _run(

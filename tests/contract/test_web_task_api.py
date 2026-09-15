@@ -49,6 +49,7 @@ from xiaowei_agent.interfaces.web_models import (
     WebTaskDetail,
     WebTaskSubmitRequest,
     WebTaskSummary,
+    web_task_detail_path,
 )
 from xiaowei_agent.persistence import IdempotencyConflictError
 from xiaowei_agent.persistence.errors import (
@@ -72,6 +73,12 @@ def _field_max_length(model: type[Any], field_name: str) -> int | None:
         if isinstance(maximum, int):
             return maximum
     return None
+
+
+def test_web_task_detail_path_encodes_reserved_characters_without_validating_task_id() -> None:
+    assert web_task_detail_path("task/with?reserved#chars%") == (
+        "/app/tasks/task%2Fwith%3Freserved%23chars%25"
+    )
 
 
 def _principal(
