@@ -15,6 +15,9 @@ from xiaowei_agent.application.task_view_runtime import (
 )
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
+    ClarificationField,
+    ClarificationPayload,
+    ClarificationReasonCode,
     EvidenceEnvelope,
     ModelAdvisory,
     ModelInvocationProfile,
@@ -120,3 +123,59 @@ async def test_narrow_runtime_replays_an_existing_terminal_submission_without_ex
     assert replayed.status is TaskStatus.SUCCEEDED
     assert replayed.render == rendered
     assert harness.gateway.invocations == invocations
+
+
+def test_task_view_uses_clarification_payload_for_clarification_terminal() -> None:
+    payload = ClarificationPayload(
+        reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+        missing_fields=(ClarificationField.TIME_RANGE,),
+        prompt="请补充时间范围。",
+    )
+
+    view = task_view_module.TaskView(
+        task_id="task-clarify",
+        status=TaskStatus.CLARIFICATION_REQUIRED,
+        clarification=payload,
+        query_path="/v1/tasks/task-clarify",
+    )
+
+    assert view.render is None
+    assert view.clarification == payload
+
+
+def test_task_view_rejects_mismatched_render_and_clarification_shapes() -> None:
+    clarification = ClarificationPayload(
+        reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+        missing_fields=(ClarificationField.TIME_RANGE,),
+        prompt="请补充时间范围。",
+    )
+    render = RenderPayload(
+        answer="已完成",
+        sections=(),
+        next_steps=("继续观察。",),
+        status=TaskStatus.SUCCEEDED,
+        refs=(),
+    )
+
+    with pytest.raises(ValueError, match="clarification presence"):
+        task_view_module.TaskView(
+            task_id="task-1",
+            status=TaskStatus.CLARIFICATION_REQUIRED,
+            render=render,
+            clarification=clarification,
+            query_path="/v1/tasks/task-1",
+        )
+    with pytest.raises(ValueError, match="clarification presence"):
+        task_view_module.TaskView(
+            task_id="task-2",
+            status=TaskStatus.SUCCEEDED,
+            render=render,
+            clarification=clarification,
+            query_path="/v1/tasks/task-2",
+        )
+    with pytest.raises(ValueError, match="render presence"):
+        task_view_module.TaskView(
+            task_id="task-3",
+            status=TaskStatus.SUCCEEDED,
+            query_path="/v1/tasks/task-3",
+        )

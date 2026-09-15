@@ -35,6 +35,7 @@ _STATUS_PRESENTATION: Final[dict[TaskStatus, tuple[str, str, str]]] = {
     TaskStatus.SUCCEEDED: ("小维处理完成", "green", "已完成"),
     TaskStatus.FAILED: ("小维处理失败", "red", "处理失败"),
     TaskStatus.REJECTED: ("小维已拒绝", "orange", "已拒绝"),
+    TaskStatus.CLARIFICATION_REQUIRED: ("小维需要补充信息", "orange", "需要补充信息"),
     TaskStatus.CANCELED: ("小维已取消", "grey", "已取消"),
     TaskStatus.INDETERMINATE: ("小维结果待确认", "yellow", "结果待确认"),
 }

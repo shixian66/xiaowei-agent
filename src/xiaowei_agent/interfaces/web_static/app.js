@@ -2,6 +2,7 @@ const TERMINAL_STATUSES = new Set([
   "succeeded",
   "failed",
   "rejected",
+  "clarification_required",
   "canceled",
   "indeterminate",
 ]);
@@ -14,6 +15,7 @@ const STATUS = Object.freeze({
   succeeded: { label: "处理完成", icon: "✓" },
   failed: { label: "处理失败", icon: "×" },
   rejected: { label: "已拒绝", icon: "!" },
+  clarification_required: { label: "需要补充信息", icon: "!" },
   canceled: { label: "已取消", icon: "—" },
   indeterminate: { label: "结果待确认", icon: "?" },
 });

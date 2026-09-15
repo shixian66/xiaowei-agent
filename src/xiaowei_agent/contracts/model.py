@@ -20,6 +20,7 @@ from xiaowei_agent.contracts.intent import (
     INTENT_SLOT_ALLOWLISTS,
     IntentDraft,
 )
+from xiaowei_agent.contracts.interaction import InteractionDraft
 
 MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
 _MAX_UTF8_BYTES_PER_CODE_POINT: Final[int] = 4
@@ -175,6 +176,13 @@ class IntentModelResult(Contract):
     usage: ModelUsage
 
 
+class InteractionModelResult(Contract):
+    """一次 interaction 分类调用接受的 DTO 与同次可信 usage。"""
+
+    draft: InteractionDraft
+    usage: ModelUsage
+
+
 class AdvisoryModelResult(Contract):
     """一次 advisory 调用接受的 DTO 与同次可信 usage。"""
 
@@ -199,6 +207,12 @@ class ModelInvocationProfile(Contract):
     intent_schema_revision: Literal["ri3-intent-schema-v1"] = (
         "ri3-intent-schema-v1"
     )
+    interaction_prompt_revision: Literal["i1-interaction-prompt-v1"] = (
+        "i1-interaction-prompt-v1"
+    )
+    interaction_schema_revision: Literal["i1-interaction-schema-v1"] = (
+        "i1-interaction-schema-v1"
+    )
     advisory_prompt_revision: Literal["ri3-advisory-prompt-v1"] = (
         "ri3-advisory-prompt-v1"
     )
@@ -206,10 +220,13 @@ class ModelInvocationProfile(Contract):
         "ri3-advisory-schema-v1"
     )
     intent_thinking_level: Literal["LOW"] = "LOW"
+    interaction_thinking_level: Literal["LOW"] = "LOW"
     advisory_thinking_level: Literal["HIGH"] = "HIGH"
     intent_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
+    interaction_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
     advisory_timeout_seconds: StrictInt = Field(default=180, ge=180, le=180)
     intent_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
+    interaction_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
     advisory_output_tokens: StrictInt = Field(default=4_000, ge=4_000, le=4_000)
 
 
@@ -244,6 +261,7 @@ __all__ = [
     "MAX_MODEL_USAGE_TOKENS",
     "AdvisoryModelResult",
     "IntentModelResult",
+    "InteractionModelResult",
     "ModelAdvisory",
     "ModelIntentRequest",
     "ModelInvocationProfile",

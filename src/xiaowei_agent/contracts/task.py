@@ -21,6 +21,7 @@ from xiaowei_agent.contracts.base import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.clarification import ClarificationPayload
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
 from xiaowei_agent.contracts.render import RenderPayload
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
@@ -32,6 +33,7 @@ TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
         TaskStatus.REJECTED,
         TaskStatus.CANCELED,
         TaskStatus.INDETERMINATE,
+        TaskStatus.CLARIFICATION_REQUIRED,
     }
 )
 
@@ -99,12 +101,18 @@ class TaskView(Contract):
     task_id: StrictStr
     status: TaskStatus
     render: RenderPayload | None = None
+    clarification: ClarificationPayload | None = None
     query_path: StrictStr
 
     @model_validator(mode="after")
     def _projection_is_consistent(self) -> Self:
-        terminal = self.status in TERMINAL_STATUSES
-        if terminal != (self.render is not None):
+        needs_clarification = self.status is TaskStatus.CLARIFICATION_REQUIRED
+        terminal_with_render = self.status in TERMINAL_STATUSES and not needs_clarification
+        if needs_clarification != (self.clarification is not None):
+            raise ValueError("clarification presence must agree with task status")
+        if self.clarification is not None and self.render is not None:
+            raise ValueError("clarification presence excludes render")
+        if terminal_with_render != (self.render is not None):
             raise ValueError("render presence must agree with terminal status")
         if self.render is not None and self.render.status is not self.status:
             raise ValueError("render status must agree with task status")
@@ -120,6 +128,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
                 TaskStatus.CANCELED,
                 TaskStatus.FAILED,
                 TaskStatus.REJECTED,
+                TaskStatus.CLARIFICATION_REQUIRED,
             }
         ),
         TaskStatus.PLANNING: frozenset(
@@ -128,6 +137,7 @@ ALLOWED_TRANSITIONS: Final[Mapping[TaskStatus, frozenset[TaskStatus]]] = Mapping
                 TaskStatus.FAILED,
                 TaskStatus.CANCELED,
                 TaskStatus.REJECTED,
+                TaskStatus.CLARIFICATION_REQUIRED,
             }
         ),
         TaskStatus.RUNNING: frozenset(

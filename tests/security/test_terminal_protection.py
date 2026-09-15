@@ -30,6 +30,7 @@ def test_terminal_set_matches_architecture() -> None:
         "succeeded",
         "failed",
         "rejected",
+        "clarification_required",
         "canceled",
         "indeterminate",
     }
