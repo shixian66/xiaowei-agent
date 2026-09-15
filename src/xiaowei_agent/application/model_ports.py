@@ -8,24 +8,15 @@ from typing import Final, Protocol
 
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
-    IntentModelResult,
     InteractionClassifierRequest,
     InteractionModelResult,
     ModelErrorCode,
     ModelFallbackCode,
-    ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
 )
 
 ADVISORY_OUTPUT_TOKEN_LIMIT: Final[int] = 4_000
-INTENT_RETRYABLE_ERROR_CODES: Final[frozenset[ModelErrorCode]] = frozenset(
-    {
-        ModelErrorCode.RATE_LIMITED,
-        ModelErrorCode.SERVER_ERROR,
-        ModelErrorCode.TRANSPORT_ERROR,
-    }
-)
 MODEL_ERROR_FALLBACK_CODES: Final[Mapping[ModelErrorCode, ModelFallbackCode]] = (
     MappingProxyType(
         {
@@ -68,12 +59,6 @@ def validate_advisory_output_tokens(value: StrictInt) -> StrictInt:
     return value
 
 
-class IntentModelPort(Protocol):
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
-        """返回草案与 usage；失败时抛安全的 ``ModelPortError``。"""
-        ...
-
-
 class InteractionClassifierPort(Protocol):
     async def classify(
         self, request: InteractionClassifierRequest
@@ -95,9 +80,7 @@ class SlowQueryAdvisoryPort(Protocol):
 
 __all__ = [
     "ADVISORY_OUTPUT_TOKEN_LIMIT",
-    "INTENT_RETRYABLE_ERROR_CODES",
     "MODEL_ERROR_FALLBACK_CODES",
-    "IntentModelPort",
     "InteractionClassifierPort",
     "ModelPortError",
     "SlowQueryAdvisoryPort",

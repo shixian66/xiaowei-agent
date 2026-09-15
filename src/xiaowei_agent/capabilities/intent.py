@@ -126,7 +126,7 @@ class RuleBasedIntentInterpreter:
 
     REQUIRED_SLOTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
         {
-            SLOW_QUERY_INTENT: frozenset({"environment_id"}),
+            SLOW_QUERY_INTENT: frozenset(),
             PROMETHEUS_ALERT_INTENT: frozenset({"alert_name", "instance"}),
             ASSET_INVENTORY_INTENT: frozenset(),
             UNKNOWN_INTENT: frozenset(),
@@ -140,12 +140,11 @@ class RuleBasedIntentInterpreter:
         """按闭集规则产出草案。
 
         :param text: 用户原文，按不可信外部文本处理。
-        :param context: 执行上下文；``environment_id`` 在原文未指定时由它兜底。
+        :param context: 执行上下文；规则解释器只识别用户明示槽位，不改写上下文。
         """
+        del context
         intent = self._recognise_intent(text)
         slots = self._extract_slots(text, intent=intent)
-        if intent == SLOW_QUERY_INTENT:
-            slots.setdefault("environment_id", context.environment_id)
         recognised = intent != UNKNOWN_INTENT
         missing = tuple(sorted(self.REQUIRED_SLOTS[intent] - set(slots)))
         if intent == ASSET_INVENTORY_INTENT and not (_ASSET_SELECTOR_SLOTS & slots.keys()):

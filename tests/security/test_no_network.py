@@ -44,7 +44,7 @@ from xiaowei_agent.config import load_settings
 from xiaowei_agent.interfaces.local_stack import build_in_memory_local_stack
 settings = load_settings({'XIAOWEI_ENVIRONMENT_ID': 'dev'})
 stack = build_in_memory_local_stack(settings=settings)
-assert stack.intent_model is None
+assert stack.interaction_classifier is None
 assert stack.slow_query_advisory is None
 """
     result = subprocess.run(  # noqa: S603 -- 当前解释器固定执行内联审计脚本

@@ -16,10 +16,10 @@ from xiaowei_agent.contracts.base import (
     StrictStr,
 )
 from xiaowei_agent.contracts.clarification import ClarificationContext
+from xiaowei_agent.contracts.enums import InteractionKind
 from xiaowei_agent.contracts.intent import (
     INTENT_MISSING_ALLOWLISTS,
     INTENT_SLOT_ALLOWLISTS,
-    IntentDraft,
 )
 from xiaowei_agent.contracts.interaction import InteractionDraft
 
@@ -27,11 +27,6 @@ MAX_MODEL_TEXT_CHARACTERS: Final[int] = 8_192
 _MAX_UTF8_BYTES_PER_CODE_POINT: Final[int] = 4
 MAX_MODEL_TEXT_BYTES: Final[int] = (
     MAX_MODEL_TEXT_CHARACTERS * _MAX_UTF8_BYTES_PER_CODE_POINT
-)
-MAX_MODEL_HISTORY_ITEMS: Final[int] = 20
-MAX_MODEL_HISTORY_CHARACTERS: Final[int] = 64_000
-MAX_MODEL_HISTORY_BYTES: Final[int] = (
-    MAX_MODEL_HISTORY_CHARACTERS * _MAX_UTF8_BYTES_PER_CODE_POINT
 )
 MAX_MODEL_REQUEST_BYTES: Final[int] = 512 * 1_024
 MAX_ADVISORY_ROWS: Final[int] = 20
@@ -68,21 +63,6 @@ AdvisoryText = Annotated[
     Field(max_length=MAX_ADVISORY_TEXT_CHARACTERS),
     AfterValidator(_valid_utf8),
 ]
-
-
-class ModelIntentRequest(Contract):
-    """仅含已净化文本的意图理解请求。"""
-
-    user_text: ModelText
-    history: tuple[ModelText, ...] = Field(max_length=MAX_MODEL_HISTORY_ITEMS)
-    context_truncated: bool
-
-    @model_validator(mode="after")
-    def _history_and_request_are_bounded(self) -> "ModelIntentRequest":
-        if sum(map(len, self.history)) > MAX_MODEL_HISTORY_CHARACTERS:
-            raise ValueError("model history exceeds the character limit")
-        _require_request_size(self)
-        return self
 
 
 class InteractionClassifierRequest(Contract):
@@ -163,6 +143,21 @@ class ProviderIntentResponse(Contract):
         return self
 
 
+class ProviderInteractionResponse(Contract):
+    """供应商可返回的 interaction 字段闭集；adapter 本地补 ``source``。"""
+
+    proposed_kind: InteractionKind
+    capability: ProviderIntentResponse | None = None
+    confidence: FiniteFloat = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _capability_shape_matches_kind(self) -> "ProviderInteractionResponse":
+        needs_capability = self.proposed_kind is InteractionKind.CAPABILITY_REQUEST
+        if needs_capability != (self.capability is not None):
+            raise ValueError("interaction capability presence does not match kind")
+        return self
+
+
 class ModelAdvisory(Contract):
     """只读分析展示字段；不含事实、引用、状态或可执行动作。"""
 
@@ -180,13 +175,6 @@ class ModelUsage(Contract):
     output_tokens: StrictInt | None = Field(
         default=None, ge=0, le=MAX_MODEL_USAGE_TOKENS
     )
-
-
-class IntentModelResult(Contract):
-    """一次 intent 调用接受的 DTO 与同次可信 usage。"""
-
-    draft: IntentDraft
-    usage: ModelUsage
 
 
 class InteractionModelResult(Contract):
@@ -214,12 +202,6 @@ class ModelInvocationProfile(Contract):
     origin: Literal["https://generativelanguage.googleapis.com"] = (
         "https://generativelanguage.googleapis.com"
     )
-    intent_prompt_revision: Literal["ri3-intent-prompt-v1"] = (
-        "ri3-intent-prompt-v1"
-    )
-    intent_schema_revision: Literal["ri3-intent-schema-v1"] = (
-        "ri3-intent-schema-v1"
-    )
     interaction_prompt_revision: Literal["i1-interaction-prompt-v1"] = (
         "i1-interaction-prompt-v1"
     )
@@ -232,13 +214,10 @@ class ModelInvocationProfile(Contract):
     advisory_schema_revision: Literal["ri3-advisory-schema-v1"] = (
         "ri3-advisory-schema-v1"
     )
-    intent_thinking_level: Literal["LOW"] = "LOW"
     interaction_thinking_level: Literal["LOW"] = "LOW"
     advisory_thinking_level: Literal["HIGH"] = "HIGH"
-    intent_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
     interaction_timeout_seconds: StrictInt = Field(default=60, ge=60, le=60)
     advisory_timeout_seconds: StrictInt = Field(default=180, ge=180, le=180)
-    intent_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
     interaction_output_tokens: StrictInt = Field(default=2_048, ge=2_048, le=2_048)
     advisory_output_tokens: StrictInt = Field(default=4_000, ge=4_000, le=4_000)
 
@@ -265,23 +244,19 @@ def model_text_values(value: Contract) -> tuple[str, ...]:
 
 __all__ = [
     "MAX_ADVISORY_ROWS",
-    "MAX_MODEL_HISTORY_BYTES",
-    "MAX_MODEL_HISTORY_CHARACTERS",
-    "MAX_MODEL_HISTORY_ITEMS",
     "MAX_MODEL_REQUEST_BYTES",
     "MAX_MODEL_TEXT_BYTES",
     "MAX_MODEL_TEXT_CHARACTERS",
     "MAX_MODEL_USAGE_TOKENS",
     "AdvisoryModelResult",
-    "IntentModelResult",
     "InteractionClassifierRequest",
     "InteractionModelResult",
     "ModelAdvisory",
-    "ModelIntentRequest",
     "ModelInvocationProfile",
     "ModelUsage",
     "ProviderIntentResponse",
     "ProviderIntentSlots",
+    "ProviderInteractionResponse",
     "SlowQueryAdvisoryRequest",
     "model_text_values",
 ]

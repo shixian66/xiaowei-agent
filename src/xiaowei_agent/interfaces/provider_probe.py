@@ -48,7 +48,7 @@ GEMINI_PROBE_INPUT: Final[str] = "xiaowei connection check"
 """发给 Gemini 的固定合成输入。
 
 固定成模块级常量而不是拼一个随请求变化的串：探针的输入若可被调用方影响，它就成了
-一条绕过 ``IntentModelPort`` 的任意文本出站通道。内容本身不含任何本机事实。
+一条绕过 ``InteractionClassifierPort`` 的任意文本出站通道。内容本身不含任何本机事实。
 """
 
 

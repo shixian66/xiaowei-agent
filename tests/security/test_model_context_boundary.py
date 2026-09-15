@@ -11,10 +11,12 @@ from tests.fakes.recordings import _row
 from xiaowei_agent.application.model_advisory import (
     project_slow_query_advisory_request,
 )
-from xiaowei_agent.application.model_intent import build_model_intent_request
+from xiaowei_agent.application.model_interaction import (
+    build_interaction_classifier_request,
+)
 from xiaowei_agent.application.model_ports import (
     MODEL_ERROR_FALLBACK_CODES,
-    IntentModelPort,
+    InteractionClassifierPort,
     SlowQueryAdvisoryPort,
     fallback_code_for_model_error,
 )
@@ -27,20 +29,20 @@ from xiaowei_agent.contracts import (
     ExternalSource,
     IntentDraft,
     IntentSource,
+    InteractionClassifierRequest,
     ModelAdvisory,
     ModelErrorCode,
     ModelFallbackCode,
-    ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     TaskOutcome,
     TaskStatus,
 )
 from xiaowei_agent.persistence.model_artifacts import (
     AdvisoryArtifactCandidate,
-    IntentArtifactCandidate,
+    InteractionArtifactCandidate,
 )
 from xiaowei_agent.persistence.schema import (
-    TASK_ACCEPTED_INTENTS,
+    TASK_INTERACTION_ARTIFACTS,
     TASK_MODEL_ADVISORIES,
 )
 from xiaowei_agent.redaction import scrub_text
@@ -59,9 +61,9 @@ def test_every_model_error_has_one_explicit_total_fallback_mapping() -> None:
 
 
 def test_model_ports_expose_only_the_two_narrow_typed_calls() -> None:
-    intent_calls = {
+    interaction_calls = {
         name
-        for name, value in IntentModelPort.__dict__.items()
+        for name, value in InteractionClassifierPort.__dict__.items()
         if not name.startswith("_") and callable(value)
     }
     advisory_calls = {
@@ -69,9 +71,9 @@ def test_model_ports_expose_only_the_two_narrow_typed_calls() -> None:
         for name, value in SlowQueryAdvisoryPort.__dict__.items()
         if not name.startswith("_") and callable(value)
     }
-    assert intent_calls == {"generate_intent"}
+    assert interaction_calls == {"classify"}
     assert advisory_calls == {"generate_advisory"}
-    assert set(inspect.signature(IntentModelPort.generate_intent).parameters) == {
+    assert set(inspect.signature(InteractionClassifierPort.classify).parameters) == {
         "self",
         "request",
     }
@@ -80,15 +82,13 @@ def test_model_ports_expose_only_the_two_narrow_typed_calls() -> None:
     ) == {"self", "request", "max_output_tokens"}
 
 
-def test_intent_request_has_no_identity_policy_tool_or_endpoint_context() -> None:
-    assert set(ModelIntentRequest.model_fields) == {
+def test_interaction_request_has_no_identity_policy_tool_or_endpoint_context() -> None:
+    assert set(InteractionClassifierRequest.model_fields) == {
         "user_text",
-        "history",
-        "context_truncated",
+        "clarification",
     }
-    request = build_model_intent_request(
+    request = build_interaction_classifier_request(
         user_text="检查慢查询",
-        history=("上一轮只读结果",),
     )
     dumped = request.model_dump(mode="python")
     forbidden = {
@@ -107,15 +107,12 @@ def test_intent_request_has_no_identity_policy_tool_or_endpoint_context() -> Non
 def test_secret_shaped_input_is_scrubbed_before_it_enters_the_model_dto() -> None:
     secret = "token=" + "synthetic-value"
     user_text = "检查慢查询 " + secret
-    history_text = "上一轮 " + secret
-    request = build_model_intent_request(
+    request = build_interaction_classifier_request(
         user_text=user_text,
-        history=(history_text,),
     )
 
     assert secret not in request.model_dump_json()
     assert request.user_text == scrub_text(user_text) != user_text
-    assert request.history[0] == scrub_text(history_text) != history_text
 
 
 def test_model_candidate_generation_cannot_be_changed_by_confidence_or_slots() -> None:
@@ -197,7 +194,7 @@ def test_advisory_cannot_carry_deterministic_facts_or_actions(field: str) -> Non
 
 
 def test_model_artifact_payloads_and_tables_exclude_raw_provider_material() -> None:
-    expected_intent = {
+    expected_interaction = {
         "draft",
         "origin",
         "provider",
@@ -237,9 +234,9 @@ def test_model_artifact_payloads_and_tables_exclude_raw_provider_material() -> N
         "fencing_token",
     }
 
-    assert set(IntentArtifactCandidate.model_fields) == expected_intent
+    assert set(InteractionArtifactCandidate.model_fields) == expected_interaction
     assert set(AdvisoryArtifactCandidate.model_fields) == expected_advisory
-    assert set(TASK_ACCEPTED_INTENTS.c.keys()) == common_columns | {"draft"}
+    assert set(TASK_INTERACTION_ARTIFACTS.c.keys()) == common_columns | {"draft"}
     assert set(TASK_MODEL_ADVISORIES.c.keys()) == common_columns | {"advisory"}
     forbidden = {
         "prompt",
@@ -251,5 +248,5 @@ def test_model_artifact_payloads_and_tables_exclude_raw_provider_material() -> N
         "provider_error",
         "evidence",
     }
-    assert forbidden.isdisjoint(TASK_ACCEPTED_INTENTS.c.keys())
+    assert forbidden.isdisjoint(TASK_INTERACTION_ARTIFACTS.c.keys())
     assert forbidden.isdisjoint(TASK_MODEL_ADVISORIES.c.keys())

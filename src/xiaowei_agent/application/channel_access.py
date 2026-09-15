@@ -7,9 +7,12 @@ from pydantic import Field
 
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.contracts import (
+    TERMINAL_STATUSES,
     ActorTaskPageQuery,
     AuthenticatedPrincipal,
     AwareDatetime,
+    Channel,
+    ChannelKind,
     ChannelPermission,
     Contract,
     NonEmptyText,
@@ -23,6 +26,7 @@ from xiaowei_agent.contracts import (
     TaskView,
 )
 from xiaowei_agent.persistence.channel import (
+    ChannelBindingLookup,
     ChannelBindingNotFoundError,
     ChannelStore,
     GroupBindingLookup,
@@ -137,23 +141,31 @@ class TaskAccessService:
         """父任务必须属于同一 Web 身份；所有拒绝统一隐藏存在性。"""
         if ChannelPermission.VIEW_SAFE_TASK not in principal.permissions:
             raise TaskAccessNotFoundError
-        from xiaowei_agent.application.context import (
-            ParentContextRejectedError,
-            load_web_parent_chain,
-        )
-
         try:
-            await load_web_parent_chain(
-                task_store=self._tasks,
-                channel_store=self._channels,
-                parent_task_id=parent_task_id,
+            lookup = TaskLookup(
+                task_id=parent_task_id,
                 tenant_id=principal.tenant_id,
                 environment_id=principal.environment_id,
-                actor=principal.actor,
-                binding_owner=principal.subject_ref,
-                max_parent_tasks=1,
             )
-        except ParentContextRejectedError:
+            record = await self._tasks.get(lookup=lookup)
+            submission = await self._tasks.get_submission(lookup=lookup)
+            binding = await self._channels.get_binding(
+                lookup=ChannelBindingLookup(
+                    task_id=parent_task_id,
+                    tenant_id=principal.tenant_id,
+                    environment_id=principal.environment_id,
+                )
+            )
+        except (TaskNotFoundError, ChannelBindingNotFoundError):
+            raise TaskAccessNotFoundError from None
+        if (
+            record.status not in TERMINAL_STATUSES
+            or record.actor != principal.actor
+            or submission.parent_task_id == parent_task_id
+            or submission.envelope.channel is not Channel.WEB
+            or binding.channel is not ChannelKind.WEB
+            or binding.initiator_subject_ref != principal.subject_ref
+        ):
             raise TaskAccessNotFoundError from None
 
     @staticmethod

@@ -29,6 +29,7 @@ from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
+    TASK_INTERACTION_ARTIFACTS,
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
@@ -46,7 +47,15 @@ _ALEMBIC_VERSION_NUM_MAX_LENGTH = 32
 # ``test_altered_table_head_has_all_declared_columns_and_constraints`` 覆盖：它扫的是
 # 完整 upgrade SQL（含 ALTER），因此新增列或约束漏进迁移仍会转红。
 # 两处共用同一个集合，避免"加进跳过集却忘了补 head 检查"这种漂移。
-_ALTERED_AFTER_CREATION = (TASKS, TASK_SUBMISSIONS, WEB_SESSIONS)
+_ALTERED_AFTER_CREATION = (
+    TASKS,
+    TASK_SUBMISSIONS,
+    WEB_SESSIONS,
+    TASK_INTERACTION_ARTIFACTS,
+)
+_RENAMED_TABLES = {
+    "task_accepted_intents": "task_interaction_artifacts",
+}
 
 
 def _alembic_config() -> Config:
@@ -84,7 +93,10 @@ def _create_table_statements(sql: str) -> dict[str, str]:
     for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\n\);", sql, re.DOTALL):
         name = match.group(1)
         if name != _ALEMBIC_BOOKKEEPING:
-            found[name] = _normalise(f"CREATE TABLE {name} ({match.group(2)})")
+            final_name = _RENAMED_TABLES.get(name, name)
+            found[final_name] = _normalise(
+                f"CREATE TABLE {final_name} ({match.group(2)})"
+            )
     return found
 
 
@@ -176,6 +188,15 @@ def test_rev_0010_has_the_expected_revision_chain() -> None:
 
     assert revision.revision == "0010_local_admin_provider"
     assert revision.down_revision == "0009_task_parent_context"
+
+
+def test_rev_0011_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0011_interaction_clarification as revision,
+    )
+
+    assert revision.revision == "0011_interaction_clarification"
+    assert revision.down_revision == "0010_local_admin_provider"
 
 
 def test_revision_ids_fit_the_default_alembic_version_column() -> None:
@@ -315,7 +336,10 @@ def test_downgrade_drops_everything_upgrade_created() -> None:
         command.downgrade(config, "head:base", sql=True)
     emitted = buffer.getvalue()
     for table in ALL_TABLES:
-        assert f"DROP TABLE {table.name}" in emitted
+        drop_name = {
+            "task_interaction_artifacts": "task_accepted_intents",
+        }.get(table.name, table.name)
+        assert f"DROP TABLE {drop_name}" in emitted
     assert f"DROP SEQUENCE {FENCING_SEQUENCE_NAME}" in emitted
 
 

@@ -19,14 +19,17 @@ from xiaowei_agent.application.model_ports import (
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentDraft,
-    IntentModelResult,
     IntentSource,
+    InteractionClassifierRequest,
+    InteractionDraft,
+    InteractionModelResult,
+    InteractionSource,
     ModelAdvisory,
     ModelErrorCode,
-    ModelIntentRequest,
     ModelInvocationProfile,
     ModelUsage,
     ProviderIntentResponse,
+    ProviderInteractionResponse,
     SlowQueryAdvisoryRequest,
     StrictInt,
 )
@@ -37,7 +40,6 @@ GEMINI_MODEL_PROFILE: Final[ModelInvocationProfile] = ModelInvocationProfile()
 GEMINI_MODEL: Final[str] = GEMINI_MODEL_PROFILE.model
 GEMINI_API_VERSION: Final[str] = GEMINI_MODEL_PROFILE.api_version
 GEMINI_PROVIDER_ORIGIN: Final[str] = GEMINI_MODEL_PROFILE.origin
-INTENT_OUTPUT_TOKEN_LIMIT: Final[int] = GEMINI_MODEL_PROFILE.intent_output_tokens
 _CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _PROXY_ENVIRONMENT: Final[tuple[str, ...]] = (
@@ -48,9 +50,9 @@ _PROXY_ENVIRONMENT: Final[tuple[str, ...]] = (
     "https_proxy",
     "all_proxy",
 )
-_SYSTEM_INTENT: Final[str] = (
-    "Return only the requested intent JSON. Never choose a capability, target, SQL, "
-    "approval, tool, execution step, or next action."
+_SYSTEM_INTERACTION: Final[str] = (
+    "Return only the requested interaction JSON. Never choose a final capability, "
+    "target, SQL, approval, tool, execution step, or next action."
 )
 _SYSTEM_ADVISORY: Final[str] = (
     "Return only the requested advisory JSON from the supplied untrusted rows. "
@@ -66,7 +68,9 @@ def _validate_credential(value: str) -> str:
     return value
 
 
-def _require_clean_texts(value: ProviderIntentResponse | ModelAdvisory) -> None:
+def _require_clean_texts(
+    value: ProviderInteractionResponse | ProviderIntentResponse | ModelAdvisory,
+) -> None:
     if any(scrub_text(text) != text for text in model_text_values(value)):
         raise ModelPortError(ModelErrorCode.INVALID_RESPONSE)
 
@@ -243,16 +247,16 @@ class GeminiModelAdapter:
     async def _generate(
         self,
         *,
-        request: ModelIntentRequest | SlowQueryAdvisoryRequest,
-        response_schema: type[ProviderIntentResponse] | type[ModelAdvisory],
+        request: InteractionClassifierRequest | SlowQueryAdvisoryRequest,
+        response_schema: type[ProviderInteractionResponse] | type[ModelAdvisory],
         system_instruction: str,
         thinking_level: types.ThinkingLevel,
         max_output_tokens: int,
-    ) -> IntentModelResult | AdvisoryModelResult:
+    ) -> InteractionModelResult | AdvisoryModelResult:
         client = self._client()
         primary_error: BaseException | None = None
         mapped_error: ModelPortError | None = None
-        result: IntentModelResult | AdvisoryModelResult | None = None
+        result: InteractionModelResult | AdvisoryModelResult | None = None
         try:
             response = await client.aio.models.generate_content(
                 model=self.profile.model,
@@ -276,14 +280,24 @@ class GeminiModelAdapter:
             parsed = response_schema.model_validate_json(text)
             _require_clean_texts(parsed)
             usage = _model_usage(response)
-            if isinstance(parsed, ProviderIntentResponse):
-                result = IntentModelResult(
-                    draft=IntentDraft(
-                        intent=parsed.intent,
-                        slots=parsed.slots.model_dump(exclude_none=True),
-                        missing=parsed.missing,
+            if isinstance(parsed, ProviderInteractionResponse):
+                capability = parsed.capability
+                result = InteractionModelResult(
+                    draft=InteractionDraft(
+                        proposed_kind=parsed.proposed_kind,
+                        capability_draft=(
+                            None
+                            if capability is None
+                            else IntentDraft(
+                                intent=capability.intent,
+                                slots=capability.slots.model_dump(exclude_none=True),
+                                missing=capability.missing,
+                                confidence=capability.confidence,
+                                source=IntentSource.MODEL,
+                            )
+                        ),
                         confidence=parsed.confidence,
-                        source=IntentSource.MODEL,
+                        source=InteractionSource.MODEL,
                     ),
                     usage=usage,
                 )
@@ -306,16 +320,18 @@ class GeminiModelAdapter:
             raise RuntimeError("unreachable Gemini response outcome")
         return result
 
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
-        """请求一次严格意图 JSON，并由本地代码补可信来源。"""
+    async def classify(
+        self, request: InteractionClassifierRequest
+    ) -> InteractionModelResult:
+        """请求一次严格 interaction JSON，并由本地代码补可信来源。"""
         parsed = await self._generate(
             request=request,
-            response_schema=ProviderIntentResponse,
-            system_instruction=_SYSTEM_INTENT,
-            thinking_level=types.ThinkingLevel[self.profile.intent_thinking_level],
-            max_output_tokens=self.profile.intent_output_tokens,
+            response_schema=ProviderInteractionResponse,
+            system_instruction=_SYSTEM_INTERACTION,
+            thinking_level=types.ThinkingLevel[self.profile.interaction_thinking_level],
+            max_output_tokens=self.profile.interaction_output_tokens,
         )
-        if not isinstance(parsed, IntentModelResult):
+        if not isinstance(parsed, InteractionModelResult):
             raise ModelPortError(ModelErrorCode.INVALID_RESPONSE)
         return parsed
 
@@ -348,7 +364,7 @@ async def probe_connection(
 ) -> None:
     """发一次最小的固定请求验证凭据与连通性；失败抛 ``ModelPortError``。
 
-    **不经过 ``IntentModelPort``**：那条路带着 system instruction、response schema
+    **不经过 ``InteractionClassifierPort``**：那条路带着 system instruction、response schema
     与 thinking 配置，测的是"模型能不能按约定作答"。控制面要回答的是更前面一个
     问题——"这把 Key 现在通不通"。用后者的失败去解释前者只会误导管理员。
 
@@ -364,7 +380,7 @@ async def probe_connection(
             model=profile.model,
             contents=contents,
             config=types.GenerateContentConfig(
-                max_output_tokens=profile.intent_output_tokens,
+                max_output_tokens=profile.interaction_output_tokens,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),

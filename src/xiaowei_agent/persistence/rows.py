@@ -28,7 +28,7 @@ from xiaowei_agent.contracts import (
     Contract,
     DestinationKind,
     IdentitySource,
-    IntentDraft,
+    InteractionDraft,
     ModelAdvisory,
     ModelUsage,
     ProjectionErrorCode,
@@ -42,7 +42,7 @@ from xiaowei_agent.contracts import (
 if TYPE_CHECKING:
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.model_artifacts import (
-        AcceptedIntentArtifact,
+        AcceptedInteractionArtifact,
         StoredModelAdvisory,
     )
     from xiaowei_agent.persistence.store import StepExecutionRecord
@@ -131,8 +131,10 @@ def row_to_record(row: Mapping[str, Any]) -> TaskRecord:
     )
 
 
-def accepted_intent_to_row(artifact: "AcceptedIntentArtifact") -> dict[str, Any]:
-    """AcceptedIntentArtifact → 展开列与严格 JSONB。"""
+def interaction_artifact_to_row(
+    artifact: "AcceptedInteractionArtifact",
+) -> dict[str, Any]:
+    """AcceptedInteractionArtifact → 展开列与严格 JSONB。"""
     return {
         "task_id": artifact.task_id,
         "artifact_version": artifact.artifact_version,
@@ -151,14 +153,16 @@ def accepted_intent_to_row(artifact: "AcceptedIntentArtifact") -> dict[str, Any]
     }
 
 
-def row_to_accepted_intent(row: Mapping[Any, Any]) -> "AcceptedIntentArtifact":
-    """数据库行 → 自校验 AcceptedIntentArtifact。"""
-    from xiaowei_agent.persistence.model_artifacts import AcceptedIntentArtifact
+def row_to_interaction_artifact(
+    row: Mapping[Any, Any]
+) -> "AcceptedInteractionArtifact":
+    """数据库行 → 自校验 AcceptedInteractionArtifact。"""
+    from xiaowei_agent.persistence.model_artifacts import AcceptedInteractionArtifact
 
-    return AcceptedIntentArtifact(
+    return AcceptedInteractionArtifact(
         task_id=row["task_id"],
         artifact_version=row["artifact_version"],
-        draft=load_contract(IntentDraft, row["draft"]),
+        draft=load_contract(InteractionDraft, row["draft"]),
         origin=row["origin"],
         provider=row["provider"],
         model=row["model"],

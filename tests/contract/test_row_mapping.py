@@ -31,6 +31,9 @@ from xiaowei_agent.contracts import (
     ExternalSource,
     IntentDraft,
     IntentSource,
+    InteractionDraft,
+    InteractionKind,
+    InteractionSource,
     ModelAdvisory,
     ModelUsage,
     PipelineStage,
@@ -126,6 +129,12 @@ _INTENT_DRAFT = IntentDraft(
     confidence=0.9,
     source=IntentSource.MODEL,
 )
+_INTERACTION_DRAFT = InteractionDraft(
+    proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+    capability_draft=_INTENT_DRAFT,
+    confidence=0.9,
+    source=InteractionSource.MODEL,
+)
 _MODEL_USAGE = ModelUsage(input_tokens=10, output_tokens=5)
 _MODEL_ADVISORY = ModelAdvisory(
     analysis="扫描行数偏高", suggestions=("检查分区裁剪",), uncertainties=()
@@ -142,8 +151,8 @@ _JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
     ("task_evidence", "envelope"): _EVIDENCE,
     ("task_approvals", "request"): _APPROVAL,
     ("task_audit_events", "event"): _AUDIT_EVENT,
-    ("task_accepted_intents", "draft"): _INTENT_DRAFT,
-    ("task_accepted_intents", "usage"): _MODEL_USAGE,
+    ("task_interaction_artifacts", "draft"): _INTERACTION_DRAFT,
+    ("task_interaction_artifacts", "usage"): _MODEL_USAGE,
     ("task_model_advisories", "advisory"): _MODEL_ADVISORY,
     ("task_model_advisories", "usage"): _MODEL_USAGE,
 }
@@ -156,8 +165,8 @@ _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
     ("task_evidence", "envelope"): EvidenceEnvelope,
     ("task_approvals", "request"): ApprovalRequest,
     ("task_audit_events", "event"): TraceEvent,
-    ("task_accepted_intents", "draft"): IntentDraft,
-    ("task_accepted_intents", "usage"): ModelUsage,
+    ("task_interaction_artifacts", "draft"): InteractionDraft,
+    ("task_interaction_artifacts", "usage"): ModelUsage,
     ("task_model_advisories", "advisory"): ModelAdvisory,
     ("task_model_advisories", "usage"): ModelUsage,
 }

@@ -11,8 +11,6 @@ _PACKAGE = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
 _ALLOWED = {
     Path("application/channel_access.py"),
     Path("application/channel_projection.py"),
-    # RI3 PR 3D：Worker 只沿显式 parent 指针重验并投影安全历史。
-    Path("application/context.py"),
 }
 
 

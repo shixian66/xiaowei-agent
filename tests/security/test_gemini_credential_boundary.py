@@ -10,12 +10,16 @@ from tests.fakes.model import assert_safe_model_port_error
 
 from xiaowei_agent.application.model_ports import ModelPortError
 from xiaowei_agent.config import _FIELD_TO_ENV, Settings
-from xiaowei_agent.contracts import ModelErrorCode, ModelIntentRequest
+from xiaowei_agent.contracts import InteractionClassifierRequest, ModelErrorCode
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 
 pytestmark = pytest.mark.security
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+def _request(text: str = "检查") -> InteractionClassifierRequest:
+    return InteractionClassifierRequest(user_text=text)
 
 
 class CountingFactory:
@@ -36,7 +40,6 @@ async def test_missing_or_invalid_key_never_constructs_a_client() -> None:
     抛 BaseException）都测的是那个 seam。承重的属性没变，只是输入从"读出来的值"
     变成"注入的值"：任何不满足 ``_validate_credential`` 的取值都不得走到 client。
     """
-    request = ModelIntentRequest(user_text="检查", history=(), context_truncated=False)
     for api_key in (
         "",
         "short",
@@ -49,7 +52,7 @@ async def test_missing_or_invalid_key_never_constructs_a_client() -> None:
         factory = CountingFactory()
         adapter = GeminiModelAdapter(client_factory=factory, api_key=api_key)
         with pytest.raises(ModelPortError) as caught:
-            await adapter.generate_intent(request)
+            await adapter.classify(_request())
         assert_safe_model_port_error(
             caught.value, ModelErrorCode.CREDENTIAL_UNAVAILABLE
         )
@@ -68,9 +71,7 @@ async def test_the_rejected_key_never_appears_in_the_error() -> None:
     )
 
     with pytest.raises(ModelPortError) as caught:
-        await adapter.generate_intent(
-            ModelIntentRequest(user_text="x", history=(), context_truncated=False)
-        )
+        await adapter.classify(_request("x"))
 
     assert_safe_model_port_error(caught.value, ModelErrorCode.CREDENTIAL_UNAVAILABLE)
     assert leaky.strip() not in str(caught.value)
@@ -90,11 +91,7 @@ async def test_ambient_proxy_is_rejected_before_secret_or_client(
         factory = CountingFactory()
         adapter = GeminiModelAdapter(client_factory=factory, api_key=api_key)
         with pytest.raises(ModelPortError) as caught:
-            await adapter.generate_intent(
-                ModelIntentRequest(
-                    user_text="检查", history=(), context_truncated=False
-                )
-            )
+            await adapter.classify(_request())
         assert_safe_model_port_error(caught.value, ModelErrorCode.AMBIENT_PROXY)
         assert factory.calls == 0
 
@@ -106,9 +103,13 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
     secret = "sk-" + "x" * 24
     response = json.dumps(
         {
-            "intent": "starrocks.slow_query.diagnose",
-            "slots": {"window_minutes": secret},
-            "missing": [],
+            "proposed_kind": "capability_request",
+            "capability": {
+                "intent": "starrocks.slow_query.diagnose",
+                "slots": {"window_minutes": secret},
+                "missing": [],
+                "confidence": 0.5,
+            },
             "confidence": 0.5,
         }
     )
@@ -133,9 +134,7 @@ async def test_redaction_changing_provider_output_is_rejected_without_leak(
         api_key="AIza" + "x" * 35,
     )
     with caplog.at_level(logging.DEBUG), pytest.raises(ModelPortError) as caught:
-        await adapter.generate_intent(
-            ModelIntentRequest(user_text="检查", history=(), context_truncated=False)
-        )
+        await adapter.classify(_request())
     assert_safe_model_port_error(caught.value, ModelErrorCode.INVALID_RESPONSE)
     assert secret not in str(caught.value)
     assert secret not in caplog.text

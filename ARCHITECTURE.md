@@ -103,10 +103,10 @@ RequestEnvelope
   → Worker.begin_task_attempt
   → Worker heartbeat（覆盖本次 execute_task 与 retry scheduling）
        → XiaoweiRuntime
-            → load-or-create AcceptedInteractionArtifact（I1 目标）
-            → DeterministicInteractionRouter（I1 目标）
+            → load-or-create AcceptedInteractionArtifact
+            → DeterministicInteractionRouter
                  → conversation / knowledge_lookup / log_analysis: REJECTED
-                 → unclear route: ClarificationRecord → CLARIFICATION_REQUIRED
+                 → unclear route: ClarificationRecord → CLARIFICATION_REQUIRED（I1 后续切片）
                  → capability_request + proceed: continue
             → CapabilityResolver
             → SlotVerifier（I1 目标：可信槽位升级）
@@ -135,19 +135,19 @@ RequestEnvelope
 
 ### 4.1 模型边界
 
-在 I1 尚未实现前，当前 RI3 源码事实仍是：只有获授权的 durable Runtime path 可以调用
-`IntentModelPort`；现有 `IntentInterpreter` 仍是确定性 fallback，不拥有 provider access。
-Provider output passes strict schema and local semantic validation, then the port returns
-the accepted DTO together with trusted nullable `ModelUsage`; usage is the locked SDK's
+当前 I1-A 源码事实是：只有获授权的 durable Runtime path 可以调用
+`InteractionClassifierPort`；旧 `IntentInterpreter` 只作为规则 fallback，不拥有 provider access。
+Provider output passes strict interaction schema and local semantic validation, then the port returns
+an `InteractionModelResult` together with trusted nullable `ModelUsage`; usage is the locked SDK's
 normalized metadata narrowed again to local bounds, not part of the model-generated schema.
-The draft may then become an insert-once
-`AcceptedIntentDraft`; it means only that this task accepted an untrusted
-draft, never that the model gained execution authority. 任务重试必须先读回并复用已接受草稿。若 provider 已收到请求但本地还没保存就崩溃，恢复后
-允许重复一次模型调用；模型无工具和执行副作用，因此 RI3 明确接受这一 at-least-once 取舍，不为此
-建设调用 reservation 平台。Resolver 仍须重新从当前注册能力、租户上下文、环境目录和确定性规则
-得到最终候选。模型响应只有 intent/slots/missing/confidence；
+The draft may then become an insert-once `AcceptedInteractionArtifact`; it means only that this task
+accepted an untrusted interaction draft, never that the model gained execution authority. 任务重试必须
+先读回并复用已接受 artifact。若 provider 已收到请求但本地还没保存就崩溃，恢复后允许重复一次模型调用；
+模型无工具和执行副作用，因此当前仍接受这一 at-least-once 取舍，不为此建设调用 reservation 平台。
+Router 只能从 artifact 产出 proceed/clarify/refuse 裁决；只有 proceed 的 capability draft 进入 Resolver。
+Resolver 仍须重新从当前注册能力、租户上下文、环境目录和确定性规则得到最终候选。模型响应里的
 confidence 复用现有有限 float `[0,1]` 语义（JSON 数字 `0/1` 可归一，bool/字符串/NaN/Inf 拒绝），
-但 RI3 不用它绕过 Resolver、直接选 capability 或扩大参数。
+但不用于绕过 Router/Resolver、直接选 capability 或扩大参数。
 
 证据解释只能通过独立的 `SlowQueryAdvisoryPort`。它只接收 capability 专属、字段闭集、限量且脱敏的
 投影，输出只能进入无证据引用的建议展示槽。Runtime 可以用显式 capability binding 组合 planner、
@@ -225,19 +225,19 @@ Reflection 不是第二条执行链，也不是模型拥有的“自我授权”
 
 ### 5.2 XiaoweiRuntime
 
-应用层唯一编排入口，负责组装依赖、创建或恢复任务、接受或读回已持久化的意图草稿、调用 Runner、
+应用层唯一编排入口，负责组装依赖、创建或恢复任务、接受或读回已持久化的 interaction artifact、调用 Runner、
 汇总 evidence 和生成 `RenderPayload`。它通过显式、版本化 key 的 capability binding 选择领域 planner、
 Answerability、可选 advisory projector 与 renderer；binding 不拥有候选生成权。模型建议先以 task 级
 insert-once 事实保存，TaskView 只在任务终态后展示。Runtime 保持轻薄，不承载具体数据库、Prometheus
 或 Jenkins 业务分支。
 
-Only the granted durable `execute_task()` path loads/saves accepted intent and calls
-the provider. Its only production caller under `src/` remains
-`application/worker.py`. The compatibility `XiaoweiRuntime.handle()` path stays as an
-offline-test convenience, preserves deterministic interpret/resolve/prepare before
-task creation, and makes zero model/artifact-store calls. RI3 moves heartbeat ownership
-to one small application helper: Worker wraps execute/retry, while `handle()` wraps only
-its post-grant attempt. Each attempt has exactly one owner; the public Runtime stays small.
+Only the granted durable `execute_task()` path loads/saves interaction artifacts and calls
+the provider. Its production caller under `src/` remains `application/worker.py`.
+The compatibility `XiaoweiRuntime.handle()` path first persists/submits the task, then
+obtains a real attempt grant and calls the same durable execution path; duplicate terminal
+submissions only re-project the recorded task. Heartbeat ownership stays in one small
+application helper: Worker wraps execute/retry, while `handle()` wraps only its post-grant
+attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
 ### 5.3 Interaction Context / Clarification
 
@@ -419,16 +419,16 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选，I1 目标） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `InteractionDraft` | proposed_kind、capability_draft、confidence、source | 模型/规则的不可信交互候选；`InteractionKind` 与 `RoutingDisposition` 由确定性 Router 采纳或拒绝 |
-| `AcceptedInteractionArtifact` | task_id、artifact_version、draft、origin、provider/model metadata、input/result digest、usage、fencing | I1 的 insert-once 交互事实；替代新运行路径的 accepted intent，模型元数据不来自模型响应 |
+| `AcceptedInteractionArtifact` | task_id、artifact_version、draft、origin、provider/model metadata、input/result digest、usage、fencing | I1 的 insert-once 交互事实；替代新运行路径的 accepted intent，artifact version 2 才会被 Runtime loader 解释，模型元数据不来自模型响应 |
 | `IntentDraft` | intent、slots、missing、confidence、source | 模型可产生，但不具执行权 |
-| `AcceptedIntentDraft` | task_id、intent_input_digest、draft、origin、safe metadata/result digest、fencing | 只记录已接受的不可信草稿；model origin 绑定模型 profile，rule origin 不绑定 Gemini revision；input digest 相同才复用，insert-once，不存 prompt 或 provider 原文 |
 | `ModelAdvisory` | task_id、advisory_input_digest、advisory、safe metadata/result digest、fencing | input digest 绑定安全证据投影；insert-once；只在原任务终态后展示，不能改变原终态或动作 |
 | `ModelInvocationProfile` | 固定 provider/model/API（RI3 为 Developer API `v1beta` + `https://generativelanguage.googleapis.com`）、prompt/schema revision、thinking/timeout/output 上限 | composition root 注入不可变非秘密 profile；没有任意 endpoint/proxy、tool 或 provider registry |
-| `ModelIntentRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/history/context_truncated`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `InteractionClassifierRequest` / `SlowQueryAdvisoryRequest` | 前者精确为 `user_text/clarification`；后者精确为 `rows/sampled` | 两个窄口专属 DTO；无原始 RequestEnvelope、任意 context/prompt/schema/tools/endpoint escape hatch；诊断 rows 为 0 时零调用 |
+| `ProviderInteractionResponse` | `proposed_kind`、可选 `capability`、confidence | provider wire schema 只能表达 interaction 分类；`capability` 存在性必须与 `CAPABILITY_REQUEST` 匹配，本地再把 capability 字段复验成闭集 `IntentDraft` |
 | `ProviderIntentSlots` | 现有 intent allowlist 并集的 11 个 omitted-or-string 字段 | Developer API schema 不宣告 null；显式 null/未知字段都整体拒绝，本地语义校验仍以 intent-specific allowlist 为单一真源 |
 | `ModelUsage` | nullable input_tokens/output_tokens | 只由 adapter 从锁定 SDK 已归一化的 prompt/candidates token count 构造；SDK 会把可强制转换的 integer-like raw 值（bool、整数形 float、数字字符串）转为 int，本地再做 non-negative signed-64-bit 边界；不保留 total/raw metadata，不进入 provider response schema |
 | `ModelPortError` | 闭集 `ModelErrorCode` | application 可消费的 provider-neutral 安全失败；intent 仅将 rate-limit、5xx server 与明确 transport error 列为可重试 |
-| `IntentModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
+| `InteractionModelResult` / `AdvisoryModelResult` | accepted draft/advisory + `ModelUsage` | 两个 port 的具体输出；无 tuple、全局 last_usage 或 callback 隐式侧道，支持并发调用安全传递 |
 | `CapabilitySpec` | id、version、domain、operation、gateway、schemas、policy_profile、evidence_contract | 声明能力；operation gateway 是工具路由唯一真源，不直接执行 |
 | `CapabilityInputBinding` | params_type、input_schema_ref、allowed_clarification_fields、slot_verifier、planner、confirmed_slot_projector | I1 的 capability 输入绑定；`CapabilitySpec.input_schema_ref`、binding 和 Params 必须一致 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
@@ -528,9 +528,10 @@ closed fallback code). Model-stage free-form detail remains empty. Prompt, respo
 provider error text and credentials are neither trace fields nor persisted artifacts.
 Observation numbers are strict, non-negative and signed-64-bit bounded; total request
 count is 0–2 and advisory is further limited to 0–1.
-ADR-017/I1 将新分类事件改为 `ModelCallKind.INTERACTION`，单 attempt 的
+I1-A 新分类事件使用 `ModelCallKind.INTERACTION`，单 attempt 的
 `ModelCallObservation.request_count` 为 `0..1`；历史 `ModelCallKind.INTENT`
-仍按 `0..2` 只读兼容，`ADVISORY` 仍为 `0..1`，不得把字段级上限全局降为 1。
+只保留为 legacy trace read compatibility，仍按 `0..2` 只读兼容，`ADVISORY` 仍为 `0..1`，
+不得把字段级上限全局降为 1。
 I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，错误归因阶段从当前十个
 扩展为十一个阶段；在 I1-D 合入前，当前源码和契约测试仍是 RI3 后的十个阶段。
 

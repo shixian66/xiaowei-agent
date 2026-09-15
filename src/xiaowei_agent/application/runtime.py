@@ -4,7 +4,8 @@
 
 ```text
 RequestEnvelope
-  → IntentInterpreter.interpret()   → IntentDraft        [INTENT]
+  → load-or-create interaction artifact                 [MODEL]
+  → route_interaction()             → IntentDraft        [INTENT]
   → CapabilityResolver.resolve()    → CandidateSet       [RESOLVER]
   → TargetResolver.resolve()        → ResolvedTarget
   → PlanCompiler.compile_plan()     → ExecutionPlan      [PLANNER]
@@ -40,15 +41,11 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
-from xiaowei_agent.application.context import (
-    AssembledContext,
-    ContextAssemblyPort,
-    ParentContextRejectedError,
-)
+from xiaowei_agent.application.interaction_router import route_interaction
 from xiaowei_agent.application.model_advisory import load_or_accept_advisory
-from xiaowei_agent.application.model_intent import load_or_accept_intent
+from xiaowei_agent.application.model_interaction import load_or_accept_interaction
 from xiaowei_agent.application.model_ports import (
-    IntentModelPort,
+    InteractionClassifierPort,
     SlowQueryAdvisoryPort,
 )
 from xiaowei_agent.application.task_heartbeat import run_with_task_heartbeat
@@ -77,8 +74,8 @@ from xiaowei_agent.contracts import (
     RenderPayload,
     RequestContext,
     RequestEnvelope,
-    ResolvedTarget,
     RetryReason,
+    RoutingDisposition,
     StageOutcome,
     TaskLookup,
     TaskOutcome,
@@ -181,11 +178,9 @@ class XiaoweiRuntime:
         clock: Clock,
         model_artifacts: ModelArtifactStore,
         model_profile: ModelInvocationProfile,
-        intent_model: IntentModelPort | None = None,
+        interaction_classifier: InteractionClassifierPort | None = None,
         slow_query_advisory: SlowQueryAdvisoryPort | None = None,
-        context_assembler: ContextAssemblyPort | None = None,
         model_monotonic: Callable[[], float] = time.monotonic,
-        model_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         lease_ttl_seconds: int = 60,
         heartbeat_interval_seconds: float = 10.0,
         heartbeat_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -202,11 +197,9 @@ class XiaoweiRuntime:
         self._clock = clock
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
-        self._intent_model = intent_model
+        self._interaction_classifier = interaction_classifier
         self._slow_query_advisory = slow_query_advisory
-        self._context_assembler = context_assembler
         self._model_monotonic = model_monotonic
-        self._model_sleep = model_sleep
         self._lease_ttl_seconds = lease_ttl_seconds
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._heartbeat_sleep = heartbeat_sleep
@@ -300,37 +293,26 @@ class XiaoweiRuntime:
         recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
-            if submission.parent_task_id is None:
-                assembled_context = AssembledContext(history=(), truncated=False)
-            elif self._context_assembler is None:
-                raise ParentContextRejectedError
-            else:
-                assembled_context = await self._context_assembler.assemble(
-                    task_id=grant.task_id,
-                    submission=submission,
-                )
-            accepted = await load_or_accept_intent(
+            accepted = await load_or_accept_interaction(
                 grant=grant,
                 envelope=submission.envelope,
                 context=context,
-                history=assembled_context.history,
-                context_truncated=assembled_context.truncated,
                 interpreter=self._interpreter,
-                model=self._intent_model,
+                model=self._interaction_classifier,
                 profile=self._model_profile,
                 artifacts=self._model_artifacts,
                 monotonic=self._model_monotonic,
-                sleep=self._model_sleep,
             )
-            if accepted.observation is not None:
+            if (
+                accepted.observation is not None
+                and accepted.observation.fallback_code is not ModelFallbackCode.DISABLED
+            ):
                 fallback = accepted.observation.fallback_code
                 await self._emit(
                     stage=PipelineStage.MODEL,
                     outcome=(
                         StageOutcome.OK
                         if fallback is None
-                        else StageOutcome.SKIPPED
-                        if fallback is ModelFallbackCode.DISABLED
                         else StageOutcome.FAILED
                     ),
                     context=context,
@@ -339,15 +321,25 @@ class XiaoweiRuntime:
                     model=accepted.observation,
                     delivery=Delivery.LOG_AND_DURABLE,
                 )
-            draft = accepted.artifact.draft
+            route = route_interaction(draft=accepted.artifact.draft, context=context)
             await self._emit(
                 stage=PipelineStage.INTENT,
-                outcome=StageOutcome.OK,
+                outcome=(
+                    StageOutcome.OK
+                    if route.disposition is RoutingDisposition.PROCEED
+                    else StageOutcome.REJECTED
+                ),
                 context=context,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
                 delivery=Delivery.LOG_AND_DURABLE,
             )
+            if route.intent_draft is None:
+                raise RequestRejectedError(
+                    "interaction route rejected",
+                    stage=PipelineStage.INTENT,
+                )
+            draft = route.intent_draft
             candidate, binding = await self._resolve(
                 draft=draft,
                 context=context,
@@ -380,7 +372,7 @@ class XiaoweiRuntime:
         except (PersistenceUnavailableError, PersistenceIntegrityError):
             raise
         except ModelArtifactConflictError:
-            # Intent artifact 在 Resolver 前被复验；若上次尝试已经提交过 plan/证据，
+            # Interaction artifact 在 Resolver 前被复验；若上次尝试已经提交过 plan/证据，
             # 本次必须恢复该 plan 的 binding 才能按事实收成 recovery_drift。否则
             # assess_evidence 会把“有证据但 binding=None”当成另一项不变量错误。
             try:
@@ -469,19 +461,16 @@ class XiaoweiRuntime:
         :param as_of: 注入的"现在"；时间窗由它确定性推导，不读进程时钟。
         :raises RequestRejectedError: 取数之前的确定性拒绝。
         """
-        draft = await self._interpret(envelope=envelope, context=context)
-        candidate, binding = await self._resolve(draft=draft, context=context)
-        prepared = await self._prepare(
-            binding=binding,
-            candidate=candidate,
-            draft=draft,
-            context=context,
-            as_of=as_of,
-        )
-        plan = prepared.plan
-        target = prepared.target
-        record = await self._tasks.create_task(
-            submission=TaskSubmission(envelope=envelope, context=context, as_of=as_of)
+        submission = TaskSubmission(envelope=envelope, context=context, as_of=as_of)
+        view = await self.submit_task(submission=submission)
+        if view.status in TERMINAL_STATUSES and view.render is not None:
+            return view.render
+        record = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=view.task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
         )
         if record.status in TERMINAL_STATUSES:
             # 幂等：同一 idempotency_key 只产生一个任务事实。重复请求不再执行，
@@ -509,13 +498,11 @@ class XiaoweiRuntime:
             raise TaskInProgressError(task_id=record.task_id)
         grant = attempt.grant
         return await run_with_task_heartbeat(
-            lambda: self._handle_granted_attempt(
+            lambda: self._execute_granted_attempt(
                 record=record,
                 grant=grant,
-                plan=plan,
-                target=target,
                 context=context,
-                binding=binding,
+                submission=submission,
             ),
             grant=grant,
             task_store=self._tasks,
@@ -524,21 +511,17 @@ class XiaoweiRuntime:
             sleep=self._heartbeat_sleep,
         )
 
-    async def _handle_granted_attempt(
+    async def _execute_granted_attempt(
         self,
         *,
         record: TaskRecord,
         grant: TaskAttemptGrant,
-        plan: ExecutionPlan,
-        target: ResolvedTarget,
         context: RequestContext,
-        binding: CapabilityRuntimeBinding,
+        submission: TaskSubmission,
     ) -> RenderPayload:
         """兼容同步入口取得 grant 后的完整 attempt。"""
         try:
-            outcome = await self._runner.start(
-                grant, plan=plan, target=target, context=context
-            )
+            await self.execute_task(grant=grant, submission=submission)
         except WorkflowPaused as paused:
             evidences = await self._ledger.load(task_id=record.task_id)
             await self._emit(
@@ -552,13 +535,14 @@ class XiaoweiRuntime:
             return render_pending(
                 approval_ref=paused.approval_ref, evidences=evidences
             )
-        return await self._finish(
-            record=record,
-            outcome=outcome,
-            context=context,
-            grant=grant,
-            binding=binding,
+        winner = await self._tasks.get(
+            lookup=TaskLookup(
+                task_id=record.task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+            )
         )
+        return await self._render_recorded(record=winner, context=context)
 
     async def _render_recorded(
         self, *, record: TaskRecord, context: RequestContext
@@ -574,25 +558,6 @@ class XiaoweiRuntime:
         return payload
 
     # --- 各阶段 -------------------------------------------------------------
-
-    async def _interpret(
-        self,
-        *,
-        envelope: RequestEnvelope,
-        context: RequestContext,
-        task_id: str | None = None,
-        attempt_number: int | None = None,
-    ) -> IntentDraft:
-        draft = self._interpreter.interpret(text=envelope.text, context=context)
-        await self._emit(
-            stage=PipelineStage.INTENT,
-            outcome=StageOutcome.OK,
-            context=context,
-            task_id=task_id,
-            attempt_number=attempt_number,
-            delivery=_independent_delivery(task_id),
-        )
-        return draft
 
     async def _resolve(
         self,
@@ -767,15 +732,17 @@ class XiaoweiRuntime:
             else:
                 if accepted.artifact is not None:
                     advisory = accepted.artifact.advisory
-                if accepted.observation is not None:
+                if (
+                    accepted.observation is not None
+                    and accepted.observation.fallback_code
+                    is not ModelFallbackCode.DISABLED
+                ):
                     fallback = accepted.observation.fallback_code
                     model_event = self._event(
                         stage=PipelineStage.MODEL,
                         outcome=(
                             StageOutcome.OK
                             if fallback is None
-                            else StageOutcome.SKIPPED
-                            if fallback is ModelFallbackCode.DISABLED
                             else StageOutcome.FAILED
                         ),
                         context=context,

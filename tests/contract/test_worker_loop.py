@@ -21,8 +21,11 @@ from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     IntentDraft,
-    IntentModelResult,
     IntentSource,
+    InteractionDraft,
+    InteractionKind,
+    InteractionModelResult,
+    InteractionSource,
     ModelAdvisory,
     ModelUsage,
     RequestContext,
@@ -68,22 +71,27 @@ class _Runtime:
         await self._action(grant)
 
 
-class _BlockingIntentModel:
+class _BlockingInteractionModel:
     def __init__(self) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def generate_intent(self, request: Any) -> IntentModelResult:
+    async def classify(self, request: Any) -> InteractionModelResult:
         del request
         self.entered.set()
         await self.release.wait()
-        return IntentModelResult(
-            draft=IntentDraft(
-                intent="starrocks.slow_query.diagnose",
-                slots={"window_minutes": "30"},
-                missing=(),
+        return InteractionModelResult(
+            draft=InteractionDraft(
+                proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+                capability_draft=IntentDraft(
+                    intent="starrocks.slow_query.diagnose",
+                    slots={"window_minutes": "30"},
+                    missing=(),
+                    confidence=0.8,
+                    source=IntentSource.MODEL,
+                ),
                 confidence=0.8,
-                source=IntentSource.MODEL,
+                source=InteractionSource.MODEL,
             ),
             usage=ModelUsage(),
         )
@@ -236,10 +244,14 @@ async def test_worker_heartbeat_covers_actual_model_waits_with_one_periodic_owne
     runner_renewals: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = _BlockingIntentModel() if stage == "intent" else _BlockingAdvisoryModel()
+    model = (
+        _BlockingInteractionModel()
+        if stage == "intent"
+        else _BlockingAdvisoryModel()
+    )
     harness = RuntimeHarness(
         GOLDEN,
-        intent_model=model if stage == "intent" else None,
+        interaction_classifier=model if stage == "intent" else None,
         slow_query_advisory=model if stage == "advisory" else None,
     )
     await harness.runtime.submit_task(

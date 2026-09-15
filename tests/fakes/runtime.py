@@ -89,9 +89,8 @@ class RuntimeHarness:
         as_of: dt.datetime = _AS_OF,
         synthetic_write: bool = False,
         clear_ledger_before_render: bool = False,
-        intent_model: Any = None,
+        interaction_classifier: Any = None,
         slow_query_advisory: Any = None,
-        context_assembler: Any = None,
     ) -> None:
         self.clock = ManualClock(start=as_of)
         self.as_of = as_of
@@ -156,9 +155,8 @@ class RuntimeHarness:
             clock=self.clock,
             model_artifacts=self.model_artifacts,
             model_profile=ModelInvocationProfile(),
-            intent_model=intent_model,
+            interaction_classifier=interaction_classifier,
             slow_query_advisory=slow_query_advisory,
-            context_assembler=context_assembler,
         )
         self._injection: str | None = None
         self.task_id = ""

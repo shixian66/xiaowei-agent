@@ -13,6 +13,9 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     IntentDraft,
     IntentSource,
+    InteractionDraft,
+    InteractionKind,
+    InteractionSource,
     ModelAdvisory,
     ModelUsage,
     TaskLookup,
@@ -20,7 +23,7 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.persistence.model_artifacts import (
     AdvisoryArtifactCandidate,
-    IntentArtifactCandidate,
+    InteractionArtifactCandidate,
     ModelArtifactConflictError,
     ModelArtifactGrantError,
     ModelArtifactStateError,
@@ -30,26 +33,31 @@ from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionComman
 __all__ = ["ALL_GROUPS", "MODEL_ARTIFACT_CASES", "bind"]
 
 
-def _intent_candidate(**updates: object) -> IntentArtifactCandidate:
+def _interaction_candidate(**updates: object) -> InteractionArtifactCandidate:
     values: dict[str, object] = {
-        "draft": IntentDraft(
-            intent="starrocks.slow_query.diagnose",
-            slots={"window_minutes": "30"},
-            missing=(),
+        "draft": InteractionDraft(
+            proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+            capability_draft=IntentDraft(
+                intent="starrocks.slow_query.diagnose",
+                slots={"window_minutes": "30"},
+                missing=(),
+                confidence=0.9,
+                source=IntentSource.MODEL,
+            ),
             confidence=0.9,
-            source=IntentSource.MODEL,
+            source=InteractionSource.MODEL,
         ),
         "origin": "model",
         "provider": "google-gemini-developer-api",
         "model": "gemini-3-flash-preview",
         "provider_origin": "https://generativelanguage.googleapis.com",
-        "prompt_revision": "ri3-intent-prompt-v1",
-        "schema_revision": "ri3-intent-schema-v1",
+        "prompt_revision": "i1-interaction-prompt-v1",
+        "schema_revision": "i1-interaction-schema-v1",
         "input_digest": "a" * 64,
         "result_digest": "b" * 64,
         "usage": ModelUsage(input_tokens=10, output_tokens=5),
     }
-    return IntentArtifactCandidate(**(values | updates))
+    return InteractionArtifactCandidate(**(values | updates))
 
 
 def _advisory_candidate(**updates: object) -> AdvisoryArtifactCandidate:
@@ -115,17 +123,17 @@ async def _move_to_running(store: Any, context: Any, grant: Any) -> None:
         record = transitioned.winner
 
 
-async def test_intent_artifact_round_trips_and_exact_replay_is_idempotent(
+async def test_interaction_artifact_round_trips_and_exact_replay_is_idempotent(
     model_artifact_store: Any, store: Any, context: Any
 ) -> None:
     grant = await _grant(store, context)
-    candidate = _intent_candidate()
+    candidate = _interaction_candidate()
 
-    first = await model_artifact_store.save_intent(grant=grant, candidate=candidate)
-    second = await model_artifact_store.save_intent(grant=grant, candidate=candidate)
+    first = await model_artifact_store.save_interaction(grant=grant, candidate=candidate)
+    second = await model_artifact_store.save_interaction(grant=grant, candidate=candidate)
 
     assert first == second
-    assert await model_artifact_store.load_intent(task_id=grant.task_id) == first
+    assert await model_artifact_store.load_interaction(task_id=grant.task_id) == first
     assert first.task_id == grant.task_id
     assert first.fencing_token == grant.fencing_token
 
@@ -134,21 +142,21 @@ async def test_intent_artifact_round_trips_and_exact_replay_is_idempotent(
     "updates",
     [{"input_digest": "e" * 64}, {"result_digest": "f" * 64}],
 )
-async def test_intent_artifact_refuses_digest_drift(
+async def test_interaction_artifact_refuses_digest_drift(
     model_artifact_store: Any,
     store: Any,
     context: Any,
     updates: dict[str, object],
 ) -> None:
     grant = await _grant(store, context)
-    original = _intent_candidate()
-    await model_artifact_store.save_intent(grant=grant, candidate=original)
+    original = _interaction_candidate()
+    await model_artifact_store.save_interaction(grant=grant, candidate=original)
 
     with pytest.raises(ModelArtifactConflictError):
-        await model_artifact_store.save_intent(
-            grant=grant, candidate=_intent_candidate(**updates)
+        await model_artifact_store.save_interaction(
+            grant=grant, candidate=_interaction_candidate(**updates)
         )
-    assert (await model_artifact_store.load_intent(task_id=grant.task_id)).input_digest == (
+    assert (await model_artifact_store.load_interaction(task_id=grant.task_id)).input_digest == (
         original.input_digest
     )
 
@@ -164,24 +172,24 @@ async def test_intent_artifact_refuses_digest_drift(
         {"usage": ModelUsage(input_tokens=11, output_tokens=5)},
     ],
 )
-async def test_intent_artifact_refuses_metadata_drift_with_same_digests(
+async def test_interaction_artifact_refuses_metadata_drift_with_same_digests(
     model_artifact_store: Any,
     store: Any,
     context: Any,
     updates: dict[str, object],
 ) -> None:
     grant = await _grant(store, context)
-    await model_artifact_store.save_intent(
-        grant=grant, candidate=_intent_candidate()
+    await model_artifact_store.save_interaction(
+        grant=grant, candidate=_interaction_candidate()
     )
 
     with pytest.raises(ModelArtifactConflictError):
-        await model_artifact_store.save_intent(
-            grant=grant, candidate=_intent_candidate(**updates)
+        await model_artifact_store.save_interaction(
+            grant=grant, candidate=_interaction_candidate(**updates)
         )
 
 
-async def test_stale_grant_cannot_write_an_intent_artifact(
+async def test_stale_grant_cannot_write_an_interaction_artifact(
     model_artifact_store: Any, store: Any, context: Any, clock: Any
 ) -> None:
     stale = await _grant(store, context)
@@ -198,16 +206,16 @@ async def test_stale_grant_cannot_write_an_intent_artifact(
     assert fresh_attempt.grant is not None
 
     with pytest.raises(ModelArtifactGrantError):
-        await model_artifact_store.save_intent(
-            grant=stale, candidate=_intent_candidate()
+        await model_artifact_store.save_interaction(
+            grant=stale, candidate=_interaction_candidate()
         )
-    saved = await model_artifact_store.save_intent(
-        grant=fresh_attempt.grant, candidate=_intent_candidate()
+    saved = await model_artifact_store.save_interaction(
+        grant=fresh_attempt.grant, candidate=_interaction_candidate()
     )
     assert saved.fencing_token == fresh_attempt.grant.fencing_token
 
 
-async def test_terminal_task_cannot_gain_a_late_intent_artifact(
+async def test_terminal_task_cannot_gain_a_late_interaction_artifact(
     model_artifact_store: Any, store: Any, context: Any
 ) -> None:
     grant = await _grant(store, context)
@@ -229,8 +237,8 @@ async def test_terminal_task_cannot_gain_a_late_intent_artifact(
     assert result.applied
 
     with pytest.raises(ModelArtifactStateError):
-        await model_artifact_store.save_intent(
-            grant=grant, candidate=_intent_candidate()
+        await model_artifact_store.save_interaction(
+            grant=grant, candidate=_interaction_candidate()
         )
 
 
@@ -242,8 +250,8 @@ async def test_unknown_task_is_a_state_error_not_a_grant_loser(
     unknown_grant = grant.model_copy(update={"lease": unknown_lease})
 
     with pytest.raises(ModelArtifactStateError):
-        await model_artifact_store.save_intent(
-            grant=unknown_grant, candidate=_intent_candidate()
+        await model_artifact_store.save_interaction(
+            grant=unknown_grant, candidate=_interaction_candidate()
         )
 
 
@@ -381,16 +389,16 @@ async def test_terminal_task_cannot_gain_a_late_advisory_artifact(
 
 
 async def test_unknown_task_has_no_model_artifacts(model_artifact_store: Any) -> None:
-    assert await model_artifact_store.load_intent(task_id="unknown") is None
+    assert await model_artifact_store.load_interaction(task_id="unknown") is None
     assert await model_artifact_store.load_advisory(task_id="unknown") is None
 
 
 MODEL_ARTIFACT_CASES = (
-    test_intent_artifact_round_trips_and_exact_replay_is_idempotent,
-    test_intent_artifact_refuses_digest_drift,
-    test_intent_artifact_refuses_metadata_drift_with_same_digests,
-    test_stale_grant_cannot_write_an_intent_artifact,
-    test_terminal_task_cannot_gain_a_late_intent_artifact,
+    test_interaction_artifact_round_trips_and_exact_replay_is_idempotent,
+    test_interaction_artifact_refuses_digest_drift,
+    test_interaction_artifact_refuses_metadata_drift_with_same_digests,
+    test_stale_grant_cannot_write_an_interaction_artifact,
+    test_terminal_task_cannot_gain_a_late_interaction_artifact,
     test_unknown_task_is_a_state_error_not_a_grant_loser,
     test_advisory_requires_running_and_round_trips,
     test_advisory_rejects_a_live_grant_in_the_wrong_task_status,

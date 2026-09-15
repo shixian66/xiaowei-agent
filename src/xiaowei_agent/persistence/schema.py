@@ -196,8 +196,8 @@ TASK_EVIDENCE: Final = sa.Table(
 )
 """append-only 证据台账。"""
 
-TASK_ACCEPTED_INTENTS: Final = sa.Table(
-    "task_accepted_intents",
+TASK_INTERACTION_ARTIFACTS: Final = sa.Table(
+    "task_interaction_artifacts",
     METADATA,
     sa.Column("task_id", sa.Text, primary_key=True),
     sa.Column("artifact_version", sa.Integer, nullable=False),
@@ -214,23 +214,26 @@ TASK_ACCEPTED_INTENTS: Final = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("fencing_token", sa.BigInteger, nullable=False),
     sa.ForeignKeyConstraint(
-        ["task_id"], ["tasks.task_id"], name="fk_task_accepted_intents_task", ondelete="CASCADE"
+        ["task_id"],
+        ["tasks.task_id"],
+        name="fk_task_interaction_artifacts_task",
+        ondelete="CASCADE",
     ),
     sa.CheckConstraint(
-        "artifact_version = 1", name="ck_task_accepted_intents_version"
+        "artifact_version IN (1, 2)", name="ck_task_interaction_artifacts_version"
     ),
     sa.CheckConstraint(
-        "fencing_token > 0", name="ck_task_accepted_intents_fencing_positive"
+        "fencing_token > 0", name="ck_task_interaction_artifacts_fencing_positive"
     ),
     sa.CheckConstraint(
         "(origin = 'model' AND provider IS NOT NULL AND model IS NOT NULL"
         " AND provider_origin IS NOT NULL) OR"
         " (origin = 'rule' AND provider IS NULL AND model IS NULL"
         " AND provider_origin IS NULL)",
-        name="ck_task_accepted_intents_origin_identity",
+        name="ck_task_interaction_artifacts_origin_identity",
     ),
 )
-"""Resolver 前已接受的 model/rule intent；每个 task insert-once。"""
+"""Router 前已接受的 model/rule interaction；每个 task insert-once。"""
 
 TASK_MODEL_ADVISORIES: Final = sa.Table(
     "task_model_advisories",
@@ -557,7 +560,7 @@ ALL_TABLES: Final = (
     TASK_STEP_EXECUTIONS,
     TASK_PLANS,
     TASK_EVIDENCE,
-    TASK_ACCEPTED_INTENTS,
+    TASK_INTERACTION_ARTIFACTS,
     TASK_MODEL_ADVISORIES,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,

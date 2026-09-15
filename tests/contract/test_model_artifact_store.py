@@ -9,8 +9,8 @@ bind(globals(), MODEL_ARTIFACT_CASES)
 
 def test_model_artifact_store_has_only_four_narrow_methods() -> None:
     assert {name for name in dir(ModelArtifactStore) if not name.startswith("_")} == {
-        "load_intent",
-        "save_intent",
+        "load_interaction",
+        "save_interaction",
         "load_advisory",
         "save_advisory",
     }

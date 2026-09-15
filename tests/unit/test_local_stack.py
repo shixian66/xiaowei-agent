@@ -15,7 +15,6 @@ from xiaowei_agent.application.capability_runtime import CapabilityBindingRegist
 from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
 from xiaowei_agent.application.channel_submission import ChannelSubmissionService
-from xiaowei_agent.application.context import ContextAssembler
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
@@ -50,7 +49,6 @@ from xiaowei_agent.interfaces.local_stack import (
 from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
 from xiaowei_agent.persistence.database import DatabaseConfigurationError
-from xiaowei_agent.persistence.fake import InMemoryChannelStore
 from xiaowei_agent.persistence.postgres import (
     PostgresChannelStore,
     PostgresTaskStore,
@@ -73,17 +71,8 @@ async def test_in_memory_local_stack_is_complete_and_ready() -> None:
         "asset_inventory",
     }
     assert isinstance(stack.runtime._bindings, CapabilityBindingRegistry)
-    assert isinstance(stack.runtime._context_assembler, ContextAssembler)
-    assert stack.runtime._context_assembler._tasks is stack.task_store
-    assert isinstance(
-        stack.runtime._context_assembler._channels,
-        InMemoryChannelStore,
-    )
-    assert isinstance(
-        stack.runtime._context_assembler._projector,
-        TaskViewRuntime,
-    )
-    assert stack.intent_model is None
+    assert not hasattr(stack.runtime, "_context_assembler")
+    assert stack.interaction_classifier is None
     assert stack.slow_query_advisory is None
     assert stack.model_profile is None
     assert stack.runtime._runner._bindings is stack.runtime._bindings
@@ -114,10 +103,10 @@ def test_enabled_gemini_is_lazily_assembled_without_reading_the_key(
         settings=Settings(environment_id="dev", gemini_enabled=True),
         credentials=ProviderCredentials(gemini_api_key="AIza" + "x" * 35),
     )
-    assert stack.intent_model is not None
-    assert stack.intent_model is stack.slow_query_advisory
+    assert stack.interaction_classifier is not None
+    assert stack.interaction_classifier is stack.slow_query_advisory
     assert isinstance(stack.model_profile, ModelInvocationProfile)
-    assert stack.intent_model.profile is stack.model_profile
+    assert stack.interaction_classifier.profile is stack.model_profile
     assert calls == 0
 
 
@@ -502,17 +491,7 @@ async def test_postgres_stack_uses_one_engine_and_disposes_it(
     )
     stack = await build_postgres_local_stack(settings=Settings(environment_id="dev"))
     assert isinstance(stack.task_store, PostgresTaskStore)
-    assert isinstance(stack.runtime._context_assembler, ContextAssembler)
-    assert stack.runtime._context_assembler._tasks is stack.task_store
-    assert isinstance(
-        stack.runtime._context_assembler._channels,
-        PostgresChannelStore,
-    )
-    assert stack.runtime._context_assembler._channels._engine is engine
-    assert isinstance(
-        stack.runtime._context_assembler._projector,
-        TaskViewRuntime,
-    )
+    assert not hasattr(stack.runtime, "_context_assembler")
     assert stack.task_store._engine is engine
     assert stack.plan_store._engine is engine
     assert stack.evidence_ledger._engine is engine

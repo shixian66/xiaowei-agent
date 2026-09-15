@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
     from xiaowei_agent.application.model_ports import (
-        IntentModelPort,
+        InteractionClassifierPort,
         SlowQueryAdvisoryPort,
     )
     from xiaowei_agent.application.task_heartbeat import LeaseRenewalPort
@@ -185,11 +185,11 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         scripted: "ScriptedModelAdapter",
     ) -> None:
         """两个模型 port 的真实/fake 实现都必须保持窄签名。"""
-        real_intent: IntentModelPort = gemini
+        real_interaction: InteractionClassifierPort = gemini
         real_advisory: SlowQueryAdvisoryPort = gemini
-        fake_intent: IntentModelPort = scripted
+        fake_interaction: InteractionClassifierPort = scripted
         fake_advisory: SlowQueryAdvisoryPort = scripted
-        _ = (real_intent, real_advisory, fake_intent, fake_advisory)
+        _ = (real_interaction, real_advisory, fake_interaction, fake_advisory)
 
     def _postgres_port_anchors(
         plans: "PostgresPlanStore", ledger: "PostgresEvidenceLedger"

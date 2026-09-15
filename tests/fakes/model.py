@@ -8,9 +8,9 @@ from xiaowei_agent.application.model_ports import (
 )
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
-    IntentModelResult,
+    InteractionClassifierRequest,
+    InteractionModelResult,
     ModelErrorCode,
-    ModelIntentRequest,
     SlowQueryAdvisoryRequest,
     StrictInt,
 )
@@ -18,16 +18,18 @@ from xiaowei_agent.contracts import (
 
 class ScriptedModelAdapter:
     def __init__(
-        self, *, intent: IntentModelResult, advisory: AdvisoryModelResult
+        self, *, interaction: InteractionModelResult, advisory: AdvisoryModelResult
     ) -> None:
-        self.intent = intent
+        self.interaction = interaction
         self.advisory = advisory
-        self.intent_requests: list[ModelIntentRequest] = []
+        self.interaction_requests: list[InteractionClassifierRequest] = []
         self.advisory_requests: list[tuple[SlowQueryAdvisoryRequest, int]] = []
 
-    async def generate_intent(self, request: ModelIntentRequest) -> IntentModelResult:
-        self.intent_requests.append(request)
-        return self.intent
+    async def classify(
+        self, request: InteractionClassifierRequest
+    ) -> InteractionModelResult:
+        self.interaction_requests.append(request)
+        return self.interaction
 
     async def generate_advisory(
         self,

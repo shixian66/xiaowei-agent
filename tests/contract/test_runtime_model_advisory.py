@@ -301,15 +301,16 @@ async def test_insufficient_evidence_never_calls_advisory() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compatibility_handle_never_calls_or_saves_advisory() -> None:
+async def test_compatibility_handle_uses_the_durable_advisory_path() -> None:
     port = _AdvisoryPort(_result())
     harness = RuntimeHarness(GOLDEN, slow_query_advisory=port)
 
     payload = await harness.handle("最近30分钟有哪些慢查询")
 
     assert payload.status is TaskStatus.SUCCEEDED
-    assert port.calls == []
-    assert await harness.model_artifacts.load_advisory(task_id=harness.task_id) is None
+    assert len(port.calls) == 1
+    stored = await harness.model_artifacts.load_advisory(task_id=harness.task_id)
+    assert stored is not None
 
 
 @pytest.mark.asyncio

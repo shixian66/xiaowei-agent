@@ -15,7 +15,10 @@ import pytest
 
 from xiaowei_agent import _conformance
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
-from xiaowei_agent.application.model_ports import IntentModelPort, SlowQueryAdvisoryPort
+from xiaowei_agent.application.model_ports import (
+    InteractionClassifierPort,
+    SlowQueryAdvisoryPort,
+)
 from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
@@ -48,7 +51,7 @@ _ANCHORED = {
     "WorkflowRunner",
     "TraceSink",
     "WebSessionStore",
-    "IntentModelPort",
+    "InteractionClassifierPort",
     "LeaseRenewalPort",
     "ModelArtifactStore",
     "SlowQueryAdvisoryPort",
@@ -116,8 +119,8 @@ def test_model_adapters_keep_both_narrow_port_signatures() -> None:
     from tests.fakes.model import ScriptedModelAdapter
 
     for implementation in (GeminiModelAdapter, ScriptedModelAdapter):
-        assert inspect.signature(implementation.generate_intent) == inspect.signature(
-            IntentModelPort.generate_intent
+        assert inspect.signature(implementation.classify) == inspect.signature(
+            InteractionClassifierPort.classify
         )
         assert inspect.signature(implementation.generate_advisory) == inspect.signature(
             SlowQueryAdvisoryPort.generate_advisory
@@ -143,9 +146,9 @@ def test_model_conformance_anchor_assigns_both_real_and_fake_to_both_ports() -> 
         and isinstance(node.annotation, ast.Name)
     }
     assert assignments == {
-        ("real_intent", "IntentModelPort"),
+        ("real_interaction", "InteractionClassifierPort"),
         ("real_advisory", "SlowQueryAdvisoryPort"),
-        ("fake_intent", "IntentModelPort"),
+        ("fake_interaction", "InteractionClassifierPort"),
         ("fake_advisory", "SlowQueryAdvisoryPort"),
     }
 

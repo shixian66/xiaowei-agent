@@ -28,7 +28,7 @@ class InMemoryPersistenceState:
         self.submission_digests: dict[str, str] = {}
         self.plans: dict[str, Any] = {}
         self.evidence: dict[str, dict[str, EvidenceEnvelope]] = {}
-        self.accepted_intents: dict[str, Any] = {}
+        self.interaction_artifacts: dict[str, Any] = {}
         self.model_advisories: dict[str, Any] = {}
         self.approvals: dict[str, list[ApprovalRequest]] = {}
         self.audit_events: dict[str, list[TraceEvent]] = {}

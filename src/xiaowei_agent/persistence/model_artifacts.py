@@ -10,8 +10,8 @@ from xiaowei_agent.contracts import (
     AwareDatetime,
     Contract,
     GrantRejection,
-    IntentDraft,
-    IntentSource,
+    InteractionDraft,
+    InteractionSource,
     ModelAdvisory,
     ModelUsage,
     Sha256Hex,
@@ -25,6 +25,7 @@ from xiaowei_agent.persistence.decisions import grant_is_current
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.store import Clock, TaskAttemptGrant, TaskIdCarryingError
 
+INTERACTION_ARTIFACT_VERSION: Literal[2] = 2
 MODEL_ARTIFACT_VERSION: Literal[1] = 1
 
 
@@ -78,10 +79,10 @@ def require_model_artifact_grant(
     )
 
 
-class IntentArtifactCandidate(Contract):
-    """应用层已复验、尚未由存储层盖时间与 fencing 的 intent。"""
+class InteractionArtifactCandidate(Contract):
+    """应用层已复验、尚未由存储层盖时间与 fencing 的 interaction。"""
 
-    draft: IntentDraft
+    draft: InteractionDraft
     origin: Literal["model", "rule"]
     provider: StrictStr | None
     model: StrictStr | None
@@ -96,14 +97,16 @@ class IntentArtifactCandidate(Contract):
     def _identity_matches_origin(self) -> Self:
         identity = (self.provider, self.model, self.provider_origin)
         if self.origin == "model":
-            if self.draft.source is not IntentSource.MODEL or any(
+            if self.draft.source is not InteractionSource.MODEL or any(
                 value is None for value in identity
             ):
-                raise ValueError("model intent requires complete provider identity")
-        elif self.draft.source is IntentSource.MODEL or any(
+                raise ValueError(
+                    "model interaction requires complete provider identity"
+                )
+        elif self.draft.source is InteractionSource.MODEL or any(
             value is not None for value in identity
         ):
-            raise ValueError("rule intent cannot carry provider identity")
+            raise ValueError("rule interaction cannot carry provider identity")
         return self
 
 
@@ -122,8 +125,8 @@ class AdvisoryArtifactCandidate(Contract):
     usage: ModelUsage
 
 
-class AcceptedIntentArtifact(IntentArtifactCandidate):
-    artifact_version: Literal[1] = MODEL_ARTIFACT_VERSION
+class AcceptedInteractionArtifact(InteractionArtifactCandidate):
+    artifact_version: Literal[2] = INTERACTION_ARTIFACT_VERSION
     task_id: TaskId
     created_at: AwareDatetime
     fencing_token: StrictInt = Field(gt=0)
@@ -137,11 +140,13 @@ class StoredModelAdvisory(AdvisoryArtifactCandidate):
 
 
 class ModelArtifactStore(Protocol):
-    async def load_intent(self, *, task_id: str) -> AcceptedIntentArtifact | None: ...
+    async def load_interaction(
+        self, *, task_id: str
+    ) -> AcceptedInteractionArtifact | None: ...
 
-    async def save_intent(
-        self, *, grant: TaskAttemptGrant, candidate: IntentArtifactCandidate
-    ) -> AcceptedIntentArtifact: ...
+    async def save_interaction(
+        self, *, grant: TaskAttemptGrant, candidate: InteractionArtifactCandidate
+    ) -> AcceptedInteractionArtifact: ...
 
     async def load_advisory(self, *, task_id: str) -> StoredModelAdvisory | None: ...
 
@@ -151,8 +156,8 @@ class ModelArtifactStore(Protocol):
 
 
 def artifact_matches_candidate(
-    stored: AcceptedIntentArtifact | StoredModelAdvisory,
-    candidate: IntentArtifactCandidate | AdvisoryArtifactCandidate,
+    stored: AcceptedInteractionArtifact | StoredModelAdvisory,
+    candidate: InteractionArtifactCandidate | AdvisoryArtifactCandidate,
 ) -> bool:
     return all(
         getattr(stored, name) == getattr(candidate, name)
@@ -167,16 +172,18 @@ class InMemoryModelArtifactStore:
         self._state = state
         self._clock = clock
 
-    async def load_intent(self, *, task_id: str) -> AcceptedIntentArtifact | None:
+    async def load_interaction(
+        self, *, task_id: str
+    ) -> AcceptedInteractionArtifact | None:
         async with self._state.lock:
             return cast(
-                AcceptedIntentArtifact | None,
-                self._state.accepted_intents.get(task_id),
+                AcceptedInteractionArtifact | None,
+                self._state.interaction_artifacts.get(task_id),
             )
 
-    async def save_intent(
-        self, *, grant: TaskAttemptGrant, candidate: IntentArtifactCandidate
-    ) -> AcceptedIntentArtifact:
+    async def save_interaction(
+        self, *, grant: TaskAttemptGrant, candidate: InteractionArtifactCandidate
+    ) -> AcceptedInteractionArtifact:
         async with self._state.lock:
             current = self._state.tasks.get(grant.task_id)
             require_model_artifact_grant(
@@ -187,22 +194,22 @@ class InMemoryModelArtifactStore:
                     {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
                 ),
             )
-            existing = self._state.accepted_intents.get(grant.task_id)
+            existing = self._state.interaction_artifacts.get(grant.task_id)
             if existing is not None:
-                stored = cast(AcceptedIntentArtifact, existing)
+                stored = cast(AcceptedInteractionArtifact, existing)
                 if not artifact_matches_candidate(stored, candidate):
                     raise ModelArtifactConflictError(
-                        "different accepted intent is already stored",
+                        "different interaction artifact is already stored",
                         task_id=grant.task_id,
                     )
                 return stored
-            stored = AcceptedIntentArtifact(
+            stored = AcceptedInteractionArtifact(
                 **candidate.model_dump(mode="python"),
                 task_id=grant.task_id,
                 created_at=self._clock(),
                 fencing_token=grant.fencing_token,
             )
-            self._state.accepted_intents[grant.task_id] = stored
+            self._state.interaction_artifacts[grant.task_id] = stored
             return stored
 
     async def load_advisory(self, *, task_id: str) -> StoredModelAdvisory | None:
@@ -243,11 +250,12 @@ class InMemoryModelArtifactStore:
 
 
 __all__ = [
+    "INTERACTION_ARTIFACT_VERSION",
     "MODEL_ARTIFACT_VERSION",
-    "AcceptedIntentArtifact",
+    "AcceptedInteractionArtifact",
     "AdvisoryArtifactCandidate",
     "InMemoryModelArtifactStore",
-    "IntentArtifactCandidate",
+    "InteractionArtifactCandidate",
     "ModelArtifactConflictError",
     "ModelArtifactGrantError",
     "ModelArtifactStateError",

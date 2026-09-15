@@ -125,7 +125,7 @@ async def test_compatibility_handle_emits_every_non_model_stage_in_order() -> No
 @pytest.mark.parametrize(
     ("injected", "expected_stage"),
     [
-        ("unknown_capability", PipelineStage.RESOLVER),
+        ("unknown_capability", PipelineStage.INTENT),
         ("window_too_wide", PipelineStage.PLANNER),
         ("adapter_timeout", PipelineStage.GATEWAY),
         ("empty_audit_window", PipelineStage.REFLECTION),

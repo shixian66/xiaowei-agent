@@ -165,8 +165,8 @@ def test_adr_017_freezes_the_i0_i1_interaction_terms() -> None:
 
 _I0_TRUTH_DOC_TERMS = {
     "ARCHITECTURE.md": (
-        "→ load-or-create AcceptedInteractionArtifact（I1 目标）",
-        "→ DeterministicInteractionRouter（I1 目标）",
+        "→ load-or-create AcceptedInteractionArtifact",
+        "→ DeterministicInteractionRouter",
         "PipelineStage.DISCLOSURE",
         "十一个阶段",
     ),
@@ -177,13 +177,14 @@ _I0_TRUTH_DOC_TERMS = {
         "SlotVerifier → PlanCompiler",
     ),
     "README.md": (
-        "智能交互入口 I0-DOC 正在冻结",
-        "当前源码尚未实现 I1",
+        "智能交互入口 I0-DOC 已绑定",
+        "不能把本地离线切片写成完整 I1",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
     "AGENT_HANDOFF.md": (
         "I0-DOC 目标",
-        "I1 尚未实现，当前没有",
+        "I1-A 正在实现中",
+        "Runtime 在 Resolver 前读写",
         "ADR-017",
     ),
 }
@@ -236,10 +237,13 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
 
     readme_i0_status = (
-        "> 智能交互入口 I0-DOC 正在冻结 "
-        "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：\n"
-        "> 后续 I1 会在 Resolver 前增加分流、终态澄清、可信槽位、`ReadClass` "
-        "和执行披露屏障；当前源码尚未实现 I1，不能把该设计写成运行能力。\n"
+        "> 智能交互入口 I0-DOC 已绑定 "
+        "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
+        "> 当前工作树正在实现 I1-A：已有 interaction classifier、insert-once "
+        "interaction artifact、确定性\n"
+        "> Router 与 Runtime 接入切片；终态澄清存储/子任务、可信槽位、`ReadClass` "
+        "和执行披露屏障仍未实现，\n"
+        "> 不能把本地离线切片写成完整 I1、真实模型、部署或用户验收。\n"
     )
     without_readme_status = {
         **docs,
@@ -247,11 +251,11 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "当前源码尚未实现 I1" in readme_missing["README.md"]
+    assert "不能把本地离线切片写成完整 I1" in readme_missing["README.md"]
 
     arch_i0_chain = (
-        "            → load-or-create AcceptedInteractionArtifact（I1 目标）\n"
-        "            → DeterministicInteractionRouter（I1 目标）\n"
+        "            → load-or-create AcceptedInteractionArtifact\n"
+        "            → DeterministicInteractionRouter\n"
     )
     without_arch_chain = {
         **docs,
@@ -259,7 +263,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     arch_missing = _missing_i0_truth_terms(without_arch_chain)
     assert "ARCHITECTURE.md" in arch_missing
-    assert "→ load-or-create AcceptedInteractionArtifact（I1 目标）" in arch_missing[
+    assert "→ load-or-create AcceptedInteractionArtifact" in arch_missing[
         "ARCHITECTURE.md"
     ]
 

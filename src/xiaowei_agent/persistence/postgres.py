@@ -123,9 +123,9 @@ from xiaowei_agent.persistence.evidence import (
     EvidenceNotFoundError,
 )
 from xiaowei_agent.persistence.model_artifacts import (
-    AcceptedIntentArtifact,
+    AcceptedInteractionArtifact,
     AdvisoryArtifactCandidate,
-    IntentArtifactCandidate,
+    InteractionArtifactCandidate,
     ModelArtifactConflictError,
     StoredModelAdvisory,
     artifact_matches_candidate,
@@ -137,16 +137,16 @@ from xiaowei_agent.persistence.plans import (
     StoredPlan,
 )
 from xiaowei_agent.persistence.rows import (
-    accepted_intent_to_row,
     channel_binding_to_row,
     dump_contract,
+    interaction_artifact_to_row,
     load_contract,
     model_advisory_to_row,
     oauth_state_to_row,
     projection_subscription_to_row,
     record_to_row,
-    row_to_accepted_intent,
     row_to_channel_binding,
+    row_to_interaction_artifact,
     row_to_model_advisory,
     row_to_oauth_state,
     row_to_projection_subscription,
@@ -162,10 +162,10 @@ from xiaowei_agent.persistence.schema import (
     FENCING_SEQUENCE,
     PROJECTION_FENCING_SEQUENCE,
     PROJECTION_SUBSCRIPTIONS,
-    TASK_ACCEPTED_INTENTS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     TASK_EVIDENCE,
+    TASK_INTERACTION_ARTIFACTS,
     TASK_MODEL_ADVISORIES,
     TASK_PLANS,
     TASK_STEP_EXECUTIONS,
@@ -2185,31 +2185,34 @@ class PostgresModelArtifactStore:
             allowed_statuses=allowed_statuses,
         )
 
-    async def _load_intent_row(
+    async def _load_interaction_row(
         self, connection: AsyncConnection, *, task_id: str
-    ) -> AcceptedIntentArtifact | None:
+    ) -> AcceptedInteractionArtifact | None:
         row = (
             (
                 await connection.execute(
-                    sa.select(TASK_ACCEPTED_INTENTS).where(
-                        TASK_ACCEPTED_INTENTS.c.task_id == task_id
+                    sa.select(TASK_INTERACTION_ARTIFACTS).where(
+                        TASK_INTERACTION_ARTIFACTS.c.task_id == task_id,
+                        TASK_INTERACTION_ARTIFACTS.c.artifact_version == 2,
                     )
                 )
             )
             .mappings()
             .first()
         )
-        return None if row is None else row_to_accepted_intent(row)
+        return None if row is None else row_to_interaction_artifact(row)
 
     @_persistence_boundary(write=False)
-    async def load_intent(self, *, task_id: str) -> AcceptedIntentArtifact | None:
+    async def load_interaction(
+        self, *, task_id: str
+    ) -> AcceptedInteractionArtifact | None:
         async with self._engine.connect() as connection:
-            return await self._load_intent_row(connection, task_id=task_id)
+            return await self._load_interaction_row(connection, task_id=task_id)
 
     @_persistence_boundary(write=True)
-    async def save_intent(
-        self, *, grant: TaskAttemptGrant, candidate: IntentArtifactCandidate
-    ) -> AcceptedIntentArtifact:
+    async def save_interaction(
+        self, *, grant: TaskAttemptGrant, candidate: InteractionArtifactCandidate
+    ) -> AcceptedInteractionArtifact:
         async with _write_transaction(self._engine) as connection:
             current = await self._current_for_update(
                 connection, task_id=grant.task_id
@@ -2222,28 +2225,28 @@ class PostgresModelArtifactStore:
                     {TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RUNNING}
                 ),
             )
-            artifact = AcceptedIntentArtifact(
+            artifact = AcceptedInteractionArtifact(
                 **candidate.model_dump(mode="python"),
                 task_id=grant.task_id,
                 created_at=self._clock(),
                 fencing_token=grant.fencing_token,
             )
             insert = (
-                sa.dialects.postgresql.insert(TASK_ACCEPTED_INTENTS)
-                .values(**accepted_intent_to_row(artifact))
+                sa.dialects.postgresql.insert(TASK_INTERACTION_ARTIFACTS)
+                .values(**interaction_artifact_to_row(artifact))
                 .on_conflict_do_nothing(index_elements=["task_id"])
-                .returning(TASK_ACCEPTED_INTENTS.c.task_id)
+                .returning(TASK_INTERACTION_ARTIFACTS.c.task_id)
             )
             if (await connection.execute(insert)).first() is not None:
                 return artifact
-            existing = await self._load_intent_row(
+            existing = await self._load_interaction_row(
                 connection, task_id=grant.task_id
             )
             if existing is None or not artifact_matches_candidate(
                 existing, candidate
             ):
                 raise ModelArtifactConflictError(
-                    "different accepted intent is already stored",
+                    "different interaction artifact is already stored",
                     task_id=grant.task_id,
                 )
             return existing

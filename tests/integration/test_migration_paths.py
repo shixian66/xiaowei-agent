@@ -362,7 +362,7 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
     async with clean_database.begin() as connection:
         await connection.execute(
             sa.text(
-                "INSERT INTO task_accepted_intents "
+                "INSERT INTO task_interaction_artifacts "
                 "(task_id, artifact_version, draft, origin, provider, model, "
                 "provider_origin, prompt_revision, schema_revision, input_digest, "
                 "result_digest, usage, created_at, fencing_token) VALUES "
@@ -411,26 +411,27 @@ async def test_rev_0008_downgrade_requires_authorization_for_model_artifacts(
         revision = await connection.scalar(
             sa.text("SELECT version_num FROM alembic_version")
         )
-        intent_count = await connection.scalar(
-            sa.text("SELECT count(*) FROM task_accepted_intents")
+        interaction_count = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_interaction_artifacts")
         )
         advisory_count = await connection.scalar(
             sa.text("SELECT count(*) FROM task_model_advisories")
         )
-    assert revision == "0010_local_admin_provider"
-    assert (intent_count, advisory_count) == (1, 1)
+    assert revision == "0011_interaction_clarification"
+    assert (interaction_count, advisory_count) == (1, 1)
 
     async with clean_database.begin() as connection:
         await connection.run_sync(run_downgrade, "0007_web_sessions", True)
     assert not {
         "task_accepted_intents",
+        "task_interaction_artifacts",
         "task_model_advisories",
     } & await _table_names(clean_database)
 
     async with clean_database.begin() as connection:
         await connection.run_sync(run_upgrade)
     assert {
-        "task_accepted_intents",
+        "task_interaction_artifacts",
         "task_model_advisories",
     } <= await _table_names(clean_database)
 

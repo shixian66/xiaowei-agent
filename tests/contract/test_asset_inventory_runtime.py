@@ -7,7 +7,6 @@ from tests.fakes.asset_recordings import recording_for
 from tests.fakes.runtime import RuntimeHarness
 
 from xiaowei_agent.application.default_capabilities import ASSET_INVENTORY_BINDING
-from xiaowei_agent.application.runtime import RequestRejectedError
 from xiaowei_agent.contracts import AttemptIntent, TaskStatus
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
 from xiaowei_agent.tools.asset_inventory_fake import AssetInventoryRecordingAdapter
@@ -177,7 +176,7 @@ async def test_missing_multiple_or_broad_selector_never_calls_the_adapter(
     text: str,
 ) -> None:
     harness = _harness("golden")
-    with pytest.raises(RequestRejectedError):
-        await harness.handle(text)
+    payload = await harness.handle(text)
+    assert payload.status is TaskStatus.REJECTED
     assert harness.gateway.invocations == 0
     assert harness.adapters["asset_inventory"].call_count == 0

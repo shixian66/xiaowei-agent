@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.model_ports import (
-        IntentModelPort,
+        InteractionClassifierPort,
         SlowQueryAdvisoryPort,
     )
     from xiaowei_agent.application.runtime import XiaoweiRuntime
@@ -150,7 +150,7 @@ class LocalStack:
     readiness: ReadinessProbe
     aclose: AsyncClose
     policy_revision: str
-    intent_model: IntentModelPort | None
+    interaction_classifier: InteractionClassifierPort | None
     slow_query_advisory: SlowQueryAdvisoryPort | None
     model_profile: ModelInvocationProfile | None
 
@@ -482,7 +482,6 @@ def _assemble_local_stack(
     provider_state: ProviderStateStore,
     load_receipts: Mapping[tuple[str, str], LoadReceipt],
 ) -> LocalStack:
-    from xiaowei_agent.application.context import ContextAssembler
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.capabilities.asset_inventory import (
         ASSET_INVENTORY_GATEWAY,
@@ -620,14 +619,6 @@ def _assemble_local_stack(
         sink=sink,
         lease_ttl_seconds=settings.lease_ttl_seconds,
     )
-    task_projector = TaskViewRuntime(
-        task_store=task_store,
-        plan_store=plan_store,
-        ledger=ledger,
-        bindings=bindings,
-        model_artifacts=model_artifacts,
-        model_profile=application_model_profile,
-    )
     runtime = XiaoweiRuntime(
         interpreter=RuleBasedIntentInterpreter(),
         resolver=DeterministicCapabilityResolver(),
@@ -641,13 +632,8 @@ def _assemble_local_stack(
         clock=clock,
         model_artifacts=model_artifacts,
         model_profile=application_model_profile,
-        intent_model=model_adapter,
+        interaction_classifier=model_adapter,
         slow_query_advisory=model_adapter,
-        context_assembler=ContextAssembler(
-            task_store=task_store,
-            channel_store=channel_store,
-            task_projector=task_projector,
-        ),
         model_monotonic=monotonic,
         lease_ttl_seconds=settings.lease_ttl_seconds,
         heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
@@ -667,7 +653,7 @@ def _assemble_local_stack(
         readiness=readiness,
         aclose=aclose,
         policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
-        intent_model=model_adapter,
+        interaction_classifier=model_adapter,
         slow_query_advisory=model_adapter,
         model_profile=model_profile,
     )
