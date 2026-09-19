@@ -638,3 +638,62 @@ async def test_rev_0011_downgrade_requires_authorization_for_v2_interactions(
 
     assert remaining_after_down == 0
     assert "task_interaction_artifacts" in await _table_names(clean_database)
+
+
+async def test_rev_0012_downgrade_requires_authorization_for_clarification_records(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_submission
+
+    task = await store.create_task(submission=make_submission(context))
+    async with clean_database.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO task_clarification_records "
+                "(task_id, record_version, subject, reason_code, missing_fields, "
+                "confirmed_slots, created_at, fencing_token) VALUES "
+                "(:task_id, 1, CAST(:subject AS jsonb), "
+                "'interaction.kind_ambiguous', CAST(:missing_fields AS jsonb), "
+                "CAST(:confirmed_slots AS jsonb), now(), 1)"
+            ),
+            {
+                "task_id": task.task_id,
+                "subject": '{"kind":"route","proposed_kind":"unknown"}',
+                "missing_fields": '["time_range"]',
+                "confirmed_slots": "[]",
+            },
+        )
+
+    run_upgrade, run_downgrade = alembic_runners
+    with pytest.raises(MigrationSafetyError) as exc_info:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(
+                run_downgrade,
+                "0011_interaction_clarification",
+            )
+    assert exc_info.value.counts == (("task_clarification_records", 1),)
+
+    async with clean_database.connect() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+        remaining = await connection.scalar(
+            sa.text("SELECT count(*) FROM task_clarification_records")
+        )
+    assert revision == _head_revision()
+    assert remaining == 1
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(
+            run_downgrade,
+            "0011_interaction_clarification",
+            True,
+        )
+    assert "task_clarification_records" not in await _table_names(clean_database)
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_upgrade, "head")
+    assert "task_clarification_records" in await _table_names(clean_database)

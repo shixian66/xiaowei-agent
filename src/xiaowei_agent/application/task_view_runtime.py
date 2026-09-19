@@ -51,14 +51,24 @@ from xiaowei_agent.rendering.model_advisory import append_model_advisory
 class ApplicationFailure(StrEnum):
     """入口层可安全映射的应用异常闭集。"""
 
+    CLARIFICATION_INTEGRITY = "clarification_integrity"
     CONFLICT = "conflict"
     NOT_FOUND = "not_found"
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
 
 
+class ClarificationIntegrityError(RuntimeError):
+    """澄清终态缺失持久事实，入口只能暴露闭集错误码。"""
+
+    def __init__(self) -> None:
+        super().__init__("clarification.integrity_error")
+
+
 def classify_application_exception(exc: Exception) -> ApplicationFailure:
     """把应用边界异常收敛为入口可消费的闭集，不暴露存储层类型。"""
+    if isinstance(exc, ClarificationIntegrityError):
+        return ApplicationFailure.CLARIFICATION_INTEGRITY
     if isinstance(exc, IdempotencyConflictError):
         return ApplicationFailure.CONFLICT
     if isinstance(exc, TaskNotFoundError):
@@ -124,10 +134,10 @@ class TaskViewRuntime:
     async def project_clarification(self, *, record: TaskRecord) -> ClarificationPayload:
         """从 ClarificationRecord 重建澄清投影；缺失即 fail-closed。"""
         if self._clarification_records is None:
-            raise RuntimeError("clarification.integrity_error")
+            raise ClarificationIntegrityError()
         stored = await self._clarification_records.load(task_id=record.task_id)
         if stored is None:
-            raise RuntimeError("clarification.integrity_error")
+            raise ClarificationIntegrityError()
         return render_clarification_payload(record=stored)
 
     async def project_recorded(self, *, record: TaskRecord) -> RenderPayload:

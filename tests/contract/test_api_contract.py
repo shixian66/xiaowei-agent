@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from xiaowei_agent.application.task_view_runtime import ClarificationIntegrityError
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import ReadinessReport, TaskStatus, TaskView, task_query_path
 from xiaowei_agent.interfaces.api import create_app
@@ -139,6 +140,7 @@ async def test_get_rejects_malformed_task_id_as_not_found_before_runtime(
             503,
             "unavailable",
         ),
+        (ClarificationIntegrityError(), 500, "clarification.integrity_error"),
         (RuntimeError("private internal text"), 500, "internal_error"),
     ],
 )

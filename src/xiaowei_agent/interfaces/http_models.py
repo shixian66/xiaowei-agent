@@ -28,6 +28,7 @@ class ErrorItem(BaseModel):
         "forbidden",
         "not_found",
         "method_not_allowed",
+        "clarification.integrity_error",
         "idempotency_conflict",
         "payload_too_large",
         "unsupported_media_type",

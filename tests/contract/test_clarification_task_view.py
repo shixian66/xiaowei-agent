@@ -4,6 +4,7 @@ import pytest
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.task_view_runtime import ClarificationIntegrityError
 from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationPayload,
@@ -74,7 +75,7 @@ async def test_clarification_terminal_with_missing_record_is_integrity_error() -
     )
     assert result.applied
 
-    with pytest.raises(RuntimeError, match=r"clarification\.integrity_error"):
+    with pytest.raises(ClarificationIntegrityError):
         await harness.runtime.query_task(
             lookup=TaskLookup(
                 task_id=view.task_id,

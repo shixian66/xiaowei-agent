@@ -70,6 +70,8 @@ async def _http_error(_: Request, exc: Exception) -> Response:
 
 async def _application_error(_: Request, exc: Exception) -> Response:
     failure = classify_application_exception(exc)
+    if failure is ApplicationFailure.CLARIFICATION_INTEGRITY:
+        return _error(500, "clarification.integrity_error")
     if failure is ApplicationFailure.CONFLICT:
         return _error(409, "idempotency_conflict")
     if failure is ApplicationFailure.NOT_FOUND:

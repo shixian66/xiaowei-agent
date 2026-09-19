@@ -18,13 +18,17 @@
 - 本分支实现 I1-A Task 1.4：新增 grant-fenced、insert-once `ClarificationRecordStore`
   与 `task_clarification_records` 表；Runtime 在模型 `UNKNOWN` route clarify 时先保存
   `ClarificationRecord`，再收成 `CLARIFICATION_REQUIRED`；TaskView/Web/飞书从持久澄清事实投影，
-  缺记录 fail-closed 为 `clarification.integrity_error`。规则 fallback 的 `UNKNOWN` 仍保持旧
+  缺记录 fail-closed 为闭集 `clarification.integrity_error`。规则 fallback 的 `UNKNOWN` 仍保持旧
   preplan `REJECTED` 边界，避免把明确不支持的写/未知能力改成澄清。
 - `rev_0011_interaction_clarification` 已把 `task_accepted_intents` 物理表重命名为
   `task_interaction_artifacts`，新写入 artifact version 2；旧 V1 行保留但 Postgres loader 只解释 V2，
   防止旧 accepted intent 被新运行路径误执行。复审打回后已补：0011 downgrade 对 V2 interaction rows
   复用 `require_destructive_authorization`，显式授权时先删除 V2 再恢复旧 CHECK；Postgres
   `save_interaction()` 只在当前 grant/状态复验通过后把同 task 的 legacy V1 行替换为 V2。
+- PR #47 复审指出 0011 已随 PR #46 发布，不能再原地追加澄清表；当前分支已把 0011 恢复为
+  `origin/main@befaa6b` 的历史快照，并新增 `rev_0012_clarification_records` 承载
+  `task_clarification_records` 建表与自身 downgrade 守卫，避免已升级到 0011 的库在 upgrade head 时
+  静默 no-op。
 - 复审打回的 CI head 漂移与 Gemini seam 测试缺口已按根因处理：migration path 测试的当前 head
   断言改由 Alembic `ScriptDirectory` 提供，并新增契约测试防止最新 revision 与 Alembic head 再分叉；
   Gemini SDK seam 恢复真实 SDK schema/no-AFC/no-network、close timeout、close error 不遮蔽主错误、
@@ -32,8 +36,8 @@
   调大 Gemini close timeout 会使新增测试变红。当前证据仍为本机 `tests` 与本机 PostgreSQL integration，
   不是 CI、部署、canary 或用户验收。
 - 本分支已补同根护栏：ClarificationRecordStore 内存/PostgreSQL 共享套件、schema/migration
-  离线一致性、row mapping JSONB 往返、Protocol conformance、只读进程 module surface、通道
-  parity 与安全 marker gate。
+  离线一致性、已发布 migration 源码哈希、0012 downgrade 授权守卫、崩溃恢复不重放模型/网关、
+  row mapping JSONB 往返、Protocol conformance、只读进程 module surface、通道 parity 与安全 marker gate。
 - Task 1.5（`clarification_parent_task_id`、一对一澄清子任务消费、重复消费/目标漂移/环境漂移处理）尚未实现；
   `SlotVerifier`、ReadClass/Plan schema V2、ExecutionDisclosure、I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
   M8 与 M9 也均未在本分支实现。
