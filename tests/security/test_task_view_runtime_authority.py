@@ -207,6 +207,7 @@ def test_task_view_runtime_imports_no_execution_layers() -> None:
 
 def test_task_view_runtime_dependency_surface_is_closed() -> None:
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_tasks") == {
+        "create_clarification_child",
         "create_task",
         "get",
     }

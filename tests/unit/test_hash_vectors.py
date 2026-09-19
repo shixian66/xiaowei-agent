@@ -91,7 +91,7 @@ def _null_parent_submission() -> TaskSubmission:
             policy_revision="policy-1",
         ),
         as_of=dt.datetime(2026, 9, 5, 9, 30, tzinfo=dt.UTC),
-        parent_task_id=None,
+        clarification_parent_task_id=None,
     )
 
 
@@ -100,7 +100,7 @@ def test_null_parent_keeps_all_pre_ri3_digest_bytes_frozen() -> None:
     assert request_dedup_digest(
         submission.envelope,
         submission.context,
-        parent_task_id=None,
+        clarification_parent_task_id=None,
     ) == hashlib.sha256(_REQUEST_DEDUP_CANONICAL).hexdigest()
     assert submission_digest(submission) == hashlib.sha256(
         _SUBMISSION_CANONICAL

@@ -10,6 +10,7 @@ from xiaowei_agent.application.channel_access import (
     TaskAccessService,
 )
 from xiaowei_agent.application.channel_submission import (
+    ChannelParentNotFoundError,
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
     ChannelSubmitCommand,
@@ -73,7 +74,7 @@ def _command(
     channel: ChannelKind = ChannelKind.FEISHU_GROUP,
     client_key: str = "event-1",
     text: str = "inspect slow queries",
-    parent_task_id: str | None = None,
+    clarification_parent_task_id: str | None = None,
 ) -> ChannelSubmitCommand:
     return ChannelSubmitCommand(
         principal=_principal() if principal is None else principal,
@@ -85,7 +86,7 @@ def _command(
         client_submission_ref=client_key,
         conversation_ref="chat-1" if channel is ChannelKind.FEISHU_GROUP else None,
         submitted_at=clock(),
-        parent_task_id=parent_task_id,
+        clarification_parent_task_id=clarification_parent_task_id,
     )
 
 
@@ -96,7 +97,7 @@ def test_group_submission_requires_a_conversation_reference(clock) -> None:
 
 def test_only_web_submissions_can_name_a_parent(clock) -> None:
     with pytest.raises(ValueError, match="parent task is only supported for web"):
-        _command(clock, parent_task_id="task-parent")
+        _command(clock, clarification_parent_task_id="task-parent")
 
 
 @pytest.fixture
@@ -136,6 +137,7 @@ async def _terminal_web_parent(
     *,
     principal: AuthenticatedPrincipal | None = None,
     client_key: str = "web-parent",
+    terminal_status: TaskStatus = TaskStatus.CLARIFICATION_REQUIRED,
 ) -> Any:
     submitted = await service.submit(
         command=_command(
@@ -152,12 +154,12 @@ async def _terminal_web_parent(
             tenant_id=(principal or _principal()).tenant_id,
             environment_id=(principal or _principal()).environment_id,
         ),
-        TaskStatus.SUCCEEDED,
+        terminal_status,
     )
     return submitted
 
 
-async def test_web_parent_must_be_terminal_and_owned_by_the_same_web_identity(
+async def test_web_clarification_parent_must_be_owned_by_the_same_web_identity(
     service, store, clock, memory_state
 ) -> None:
     parent = await _terminal_web_parent(service, store, clock)
@@ -166,7 +168,7 @@ async def test_web_parent_must_be_terminal_and_owned_by_the_same_web_identity(
             clock,
             channel=ChannelKind.WEB,
             client_key="web-child",
-            parent_task_id=parent.task_view.task_id,
+            clarification_parent_task_id=parent.task_view.task_id,
         )
     )
 
@@ -178,9 +180,44 @@ async def test_web_parent_must_be_terminal_and_owned_by_the_same_web_identity(
         )
     )
 
-    assert submission.parent_task_id == parent.task_view.task_id
+    assert submission.clarification_parent_task_id == parent.task_view.task_id
     assert child.binding.channel is ChannelKind.WEB
     assert len(memory_state.tasks) == 2
+
+
+async def test_web_clarification_parent_is_consumed_at_most_once(
+    service, store, clock, memory_state
+) -> None:
+    parent = await _terminal_web_parent(
+        service,
+        store,
+        clock,
+        client_key="clarification-parent-once",
+        terminal_status=TaskStatus.CLARIFICATION_REQUIRED,
+    )
+
+    first = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="clarification-child-first",
+            clarification_parent_task_id=parent.task_view.task_id,
+        )
+    )
+    baseline = set(memory_state.tasks)
+
+    with pytest.raises(ChannelParentNotFoundError, match="task not found"):
+        await service.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="clarification-child-second",
+                clarification_parent_task_id=parent.task_view.task_id,
+            )
+        )
+
+    assert first.clarification_parent_task_id == parent.task_view.task_id
+    assert set(memory_state.tasks) == baseline
 
 
 async def test_web_parent_fails_closed_when_authorizer_is_not_assembled(
@@ -199,7 +236,7 @@ async def test_web_parent_fails_closed_when_authorizer_is_not_assembled(
                 clock,
                 channel=ChannelKind.WEB,
                 client_key="missing-parent-authorizer",
-                parent_task_id=parent.task_view.task_id,
+                clarification_parent_task_id=parent.task_view.task_id,
             )
         )
 
@@ -218,7 +255,7 @@ async def test_nonterminal_or_unknown_parent_is_hidden_without_creating_a_child(
     )
     baseline = set(memory_state.tasks)
 
-    for index, parent_task_id in enumerate(
+    for index, clarification_parent_task_id in enumerate(
         (pending.task_view.task_id, "missing-parent"), start=1
     ):
         with pytest.raises(TaskAccessNotFoundError, match="task not found"):
@@ -227,9 +264,34 @@ async def test_nonterminal_or_unknown_parent_is_hidden_without_creating_a_child(
                     clock,
                     channel=ChannelKind.WEB,
                     client_key=f"invalid-parent-child-{index}",
-                    parent_task_id=parent_task_id,
+                    clarification_parent_task_id=clarification_parent_task_id,
                 )
             )
+
+    assert set(memory_state.tasks) == baseline
+
+
+async def test_non_clarification_terminal_parent_is_hidden_without_creating_a_child(
+    service, store, clock, memory_state
+) -> None:
+    parent = await _terminal_web_parent(
+        service,
+        store,
+        clock,
+        client_key="succeeded-parent",
+        terminal_status=TaskStatus.SUCCEEDED,
+    )
+    baseline = set(memory_state.tasks)
+
+    with pytest.raises(TaskAccessNotFoundError, match="task not found"):
+        await service.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="child-of-succeeded-parent",
+                clarification_parent_task_id=parent.task_view.task_id,
+            )
+        )
 
     assert set(memory_state.tasks) == baseline
 
@@ -267,7 +329,7 @@ async def test_parent_authority_mismatch_is_hidden_even_from_admin(
                 principal=principal,
                 channel=ChannelKind.WEB,
                 client_key=f"mismatched-parent-{principal.actor}",
-                parent_task_id=parent.task_view.task_id,
+                clarification_parent_task_id=parent.task_view.task_id,
             )
         )
 
@@ -285,7 +347,7 @@ async def test_feishu_task_cannot_be_used_as_a_web_parent(
             tenant_id="dev-local",
             environment_id="dev",
         ),
-        TaskStatus.SUCCEEDED,
+        TaskStatus.CLARIFICATION_REQUIRED,
     )
     baseline = set(memory_state.tasks)
 
@@ -295,7 +357,7 @@ async def test_feishu_task_cannot_be_used_as_a_web_parent(
                 clock,
                 channel=ChannelKind.WEB,
                 client_key="web-child-of-feishu",
-                parent_task_id=parent.task_view.task_id,
+                clarification_parent_task_id=parent.task_view.task_id,
             )
         )
 
@@ -308,7 +370,7 @@ async def test_corrupt_parent_cycle_is_hidden_without_creating_a_child(
     parent = await _terminal_web_parent(service, store, clock)
     task_id = parent.task_view.task_id
     corrupt = memory_state.submissions[task_id].model_copy(
-        update={"parent_task_id": task_id}
+        update={"clarification_parent_task_id": task_id}
     )
     memory_state.submissions[task_id] = corrupt
     memory_state.submission_digests[task_id] = submission_digest(corrupt)
@@ -317,7 +379,7 @@ async def test_corrupt_parent_cycle_is_hidden_without_creating_a_child(
             "request_digest": request_dedup_digest(
                 corrupt.envelope,
                 corrupt.context,
-                parent_task_id=task_id,
+                clarification_parent_task_id=task_id,
             )
         }
     )
@@ -329,7 +391,7 @@ async def test_corrupt_parent_cycle_is_hidden_without_creating_a_child(
                 clock,
                 channel=ChannelKind.WEB,
                 client_key="child-of-corrupt-cycle",
-                parent_task_id=task_id,
+                clarification_parent_task_id=task_id,
             )
         )
 
@@ -350,7 +412,7 @@ async def test_web_precheck_only_reads_the_direct_parent_and_worker_owns_ancestr
             clock,
             channel=ChannelKind.WEB,
             client_key="ancestor-drift-parent",
-            parent_task_id=root.task_view.task_id,
+            clarification_parent_task_id=root.task_view.task_id,
         )
     )
     await drive_to_terminal(
@@ -360,7 +422,7 @@ async def test_web_precheck_only_reads_the_direct_parent_and_worker_owns_ancestr
             tenant_id="dev-local",
             environment_id="dev",
         ),
-        TaskStatus.SUCCEEDED,
+        TaskStatus.CLARIFICATION_REQUIRED,
     )
     root_id = root.task_view.task_id
     memory_state.tasks[root_id] = memory_state.tasks[root_id].model_copy(
@@ -372,11 +434,11 @@ async def test_web_precheck_only_reads_the_direct_parent_and_worker_owns_ancestr
             clock,
             channel=ChannelKind.WEB,
             client_key="ancestor-drift-child",
-            parent_task_id=parent.task_view.task_id,
+            clarification_parent_task_id=parent.task_view.task_id,
         )
     )
 
-    assert child.parent_task_id == parent.task_view.task_id
+    assert child.clarification_parent_task_id == parent.task_view.task_id
     assert len(memory_state.tasks) == 3
 
 

@@ -270,23 +270,18 @@ provider 原文或 secret-shaped 输入。
 
 ## 迁移
 
-I1 使用单个 Alembic revision：
+I1-A 的持久化演进已拆成顺序 revision，而不是回改已发布 revision：
 
-```python
-revision = "0011_interaction_clarification"
-down_revision = "0010_local_admin_provider"
-```
-
-预计变更：
-
-1. 删除 `task_submissions.parent_task_id`；新增 nullable `clarification_parent_task_id`、同表 FK、普通索引
-   与非空唯一约束。
-2. 新增 `task_clarification_records`，以 `task_id` 为 PK/FK，包含 record version、record payload/列和
-   fencing check。
-3. 将 `task_accepted_intents` 物理表重命名为 `task_interaction_artifacts`；新写入 artifact version 2；
-   旧 V1 行只作为不可执行历史，活动任务命中 V1 时 fail-closed。
-4. upgrade 在改名/删列前必须检查旧 `parent_task_id IS NOT NULL`。命中即整次 migration 回滚，不能静默
-   解释为澄清关系。
+1. `0011_interaction_clarification` 将 `task_accepted_intents` 物理表重命名为
+   `task_interaction_artifacts`；新写入 artifact version 2；旧 V1 行只作为不可执行历史，活动任务命中
+   V1 时 fail-closed。
+2. `0012_clarification_records` 新增 `task_clarification_records`，以 `task_id` 为 PK/FK，包含 record
+   version、record payload/列和 fencing check。
+3. `0013_clarification_parent` 将 `task_submissions.parent_task_id` rename 为 nullable
+   `clarification_parent_task_id`，新增同表 FK 与非空唯一约束；唯一约束本身就是消费查找索引，不再额外建
+   一条重复普通索引。
+4. `0013` upgrade 在 rename 前必须检查旧 `parent_task_id IS NOT NULL`。命中即整次 migration 回滚，不能
+   静默解释为澄清关系。
 5. downgrade 的 I1 数据丢失检查复用既有 `require_destructive_authorization`。默认返回
    `DESTRUCTIVE_DOWNGRADE_REJECTED`；只有显式 destructive authorization 才能删除 I1-only 澄清记录、
    父引用和 V2 artifact。upgrade 前置检查与 destructive downgrade guard 语义不同，不能新造第二套

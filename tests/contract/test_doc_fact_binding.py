@@ -241,8 +241,8 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
         "> 当前工作树正在实现 I1-A：已有 interaction classifier、insert-once "
         "interaction artifact、确定性\n"
-        "> Router 与 Runtime 接入切片；终态澄清存储/子任务、可信槽位、`ReadClass` "
-        "和执行披露屏障仍未实现，\n"
+        "> Router 与 Runtime 接入切片、终态澄清存储与澄清子任务一次性消费；可信槽位、"
+        "`ReadClass` 和执行披露屏障仍未实现，\n"
         "> 不能把本地离线切片写成完整 I1、真实模型、部署或用户验收。\n"
     )
     without_readme_status = {

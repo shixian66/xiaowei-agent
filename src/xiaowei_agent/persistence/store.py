@@ -97,6 +97,10 @@ class ContextMismatchError(RuntimeError):
     """
 
 
+class ClarificationParentRequiredError(RuntimeError):
+    """澄清父任务只能经 ``create_clarification_child`` 消费。"""
+
+
 class UnscopedAuditEventError(ValueError):
     """审计事件没有 ``task_id``，无处归档。
 
@@ -114,7 +118,7 @@ def request_dedup_digest(
     envelope: RequestEnvelope,
     context: RequestContext,
     *,
-    parent_task_id: str | None,
+    clarification_parent_task_id: str | None,
 ) -> str:
     """幂等去重摘要：只覆盖**语义**字段。
 
@@ -130,9 +134,33 @@ def request_dedup_digest(
         "text": envelope.text,
         "idempotency_key": envelope.idempotency_key,
     }
-    if parent_task_id is not None:
-        payload["parent_task_id"] = parent_task_id
+    if clarification_parent_task_id is not None:
+        payload["clarification_parent_task_id"] = clarification_parent_task_id
     return content_digest(canonical_json(payload).decode("utf-8"))
+
+
+def reject_clarification_parent_on_plain_create(submission: TaskSubmission) -> None:
+    """普通创建不得携带澄清父任务，避免绕过一次性消费语义。"""
+    if submission.clarification_parent_task_id is not None:
+        raise ClarificationParentRequiredError(
+            "clarification parent requires create_clarification_child"
+        )
+
+
+def clarification_parent_is_usable(
+    *,
+    parent: TaskRecord,
+    submission: TaskSubmission,
+    authenticated_channel_owner: str,
+) -> bool:
+    """父任务能否被当前提交作为澄清回复消费。"""
+    return (
+        parent.status is TaskStatus.CLARIFICATION_REQUIRED
+        and parent.tenant_id == submission.context.tenant_id
+        and parent.environment_id == submission.context.environment_id
+        and parent.actor == submission.context.actor
+        and authenticated_channel_owner == submission.context.actor
+    )
 
 
 def idempotency_scope_digest(
@@ -154,8 +182,8 @@ def submission_digest(submission: TaskSubmission) -> str:
         "context": dump_contract(submission.context),
         "as_of": submission.as_of.isoformat(),
     }
-    if submission.parent_task_id is not None:
-        payload["parent_task_id"] = submission.parent_task_id
+    if submission.clarification_parent_task_id is not None:
+        payload["clarification_parent_task_id"] = submission.clarification_parent_task_id
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
@@ -171,7 +199,7 @@ def submission_matches_record(
         == request_dedup_digest(
             submission.envelope,
             submission.context,
-            parent_task_id=submission.parent_task_id,
+            clarification_parent_task_id=submission.clarification_parent_task_id,
         )
         and context_matches_envelope(submission.envelope, submission.context)
         and record.tenant_id == submission.context.tenant_id
@@ -527,6 +555,20 @@ class TaskStore(Protocol):
         """按 ``(tenant_id, environment_id, idempotency_key)`` 幂等创建。
 
         :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
+        :raises IdempotencyConflictError: 同一作用域内同键但**语义**不同的请求。
+        """
+
+    async def create_clarification_child(
+        self,
+        *,
+        submission: TaskSubmission,
+        authenticated_channel_owner: str,
+    ) -> TaskRecord:
+        """一次性消费 ``CLARIFICATION_REQUIRED`` 父任务并创建澄清回复子任务。
+
+        :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
+        :raises ClarificationParentRequiredError: 提交未携带澄清父任务。
+        :raises TaskNotFoundError: 父任务不存在、不可消费、scope/actor 漂移或已被消费。
         :raises IdempotencyConflictError: 同一作用域内同键但**语义**不同的请求。
         """
 

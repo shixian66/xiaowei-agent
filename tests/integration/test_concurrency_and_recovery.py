@@ -16,10 +16,10 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.conftest import lookup_for, make_envelope, make_submission
+from tests.conftest import drive_to_terminal, lookup_for, make_envelope, make_submission
 
 from xiaowei_agent.contracts import TaskStatus, TransitionRejection
-from xiaowei_agent.persistence.store import TransitionCommand
+from xiaowei_agent.persistence.store import TaskNotFoundError, TransitionCommand
 
 pytestmark = pytest.mark.security
 
@@ -96,6 +96,83 @@ async def test_only_one_task_row_exists_after_concurrent_creates(
     async with clean_database.connect() as connection:
         count = await connection.execute(sa.text("SELECT count(*) FROM tasks"))
         assert count.scalar_one() == 1
+
+
+async def test_concurrent_clarification_children_with_different_keys_consume_parent_once(
+    store: Any, context: Any, independent_stores: Any
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="clarification-parent-race",
+                idempotency_key="clarification-parent-race",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    creators = independent_stores(_CONCURRENCY)
+
+    async def create_child(index: int, creator: Any) -> Any:
+        return await creator.create_clarification_child(
+            submission=make_submission(
+                context,
+                envelope=make_envelope(
+                    request_id=f"clarification-child-race-{index}",
+                    idempotency_key=f"clarification-child-race-{index}",
+                    text="continue clarification",
+                ),
+                clarification_parent_task_id=parent.task_id,
+            ),
+            authenticated_channel_owner=context.actor,
+        )
+
+    results = await asyncio.gather(
+        *(create_child(index, creator) for index, creator in enumerate(creators)),
+        return_exceptions=True,
+    )
+    records = [item for item in results if not isinstance(item, Exception)]
+    rejected = [item for item in results if isinstance(item, TaskNotFoundError)]
+
+    assert len(records) == 1
+    assert len(rejected) == _CONCURRENCY - 1
+
+
+async def test_concurrent_clarification_child_replays_same_key(
+    store: Any, context: Any, independent_stores: Any
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="clarification-parent-replay",
+                idempotency_key="clarification-parent-replay",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    creators = independent_stores(_CONCURRENCY)
+    submission = make_submission(
+        context,
+        envelope=make_envelope(
+            request_id="clarification-child-replay-1",
+            idempotency_key="clarification-child-replay",
+            text="continue clarification",
+        ),
+        clarification_parent_task_id=parent.task_id,
+    )
+
+    records = await asyncio.gather(
+        *(
+            creator.create_clarification_child(
+                submission=submission,
+                authenticated_channel_owner=context.actor,
+            )
+            for creator in creators
+        )
+    )
+
+    assert len({record.task_id for record in records}) == 1
 
 
 async def test_preempted_worker_cannot_write_with_its_old_token(

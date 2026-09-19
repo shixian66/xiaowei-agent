@@ -271,7 +271,7 @@ def test_clarification_record_round_trips_through_columns_and_jsonb_lists() -> N
 
 
 def test_parented_submission_contract_round_trips_as_strict_json() -> None:
-    parented = _SUBMISSION.model_copy(update={"parent_task_id": "task-parent"})
+    parented = _SUBMISSION.model_copy(update={"clarification_parent_task_id": "task-parent"})
 
     assert load_contract(TaskSubmission, dump_contract(parented)) == parented
 

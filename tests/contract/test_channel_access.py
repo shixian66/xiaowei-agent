@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 import pytest
-from tests.conftest import make_envelope, make_submission
+from tests.conftest import drive_to_terminal, lookup_for, make_envelope, make_submission
 
 from xiaowei_agent.application import channel_access as channel_access_module
 from xiaowei_agent.application.channel_access import (
@@ -87,7 +87,6 @@ async def _create_task(
     *,
     suffix: str,
     actor: str = "alice",
-    parent_task_id: str | None = None,
 ):
     scoped = context.model_copy(update={"actor": actor})
     return await store.create_task(
@@ -99,7 +98,6 @@ async def _create_task(
                 idempotency_key=f"access-{suffix}",
                 text=f"inspect {suffix}",
             ),
-            parent_task_id=parent_task_id,
         )
     )
 
@@ -143,11 +141,23 @@ async def test_owner_and_admin_can_read_without_a_membership_call(
 async def test_task_detail_returns_only_the_parent_reference(
     store, channel_store, memory_state, context
 ) -> None:
-    task = await _create_task(
+    parent = await _create_task(store, context, suffix="parent-reference-parent")
+    await drive_to_terminal(
         store,
-        context,
-        suffix="parent-reference",
-        parent_task_id="parent-task",
+        lookup_for(parent),
+        TaskStatus.CLARIFICATION_REQUIRED,
+    )
+    task = await store.create_clarification_child(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="request-parent-reference-child",
+                idempotency_key="access-parent-reference-child",
+                text="inspect parent reference child",
+            ),
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
     )
     service = _service(store, channel_store, memory_state, MembershipStub())
 
@@ -155,7 +165,7 @@ async def test_task_detail_returns_only_the_parent_reference(
         query=TaskAccessQuery(principal=_principal(), task_id=task.task_id)
     )
 
-    assert accessible.parent_task_id == "parent-task"
+    assert accessible.clarification_parent_task_id == parent.task_id
     assert not {"submission", "binding", "parent_submission"} & set(
         AccessibleTask.model_fields
     )

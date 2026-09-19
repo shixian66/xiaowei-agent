@@ -31,6 +31,7 @@ from xiaowei_agent.application.channel_access import (
     TaskListQuery,
 )
 from xiaowei_agent.application.channel_submission import (
+    ChannelParentNotFoundError,
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
     ChannelSubmitCommand,
@@ -1125,6 +1126,7 @@ def create_app(
     app.add_exception_handler(_ConfigUnavailableError, _config_unavailable)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
+    app.add_exception_handler(ChannelParentNotFoundError, _task_not_found)
     app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
     app.add_exception_handler(TaskAccessNotFoundError, _task_not_found)
     app.add_exception_handler(
@@ -1325,11 +1327,15 @@ def create_app(
                 client_submission_ref=body.client_submission_id,
                 conversation_ref=None,
                 submitted_at=clock(),
-                parent_task_id=body.parent_task_id,
+                clarification_parent_task_id=body.clarification_parent_task_id,
             )
         )
         accepted = WebTaskAccepted.from_submission(submitted)
-        exclude = {"parent_task_id"} if accepted.parent_task_id is None else set()
+        exclude = (
+            {"clarification_parent_task_id"}
+            if accepted.clarification_parent_task_id is None
+            else set()
+        )
         return accepted.model_dump(mode="json", exclude=exclude)
 
     @app.get("/app/api/tasks/{task_id}")
@@ -1342,7 +1348,11 @@ def create_app(
             )
         )
         detail = WebTaskDetail.from_accessible(accessible)
-        exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
+        exclude = (
+            {"clarification_parent_task_id"}
+            if detail.clarification_parent_task_id is None
+            else set()
+        )
         if detail.clarification is None:
             exclude.add("clarification")
         return detail.model_dump(mode="json", exclude=exclude)

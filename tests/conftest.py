@@ -199,7 +199,7 @@ def make_submission(
     *,
     envelope: "RequestEnvelope | None" = None,
     as_of: object | None = None,
-    parent_task_id: str | None = None,
+    clarification_parent_task_id: str | None = None,
 ) -> "TaskSubmission":
     """构造提交事实；默认时间固定，避免测试隐式读取进程时钟。"""
     import datetime as dt
@@ -210,7 +210,7 @@ def make_submission(
         envelope=make_envelope() if envelope is None else envelope,
         context=context,
         as_of=dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.UTC) if as_of is None else as_of,
-        parent_task_id=parent_task_id,
+        clarification_parent_task_id=clarification_parent_task_id,
     )
 
 

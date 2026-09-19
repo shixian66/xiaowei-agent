@@ -67,7 +67,7 @@ async def _post(app: Any, body: dict[str, object]) -> httpx.Response:
         "request_id",
         "channel",
         "policy_revision",
-        "parent_task_id",
+        "clarification_parent_task_id",
     ],
 )
 async def test_every_server_owned_field_is_rejected_as_extra_input(field: str) -> None:

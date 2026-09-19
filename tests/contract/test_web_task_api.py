@@ -21,6 +21,7 @@ from xiaowei_agent.application.channel_access import (
     TaskSummary,
 )
 from xiaowei_agent.application.channel_submission import (
+    ChannelParentNotFoundError,
     ChannelSubmissionForbiddenError,
     ChannelSubmitCommand,
 )
@@ -182,7 +183,7 @@ class _Submissions:
             raise self.error
         return SimpleNamespace(
             task_view=self.view,
-            parent_task_id=command.parent_task_id,
+            clarification_parent_task_id=command.clarification_parent_task_id,
         )
 
 
@@ -310,17 +311,17 @@ def test_web_submit_parent_is_optional_and_strict() -> None:
     assert WebTaskSubmitRequest(
         text="继续分析",
         client_submission_id="browser-parent-0001",
-    ).parent_task_id is None
+    ).clarification_parent_task_id is None
     assert WebTaskSubmitRequest(
         text="继续分析",
         client_submission_id="browser-parent-0001",
-        parent_task_id="task-parent",
-    ).parent_task_id == "task-parent"
+        clarification_parent_task_id="task-parent",
+    ).clarification_parent_task_id == "task-parent"
     assert WebTaskSubmitRequest(
         text="继续分析",
         client_submission_id="browser-parent-0001",
-        parent_task_id="a" + ("-" * 199),
-    ).parent_task_id == "a" + ("-" * 199)
+        clarification_parent_task_id="a" + ("-" * 199),
+    ).clarification_parent_task_id == "a" + ("-" * 199)
     for invalid in (
         "",
         " task-parent ",
@@ -337,7 +338,7 @@ def test_web_submit_parent_is_optional_and_strict() -> None:
             WebTaskSubmitRequest(
                 text="继续分析",
                 client_submission_id="browser-parent-0001",
-                parent_task_id=invalid,
+                clarification_parent_task_id=invalid,
             )
 
 
@@ -390,7 +391,7 @@ async def test_child_detail_exposes_only_its_parent_task_reference() -> None:
         request_preview="继续分析",
         submitted_at=_NOW,
         task_version=8,
-        parent_task_id="task-parent",
+        clarification_parent_task_id="task-parent",
     )
     client, _, _ = _client(access=access)
 
@@ -398,7 +399,7 @@ async def test_child_detail_exposes_only_its_parent_task_reference() -> None:
         response = await client.get("/app/api/tasks/task-1")
 
     assert response.status_code == 200
-    assert response.json()["parent_task_id"] == "task-parent"
+    assert response.json()["clarification_parent_task_id"] == "task-parent"
     assert "parent_submission" not in response.text
     assert "parent_binding" not in response.text
 
@@ -462,7 +463,7 @@ async def test_submit_forwards_explicit_parent_and_returns_its_source() -> None:
             json={
                 "text": "继续分析这个任务",
                 "client_submission_id": "browser-parent-0002",
-                "parent_task_id": "task-parent",
+                "clarification_parent_task_id": "task-parent",
             },
             headers={
                 "origin": "https://ops.example.test",
@@ -475,9 +476,9 @@ async def test_submit_forwards_explicit_parent_and_returns_its_source() -> None:
         "task_id": "task-1",
         "status": "created",
         "detail_path": "/app/tasks/task-1",
-        "parent_task_id": "task-parent",
+        "clarification_parent_task_id": "task-parent",
     }
-    assert submissions.calls[0].parent_task_id == "task-parent"
+    assert submissions.calls[0].clarification_parent_task_id == "task-parent"
 
 
 async def test_submit_rejects_non_json_media_type_before_submission() -> None:
@@ -539,6 +540,12 @@ async def test_task_errors_map_to_closed_http_semantics() -> None:
             TaskAccessSnapshotUnavailableError(),
             503,
             "unavailable",
+        ),
+        (
+            "submit",
+            ChannelParentNotFoundError(),
+            404,
+            "not_found",
         ),
         (
             "submit",

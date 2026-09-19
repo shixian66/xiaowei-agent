@@ -185,6 +185,7 @@ from xiaowei_agent.persistence.schema import (
     WEB_SESSIONS,
 )
 from xiaowei_agent.persistence.store import (
+    ClarificationParentRequiredError,
     Clock,
     ContextMismatchError,
     DispatchQuery,
@@ -205,7 +206,9 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
     UnscopedAuditEventError,
     attempt_terminal_event,
+    clarification_parent_is_usable,
     idempotency_scope_digest,
+    reject_clarification_parent_on_plain_create,
     request_dedup_digest,
     retry_command_digest,
     step_commit_digest,
@@ -1105,7 +1108,7 @@ class PostgresTaskStore:
                 envelope=load_contract(RequestEnvelope, row["submission_envelope"]),
                 context=load_contract(RequestContext, row["submission_context"]),
                 as_of=row["submission_as_of"],
-                parent_task_id=row["submission_parent_task_id"],
+                clarification_parent_task_id=row["submission_clarification_parent_task_id"],
             )
         except ValueError as exc:
             raise TaskNotFoundError(task_id=record.task_id) from exc
@@ -1141,7 +1144,7 @@ class PostgresTaskStore:
                 TASK_SUBMISSIONS.c.context.label("submission_context"),
                 TASK_SUBMISSIONS.c.as_of.label("submission_as_of"),
                 TASK_SUBMISSIONS.c.submission_digest.label("submission_digest"),
-                TASK_SUBMISSIONS.c.parent_task_id.label("submission_parent_task_id"),
+                TASK_SUBMISSIONS.c.clarification_parent_task_id.label("submission_clarification_parent_task_id"),
             )
             .join(TASK_SUBMISSIONS, TASK_SUBMISSIONS.c.task_id == TASKS.c.task_id)
             .where(*conditions)
@@ -1373,7 +1376,7 @@ class PostgresTaskStore:
                         envelope=load_contract(RequestEnvelope, stored["envelope"]),
                         context=load_contract(RequestContext, stored["context"]),
                         as_of=stored["as_of"],
-                        parent_task_id=stored["parent_task_id"],
+                        clarification_parent_task_id=stored["clarification_parent_task_id"],
                     )
                 except ValueError:
                     submission = None
@@ -1795,6 +1798,122 @@ class PostgresTaskStore:
 
     # --- 写 -------------------------------------------------------------------
 
+    async def _load_existing_for_scope(
+        self,
+        connection: AsyncConnection,
+        *,
+        scope_digest: str,
+    ) -> Mapping[str, Any]:
+        return _as_row(
+            (
+                await connection.execute(
+                    sa.select(TASKS).where(
+                        TASKS.c.idempotency_scope_digest == scope_digest
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    def _record_or_conflict(
+        self,
+        *,
+        row: Mapping[str, Any],
+        request_context: RequestContext,
+        envelope: RequestEnvelope,
+        digest: str,
+    ) -> TaskRecord:
+        record = row_to_record(_as_row(row))
+        same_scope = (
+            record.tenant_id == request_context.tenant_id
+            and record.environment_id == request_context.environment_id
+            and record.idempotency_key == envelope.idempotency_key
+        )
+        if not same_scope or record.request_digest != digest:
+            raise IdempotencyConflictError("idempotency key reused for a different request")
+        return record
+
+    async def _existing_record_for_submission(
+        self,
+        connection: AsyncConnection,
+        *,
+        scope_digest: str,
+        request_context: RequestContext,
+        envelope: RequestEnvelope,
+        digest: str,
+    ) -> TaskRecord | None:
+        found = (
+            (
+                await connection.execute(
+                    sa.select(TASKS).where(
+                        TASKS.c.idempotency_scope_digest == scope_digest
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if found is None:
+            return None
+        return self._record_or_conflict(
+            row=_as_row(found),
+            request_context=request_context,
+            envelope=envelope,
+            digest=digest,
+        )
+
+    async def _insert_task_with_submission(
+        self,
+        connection: AsyncConnection,
+        *,
+        submission: TaskSubmission,
+        digest: str,
+        scope_digest: str,
+    ) -> TaskRecord | None:
+        envelope = submission.envelope
+        request_context = submission.context
+        created_seq = (
+            await connection.execute(sa.select(CREATED_SEQUENCE.next_value()))
+        ).scalar_one()
+        candidate = TaskRecord(
+            task_id=str(uuid.uuid4()),
+            tenant_id=request_context.tenant_id,
+            environment_id=request_context.environment_id,
+            actor=request_context.actor,
+            idempotency_key=envelope.idempotency_key,
+            request_digest=digest,
+            status=TaskStatus.CREATED,
+            version=0,
+            created_seq=created_seq,
+            attempt_number=0,
+            task_failure_count=0,
+            next_attempt_at=None,
+        )
+        insert = (
+            sa.dialects.postgresql.insert(TASKS)
+            .values(
+                **record_to_row(candidate),
+                idempotency_scope_digest=scope_digest,
+            )
+            .on_conflict_do_nothing(constraint="uq_tasks_idempotency_scope_digest")
+            .returning(TASKS)
+        )
+        inserted = (await connection.execute(insert)).mappings().first()
+        if inserted is None:
+            return None
+        await connection.execute(
+            sa.insert(TASK_SUBMISSIONS).values(
+                task_id=candidate.task_id,
+                envelope=dump_contract(submission.envelope),
+                context=dump_contract(submission.context),
+                as_of=submission.as_of,
+                submission_digest=submission_digest(submission),
+                clarification_parent_task_id=submission.clarification_parent_task_id,
+            )
+        )
+        return row_to_record(_as_row(inserted))
+
     @_persistence_boundary(write=True)
     async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
         """幂等创建。**并发重复请求只产生一个任务事实。**
@@ -1809,10 +1928,11 @@ class PostgresTaskStore:
         request_context = submission.context
         if not context_matches_envelope(envelope, request_context):
             raise ContextMismatchError("envelope and context disagree on execution context")
+        reject_clarification_parent_on_plain_create(submission)
         digest = request_dedup_digest(
             envelope,
             request_context,
-            parent_task_id=submission.parent_task_id,
+            clarification_parent_task_id=submission.clarification_parent_task_id,
         )
         scope_digest = idempotency_scope_digest(
             tenant_id=request_context.tenant_id,
@@ -1820,65 +1940,106 @@ class PostgresTaskStore:
             idempotency_key=envelope.idempotency_key,
         )
         async with _write_transaction(self._engine) as connection:
-            created_seq = (
-                await connection.execute(sa.select(CREATED_SEQUENCE.next_value()))
-            ).scalar_one()
-            candidate = TaskRecord(
-                task_id=str(uuid.uuid4()),
-                tenant_id=request_context.tenant_id,
-                environment_id=request_context.environment_id,
-                actor=request_context.actor,
-                idempotency_key=envelope.idempotency_key,
-                request_digest=digest,
-                status=TaskStatus.CREATED,
-                version=0,
-                created_seq=created_seq,
-                attempt_number=0,
-                task_failure_count=0,
-                next_attempt_at=None,
+            inserted = await self._insert_task_with_submission(
+                connection,
+                submission=submission,
+                digest=digest,
+                scope_digest=scope_digest,
             )
-            insert = (
-                sa.dialects.postgresql.insert(TASKS)
-                .values(
-                    **record_to_row(candidate),
-                    idempotency_scope_digest=scope_digest,
-                )
-                .on_conflict_do_nothing(constraint="uq_tasks_idempotency_scope_digest")
-                .returning(TASKS)
-            )
-            inserted = (await connection.execute(insert)).mappings().first()
             if inserted is not None:
-                await connection.execute(
-                    sa.insert(TASK_SUBMISSIONS).values(
-                        task_id=candidate.task_id,
-                        envelope=dump_contract(submission.envelope),
-                        context=dump_contract(submission.context),
-                        as_of=submission.as_of,
-                        submission_digest=submission_digest(submission),
-                        parent_task_id=submission.parent_task_id,
-                    )
-                )
-                return row_to_record(_as_row(inserted))
-            existing = (
-                (
-                    await connection.execute(
-                        sa.select(TASKS).where(
-                            TASKS.c.idempotency_scope_digest == scope_digest
-                        )
-                    )
-                )
-                .mappings()
-                .one()
+                return inserted
+            existing = await self._load_existing_for_scope(
+                connection, scope_digest=scope_digest
             )
-        record = row_to_record(_as_row(existing))
-        same_scope = (
-            record.tenant_id == request_context.tenant_id
-            and record.environment_id == request_context.environment_id
-            and record.idempotency_key == envelope.idempotency_key
+        return self._record_or_conflict(
+            row=existing,
+            request_context=request_context,
+            envelope=envelope,
+            digest=digest,
         )
-        if not same_scope or record.request_digest != digest:
-            raise IdempotencyConflictError("idempotency key reused for a different request")
-        return record
+
+    @_persistence_boundary(write=True)
+    async def create_clarification_child(
+        self,
+        *,
+        submission: TaskSubmission,
+        authenticated_channel_owner: str,
+    ) -> TaskRecord:
+        clarification_parent_id = submission.clarification_parent_task_id
+        if clarification_parent_id is None:
+            raise ClarificationParentRequiredError("clarification parent is required")
+        envelope = submission.envelope
+        request_context = submission.context
+        if not context_matches_envelope(envelope, request_context):
+            raise ContextMismatchError("envelope and context disagree on execution context")
+        digest = request_dedup_digest(
+            envelope,
+            request_context,
+            clarification_parent_task_id=clarification_parent_id,
+        )
+        scope_digest = idempotency_scope_digest(
+            tenant_id=request_context.tenant_id,
+            environment_id=request_context.environment_id,
+            idempotency_key=envelope.idempotency_key,
+        )
+        async with _write_transaction(self._engine) as connection:
+            existing = await self._existing_record_for_submission(
+                connection,
+                scope_digest=scope_digest,
+                request_context=request_context,
+                envelope=envelope,
+                digest=digest,
+            )
+            if existing is not None:
+                return existing
+            parent_row = await self._select_row(
+                connection, clarification_parent_id, for_update=True
+            )
+            if parent_row is None:
+                raise TaskNotFoundError(task_id=clarification_parent_id)
+            parent = row_to_record(parent_row)
+            existing = await self._existing_record_for_submission(
+                connection,
+                scope_digest=scope_digest,
+                request_context=request_context,
+                envelope=envelope,
+                digest=digest,
+            )
+            if existing is not None:
+                return existing
+            if not clarification_parent_is_usable(
+                parent=parent,
+                submission=submission,
+                authenticated_channel_owner=authenticated_channel_owner,
+            ):
+                raise TaskNotFoundError(task_id=clarification_parent_id)
+            consumed = await connection.scalar(
+                sa.select(TASK_SUBMISSIONS.c.task_id)
+                .where(
+                    TASK_SUBMISSIONS.c.clarification_parent_task_id
+                    == clarification_parent_id
+                )
+                .limit(1)
+            )
+            if consumed is not None:
+                raise TaskNotFoundError(task_id=clarification_parent_id)
+            inserted = await self._insert_task_with_submission(
+                connection,
+                submission=submission,
+                digest=digest,
+                scope_digest=scope_digest,
+            )
+            if inserted is not None:
+                return inserted
+            existing_row = await self._load_existing_for_scope(
+                connection, scope_digest=scope_digest
+            )
+        return self._record_or_conflict(
+            row=existing_row,
+            request_context=request_context,
+            envelope=envelope,
+            digest=digest,
+        )
 
     @_persistence_boundary(write=True)
     async def transition(

@@ -63,10 +63,20 @@ def test_explicit_parent_controls_are_present_and_payload_is_opt_in() -> None:
     for control_id in ('id="detail-continue-task"', 'id="detail-parent"'):
         assert control_id in detail
     assert "pendingSubmission.parentTaskId" in app_script
-    assert "body.parent_task_id = pendingSubmission.parentTaskId" in app_script
+    assert "body.clarification_parent_task_id = pendingSubmission.parentTaskId" in app_script
     assert "encodeURIComponent" in app_script + detail_script
-    assert "parent_task_id: pendingParentTaskId" not in app_script
+    assert "clarification_parent_task_id: pendingParentTaskId" not in app_script
     assert "innerHTML" not in app_script + detail_script
+
+
+def test_continue_controls_are_limited_to_clarification_required_tasks() -> None:
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+    detail_script = (_STATIC / "detail.js").read_text(encoding="utf-8")
+
+    assert 'task.status === "clarification_required"' in app_script
+    assert 'task.status === "clarification_required"' in detail_script
+    assert "setVisible(elements.continueTask, terminal)" not in app_script
+    assert "setVisible(elements.continueTask, terminal)" not in detail_script
 
 
 def test_no_script_sends_the_browser_to_an_oauth_only_entry() -> None:

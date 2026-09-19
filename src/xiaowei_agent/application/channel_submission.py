@@ -30,6 +30,7 @@ from xiaowei_agent.persistence.channel import (
     ChannelStore,
     CreateProjectionSubscriptionCommand,
 )
+from xiaowei_agent.persistence.store import TaskNotFoundError
 from xiaowei_agent.planning import canonical_json
 
 
@@ -40,6 +41,13 @@ class ChannelSubmissionForbiddenError(PermissionError):
         super().__init__("submission forbidden")
 
 
+class ChannelParentNotFoundError(LookupError):
+    """澄清父任务不存在、无权访问或已被消费；入口统一映射为 not_found。"""
+
+    def __init__(self) -> None:
+        super().__init__("task not found")
+
+
 class WebParentAccessPort(Protocol):
     """Web-only 父任务授权端口；飞书提交进程不装配该依赖。"""
 
@@ -47,7 +55,7 @@ class WebParentAccessPort(Protocol):
         self,
         *,
         principal: AuthenticatedPrincipal,
-        parent_task_id: str,
+        clarification_parent_task_id: str,
     ) -> None:
         """仅在父链满足同 scope、身份、owner 和终态约束时返回。"""
 
@@ -62,13 +70,13 @@ class ChannelSubmitCommand(Contract):
     client_submission_ref: StrictStr
     conversation_ref: StrictStr | None = None
     submitted_at: AwareDatetime
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _shape_is_supported(self) -> Self:
         if self.channel is ChannelKind.FEISHU_GROUP and self.conversation_ref is None:
             raise ValueError("group submission requires conversation_ref")
-        if self.parent_task_id is not None and self.channel is not ChannelKind.WEB:
+        if self.clarification_parent_task_id is not None and self.channel is not ChannelKind.WEB:
             raise ValueError("parent task is only supported for web")
         return self
 
@@ -76,7 +84,7 @@ class ChannelSubmitCommand(Contract):
 class SubmittedTask(Contract):
     task_view: TaskView
     binding: ChannelBinding
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
 
 class ChannelSubmissionReferences(NamedTuple):
@@ -158,38 +166,46 @@ class ChannelSubmissionService:
         principal = command.principal
         if ChannelPermission.SUBMIT_READONLY_TASK not in principal.permissions:
             raise ChannelSubmissionForbiddenError
-        if command.parent_task_id is not None:
+        if command.clarification_parent_task_id is not None:
             if self._web_parent_access is None:
                 raise ChannelSubmissionForbiddenError
             await self._web_parent_access.require_web_parent_access(
                 principal=principal,
-                parent_task_id=command.parent_task_id,
+                clarification_parent_task_id=command.clarification_parent_task_id,
             )
         references = derive_channel_submission_references(command)
-        task_view = await self._runtime.submit_task(
-            submission=TaskSubmission(
-                envelope=RequestEnvelope(
-                    request_id=command.request_id,
-                    tenant_id=principal.tenant_id,
-                    actor=principal.actor,
-                    channel=Channel.WEB
-                    if command.channel is ChannelKind.WEB
-                    else Channel.FEISHU,
-                    text=command.text,
-                    idempotency_key=references.idempotency_key,
-                    environment_id=principal.environment_id,
-                ),
-                context=RequestContext(
-                    tenant_id=principal.tenant_id,
-                    actor=principal.actor,
-                    environment_id=principal.environment_id,
-                    trace_id=command.trace_id,
-                    policy_revision=command.policy_revision,
-                ),
-                as_of=command.submitted_at,
-                parent_task_id=command.parent_task_id,
-            )
+        submission = TaskSubmission(
+            envelope=RequestEnvelope(
+                request_id=command.request_id,
+                tenant_id=principal.tenant_id,
+                actor=principal.actor,
+                channel=Channel.WEB
+                if command.channel is ChannelKind.WEB
+                else Channel.FEISHU,
+                text=command.text,
+                idempotency_key=references.idempotency_key,
+                environment_id=principal.environment_id,
+            ),
+            context=RequestContext(
+                tenant_id=principal.tenant_id,
+                actor=principal.actor,
+                environment_id=principal.environment_id,
+                trace_id=command.trace_id,
+                policy_revision=command.policy_revision,
+            ),
+            as_of=command.submitted_at,
+            clarification_parent_task_id=command.clarification_parent_task_id,
         )
+        try:
+            if command.clarification_parent_task_id is None:
+                task_view = await self._runtime.submit_task(submission=submission)
+            else:
+                task_view = await self._runtime.submit_clarification_child(
+                    submission=submission,
+                    authenticated_channel_owner=principal.actor,
+                )
+        except TaskNotFoundError:
+            raise ChannelParentNotFoundError from None
         binding = await self._channels.bind_task(
             command=BindTaskCommand(
                 task_id=task_view.task_id,
@@ -206,11 +222,12 @@ class ChannelSubmissionService:
         return SubmittedTask(
             task_view=task_view,
             binding=binding,
-            parent_task_id=command.parent_task_id,
+            clarification_parent_task_id=command.clarification_parent_task_id,
         )
 
 
 __all__ = [
+    "ChannelParentNotFoundError",
     "ChannelSubmissionForbiddenError",
     "ChannelSubmissionReferences",
     "ChannelSubmissionService",

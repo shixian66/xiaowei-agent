@@ -8,6 +8,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceWriteOutcome,
 )
 from xiaowei_agent.persistence.store import (
+    ClarificationParentRequiredError,
     Clock,
     ContextMismatchError,
     DispatchQuery,
@@ -36,6 +37,7 @@ from xiaowei_agent.persistence.store import (
 )
 
 __all__ = [
+    "ClarificationParentRequiredError",
     "Clock",
     "ContextMismatchError",
     "DispatchQuery",
