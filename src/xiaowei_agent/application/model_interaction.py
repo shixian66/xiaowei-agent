@@ -19,7 +19,9 @@ from xiaowei_agent.application.model_ports import (
 from xiaowei_agent.capabilities.intent import IntentInterpreter
 from xiaowei_agent.contracts import (
     MAX_MODEL_TEXT_CHARACTERS,
+    CapabilitySubject,
     ClarificationContext,
+    IntentDraft,
     IntentSource,
     InteractionClassifierRequest,
     InteractionDraft,
@@ -223,9 +225,29 @@ def interaction_artifact_identity_matches(
 
 
 def rule_interaction_fallback(
-    *, envelope: RequestEnvelope, context: RequestContext, interpreter: IntentInterpreter
+    *,
+    envelope: RequestEnvelope,
+    context: RequestContext,
+    interpreter: IntentInterpreter,
+    clarification: ClarificationContext | None = None,
 ) -> InteractionDraft:
     """旧规则解释器只在唯一识别 capability 时产生 capability route。"""
+    if clarification is not None and isinstance(
+        clarification.subject, CapabilitySubject
+    ):
+        subject = clarification.subject
+        return InteractionDraft(
+            proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+            capability_draft=IntentDraft(
+                intent=subject.capability_id,
+                slots={},
+                missing=tuple(field.value for field in clarification.missing_fields),
+                confidence=1.0,
+                source=IntentSource.USER,
+            ),
+            confidence=1.0,
+            source=InteractionSource.RULE,
+        )
     capability = interpreter.interpret(text=envelope.text, context=context)
     if capability.intent == UNKNOWN_INTENT:
         return InteractionDraft(
@@ -312,12 +334,16 @@ async def load_or_accept_interaction(
     model: InteractionClassifierPort | None,
     profile: ModelInvocationProfile,
     artifacts: ModelArtifactStore,
+    clarification: ClarificationContext | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> AcceptedInteractionResult:
     """重建输入、复用匹配 winner，或调用模型并在 Router 前保存 winner。"""
     request: InteractionClassifierRequest | None
     try:
-        built_request = build_interaction_classifier_request(user_text=envelope.text)
+        built_request = build_interaction_classifier_request(
+            user_text=envelope.text,
+            clarification=clarification,
+        )
     except ModelInputRejectedError:
         request = None
     else:
@@ -351,6 +377,7 @@ async def load_or_accept_interaction(
             envelope=envelope,
             context=context,
             interpreter=interpreter,
+            clarification=clarification,
         )
 
     if request is None:

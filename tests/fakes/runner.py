@@ -12,6 +12,7 @@ from tests.fakes.admission import (
     CONTEXT,
     PARAMS,
     POLICY_SNAPSHOT,
+    TARGET,
     TASK_ID,
     synthetic_write_plan,
 )
@@ -166,17 +167,18 @@ class RunnerHarness:
         )
         self.approval_gate = CountingApprovalGate()
         self.context = CONTEXT
-        self.target = resolve_target(context=CONTEXT, draft=_draft())
         self.recomputed_fingerprints = 0
         self.sink = RecordingTraceSink()
 
         if synthetic_write:
+            self.target = TARGET
             self.plan = synthetic_write_plan()
             snapshot = WRITE_SNAPSHOT
         else:
             params = PARAMS if database is None else PARAMS.model_copy(
                 update={"database": database}
             )
+            self.target = resolve_target(context=CONTEXT, params=params)
             self.plan = _slow_query_plan_with(params)
             snapshot = StaticCapabilityRegistry().snapshot()
         if tamper_sql:
@@ -356,7 +358,7 @@ def _slow_query_plan_with(params: Any) -> Any:
     return compile_plan(
         candidate=candidate,
         params=params,
-        target=resolve_target(context=CONTEXT, draft=_draft()),
+        target=resolve_target(context=CONTEXT, params=params),
         context=CONTEXT,
         snapshot=snapshot,
         surface=SLOW_QUERY_SURFACE,

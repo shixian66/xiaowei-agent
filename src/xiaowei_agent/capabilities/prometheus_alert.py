@@ -19,6 +19,7 @@ OP_QUERY_METRIC_RANGE: Final[str] = "query_metric_range"
 PROMETHEUS_ALERT_POLICY_PROFILE: Final[str] = (
     "readonly.prometheus.alert.evidence.v1"
 )
+PROMETHEUS_ALERT_INPUT_SCHEMA_REF: Final[str] = "input.prometheus.alert.v1"
 
 ALERTMANAGER_GATEWAY: Final[str] = "alertmanager"
 PROMETHEUS_GATEWAY: Final[str] = "prometheus"
@@ -32,6 +33,7 @@ PROMETHEUS_ALERT_SPEC: Final[CapabilitySpec] = CapabilitySpec(
     capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
     version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
     domain="prometheus",
+    input_schema_ref=PROMETHEUS_ALERT_INPUT_SCHEMA_REF,
     operations=(
         OperationSpec(
             operation=OP_GET_ACTIVE_ALERTS,

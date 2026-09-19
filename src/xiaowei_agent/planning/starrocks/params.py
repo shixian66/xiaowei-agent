@@ -16,7 +16,7 @@
 import datetime as _dt
 import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Final, Self
+from typing import Annotated, Any, ClassVar, Final, Self
 
 from pydantic import AfterValidator, Field, model_validator
 
@@ -24,7 +24,7 @@ from xiaowei_agent.contracts import (
     MAX_ROW_LIMIT,
     MAX_WINDOW_MINUTES,
     AwareDatetime,
-    Contract,
+    CapabilityParams,
     JsonScalar,
     StrictInt,
     StrictStr,
@@ -70,11 +70,13 @@ def _identifier(value: str) -> str:
 Identifier = Annotated[StrictStr, AfterValidator(_identifier)]
 
 
-class SlowQueryParams(Contract):
+class SlowQueryParams(CapabilityParams):
     """一次慢查询取数的全部 SQL 参数。
 
     可选过滤为 ``None`` 表示"不按该维度过滤"，不是"过滤成空"。
     """
+
+    INPUT_SCHEMA_REF: ClassVar[str] = "input.starrocks.slow_query.v1"
 
     window_start: AwareDatetime
     window_end: AwareDatetime

@@ -8,12 +8,21 @@
 结果会依赖遍历顺序。
 """
 
-from typing import Self
+from dataclasses import dataclass
+from typing import ClassVar, Generic, Self, TypeAlias, TypeVar
 
 from pydantic import model_validator
 
 from xiaowei_agent.contracts.base import Contract, StrictStr
-from xiaowei_agent.contracts.enums import EffectClass
+from xiaowei_agent.contracts.clarification import ConfirmedSlot
+from xiaowei_agent.contracts.enums import (
+    ClarificationField,
+    ClarificationReasonCode,
+    EffectClass,
+    InteractionRejectionReasonCode,
+)
+
+ParamsT = TypeVar("ParamsT", bound="CapabilityParams")
 
 
 class OperationSpec(Contract):
@@ -30,10 +39,44 @@ class OperationSpec(Contract):
         return self
 
 
+class CapabilityParams(Contract):
+    """Base class for trusted, capability-specific planner input."""
+
+    INPUT_SCHEMA_REF: ClassVar[StrictStr]
+
+
+@dataclass(frozen=True)
+class SlotReady(Generic[ParamsT]):
+    """Slot verifier produced trusted, capability-specific params."""
+
+    params: ParamsT
+    confirmed_slots: tuple[ConfirmedSlot, ...]
+
+
+@dataclass(frozen=True)
+class SlotIncomplete:
+    """Slot verifier needs user-confirmed fields before planning."""
+
+    reason_code: ClarificationReasonCode
+    missing_fields: tuple[ClarificationField, ...]
+    confirmed_slots: tuple[ConfirmedSlot, ...]
+
+
+@dataclass(frozen=True)
+class SlotInvalid:
+    """Slot verifier rejected untrusted or malformed input."""
+
+    reason_code: ClarificationReasonCode | InteractionRejectionReasonCode
+
+
+SlotVerificationResult: TypeAlias = SlotReady[ParamsT] | SlotIncomplete | SlotInvalid
+
+
 class CapabilitySpec(Contract):
     capability_id: StrictStr
     version: StrictStr
     domain: StrictStr
+    input_schema_ref: StrictStr
     operations: tuple[OperationSpec, ...]
     policy_profile: StrictStr
     evidence_contract: StrictStr

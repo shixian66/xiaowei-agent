@@ -19,6 +19,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     """
     xiaowei_agent
     xiaowei_agent.application
+    xiaowei_agent.application.capability_input
     xiaowei_agent.application.capability_runtime
     xiaowei_agent.application.default_capabilities
     xiaowei_agent.application.model_advisory
@@ -28,6 +29,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.capabilities
     xiaowei_agent.capabilities.asset_inventory
     xiaowei_agent.capabilities.effect
+    xiaowei_agent.capabilities.intent
     xiaowei_agent.capabilities.prometheus_alert
     xiaowei_agent.capabilities.registry
     xiaowei_agent.capabilities.resolver
@@ -106,15 +108,19 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.planning.assets
     xiaowei_agent.planning.assets.compiler
     xiaowei_agent.planning.assets.params
+    xiaowei_agent.planning.assets.slots
     xiaowei_agent.planning.canonical
     xiaowei_agent.planning.prometheus
     xiaowei_agent.planning.prometheus.compiler
     xiaowei_agent.planning.prometheus.params
+    xiaowei_agent.planning.prometheus.slots
     xiaowei_agent.planning.prometheus.target
     xiaowei_agent.planning.prometheus.templates
+    xiaowei_agent.planning.slot_verification
     xiaowei_agent.planning.starrocks
     xiaowei_agent.planning.starrocks.compiler
     xiaowei_agent.planning.starrocks.params
+    xiaowei_agent.planning.starrocks.slots
     xiaowei_agent.redaction
     xiaowei_agent.reflection
     xiaowei_agent.reflection.answerability

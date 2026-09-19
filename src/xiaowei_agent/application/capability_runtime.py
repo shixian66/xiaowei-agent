@@ -1,11 +1,11 @@
 """显式 capability binding；只消费 Resolver 的候选，不生成候选。"""
 
-import datetime as dt
 from collections.abc import Iterable
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Protocol
+from typing import Any, Protocol
 
+from xiaowei_agent.application.capability_input import CapabilityInputBinding
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     Candidate,
@@ -13,10 +13,8 @@ from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     EvidenceEnvelope,
     ExecutionPlan,
-    IntentDraft,
     PolicySnapshot,
     RenderPayload,
-    RequestContext,
     ResolvedTarget,
     SlowQueryAdvisoryRequest,
     TaskOutcome,
@@ -41,18 +39,6 @@ class PreparedCapability:
 
     target: ResolvedTarget
     plan: ExecutionPlan
-
-
-class CapabilityPlanner(Protocol):
-    def __call__(
-        self,
-        *,
-        candidate: Candidate,
-        draft: IntentDraft,
-        context: RequestContext,
-        as_of: dt.datetime,
-        snapshot: CapabilitySnapshot,
-    ) -> PreparedCapability: ...
 
 
 class CapabilityAssessor(Protocol):
@@ -92,7 +78,7 @@ class CapabilityRuntimeBinding:
     capability_id: str
     capability_version: str
     entry_operation: str
-    planner: CapabilityPlanner
+    input_binding: CapabilityInputBinding[Any]
     assessor: CapabilityAssessor
     renderer: CapabilityRenderer
     execution: CapabilityExecutionBinding
@@ -124,6 +110,8 @@ class CapabilityBindingRegistry:
         for binding in materialized:
             key = _binding_key(binding)
             spec = specs[key]
+            if binding.input_binding.input_schema_ref != spec.input_schema_ref:
+                raise CapabilityBindingError("input binding schema differs from spec")
             operations = {operation.operation for operation in spec.operations}
             if binding.entry_operation not in operations:
                 raise CapabilityBindingError("entry operation is not declared")

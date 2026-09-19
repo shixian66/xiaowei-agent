@@ -25,9 +25,14 @@ from xiaowei_agent.contracts.base import (
 )
 from xiaowei_agent.contracts.candidates import Candidate, CandidateSet, Rejection
 from xiaowei_agent.contracts.capability import (
+    CapabilityParams,
     CapabilitySnapshot,
     CapabilitySpec,
     OperationSpec,
+    SlotIncomplete,
+    SlotInvalid,
+    SlotReady,
+    SlotVerificationResult,
 )
 from xiaowei_agent.contracts.channel import (
     AuthenticatedPrincipal,
@@ -205,6 +210,7 @@ __all__ = [
     "BindingRejection",
     "Candidate",
     "CandidateSet",
+    "CapabilityParams",
     "CapabilitySnapshot",
     "CapabilitySpec",
     "CapabilitySubject",
@@ -294,6 +300,10 @@ __all__ = [
     "ScopeTaskPageQuery",
     "SecretRef",
     "Sha256Hex",
+    "SlotIncomplete",
+    "SlotInvalid",
+    "SlotReady",
+    "SlotVerificationResult",
     "SlowQueryAdvisoryRequest",
     "SqlGuardRejection",
     "SqlSurface",

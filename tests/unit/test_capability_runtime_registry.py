@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 from tests.fakes.admission import CONTEXT, DRAFT, POLICY_SNAPSHOT, slow_query_plan
 
+from xiaowei_agent.application.capability_input import SlotInvalid, bind_capability_input
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
     CapabilityBindingRegistry,
@@ -20,9 +21,13 @@ from xiaowei_agent.contracts import (
     Candidate,
     CandidateSet,
     CapabilitySnapshot,
+    ClarificationContext,
+    ClarificationField,
+    ConfirmedSlot,
     EvidenceEnvelope,
     ExecutionPlan,
     IntentDraft,
+    InteractionRejectionReasonCode,
     PolicyProfile,
     PolicySnapshot,
     RenderPayload,
@@ -32,6 +37,7 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
+from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
 
@@ -43,15 +49,39 @@ def _single_capability_snapshot() -> CapabilitySnapshot:
     return CapabilitySnapshot(snapshot_id=snapshot.snapshot_id, specs=(slow_query,))
 
 
-def _never_prepare(
+def _never_verify_slots(
     *,
     candidate: Candidate,
     draft: IntentDraft,
     context: RequestContext,
     as_of: dt.datetime,
+    user_text: str,
+    clarification: ClarificationContext | None = None,
+) -> SlotInvalid:
+    _ = (candidate, draft, context, as_of, user_text, clarification)
+    return SlotInvalid(
+        reason_code=InteractionRejectionReasonCode.CAPABILITY_FIELDS_INVALID
+    )
+
+
+def _never_prepare_typed(
+    *,
+    candidate: Candidate,
+    params: SlowQueryParams,
+    context: RequestContext,
     snapshot: CapabilitySnapshot,
 ) -> PreparedCapability:
-    raise AssertionError("planner must not run while validating bindings")
+    _ = (candidate, params, context, snapshot)
+    raise AssertionError("typed planner must not run while validating bindings")
+
+
+def _never_project_slots(
+    *,
+    plan: ExecutionPlan,
+    target: ResolvedTarget,
+) -> tuple[ConfirmedSlot, ...]:
+    _ = (plan, target)
+    raise AssertionError("projector must not run while validating bindings")
 
 
 def _never_assess(
@@ -86,6 +116,8 @@ def _binding(
     capability_id: str = CAPABILITY_ID,
     capability_version: str = "1.0.0",
     entry_operation: str = OP_LIST,
+    input_schema_ref: str = SlowQueryParams.INPUT_SCHEMA_REF,
+    allowed_clarification_fields: frozenset[ClarificationField] = frozenset(),
     profile: PolicyProfile = SLOW_QUERY_READONLY_PROFILE,
     execution_capability_id: str | None = None,
 ) -> CapabilityRuntimeBinding:
@@ -93,7 +125,16 @@ def _binding(
         capability_id=capability_id,
         capability_version=capability_version,
         entry_operation=entry_operation,
-        planner=_never_prepare,
+        input_binding=bind_capability_input(
+            params_type=SlowQueryParams,
+            input_schema_ref=input_schema_ref,
+            allowed_clarification_fields=allowed_clarification_fields,
+            slot_verifier=_never_verify_slots,
+            planner=_never_prepare_typed,
+            confirmed_slot_projector=(
+                _never_project_slots if allowed_clarification_fields else None
+            ),
+        ),
         assessor=_never_assess,
         renderer=_never_render,
         execution=CapabilityExecutionBinding(
@@ -191,6 +232,27 @@ def test_registry_rejects_a_profile_absent_from_the_active_policy_snapshot() -> 
 def test_registry_rejects_an_execution_binding_for_another_capability() -> None:
     with pytest.raises(CapabilityBindingError):
         _registry(_binding(execution_capability_id="test.other"))
+
+
+def test_registry_rejects_an_input_binding_schema_that_differs_from_the_spec() -> None:
+    snapshot = _single_capability_snapshot()
+    drifted = snapshot.specs[0].model_copy(
+        update={"input_schema_ref": "input.other.v1"}
+    )
+    with pytest.raises(CapabilityBindingError):
+        CapabilityBindingRegistry(
+            snapshot=snapshot.model_copy(update={"specs": (drifted,)}),
+            policy_snapshot=POLICY_SNAPSHOT,
+            bindings=(_binding(),),
+        )
+
+
+def test_registry_accepts_one_input_schema_with_multiple_operation_argument_refs() -> None:
+    snapshot = _single_capability_snapshot()
+    spec = snapshot.specs[0]
+    assert len({operation.argument_schema_ref for operation in spec.operations}) > 1
+
+    _registry(_binding())
 
 
 def test_selection_rejects_candidates_from_more_than_one_capability() -> None:

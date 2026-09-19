@@ -51,3 +51,16 @@ def render_clarification_payload(*, record: ClarificationRecord) -> Clarificatio
         confirmed_slots=record.confirmed_slots,
         prompt=_CLARIFICATION_PROMPTS[record.reason_code],
     )
+
+
+def render_clarification_as_payload(
+    *, clarification: ClarificationPayload
+) -> RenderPayload:
+    """兼容同步 ``handle()`` 的 RenderPayload 形态。"""
+    return RenderPayload(
+        answer=clarification.prompt,
+        sections=(),
+        next_steps=(),
+        status=TaskStatus.CLARIFICATION_REQUIRED,
+        refs=(),
+    )

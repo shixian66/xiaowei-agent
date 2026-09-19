@@ -67,7 +67,7 @@ def _plan_for(draft: IntentDraft, *, context: RequestContext = CONTEXT) -> objec
     return compile_plan(
         candidate=candidate,
         params=_PARAMS,
-        target=resolve_target(context=context, draft=draft),
+        target=resolve_target(context=context, params=_PARAMS),
         context=context,
         snapshot=SNAPSHOT,
         surface=SURFACE,

@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from tests.fakes.admission import CONTEXT, slow_query_plan
 from tests.fakes.recordings import _row
 
+from xiaowei_agent.application.capability_input import SlotReady
+from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
 from xiaowei_agent.application.model_advisory import (
     project_slow_query_advisory_request,
 )
@@ -22,7 +24,6 @@ from xiaowei_agent.application.model_ports import (
 )
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
-from xiaowei_agent.capabilities.target import resolve_target
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     EvidenceEnvelope,
@@ -115,7 +116,7 @@ def test_secret_shaped_input_is_scrubbed_before_it_enters_the_model_dto() -> Non
     assert request.user_text == scrub_text(user_text) != user_text
 
 
-def test_model_candidate_generation_cannot_be_changed_by_confidence_or_slots() -> None:
+def test_model_candidate_generation_uses_current_text_not_model_slots() -> None:
     resolver = DeterministicCapabilityResolver()
     snapshot = StaticCapabilityRegistry().snapshot()
     plain = IntentDraft(
@@ -127,16 +128,32 @@ def test_model_candidate_generation_cannot_be_changed_by_confidence_or_slots() -
     )
     suggestive = IntentDraft(
         intent="starrocks.slow_query.diagnose",
-        slots={"environment_id": "prod", "window_minutes": "30"},
+        slots={"environment_id": "prod", "window_minutes": "30", "database": "model_db"},
         missing=(),
         confidence=1.0,
         source=IntentSource.MODEL,
     )
 
-    assert resolver.resolve(
-        draft=plain, context=CONTEXT, snapshot=snapshot
-    ) == resolver.resolve(draft=suggestive, context=CONTEXT, snapshot=snapshot)
-    assert resolve_target(context=CONTEXT, draft=suggestive).environment_id == "dev"
+    plain_candidates = resolver.resolve(draft=plain, context=CONTEXT, snapshot=snapshot)
+    suggestive_candidates = resolver.resolve(
+        draft=suggestive, context=CONTEXT, snapshot=snapshot
+    )
+    assert plain_candidates == suggestive_candidates
+    candidate = next(
+        item
+        for item in suggestive_candidates.items
+        if item.operation == SLOW_QUERY_BINDING.entry_operation
+    )
+    verified = SLOW_QUERY_BINDING.input_binding.slot_verifier(
+        candidate=candidate,
+        draft=suggestive,
+        context=CONTEXT,
+        as_of=dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC),
+        user_text="查 sales 库最近15分钟的慢查询",
+    )
+    assert isinstance(verified, SlotReady)
+    assert verified.params.database == "sales"
+    assert verified.params.window_start == dt.datetime(2026, 9, 2, 11, 45, tzinfo=dt.UTC)
 
 
 def test_advisory_generic_dto_does_not_replace_the_capability_projector() -> None:

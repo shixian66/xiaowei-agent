@@ -514,29 +514,17 @@ async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
     )
     from tests.fakes.admission import POLICY_SNAPSHOT
 
-    def changed_planner(**_: object) -> PreparedCapability:
-        prepared = SLOW_QUERY_BINDING.planner(
-            candidate=next(
-                item
-                for item in harness.runtime._resolver.resolve(
-                    draft=harness.runtime._interpreter.interpret(
-                        text=submission.envelope.text, context=submission.context
-                    ),
-                    context=submission.context,
-                    snapshot=harness.runtime._snapshot,
-                ).items
-                if item.operation == SLOW_QUERY_BINDING.entry_operation
-            ),
-            draft=harness.runtime._interpreter.interpret(
-                text=submission.envelope.text, context=submission.context
-            ),
-            context=submission.context,
-            as_of=submission.as_of,
-            snapshot=harness.runtime._snapshot,
-        )
+    def changed_planner(**kwargs: object) -> PreparedCapability:
+        prepared = SLOW_QUERY_BINDING.input_binding.planner(**kwargs)  # type: ignore[arg-type]
         return replace(prepared, plan=changed)
 
-    changed_binding = replace(SLOW_QUERY_BINDING, planner=changed_planner)
+    changed_binding = replace(
+        SLOW_QUERY_BINDING,
+        input_binding=replace(
+            SLOW_QUERY_BINDING.input_binding,
+            planner=changed_planner,
+        ),
+    )
     monkeypatch.setattr(
         harness.runtime,
         "_bindings",

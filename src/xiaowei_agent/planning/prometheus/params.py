@@ -4,7 +4,7 @@ import datetime as dt
 import ipaddress
 import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Final, Self
+from typing import Annotated, Any, ClassVar, Final, Self
 
 from pydantic import AfterValidator, Field, model_validator
 
@@ -13,7 +13,7 @@ from xiaowei_agent.contracts import (
     MAX_PROMQL_SERIES,
     MAX_PROMQL_WINDOW_MINUTES,
     AwareDatetime,
-    Contract,
+    CapabilityParams,
     JsonScalar,
     StrictInt,
     StrictStr,
@@ -103,8 +103,10 @@ def _fingerprint(value: str) -> str:
 Fingerprint = Annotated[StrictStr, AfterValidator(_fingerprint)]
 
 
-class PrometheusAlertParams(Contract):
+class PrometheusAlertParams(CapabilityParams):
     """一次告警指标证据查询的全部参数与硬预算。"""
+
+    INPUT_SCHEMA_REF: ClassVar[str] = "input.prometheus.alert.v1"
 
     alert_name: AlertName
     instance: Instance
@@ -165,7 +167,7 @@ class PrometheusAlertParams(Contract):
 def normalise_window(
     *, as_of: dt.datetime, window_minutes: int
 ) -> tuple[dt.datetime, dt.datetime]:
-    """把查询窗口规范为 UTC 整分钟的 ``[start, end]``。"""
+    """把查询窗口规范为 UTC 整分钟的 ``[start, end)``。"""
     if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
         raise ValueError("as_of must be timezone-aware")
     if not 0 < window_minutes <= MAX_PROMQL_WINDOW_MINUTES:

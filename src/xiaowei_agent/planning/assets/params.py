@@ -3,11 +3,11 @@
 import ipaddress
 import re
 import unicodedata
-from typing import Annotated, Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import AfterValidator, model_validator
 
-from xiaowei_agent.contracts import Contract, StrictStr
+from xiaowei_agent.contracts import CapabilityParams, StrictStr
 
 _ASSET_ID_PUNCTUATION = frozenset("._:-")
 _HOST_LABEL_RE = re.compile(
@@ -53,8 +53,10 @@ Hostname = Annotated[StrictStr, AfterValidator(_hostname)]
 IpAddress = Annotated[StrictStr, AfterValidator(_ip)]
 
 
-class AssetLookupParams(Contract):
+class AssetLookupParams(CapabilityParams):
     """恰含一个精确 selector 的资产查询参数。"""
+
+    INPUT_SCHEMA_REF: ClassVar[str] = "input.asset.lookup.v1"
 
     asset_id: AssetId | None = None
     hostname: Hostname | None = None

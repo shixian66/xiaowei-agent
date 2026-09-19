@@ -28,6 +28,7 @@ def _spec(**overrides: object) -> CapabilitySpec:
         "capability_id": "c",
         "version": "1.0.0",
         "domain": "d",
+        "input_schema_ref": "input.c.v1",
         "operations": (_op(),),
         "policy_profile": "p",
         "evidence_contract": "e",
@@ -108,3 +109,16 @@ def test_snapshot_allows_two_versions_of_the_same_capability() -> None:
         snapshot_id="s", specs=(_spec(), _spec(version="1.1.0"))
     )
     assert len(snapshot.specs) == 2
+
+
+def test_capability_requires_input_schema_ref() -> None:
+    with pytest.raises(ValidationError):
+        CapabilitySpec(
+            capability_id="c",
+            version="1.0.0",
+            domain="d",
+            operations=(_op(),),
+            policy_profile="p",
+            evidence_contract="e",
+            eval_ref="v",
+        )

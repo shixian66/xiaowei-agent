@@ -21,6 +21,7 @@ CAPABILITY_VERSION: Final[str] = "1.0.0"
 OP_LIST: Final[str] = "list_slow_queries"
 OP_COUNT: Final[str] = "count_queries_in_window"
 POLICY_PROFILE: Final[str] = "readonly.starrocks.slow_query.v1"
+INPUT_SCHEMA_REF: Final[str] = "input.starrocks.slow_query.v1"
 
 GATEWAY_NAME: Final[str] = "starrocks"
 """``ToolCall.gateway`` 的取值：Gateway 按它选择 adapter。"""
@@ -29,6 +30,7 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
     capability_id=CAPABILITY_ID,
     version=CAPABILITY_VERSION,
     domain="starrocks",
+    input_schema_ref=INPUT_SCHEMA_REF,
     operations=(
         OperationSpec(
             operation=OP_LIST,

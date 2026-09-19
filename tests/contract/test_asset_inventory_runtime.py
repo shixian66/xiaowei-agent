@@ -6,6 +6,7 @@ import pytest
 from tests.fakes.asset_recordings import recording_for
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.capability_input import SlotReady
 from xiaowei_agent.application.default_capabilities import ASSET_INVENTORY_BINDING
 from xiaowei_agent.contracts import AttemptIntent, TaskStatus
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
@@ -90,19 +91,27 @@ async def test_stored_plan_drift_stops_before_the_asset_adapter(field: str) -> N
     pending = await harness.runtime.submit_task(submission=submission)
     harness.task_id = pending.task_id
     draft = harness.runtime._interpreter.interpret(text=TEXT, context=harness.context)
-    prepared = ASSET_INVENTORY_BINDING.planner(
-        candidate=next(
-            item
-            for item in harness.runtime._resolver.resolve(
-                draft=draft,
-                context=harness.context,
-                snapshot=harness.snapshot,
-            ).items
-            if item.operation == ASSET_INVENTORY_BINDING.entry_operation
-        ),
+    candidate = next(
+        item
+        for item in harness.runtime._resolver.resolve(
+            draft=draft,
+            context=harness.context,
+            snapshot=harness.snapshot,
+        ).items
+        if item.operation == ASSET_INVENTORY_BINDING.entry_operation
+    )
+    verified = ASSET_INVENTORY_BINDING.input_binding.slot_verifier(
+        candidate=candidate,
         draft=draft,
         context=harness.context,
         as_of=submission.as_of,
+        user_text=TEXT,
+    )
+    assert isinstance(verified, SlotReady)
+    prepared = ASSET_INVENTORY_BINDING.input_binding.planner(
+        candidate=candidate,
+        params=verified.params,
+        context=harness.context,
         snapshot=harness.snapshot,
     )
     first_attempt = await harness.store.begin_task_attempt(
@@ -164,19 +173,19 @@ async def test_stored_plan_drift_stops_before_the_asset_adapter(field: str) -> N
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        "查资产",
-        "查资产 hostname=node-1.example.com ip=10.0.0.8",
-        "查资产 hostname=*.example.com",
-        "列出全部资产",
+        ("查资产", TaskStatus.CLARIFICATION_REQUIRED),
+        ("查资产 hostname=node-1.example.com ip=10.0.0.8", TaskStatus.REJECTED),
+        ("查资产 hostname=*.example.com", TaskStatus.REJECTED),
+        ("列出全部资产", TaskStatus.REJECTED),
     ],
 )
 async def test_missing_multiple_or_broad_selector_never_calls_the_adapter(
-    text: str,
+    text: str, expected: TaskStatus
 ) -> None:
     harness = _harness("golden")
     payload = await harness.handle(text)
-    assert payload.status is TaskStatus.REJECTED
+    assert payload.status is expected
     assert harness.gateway.invocations == 0
     assert harness.adapters["asset_inventory"].call_count == 0

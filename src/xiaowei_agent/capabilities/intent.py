@@ -110,6 +110,11 @@ class IntentInterpreter(Protocol):
     def interpret(self, *, text: str, context: RequestContext) -> IntentDraft: ...
 
 
+def extract_slots_for_intent(*, text: str, intent: str) -> Mapping[str, str]:
+    """Extract intent-specific trusted slots from the current user text."""
+    return MappingProxyType(RuleBasedIntentInterpreter()._extract_slots(text, intent=intent))
+
+
 class RuleBasedIntentInterpreter:
     """确定性规则解释器。
 

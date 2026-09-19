@@ -6,6 +6,7 @@ import pytest
 from tests.fakes.prometheus_recordings import recordings_for
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.capability_input import SlotReady
 from xiaowei_agent.application.default_capabilities import PROMETHEUS_ALERT_BINDING
 from xiaowei_agent.contracts import AttemptIntent, TaskStatus
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
@@ -97,19 +98,27 @@ async def test_stored_plan_drift_stops_before_both_adapters(field: str) -> None:
     pending = await harness.runtime.submit_task(submission=submission)
     harness.task_id = pending.task_id
     draft = harness.runtime._interpreter.interpret(text=TEXT, context=harness.context)
-    prepared = PROMETHEUS_ALERT_BINDING.planner(
-        candidate=next(
-            item
-            for item in harness.runtime._resolver.resolve(
-                draft=draft,
-                context=harness.context,
-                snapshot=harness.snapshot,
-            ).items
-            if item.operation == "get_active_alerts"
-        ),
+    candidate = next(
+        item
+        for item in harness.runtime._resolver.resolve(
+            draft=draft,
+            context=harness.context,
+            snapshot=harness.snapshot,
+        ).items
+        if item.operation == "get_active_alerts"
+    )
+    verified = PROMETHEUS_ALERT_BINDING.input_binding.slot_verifier(
+        candidate=candidate,
         draft=draft,
         context=harness.context,
         as_of=submission.as_of,
+        user_text=TEXT,
+    )
+    assert isinstance(verified, SlotReady)
+    prepared = PROMETHEUS_ALERT_BINDING.input_binding.planner(
+        candidate=candidate,
+        params=verified.params,
+        context=harness.context,
         snapshot=harness.snapshot,
     )
     first_attempt = await harness.store.begin_task_attempt(

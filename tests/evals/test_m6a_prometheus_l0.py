@@ -11,6 +11,7 @@ from tests.fakes.admission import POLICY_SNAPSHOT
 from tests.fakes.prometheus_recordings import recordings_for
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.capability_input import SlotReady
 from xiaowei_agent.application.default_capabilities import PROMETHEUS_ALERT_BINDING
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.prometheus_alert import PROMQL_SURFACE
@@ -64,11 +65,18 @@ def _prepared(text: str = _TEXT):
         .items
         if item.operation == PROMETHEUS_ALERT_BINDING.entry_operation
     )
-    return PROMETHEUS_ALERT_BINDING.planner(
+    verified = PROMETHEUS_ALERT_BINDING.input_binding.slot_verifier(
         candidate=candidate,
         draft=draft,
         context=_context(),
         as_of=_AT,
+        user_text=text,
+    )
+    assert isinstance(verified, SlotReady)
+    return PROMETHEUS_ALERT_BINDING.input_binding.planner(
+        candidate=candidate,
+        params=verified.params,
+        context=_context(),
         snapshot=_SNAPSHOT,
     )
 
