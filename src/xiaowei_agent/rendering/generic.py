@@ -45,11 +45,15 @@ _CLARIFICATION_PROMPTS: Final[dict[ClarificationReasonCode, str]] = {
 
 def render_clarification_payload(*, record: ClarificationRecord) -> ClarificationPayload:
     """只从持久化 ClarificationRecord 投影澄清提示。"""
+    prompt = _CLARIFICATION_PROMPTS[record.reason_code]
+    if record.subject.kind == "capability" and record.missing_fields:
+        fields = ", ".join(field.value for field in record.missing_fields)
+        prompt = f"{prompt} 缺失字段：{fields}。"
     return ClarificationPayload(
         reason_code=record.reason_code,
         missing_fields=record.missing_fields,
         confirmed_slots=record.confirmed_slots,
-        prompt=_CLARIFICATION_PROMPTS[record.reason_code],
+        prompt=prompt,
     )
 
 

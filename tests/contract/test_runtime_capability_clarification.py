@@ -2,6 +2,8 @@
 
 import datetime as dt
 
+import pytest
+from tests.fakes.asset_recordings import recording_for as asset_recording_for
 from tests.fakes.prometheus_recordings import recordings_for
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
@@ -13,9 +15,11 @@ from xiaowei_agent.contracts import (
     ClarificationReasonCode,
     ConfirmedTextValue,
     TaskStatus,
+    TaskSubmission,
 )
 from xiaowei_agent.persistence.store import TaskAttemptCommand
 from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
+from xiaowei_agent.tools.asset_inventory_fake import AssetInventoryRecordingAdapter
 from xiaowei_agent.tools.prometheus_fake import PrometheusRecordingAdapter
 
 AT = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
@@ -30,6 +34,37 @@ def _prometheus_harness() -> RuntimeHarness:
             "prometheus": PrometheusRecordingAdapter(metrics),
         },
         as_of=AT,
+    )
+
+
+def _asset_harness() -> RuntimeHarness:
+    return RuntimeHarness(
+        None,
+        adapters={
+            "asset_inventory": AssetInventoryRecordingAdapter(
+                asset_recording_for("golden"), operation="lookup_asset"
+            )
+        },
+        as_of=AT,
+    )
+
+
+async def _execute_submission(
+    harness: RuntimeHarness, submission: TaskSubmission, *, owner: str
+) -> object:
+    attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=harness.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner=owner,
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempt.grant is not None
+    return await harness.runtime.execute_task(
+        grant=attempt.grant,
+        submission=submission,
     )
 
 
@@ -76,9 +111,20 @@ async def test_capability_incomplete_saves_capability_subject_and_stops_gateway(
     assert projected.clarification is not None
     assert projected.clarification.reason_code is saved.reason_code
     assert projected.clarification.missing_fields == saved.missing_fields
+    assert "instance" in projected.clarification.prompt
 
 
-async def test_capability_child_can_answer_only_the_missing_slot() -> None:
+@pytest.mark.parametrize(
+    ("child_text", "expected_status"),
+    [
+        ("node-1.example.com:9100", TaskStatus.SUCCEEDED),
+        ("instance=node-1.example.com:9100", TaskStatus.SUCCEEDED),
+        ("实例是 node-1.example.com:9100", TaskStatus.REJECTED),
+    ],
+)
+async def test_prometheus_capability_child_reply_shapes_are_stable(
+    child_text: str, expected_status: TaskStatus
+) -> None:
     harness = _prometheus_harness()
     parent_submission = harness.submission(
         "查告警 HostHighCpu 的证据",
@@ -103,7 +149,7 @@ async def test_capability_child_can_answer_only_the_missing_slot() -> None:
     assert parent_outcome.status is TaskStatus.CLARIFICATION_REQUIRED
 
     child_submission = harness.submission(
-        "node-1.example.com:9100",
+        child_text,
         idempotency_key="capability-child",
     ).model_copy(update={"clarification_parent_task_id": parent.task_id})
     child = await harness.store.create_clarification_child(
@@ -127,6 +173,49 @@ async def test_capability_child_can_answer_only_the_missing_slot() -> None:
         submission=child_submission,
     )
 
-    assert child_outcome.status is TaskStatus.SUCCEEDED
-    assert harness.adapters["alertmanager"].call_count == 1
-    assert harness.adapters["prometheus"].call_count == 1
+    assert child_outcome.status is expected_status
+    expected_calls = 1 if expected_status is TaskStatus.SUCCEEDED else 0
+    assert harness.adapters["alertmanager"].call_count == expected_calls
+    assert harness.adapters["prometheus"].call_count == expected_calls
+
+
+@pytest.mark.parametrize(
+    ("child_text", "expected_status"),
+    [
+        ("node-1.example.com", TaskStatus.SUCCEEDED),
+        ("hostname=node-1.example.com", TaskStatus.SUCCEEDED),
+        ("主机是 node-1.example.com", TaskStatus.REJECTED),
+    ],
+)
+async def test_asset_capability_child_reply_shapes_are_stable(
+    child_text: str, expected_status: TaskStatus
+) -> None:
+    harness = _asset_harness()
+    parent_submission = harness.submission(
+        "查资产",
+        idempotency_key="asset-parent",
+    )
+    parent = await harness.runtime.submit_task(submission=parent_submission)
+    harness.task_id = parent.task_id
+    parent_outcome = await _execute_submission(
+        harness, parent_submission, owner="worker-asset-parent"
+    )
+    assert parent_outcome.status is TaskStatus.CLARIFICATION_REQUIRED
+
+    child_submission = harness.submission(
+        child_text,
+        idempotency_key="asset-child",
+    ).model_copy(update={"clarification_parent_task_id": parent.task_id})
+    child = await harness.store.create_clarification_child(
+        submission=child_submission,
+        authenticated_channel_owner=harness.context.actor,
+    )
+    harness.task_id = child.task_id
+
+    child_outcome = await _execute_submission(
+        harness, child_submission, owner="worker-asset-child"
+    )
+
+    assert child_outcome.status is expected_status
+    expected_calls = 1 if expected_status is TaskStatus.SUCCEEDED else 0
+    assert harness.adapters["asset_inventory"].call_count == expected_calls

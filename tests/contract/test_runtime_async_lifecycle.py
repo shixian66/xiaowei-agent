@@ -743,6 +743,62 @@ async def test_drift_and_unclassified_failures_take_different_paths(
         assert "ordinary failure" not in repr(caught.value)
 
 
+async def test_prepare_keeps_planner_value_error_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fakes.admission import POLICY_SNAPSHOT
+
+    harness = RuntimeHarness(GOLDEN)
+    submission = harness.submission("最近30分钟有哪些慢查询")
+    view = await harness.runtime.submit_task(submission=submission)
+    harness.task_id = view.task_id
+    attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempt.grant is not None and attempt.submission is not None
+
+    def raising_planner(**_: object) -> PreparedCapability:
+        raise ValueError("internal planner invariant broken")
+
+    changed_binding = replace(
+        SLOW_QUERY_BINDING,
+        input_binding=replace(
+            SLOW_QUERY_BINDING.input_binding,
+            planner=raising_planner,
+        ),
+    )
+    monkeypatch.setattr(
+        harness.runtime,
+        "_bindings",
+        CapabilityBindingRegistry(
+            snapshot=harness.runtime._snapshot,
+            policy_snapshot=POLICY_SNAPSHOT,
+            bindings=(
+                changed_binding,
+                PROMETHEUS_ALERT_BINDING,
+                ASSET_INVENTORY_BINDING,
+            ),
+        ),
+    )
+
+    with pytest.raises(RetryableTaskError) as caught:
+        await harness.runtime.execute_task(
+            grant=attempt.grant,
+            submission=attempt.submission,
+        )
+
+    record = await harness.store.get(lookup=harness.lookup)
+    assert caught.value.task_id == view.task_id
+    assert record.status is TaskStatus.CREATED
+    assert harness.gateway.invocations == 0
+
+
 @pytest.mark.parametrize(
     "failure",
     [

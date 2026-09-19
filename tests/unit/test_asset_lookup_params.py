@@ -119,7 +119,10 @@ def _snapshot(*slots: ConfirmedSlot) -> tuple[ConfirmedSlot, ...]:
     return tuple(sorted(slots, key=lambda slot: slot.field.value))
 
 
-def _clarification(*slots: ConfirmedSlot) -> ClarificationContext:
+def _clarification(
+    *slots: ConfirmedSlot,
+    missing_fields: tuple[ClarificationField, ...] = (),
+) -> ClarificationContext:
     confirmed = _snapshot(*slots)
     subject = CapabilitySubject(
         kind="capability",
@@ -129,7 +132,11 @@ def _clarification(*slots: ConfirmedSlot) -> ClarificationContext:
         input_schema_ref=ASSET_INVENTORY_INPUT_SCHEMA_REF,
         confirmed_slots=confirmed,
     )
-    return ClarificationContext(subject=subject, confirmed_slots=confirmed)
+    return ClarificationContext(
+        subject=subject,
+        confirmed_slots=confirmed,
+        missing_fields=missing_fields,
+    )
 
 
 def test_asset_verifier_returns_selector_required_for_no_selector() -> None:
@@ -179,6 +186,41 @@ def test_asset_verifier_inherits_parent_selector() -> None:
 
     assert ready.params.selector() == ("asset_id", "asset-1")
     assert ready.confirmed_slots == parent.confirmed_slots
+
+
+@pytest.mark.parametrize("user_text", ["node-1.example.com", "hostname=node-1.example.com"])
+def test_asset_verifier_accepts_stable_child_selector_reply_shapes(
+    user_text: str,
+) -> None:
+    parent = _clarification(
+        missing_fields=(
+            ClarificationField.ASSET_ID,
+            ClarificationField.HOSTNAME,
+            ClarificationField.IP,
+        ),
+    )
+
+    ready = _ready(_draft(), clarification=parent, user_text=user_text)
+
+    assert ready.params.selector() == ("hostname", "node-1.example.com")
+
+
+def test_asset_verifier_rejects_unparseable_child_selector_reply() -> None:
+    parent = _clarification(
+        missing_fields=(
+            ClarificationField.ASSET_ID,
+            ClarificationField.HOSTNAME,
+            ClarificationField.IP,
+        ),
+    )
+
+    result = _verify(
+        _draft(),
+        clarification=parent,
+        user_text="主机是 node-1.example.com",
+    )
+
+    assert isinstance(result, SlotInvalid)
 
 
 def test_asset_projector_covers_confirmed_selector_from_plan_and_target() -> None:

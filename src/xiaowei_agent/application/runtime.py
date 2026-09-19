@@ -767,7 +767,6 @@ class XiaoweiRuntime:
             CapabilityPreparationError,
             CapabilityInputBindingError,
             SlotVerificationError,
-            ValueError,
         ) as exc:
             await self._emit(
                 stage=PipelineStage.PLANNER,

@@ -98,7 +98,10 @@ def verify_prometheus_alert_slots(
     try:
         parent = () if clarification is None else clarification.confirmed_slots
         slots = dict(extract_slots_for_intent(text=user_text, intent=draft.intent))
-        slots.update(_single_missing_text_slot(user_text, clarification=clarification))
+        for slot_name, value in _single_missing_text_slot(
+            user_text, clarification=clarification
+        ).items():
+            slots.setdefault(slot_name, value)
         confirmed = merge_confirmed_slots(
             parent_snapshot=parent,
             current_candidates=_current_user_candidates(slots=slots, as_of=as_of),

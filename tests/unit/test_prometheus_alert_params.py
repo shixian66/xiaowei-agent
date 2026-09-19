@@ -142,7 +142,10 @@ def _snapshot(*slots: ConfirmedSlot) -> tuple[ConfirmedSlot, ...]:
     return tuple(sorted(slots, key=lambda slot: slot.field.value))
 
 
-def _clarification(*slots: ConfirmedSlot) -> ClarificationContext:
+def _clarification(
+    *slots: ConfirmedSlot,
+    missing_fields: tuple[ClarificationField, ...] = (),
+) -> ClarificationContext:
     confirmed = _snapshot(*slots)
     subject = CapabilitySubject(
         kind="capability",
@@ -152,7 +155,11 @@ def _clarification(*slots: ConfirmedSlot) -> ClarificationContext:
         input_schema_ref=PROMETHEUS_ALERT_INPUT_SCHEMA_REF,
         confirmed_slots=confirmed,
     )
-    return ClarificationContext(subject=subject, confirmed_slots=confirmed)
+    return ClarificationContext(
+        subject=subject,
+        confirmed_slots=confirmed,
+        missing_fields=missing_fields,
+    )
 
 
 def test_prometheus_verifier_returns_incomplete_for_missing_required_fields() -> None:
@@ -225,6 +232,21 @@ def test_prometheus_verifier_inherits_parent_and_current_user_completes_it() -> 
     assert ready.params.instance == "node-1.example.com:9100"
     assert ready.params.window_start == dt.datetime(2026, 9, 5, 9, 0, tzinfo=dt.UTC)
     assert ready.params.window_end == dt.datetime(2026, 9, 5, 10, 0, tzinfo=dt.UTC)
+
+
+def test_prometheus_single_missing_fallback_does_not_override_extracted_slot() -> None:
+    parent = _clarification(
+        _slot(ClarificationField.ALERT_NAME, confirmed_text_value("HostHighCpu")),
+        missing_fields=(ClarificationField.INSTANCE,),
+    )
+
+    ready = _ready(
+        _draft(),
+        clarification=parent,
+        user_text="instance=node-1.example.com:9100",
+    )
+
+    assert ready.params.instance == "node-1.example.com:9100"
 
 
 def test_prometheus_verifier_rejects_invalid_current_slots() -> None:

@@ -93,7 +93,13 @@ def verify_asset_lookup_slots(
     _ = (candidate, context, as_of)
     try:
         parent = () if clarification is None else clarification.confirmed_slots
-        slots = extract_slots_for_intent(text=user_text, intent=draft.intent)
+        slots = dict(extract_slots_for_intent(text=user_text, intent=draft.intent))
+        for slot_name, value in _single_missing_selector_slot(
+            user_text,
+            slots=slots,
+            clarification=clarification,
+        ).items():
+            slots.setdefault(slot_name, value)
         confirmed = merge_confirmed_slots(
             parent_snapshot=parent,
             current_candidates=_current_user_candidates(slots),
@@ -155,6 +161,41 @@ def _current_user_candidates(slots: Mapping[str, str]) -> tuple[SlotCandidate, .
                 )
             )
     return tuple(candidates)
+
+
+def _single_missing_selector_slot(
+    user_text: str,
+    *,
+    slots: Mapping[str, str],
+    clarification: ClarificationContext | None,
+) -> dict[str, str]:
+    if clarification is None:
+        return {}
+    if tuple(clarification.missing_fields) != ASSET_SELECTOR_ALTERNATIVES:
+        return {}
+    if any(name in slots for name in _SLOT_FIELD_BY_NAME):
+        return {}
+    value = user_text.strip()
+    if not value:
+        return {}
+    inferred = _infer_bare_selector(value)
+    if inferred is None:
+        raise SlotVerificationError("asset selector reply is not explicit enough")
+    slot_name, canonical = inferred
+    return {slot_name: canonical}
+
+
+def _infer_bare_selector(value: str) -> tuple[str, str] | None:
+    try:
+        return "ip", _canonical_text(field=ClarificationField.IP, raw=value)
+    except (SlotVerificationError, ValueError, ValidationError):
+        pass
+    if "." not in value:
+        return None
+    try:
+        return "hostname", _canonical_text(field=ClarificationField.HOSTNAME, raw=value)
+    except (SlotVerificationError, ValueError, ValidationError):
+        return None
 
 
 def _params_from_confirmed_slots(
