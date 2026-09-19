@@ -23,6 +23,7 @@ from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
 from xiaowei_agent.persistence.channel import ChannelStore
+from xiaowei_agent.persistence.clarification_records import ClarificationRecordStore
 from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
 from xiaowei_agent.persistence.store import TaskStore
 from xiaowei_agent.persistence.web_session import WebSessionStore
@@ -53,6 +54,7 @@ _ANCHORED = {
     "WebSessionStore",
     "InteractionClassifierPort",
     "LeaseRenewalPort",
+    "ClarificationRecordStore",
     "ModelArtifactStore",
     "SlowQueryAdvisoryPort",
 }
@@ -171,6 +173,27 @@ def test_model_artifact_stores_keep_protocol_keywords(
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ModelArtifactStore, method)
+        ), f"{class_name}.{method}"
+
+
+@pytest.mark.parametrize(
+    "implementation_path",
+    [
+        "xiaowei_agent.persistence.clarification_records:InMemoryClarificationRecordStore",
+        "xiaowei_agent.persistence.postgres:PostgresClarificationRecordStore",
+    ],
+    ids=["memory", "postgres"],
+)
+def test_clarification_record_stores_keep_protocol_keywords(
+    implementation_path: str,
+) -> None:
+    module_path, class_name = implementation_path.split(":")
+    implementation = getattr(importlib.import_module(module_path), class_name)
+    methods = _protocol_methods(ClarificationRecordStore)
+    assert len(methods) == 2, f"ClarificationRecordStore 的方法集变了：{methods}"
+    for method in methods:
+        assert _keyword_params(getattr(implementation, method)) == _keyword_params(
+            getattr(ClarificationRecordStore, method)
         ), f"{class_name}.{method}"
 
 

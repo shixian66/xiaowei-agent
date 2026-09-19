@@ -15,6 +15,7 @@ from xiaowei_agent.application.model_advisory import (
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     AnswerabilityVerdict,
+    ClarificationPayload,
     EvidenceEnvelope,
     ExecutionPlan,
     MissingItem,
@@ -30,6 +31,7 @@ from xiaowei_agent.contracts import (
     task_query_path,
 )
 from xiaowei_agent.contracts.model import AdvisoryModelResult
+from xiaowei_agent.persistence.clarification_records import ClarificationRecordStore
 from xiaowei_agent.persistence.errors import PersistenceUnavailableError
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
@@ -39,21 +41,34 @@ from xiaowei_agent.persistence.store import (
     TaskNotFoundError,
     TaskStore,
 )
-from xiaowei_agent.rendering.generic import render_preplan_rejection
+from xiaowei_agent.rendering.generic import (
+    render_clarification_payload,
+    render_preplan_rejection,
+)
 from xiaowei_agent.rendering.model_advisory import append_model_advisory
 
 
 class ApplicationFailure(StrEnum):
     """入口层可安全映射的应用异常闭集。"""
 
+    CLARIFICATION_INTEGRITY = "clarification_integrity"
     CONFLICT = "conflict"
     NOT_FOUND = "not_found"
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
 
 
+class ClarificationIntegrityError(RuntimeError):
+    """澄清终态缺失持久事实，入口只能暴露闭集错误码。"""
+
+    def __init__(self) -> None:
+        super().__init__("clarification.integrity_error")
+
+
 def classify_application_exception(exc: Exception) -> ApplicationFailure:
     """把应用边界异常收敛为入口可消费的闭集，不暴露存储层类型。"""
+    if isinstance(exc, ClarificationIntegrityError):
+        return ApplicationFailure.CLARIFICATION_INTEGRITY
     if isinstance(exc, IdempotencyConflictError):
         return ApplicationFailure.CONFLICT
     if isinstance(exc, TaskNotFoundError):
@@ -73,6 +88,7 @@ class TaskViewRuntime:
         plan_store: PlanStore,
         ledger: EvidenceLedger,
         bindings: CapabilityBindingRegistry,
+        clarification_records: ClarificationRecordStore | None = None,
         model_artifacts: ModelArtifactStore | None = None,
         model_profile: ModelInvocationProfile | None = None,
     ) -> None:
@@ -84,6 +100,7 @@ class TaskViewRuntime:
         self._plans = plan_store
         self._ledger = ledger
         self._bindings = bindings
+        self._clarification_records = clarification_records
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
 
@@ -100,14 +117,28 @@ class TaskViewRuntime:
     async def project_task(self, *, record: TaskRecord) -> TaskView:
         """从已由调用方安全读取的任务 winner 生成同一任务投影。"""
         payload: RenderPayload | None = None
+        clarification = None
         if record.status in TERMINAL_STATUSES:
-            payload = await self.project_recorded(record=record)
+            if record.status is TaskStatus.CLARIFICATION_REQUIRED:
+                clarification = await self.project_clarification(record=record)
+            else:
+                payload = await self.project_recorded(record=record)
         return TaskView(
             task_id=record.task_id,
             status=record.status,
             render=payload,
+            clarification=clarification,
             query_path=task_query_path(record.task_id),
         )
+
+    async def project_clarification(self, *, record: TaskRecord) -> ClarificationPayload:
+        """从 ClarificationRecord 重建澄清投影；缺失即 fail-closed。"""
+        if self._clarification_records is None:
+            raise ClarificationIntegrityError()
+        stored = await self._clarification_records.load(task_id=record.task_id)
+        if stored is None:
+            raise ClarificationIntegrityError()
+        return render_clarification_payload(record=stored)
 
     async def project_recorded(self, *, record: TaskRecord) -> RenderPayload:
         """从持久化计划与证据重建终态投影。"""

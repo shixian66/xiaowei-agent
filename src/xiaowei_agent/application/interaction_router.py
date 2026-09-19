@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     InteractionDraft,
     InteractionKind,
     InteractionRejectionReasonCode,
+    InteractionSource,
     RequestContext,
     RouteSubject,
     RoutingDisposition,
@@ -64,7 +65,10 @@ def route_interaction(
     ):
         return _refuse(InteractionRejectionReasonCode.CAPABILITY_DRAFT_FORBIDDEN)
 
-    if draft.proposed_kind is InteractionKind.UNKNOWN:
+    if (
+        draft.proposed_kind is InteractionKind.UNKNOWN
+        and draft.source is InteractionSource.MODEL
+    ):
         return _clarify_route(draft.proposed_kind)
 
     if draft.proposed_kind is not InteractionKind.CAPABILITY_REQUEST:

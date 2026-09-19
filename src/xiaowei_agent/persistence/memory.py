@@ -30,6 +30,7 @@ class InMemoryPersistenceState:
         self.evidence: dict[str, dict[str, EvidenceEnvelope]] = {}
         self.interaction_artifacts: dict[str, Any] = {}
         self.model_advisories: dict[str, Any] = {}
+        self.clarification_records: dict[str, Any] = {}
         self.approvals: dict[str, list[ApprovalRequest]] = {}
         self.audit_events: dict[str, list[TraceEvent]] = {}
         self.step_executions: dict[tuple[str, str], Any] = {}

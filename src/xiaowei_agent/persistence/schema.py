@@ -267,6 +267,32 @@ TASK_MODEL_ADVISORIES: Final = sa.Table(
 )
 """终态前已接受的慢查询 advisory；每个 task insert-once。"""
 
+TASK_CLARIFICATION_RECORDS: Final = sa.Table(
+    "task_clarification_records",
+    METADATA,
+    sa.Column("task_id", sa.Text, primary_key=True),
+    sa.Column("record_version", sa.Integer, nullable=False),
+    sa.Column("subject", JSONB, nullable=False),
+    sa.Column("reason_code", sa.Text, nullable=False),
+    sa.Column("missing_fields", JSONB, nullable=False),
+    sa.Column("confirmed_slots", JSONB, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("fencing_token", sa.BigInteger, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["task_id"],
+        ["tasks.task_id"],
+        name="fk_task_clarification_records_task",
+        ondelete="CASCADE",
+    ),
+    sa.CheckConstraint(
+        "record_version = 1", name="ck_task_clarification_records_version"
+    ),
+    sa.CheckConstraint(
+        "fencing_token > 0", name="ck_task_clarification_records_fencing_positive"
+    ),
+)
+"""I1 澄清事实；每个 task insert-once。"""
+
 TASK_APPROVALS: Final = sa.Table(
     "task_approvals",
     METADATA,
@@ -562,6 +588,7 @@ ALL_TABLES: Final = (
     TASK_EVIDENCE,
     TASK_INTERACTION_ARTIFACTS,
     TASK_MODEL_ADVISORIES,
+    TASK_CLARIFICATION_RECORDS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     CHANNEL_BINDINGS,

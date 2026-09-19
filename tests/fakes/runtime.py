@@ -24,17 +24,24 @@ from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.contracts import (
+    AttemptIntent,
     Channel,
     ModelInvocationProfile,
     RenderPayload,
     RequestEnvelope,
     TaskLookup,
+    TaskStatus,
     TaskSubmission,
+)
+from xiaowei_agent.persistence.clarification_records import (
+    ClarificationRecordCandidate,
+    InMemoryClarificationRecordStore,
 )
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.model_artifacts import InMemoryModelArtifactStore
 from xiaowei_agent.persistence.plans import InMemoryPlanStore
+from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
 from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 from xiaowei_agent.tools.gateway import DeterministicToolGateway
 from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
@@ -101,6 +108,9 @@ class RuntimeHarness:
         self.model_artifacts = InMemoryModelArtifactStore(
             state=self.state, clock=self.clock
         )
+        self.clarification_records = InMemoryClarificationRecordStore(
+            state=self.state, clock=self.clock
+        )
         if adapters is not None and recording is not None:
             raise ValueError("pass recording or adapters, not both")
         if adapters is None:
@@ -155,6 +165,7 @@ class RuntimeHarness:
             clock=self.clock,
             model_artifacts=self.model_artifacts,
             model_profile=ModelInvocationProfile(),
+            clarification_records=self.clarification_records,
             interaction_classifier=interaction_classifier,
             slow_query_advisory=slow_query_advisory,
         )
@@ -192,6 +203,43 @@ class RuntimeHarness:
             envelope=envelope,
             context=self.context,
             as_of=self.as_of if as_of is None else as_of,
+        )
+
+    def attempt_command(self, task_id: str) -> TaskAttemptCommand:
+        return TaskAttemptCommand(
+            task_id=task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=self.context.trace_id,
+        )
+
+    def route_clarification_candidate(self) -> ClarificationRecordCandidate:
+        from xiaowei_agent.contracts import (
+            ClarificationField,
+            ClarificationReasonCode,
+            InteractionKind,
+            RouteSubject,
+        )
+
+        return ClarificationRecordCandidate(
+            subject=RouteSubject(
+                kind="route",
+                proposed_kind=InteractionKind.UNKNOWN,
+            ),
+            reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+            missing_fields=(ClarificationField.TIME_RANGE,),
+            confirmed_slots=(),
+        )
+
+    def transition_to_clarification(
+        self, task_id: str, attempt: object
+    ) -> TransitionCommand:
+        return TransitionCommand(
+            task_id=task_id,
+            expected_version=attempt.winner.version,
+            to_status=TaskStatus.CLARIFICATION_REQUIRED,
+            fencing_token=attempt.grant.fencing_token,
         )
 
     @property

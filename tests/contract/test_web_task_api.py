@@ -24,6 +24,7 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionForbiddenError,
     ChannelSubmitCommand,
 )
+from xiaowei_agent.application.task_view_runtime import ClarificationIntegrityError
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
@@ -558,6 +559,12 @@ async def test_task_errors_map_to_closed_http_semantics() -> None:
             ),
             503,
             "unavailable",
+        ),
+        (
+            "detail",
+            ClarificationIntegrityError(),
+            500,
+            "clarification.integrity_error",
         ),
     )
     for target, error, status, code in cases:

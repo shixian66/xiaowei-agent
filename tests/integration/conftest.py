@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from xiaowei_agent.persistence.migrations.runner import run_downgrade, run_upgrade
 from xiaowei_agent.persistence.postgres import (
+    PostgresClarificationRecordStore,
     PostgresEvidenceLedger,
     PostgresModelArtifactStore,
     PostgresPlanStore,
@@ -193,6 +194,13 @@ def model_artifact_store(
     clean_database: AsyncEngine, clock: Any
 ) -> PostgresModelArtifactStore:
     return PostgresModelArtifactStore(engine=clean_database, clock=clock)
+
+
+@pytest.fixture
+def clarification_record_store(
+    clean_database: AsyncEngine, clock: Any
+) -> PostgresClarificationRecordStore:
+    return PostgresClarificationRecordStore(engine=clean_database, clock=clock)
 
 
 @pytest.fixture

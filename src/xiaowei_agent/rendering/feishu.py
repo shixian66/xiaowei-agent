@@ -161,6 +161,14 @@ def render_feishu_card(projection: FeishuProjectionInput) -> RenderedFeishuCard:
         limit=_REQUEST_CHARACTERS,
     )
 
+    if view.clarification is not None:
+        truncated |= _append_clipped_block(
+            elements,
+            label="需补充",
+            value=view.clarification.prompt,
+            limit=_ANSWER_CHARACTERS,
+        )
+
     if view.render is not None:
         render = view.render
         truncated |= _append_clipped_block(

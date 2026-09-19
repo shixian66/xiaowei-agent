@@ -24,7 +24,13 @@ from tests.fakes.sinks import make_event
 from xiaowei_agent.contracts import (
     ApprovalRequest,
     ApprovalState,
+    CapabilitySubject,
     Channel,
+    ClarificationField,
+    ClarificationReasonCode,
+    ClarificationRecord,
+    ConfirmedSlot,
+    ConfirmedTextValue,
     Contract,
     EvidenceEnvelope,
     ExecutionPlan,
@@ -46,9 +52,11 @@ from xiaowei_agent.contracts import (
     TraceEvent,
 )
 from xiaowei_agent.persistence.rows import (
+    clarification_record_to_row,
     dump_contract,
     load_contract,
     record_to_row,
+    row_to_clarification_record,
     row_to_record,
     row_to_step_execution,
     step_execution_to_row,
@@ -139,6 +147,27 @@ _MODEL_USAGE = ModelUsage(input_tokens=10, output_tokens=5)
 _MODEL_ADVISORY = ModelAdvisory(
     analysis="扫描行数偏高", suggestions=("检查分区裁剪",), uncertainties=()
 )
+_CONFIRMED_SLOT = ConfirmedSlot(
+    field=ClarificationField.DATABASE,
+    value=ConfirmedTextValue(kind="text", text="analytics"),
+)
+_CLARIFICATION_SUBJECT = CapabilitySubject(
+    kind="capability",
+    capability_id="starrocks.slow_query.diagnose",
+    capability_version="1.0.0",
+    operation="diagnose",
+    input_schema_ref="schemas/starrocks.slow_query.diagnose/v1",
+    confirmed_slots=(_CONFIRMED_SLOT,),
+)
+_CLARIFICATION_RECORD = ClarificationRecord(
+    task_id="t1",
+    subject=_CLARIFICATION_SUBJECT,
+    reason_code=ClarificationReasonCode.CAPABILITY_FIELDS_MISSING,
+    missing_fields=(ClarificationField.TIME_RANGE,),
+    confirmed_slots=(_CONFIRMED_SLOT,),
+    created_at=_NOW,
+    fencing_token=1,
+)
 
 # 每个 JSONB 列存的是哪个契约。**这张表本身由下面的元测试对着 schema 核**，因为
 # 它此前是靠人记得往参数列表里加一项的——``task_audit_events.event`` 就是这样漏掉的：
@@ -155,6 +184,16 @@ _JSONB_PAYLOADS: dict[tuple[str, str], Contract] = {
     ("task_interaction_artifacts", "usage"): _MODEL_USAGE,
     ("task_model_advisories", "advisory"): _MODEL_ADVISORY,
     ("task_model_advisories", "usage"): _MODEL_USAGE,
+    ("task_clarification_records", "subject"): _CLARIFICATION_SUBJECT,
+}
+
+_JSONB_PLAIN_PAYLOADS: dict[tuple[str, str], object] = {
+    ("task_clarification_records", "missing_fields"): [
+        ClarificationField.TIME_RANGE.value
+    ],
+    ("task_clarification_records", "confirmed_slots"): [
+        dump_contract(_CONFIRMED_SLOT)
+    ],
 }
 
 _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
@@ -169,7 +208,19 @@ _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
     ("task_interaction_artifacts", "usage"): ModelUsage,
     ("task_model_advisories", "advisory"): ModelAdvisory,
     ("task_model_advisories", "usage"): ModelUsage,
+    ("task_clarification_records", "subject"): CapabilitySubject,
 }
+
+
+def _assert_plain_json(value: object) -> None:
+    assert type(value) in (dict, list, str, int, float, bool, type(None)), type(value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert type(key) is str
+            _assert_plain_json(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_plain_json(item)
 
 
 def test_every_jsonb_column_has_a_round_trip_fixture() -> None:
@@ -184,8 +235,8 @@ def test_every_jsonb_column_has_a_round_trip_fixture() -> None:
         for column in table.columns
         if isinstance(column.type, JSONB)
     }
-    assert declared == set(_JSONB_PAYLOADS)
-    assert declared == set(_EXPECTED_TYPES)
+    assert declared == set(_JSONB_PAYLOADS) | set(_JSONB_PLAIN_PAYLOADS)
+    assert set(_JSONB_PAYLOADS) == set(_EXPECTED_TYPES)
 
 
 @pytest.mark.parametrize(
@@ -197,6 +248,26 @@ def test_jsonb_payload_round_trips(column: tuple[str, str], model: Contract) -> 
     """样本的类型也要对：登记表里放错契约，往返照样通过。"""
     assert type(model) is _EXPECTED_TYPES[column]
     assert load_contract(type(model), dump_contract(model)) == model
+
+
+@pytest.mark.parametrize(
+    ("column", "payload"),
+    list(_JSONB_PLAIN_PAYLOADS.items()),
+    ids=[f"{table}.{column}" for table, column in _JSONB_PLAIN_PAYLOADS],
+)
+def test_jsonb_plain_payloads_are_strict_json(
+    column: tuple[str, str], payload: object
+) -> None:
+    del column
+    _assert_plain_json(payload)
+
+
+def test_clarification_record_round_trips_through_columns_and_jsonb_lists() -> None:
+    row = clarification_record_to_row(_CLARIFICATION_RECORD)
+
+    assert row["missing_fields"] == [ClarificationField.TIME_RANGE.value]
+    assert row["confirmed_slots"] == [dump_contract(_CONFIRMED_SLOT)]
+    assert row_to_clarification_record(row) == _CLARIFICATION_RECORD
 
 
 def test_parented_submission_contract_round_trips_as_strict_json() -> None:
@@ -213,17 +284,7 @@ def test_dumped_payload_is_plain_json_types() -> None:
     """
     payload = dump_contract(_EVIDENCE)
 
-    def _assert_plain(value: object) -> None:
-        assert type(value) in (dict, list, str, int, float, bool, type(None)), type(value)
-        if isinstance(value, dict):
-            for key, item in value.items():
-                assert type(key) is str
-                _assert_plain(item)
-        elif isinstance(value, list):
-            for item in value:
-                _assert_plain(item)
-
-    _assert_plain(payload)
+    _assert_plain_json(payload)
 
 
 def test_load_rejects_a_payload_that_lost_a_field() -> None:

@@ -13,6 +13,7 @@ M4 有意让 schema 出现在两处：``persistence/schema.py`` 是活的（``Po
 """
 
 import contextlib
+import hashlib
 import io
 import re
 from pathlib import Path
@@ -41,6 +42,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 # 迁移自己的记账表，不属于业务 schema，比较时排除。
 _ALEMBIC_BOOKKEEPING = "alembic_version"
 _ALEMBIC_VERSION_NUM_MAX_LENGTH = 32
+_MIGRATION_VERSIONS = (
+    _ROOT / "src" / "xiaowei_agent" / "persistence" / "migrations" / "versions"
+)
+_PUBLISHED_REVISION_SOURCE_SHA256 = {
+    "rev_0011_interaction_clarification.py": (
+        "1292a176752eca152870324f933a4025ccd40e208c427cd86a927ff938922063"
+    ),
+}
 
 # 被后续 revision 用 ALTER 演进过的表。它们的 CREATE TABLE 是**当初**那一版，逐字
 # 比对必然不等于今天的 ``schema.py``——这正是冻结历史快照应有的样子。这些表改由
@@ -199,14 +208,33 @@ def test_rev_0011_has_the_expected_revision_chain() -> None:
     assert revision.down_revision == "0010_local_admin_provider"
 
 
+def test_rev_0012_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0012_clarification_records as revision,
+    )
+
+    assert revision.revision == "0012_clarification_records"
+    assert revision.down_revision == "0011_interaction_clarification"
+
+
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0011_interaction_clarification as revision,
+        rev_0012_clarification_records as revision,
     )
 
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )
+
+
+def test_published_revision_sources_are_immutable() -> None:
+    """已发布迁移只能新增后续 revision，不能原地改变历史行为。"""
+    actual = {
+        filename: hashlib.sha256((_MIGRATION_VERSIONS / filename).read_bytes()).hexdigest()
+        for filename in _PUBLISHED_REVISION_SOURCE_SHA256
+    }
+
+    assert actual == _PUBLISHED_REVISION_SOURCE_SHA256
 
 
 def test_revision_ids_fit_the_default_alembic_version_column() -> None:

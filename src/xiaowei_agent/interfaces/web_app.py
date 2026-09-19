@@ -537,6 +537,8 @@ async def _config_unavailable(_: Request, __: Exception) -> Response:
 
 async def _application_error(_: Request, exc: Exception) -> Response:
     failure = classify_application_exception(exc)
+    if failure is ApplicationFailure.CLARIFICATION_INTEGRITY:
+        return _error(500, "clarification.integrity_error")
     if failure is ApplicationFailure.CONFLICT:
         return _error(409, "idempotency_conflict")
     if failure is ApplicationFailure.NOT_FOUND:
@@ -1341,6 +1343,8 @@ def create_app(
         )
         detail = WebTaskDetail.from_accessible(accessible)
         exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
+        if detail.clarification is None:
+            exclude.add("clarification")
         return detail.model_dump(mode="json", exclude=exclude)
 
     @app.post("/app/api/login")

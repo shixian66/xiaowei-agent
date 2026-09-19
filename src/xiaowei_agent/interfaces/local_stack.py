@@ -33,6 +33,10 @@ from xiaowei_agent.interfaces.provider_consumption import (
     ProviderCredentials,
     load_provider_credentials,
 )
+from xiaowei_agent.persistence.clarification_records import (
+    ClarificationRecordStore,
+    InMemoryClarificationRecordStore,
+)
 from xiaowei_agent.persistence.database import (
     DatabaseConfigurationError,
     PostgresReadinessProbe,
@@ -53,6 +57,7 @@ from xiaowei_agent.persistence.model_artifacts import (
 from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
 from xiaowei_agent.persistence.postgres import (
     PostgresChannelStore,
+    PostgresClarificationRecordStore,
     PostgresEvidenceLedger,
     PostgresModelArtifactStore,
     PostgresPlanStore,
@@ -473,6 +478,7 @@ def _assemble_local_stack(
     plan_store: PlanStore,
     ledger: EvidenceLedger,
     model_artifacts: ModelArtifactStore,
+    clarification_records: ClarificationRecordStore,
     readiness: ReadinessProbe,
     aclose: AsyncClose,
     clock: Clock,
@@ -632,6 +638,7 @@ def _assemble_local_stack(
         clock=clock,
         model_artifacts=model_artifacts,
         model_profile=application_model_profile,
+        clarification_records=clarification_records,
         interaction_classifier=model_adapter,
         slow_query_advisory=model_adapter,
         model_monotonic=monotonic,
@@ -681,6 +688,7 @@ def build_in_memory_local_stack(
     plan_store = InMemoryPlanStore(state=state)
     ledger = InMemoryEvidenceLedger(state=state)
     model_artifacts = InMemoryModelArtifactStore(state=state, clock=clock)
+    clarification_records = InMemoryClarificationRecordStore(state=state, clock=clock)
 
     async def close() -> None:
         if on_close is not None:
@@ -693,6 +701,7 @@ def build_in_memory_local_stack(
         plan_store=plan_store,
         ledger=ledger,
         model_artifacts=model_artifacts,
+        clarification_records=clarification_records,
         readiness=_Ready(),
         aclose=close,
         clock=clock,
@@ -725,6 +734,9 @@ async def build_postgres_task_view_stack(
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
         model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
+        clarification_records = PostgresClarificationRecordStore(
+            engine=engine, clock=clock
+        )
         _, bindings = _build_capability_bindings()
         return TaskViewStack(
             runtime=TaskViewRuntime(
@@ -732,6 +744,7 @@ async def build_postgres_task_view_stack(
                 plan_store=plan_store,
                 ledger=ledger,
                 bindings=bindings,
+                clarification_records=clarification_records,
                 model_artifacts=model_artifacts,
                 model_profile=ModelInvocationProfile(),
             ),
@@ -784,6 +797,9 @@ async def build_postgres_feishu_listener_stack(
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
         model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
+        clarification_records = PostgresClarificationRecordStore(
+            engine=engine, clock=clock
+        )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
@@ -791,6 +807,7 @@ async def build_postgres_feishu_listener_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
@@ -869,6 +886,9 @@ async def build_postgres_channel_worker_stack(
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
         model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
+        clarification_records = PostgresClarificationRecordStore(
+            engine=engine, clock=clock
+        )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         _, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
@@ -876,6 +896,7 @@ async def build_postgres_channel_worker_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
@@ -970,6 +991,9 @@ async def build_postgres_web_stack(
         plan_store = PostgresPlanStore(engine=engine)
         ledger = PostgresEvidenceLedger(engine=engine)
         model_artifacts = PostgresModelArtifactStore(engine=engine, clock=clock)
+        clarification_records = PostgresClarificationRecordStore(
+            engine=engine, clock=clock
+        )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
         provider_state = PostgresProviderStateStore(engine=engine, clock=clock)
@@ -979,6 +1003,7 @@ async def build_postgres_web_stack(
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
@@ -1095,6 +1120,9 @@ async def build_postgres_local_stack(
             plan_store=PostgresPlanStore(engine=engine),
             ledger=PostgresEvidenceLedger(engine=engine),
             model_artifacts=PostgresModelArtifactStore(engine=engine, clock=clock),
+            clarification_records=PostgresClarificationRecordStore(
+                engine=engine, clock=clock
+            ),
             readiness=PostgresReadinessProbe(engine=engine, assembled=True),
             aclose=close,
             clock=clock,

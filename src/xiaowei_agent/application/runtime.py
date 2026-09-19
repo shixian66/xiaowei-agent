@@ -41,7 +41,10 @@ from xiaowei_agent.application.capability_runtime import (
     CapabilityRuntimeBinding,
     PreparedCapability,
 )
-from xiaowei_agent.application.interaction_router import route_interaction
+from xiaowei_agent.application.interaction_router import (
+    InteractionRouteDecision,
+    route_interaction,
+)
 from xiaowei_agent.application.model_advisory import load_or_accept_advisory
 from xiaowei_agent.application.model_interaction import load_or_accept_interaction
 from xiaowei_agent.application.model_ports import (
@@ -63,6 +66,7 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     Candidate,
     CapabilitySnapshot,
+    ClarificationReasonCode,
     EvidenceEnvelope,
     ExecutionPlan,
     IntentDraft,
@@ -92,6 +96,13 @@ from xiaowei_agent.observability.sink import (
     Delivery,
     TraceSink,
     delivery_for_write_exception,
+)
+from xiaowei_agent.persistence.clarification_records import (
+    ClarificationRecordCandidate,
+    ClarificationRecordConflictError,
+    ClarificationRecordGrantError,
+    ClarificationRecordStateError,
+    ClarificationRecordStore,
 )
 from xiaowei_agent.persistence.errors import (
     PersistenceIntegrityError,
@@ -160,6 +171,10 @@ class RetryableTaskError(TaskIdCarryingError, RuntimeError):
         self.reason = reason
 
 
+class _ClarificationTerminalizedError(Exception):
+    """内部控制流：澄清事实已写入，后续交给统一 finalize。"""
+
+
 class XiaoweiRuntime:
     """组装依赖、驱动一次请求、产出可审计回答。"""
 
@@ -178,6 +193,7 @@ class XiaoweiRuntime:
         clock: Clock,
         model_artifacts: ModelArtifactStore,
         model_profile: ModelInvocationProfile,
+        clarification_records: ClarificationRecordStore,
         interaction_classifier: InteractionClassifierPort | None = None,
         slow_query_advisory: SlowQueryAdvisoryPort | None = None,
         model_monotonic: Callable[[], float] = time.monotonic,
@@ -196,6 +212,7 @@ class XiaoweiRuntime:
         self._sink = sink
         self._clock = clock
         self._model_artifacts = model_artifacts
+        self._clarification_records = clarification_records
         self._model_profile = model_profile
         self._interaction_classifier = interaction_classifier
         self._slow_query_advisory = slow_query_advisory
@@ -208,6 +225,7 @@ class XiaoweiRuntime:
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=model_profile,
         )
@@ -335,6 +353,17 @@ class XiaoweiRuntime:
                 delivery=Delivery.LOG_AND_DURABLE,
             )
             if route.intent_draft is None:
+                if route.disposition is RoutingDisposition.CLARIFY:
+                    await self._save_route_clarification(
+                        grant=grant,
+                        route=route,
+                    )
+                    terminal = _task_outcome(
+                        task_id=grant.task_id,
+                        status=TaskStatus.CLARIFICATION_REQUIRED,
+                        terminal_reason=None,
+                    )
+                    raise _ClarificationTerminalizedError
                 raise RequestRejectedError(
                     "interaction route rejected",
                     stage=PipelineStage.INTENT,
@@ -407,6 +436,20 @@ class XiaoweiRuntime:
             ) from exc
         except ModelArtifactGrantError as exc:
             raise LeaseLostError("model artifact grant is no longer current") from exc
+        except ClarificationRecordGrantError as exc:
+            raise LeaseLostError("clarification grant is no longer current") from exc
+        except ClarificationRecordConflictError:
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.FAILED,
+                terminal_reason=RECOVERY_DRIFT_REASON,
+            )
+        except ClarificationRecordStateError as exc:
+            raise LifecycleError(
+                "task status does not allow the clarification record write"
+            ) from exc
+        except _ClarificationTerminalizedError:
+            pass
         except (
             RequestRejectedError,
             PolicyDeniedError,
@@ -558,6 +601,30 @@ class XiaoweiRuntime:
         return payload
 
     # --- 各阶段 -------------------------------------------------------------
+
+    async def _save_route_clarification(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        route: InteractionRouteDecision,
+    ) -> None:
+        """把 Router 的 clarify 裁决保存成持久澄清事实。"""
+        subject = route.subject
+        reason_code = route.reason_code
+        if subject is None or not isinstance(reason_code, ClarificationReasonCode):
+            raise RequestRejectedError(
+                "invalid clarification route decision",
+                stage=PipelineStage.INTENT,
+            )
+        await self._clarification_records.save(
+            grant=grant,
+            candidate=ClarificationRecordCandidate(
+                subject=subject,
+                reason_code=reason_code,
+                missing_fields=(),
+                confirmed_slots=(),
+            ),
+        )
 
     async def _resolve(
         self,
