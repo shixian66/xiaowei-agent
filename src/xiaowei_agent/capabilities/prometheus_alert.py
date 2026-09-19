@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     EffectClass,
     OperationSpec,
     PromqlSurface,
+    ReadClass,
 )
 
 PROMETHEUS_ALERT_CAPABILITY_ID: Final[str] = "prometheus.alert.evidence"
@@ -39,6 +40,7 @@ PROMETHEUS_ALERT_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             operation=OP_GET_ACTIVE_ALERTS,
             gateway=ALERTMANAGER_GATEWAY,
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.alertmanager.active_alerts.v1",
         ),
@@ -46,6 +48,7 @@ PROMETHEUS_ALERT_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             operation=OP_QUERY_METRIC_RANGE,
             gateway=PROMETHEUS_GATEWAY,
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.prometheus.metric_range.v1",
         ),

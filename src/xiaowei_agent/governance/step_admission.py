@@ -161,6 +161,7 @@ def admit_step(
         context=context,
         target=target,
         effect_class=declared.effect_class,
+        read_class=declared.read_class,
     )
     if not decision.allow:
         raise PolicyDeniedError(

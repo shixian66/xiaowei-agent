@@ -36,6 +36,7 @@ from xiaowei_agent.contracts import (
     PolicyProfile,
     PolicySnapshot,
     PromqlSurface,
+    ReadClass,
     RequestContext,
     ResolvedTarget,
     RiskLevel,
@@ -96,6 +97,7 @@ WRITE_PROFILE: Final[PolicyProfile] = PolicyProfile(
     profile_id=WRITE_PROFILE_ID,
     allowed_operations=(WRITE_OP,),
     allowed_effect_classes=(EffectClass.MUTATE_TARGET,),
+    allowed_read_classes=(),
     allowed_environment_ids=("dev",),
     risk=RiskLevel.HIGH,
     max_timeout_seconds=30.0,
@@ -164,6 +166,7 @@ def forged_write_step() -> PlanStep:
         depends_on=(),
         side_effect=False,
         effect_class=EffectClass.READ,
+        read_class=ReadClass.BOUNDED,
     )
 
 

@@ -13,6 +13,7 @@ from xiaowei_agent.contracts import (
     CapabilitySpec,
     EffectClass,
     OperationSpec,
+    ReadClass,
     SqlSurface,
 )
 
@@ -36,6 +37,7 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             operation=OP_LIST,
             gateway=GATEWAY_NAME,
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.list.v1",
         ),
@@ -43,6 +45,7 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             operation=OP_COUNT,
             gateway=GATEWAY_NAME,
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.count.v1",
         ),

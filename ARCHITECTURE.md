@@ -433,8 +433,8 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `CapabilityInputBinding` | params_type、input_schema_ref、allowed_clarification_fields、slot_verifier、planner、confirmed_slot_projector | I1 的 capability 输入绑定；`CapabilitySpec.input_schema_ref`、binding 和 Params 必须一致 |
 | `CandidateSet` | resolver_version、snapshot_id、items、rejections | Resolver 唯一真源，shadow 只消费 |
 | `ClarificationRecord` | task_id、subject、reason_code、missing_fields、confirmed_slots、record_version、fencing | I1 的澄清事实；`ClarificationRecordStore` grant-fenced、insert-once，record 必须先于 `CLARIFICATION_REQUIRED` 终态 |
-| `ReadClass` | BOUNDED、RESTRICTED | I1 的静态只读分类；由 `OperationSpec` 派生并进入 Plan schema V2 / `plan_hash`，当前源码尚未实现 V2 |
-| `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3）。I1-C 目标把 `PLAN_SCHEMA_VERSION` 升到 2 并加入 `PlanStep.read_class`，未实现前仍以源码事实为准 |
+| `ReadClass` | BOUNDED、RESTRICTED | I1-C 的静态只读分类；由 `OperationSpec` 派生到 `PlanStep.read_class`，进入 Plan schema V2 / `plan_hash`，并由 StepAdmission 重新派生后交给 ToolPolicy 判定 |
+| `ExecutionPlan` | plan_schema_version、capability_id、capability_version、steps、policy_profile、policy_revision、budget | 确定性、可重放、不可由模型直接覆盖；绑定单一 capability。**`plan_hash` 与 `target_fingerprint` 不是本契约的字段**，由 `planning` 按需计算，绑定值存于 `ApprovalRequest`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D3）。I1-C 已把 `PLAN_SCHEMA_VERSION` 升到 2，并把 `PlanStep.read_class` 纳入计划规范形状 |
 | `PolicyDecision` | allow、reason、risk、policy_revision、obligations | fail-closed，理由结构化 |
 | `ApprovalRequest` | task_id、step_id、plan_hash、target_fingerprint、policy_revision、subject、expires_at、state | 审批与具体步骤绑定；`policy_revision` 使「policy 变化不能静默让旧审批继续生效」可独立断言（ADR-009 D3） |
 | `AdmissionCertificate` | step_id、operation、effect_class、policy_decision、approval_ref、plan_hash、target_fingerprint、tool_call_hash | `StepAdmission` 产出、`ToolGateway` 消费；**同时绑定步骤身份与调用内容**，`tool_call_hash` 覆盖 `ToolCall` 全部字段，使「未经准入即调用工具」与「持合法凭证替换参数」都不可表达（ADR-009 D4） |
@@ -470,6 +470,7 @@ sha256(canonical_json({
   "ordered_steps": [
     {"step_id": ..., "operation": ..., "typed_arguments": ...,
      "depends_on": ..., "side_effect": ..., "effect_class": ...,
+     "read_class": ...,
      "condition": {"kind": ..., "ref_step_id": ..., "field": ...,
                    "threshold": ..., "expected_result": ...}}
   ],
@@ -479,9 +480,13 @@ sha256(canonical_json({
 }))
 ```
 
-`plan_schema_version` 的首个取值为 `1`（[ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) D1）。**计划绑定单一 capability，步骤不携带 capability 标识**；跨 capability 计划须递增 schema version 并另立 ADR（ADR-009 D2）。
+`plan_schema_version` 当前取值为 `2`：V1 为 ADR-009 的首个规范形状，V2 由 I1-C 加入
+`PlanStep.read_class`。**计划绑定单一 capability，步骤不携带 capability 标识**；跨 capability
+计划须递增 schema version 并另立 ADR（ADR-009 D2）。
 
-`effect_class`、`condition` 与 `budget` 进入规范输入集的理由见 ADR-009 D1：分类漂移、可选分支条件变化和预算被放大，都必须被 `plan_hash` 检出，否则一份已批准的计划可在恢复时执行不同的动作。
+`effect_class`、`read_class`、`condition` 与 `budget` 都进入规范输入集：分类漂移、只读范围漂移、
+可选分支条件变化和预算被放大，都必须被 `plan_hash` 检出，否则一份已批准的计划可在恢复时执行
+不同的动作。
 
 `PlanBudget.max_model_tokens` 表示 plan 形成后模型调用可请求的最大 provider-generated token 数，
 provider 的 `max_output_tokens` 不得超过它；模型输入另受字段/字符/行数闭集限制。plan 形成前的意图

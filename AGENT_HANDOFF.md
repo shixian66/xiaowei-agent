@@ -2,10 +2,10 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前 I1-B 事实
+## 0. 当前 I1-C 事实
 
-- 当前开发分支：`claude/i1-b-slot-verifier`，基于
-  `origin/main@c8fc08c176bb21ed1e9a7eb6fc0ec7aed3eeeef0`。该基线已包含 PR #48 合入结果。
+- 当前开发分支：`claude/i1-c-read-class-plan-v2`，基于
+  `origin/main@f267bdf19eaf508bf51748b7522259d5dfabccb6`。该基线已包含 PR #49 合入结果。
 - I0-DOC 目标已完成并绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
   智能交互入口、终态澄清、`ReadClass` 与执行披露边界已写入项目真相文档。
 - `main` 已包含 I1-A Task 1.1–1.3 的 interaction classifier、insert-once
@@ -47,21 +47,30 @@
 - 本分支已补同根护栏：ClarificationRecordStore 内存/PostgreSQL 共享套件、schema/migration
   离线一致性、已发布 migration 源码哈希、0012 downgrade 授权守卫、崩溃恢复不重放模型/网关、
   row mapping JSONB 往返、Protocol conformance、只读进程 module surface、通道 parity 与安全 marker gate。
-- 本分支实现 I1-B：新增类型化 `CapabilityInputBinding`，三个现有 capability 均通过
+- `main` 已包含 I1-B（PR #49）：新增类型化 `CapabilityInputBinding`，三个现有 capability 均通过
   `SlotVerifier`/可信槽位升级已完成离线实现；Planner 只接收专属 Params，不再接收原始模型 slots；
   capability 级澄清父记录会在 Resolver/SlotVerifier 前绑定并校验 capability/version/operation/input schema。
-- ReadClass/Plan schema V2 与 ExecutionDisclosure、I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
+- 本分支实现 I1-C：`ReadClass` 闭集为 `BOUNDED` / `RESTRICTED`；`OperationSpec.read_class` 是唯一真源，
+  `build_plan_step()` 派生 `PlanStep.read_class`，`PLAN_SCHEMA_VERSION = 2` 且 `plan_hash` 覆盖
+  `read_class`；StepAdmission 在 Gateway 前重新从 `CapabilitySnapshot` 派生并交给 ToolPolicy 判定。
+  当前三个生产只读 operation 均声明为 `BOUNDED`，I1-C 不新增受限读取额外确认。
+- PR #50 复审补修：Postgres 读取持久化 plan 时会在构造 `ExecutionPlan` 前拒绝 V1/raw 旧 schema，
+  返回闭集 `plan.schema_version_unsupported`，Runtime 将其收成任务级 `REJECTED` 而不是 worker 系统失败；
+  Runtime 在已编译 plan 聚合出 `RESTRICTED` read 时于 Runner/Admission/Gateway 前拒绝，原因保持
+  `policy.read_class_not_allowed`。本机最终证据：`python -m pytest -q` 3862 passed / 265 skipped；
+  `python -m pytest -m security -q` 1411 passed / 83 skipped；`ruff check .` 与 `mypy src` 通过。
+- ExecutionDisclosure、I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
   M8 与 M9 仍未在本分支实现。
-- I1-B 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
+- I1-C 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
   不改变 RI2/RI3/RI4/H 层生产只读、RI6 或 E1 的独立 GO 门。当前证据等级仍为 `tests`。
 
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-b-slot-verifier` 基于 `origin/main@c8fc08c176bb21ed1e9a7eb6fc0ec7aed3eeeef0` |
+| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-c-read-class-plan-v2` 基于 `origin/main@f267bdf19eaf508bf51748b7522259d5dfabccb6` |
 | 截止时间 | 2026-09-19（Asia/Shanghai） |
-| 阶段 | **I1-B 开发中。PR #48 已合入 `main`；当前分支完成 typed SlotVerifier/可信槽位升级切片。ReadClass/Plan schema V2 与 ExecutionDisclosure 仍未实现。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **I1-C 开发中。PR #49 已合入 `main`；当前分支完成 ReadClass/Plan schema V2 离线切片。ExecutionDisclosure 仍未实现。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -111,9 +120,9 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | I1-B 复审通过并合入后，继续 ReadClass/Plan schema V2，然后 ExecutionDisclosure。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | I1-C 复审通过并合入后，继续 ExecutionDisclosure。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已包含 I0-DOC 与 I1-A Task 1.1–1.5（PR #48 已合入）；当前 worktree 的 I1-B typed SlotVerifier/可信槽位升级切片尚未合入。仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5 与 I1-B typed SlotVerifier/可信槽位升级（PR #49 已合入）；当前 worktree 的 I1-C ReadClass/Plan schema V2 切片尚未合入。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 
@@ -174,7 +183,7 @@
 - **E1 默认关闭**：E1 指**任何可能修改被管运维目标状态的操作**，与是否经 `ToolGateway`、是否被标记 `side_effect=True` 无关；合法 E1 执行必须经 `ToolGateway` 且 `side_effect=True` 并通过 `StepAdmission`。M0-M7 全程禁止 E1（含非生产环境），M8 的受控 E1 需三项显式条件齐备，生产写另需独立授权。
 - **E1 分类必须确定性派生**：`side_effect` 与 `effect_class` 只能由版本化 `CapabilitySpec` / operation metadata 派生；模型、用户输入和 adapter 都不得设置、覆盖或降级；未知分类、声明冲突、写操作误标只读一律 fail-closed。
 - **Reflection 只消费结构化 Evidence，不拥有执行权**：只输出证据充分性、限制、缺失项，以及是否降级为 `indeterminate`、是否需用户补充信息的**建议**；是否真的进入 `indeterminate` 由 Runtime/Runner 依据该结构化结论确定性决定并由 TaskStore 保护，**Reflection 不设置终态、不写 TaskStore**；不得新增/修改计划步骤、选工具、扩大目标、提高权限、生成 SQL、触发 adapter 或改写 TaskStore 事实。缺槽与初始证据需求由 `CapabilityResolver` / `PlanCompiler` 处理。确需按条件追加取数时，只能是 `ExecutionPlan` 中预编译、预算内的可选只读分支，由 Runner 依确定性条件执行并照常经过 `StepAdmission`。
-- **ADR-009 固化 hash 与准入形状**（M2）：`plan_hash` 规范输入集含 `effect_class`、`condition` 与 `budget`，`PLAN_SCHEMA_VERSION = 1`；`ExecutionPlan` 绑定**单一 capability**，步骤不携带 capability 标识；两个指纹**不作为 `ExecutionPlan` 字段**，绑定值存于 `ApprovalRequest`（含 `policy_revision`）；`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`。详见 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)。
+- **ADR-009/I1-C 固化 hash 与准入形状**：`plan_hash` 规范输入集含 `effect_class`、`read_class`、`condition` 与 `budget`，`PLAN_SCHEMA_VERSION = 2`；`ExecutionPlan` 绑定**单一 capability**，步骤不携带 capability 标识；两个指纹**不作为 `ExecutionPlan` 字段**，绑定值存于 `ApprovalRequest`（含 `policy_revision`）；`AdmissionCertificate` 同时绑定步骤身份与 `tool_call_hash`。详见 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) 与 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
 - **生产 policy snapshot 必须整体版本化**：M6a PR 1 新增 Prometheus 只读 profile 后，production revision 从 `policy-2026-09-01` 递增为 `policy-2026-09-05`；PR 2 新增资产只读 profile 后再次递增为 `policy-2026-09-05.2`。每次都与有序 profile ID 集合做成对 golden；测试 fake 的独立 revision 不随生产值机械迁移。
 - **覆盖完备性由机制承重，不由人记得**（M2）：凡"某 DTO 全部字段必须进入某 hash"一律用显式「字段 → 指纹键」映射表实现，安全测试断言映射表键集等于 `model_fields`；含嵌套 DTO（`PlanBudget`、`StepCondition`）。给 DTO 加字段却不更新映射表会立即转红。
 - **校验绕过面已封死**（M2）：`model_copy(update=...)` 与 `model_construct` 在 Pydantic v2 中完全不触发校验，均已在 `Contract` 基类封死/重新校验；未绑定的 `BaseModel.model_copy(obj, ...)` 由源码扫描禁止；不保留任何"未校验复制"的逃生口。需在校验期改写取值时一律用**字段级** `AfterValidator`——model 级 after-validator 返回非 `self` 的对象在 `__init__` 路径上会被 Pydantic 丢弃，规范化会静默失效。
@@ -587,10 +596,11 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 
 ### 未覆盖
 
-- **I1-B 仍只是本地离线 `tests` 证据**：没有读取真实 Gemini key，没有 Gemini/飞书/
+- **I1-C 仍只是本地离线 `tests` 证据**：没有读取真实 Gemini key，没有 Gemini/飞书/
   StarRocks 网络调用，没有部署、canary、测试环境验证或用户验收。`CLARIFICATION_REQUIRED` 终态澄清、
-  clarification child 消费与 typed SlotVerifier/可信槽位升级已有离线闭环；ReadClass/Plan schema V2
-  与 Disclosure 仍未实现。
+  clarification child 消费、typed SlotVerifier/可信槽位升级与 ReadClass/Plan schema V2 已有离线闭环；
+  ExecutionDisclosure 仍未实现。本机未提供 `PYTEST_POSTGRES_DSN`，因此新增 V1 plan JSONB 的真实
+  PostgreSQL integration 用例本地跳过，需以 CI 或本机 DSN 实跑补足真实库证据。
 
 - **RI3 PR 3C/3D 已合入，但证据仍只到离线 `tests`**：durable Runtime、
   `rev_0008`、artifact、MODEL trace、fallback/retry service 和慢查询 advisory 已在 fake/临时

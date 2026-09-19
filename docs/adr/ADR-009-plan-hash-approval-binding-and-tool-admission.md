@@ -24,13 +24,20 @@ M2 首次实现 `plan_hash`、`target_fingerprint` 与工具准入形状。`ARCH
 
 `ordered_steps` 的每个元素为：`step_id`、`operation`、`typed_arguments`、`depends_on`、`side_effect`、`effect_class`、`condition`。
 
+**I1-C 修订（2026-09-19）**：Plan schema V2 把静态只读分类 `read_class` 加入每个
+`ordered_steps` 元素。`read_class` 与 `effect_class` 一样进入 `plan_hash`，否则一份已批准的
+只读计划可以在不改变 hash 的情况下从 `BOUNDED` 漂移到 `RESTRICTED` 或反向漂移。
+`PLAN_SCHEMA_VERSION` 当前取值为 `2`；版本 1 是 M2 首个规范形状。旧 V1 plan 读取后 fail-closed，不补默认值、不重算 hash、不复用旧审批。
+
 三点说明：
 
 - **`effect_class` 进入**。有人会说它可由 `(capability_id, capability_version, operation)` 推出，而这三项已在输入集内，故属冗余。该推理只在 `CapabilitySpec` 版本不可原地变更时成立；显式写入使 hash 自描述，从而把「某个版本的 spec 被原地改写」这一治理失效也变成可检出的漂移。成本为零。
+- **`read_class` 进入**。它同样可由 operation 声明推出，但 I1-C 要求准入前重新派生并核对；
+  把它纳入 hash 才能让持久化计划和审批绑定同时覆盖静态读取范围。
 - **`condition` 进入**。可选只读分支的执行条件是计划的一部分；不进入则同一 `plan_hash` 可对应不同的实际执行路径。
 - **`budget` 进入**。否则已批准的计划可被换上更大的 `max_tool_calls` 继续执行，审批所依据的预算约束失效。
 
-`PLAN_SCHEMA_VERSION` 首个取值为 `1`。M2 是首次实现，此前不存在已发出的 hash 或已生效的审批，因此直接以含上述字段的形状定义版本 1，不存在需要迁移的存量。
+`PLAN_SCHEMA_VERSION` 首个取值为 `1`。M2 是首次实现，此前不存在已发出的 hash 或已生效的审批，因此直接以含上述字段的形状定义版本 1，不存在需要迁移的存量。I1-C 已按上面的修订升到版本 2。
 
 **覆盖完备性由机制承重，不由人记得**：实现维护「模型字段名 → 指纹键名」的显式映射表，安全测试断言映射表的键集等于对应 DTO 的 `model_fields`。给 DTO 新增字段而未决定它是否进入指纹时，测试立即失败。该要求同样适用于嵌套 DTO（`PlanBudget`、`StepCondition`）。
 

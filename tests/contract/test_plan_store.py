@@ -7,7 +7,12 @@
 
 from tests.suites.plan_store import PLAN_STORE_CASES, bind
 
-from xiaowei_agent.persistence.plans import PlanStore, StoredPlan
+from xiaowei_agent.persistence.plans import (
+    PlanSchemaVersionUnsupportedError,
+    PlanStore,
+    StoredPlan,
+    reject_unsupported_plan_schema,
+)
 
 bind(globals(), PLAN_STORE_CASES)
 
@@ -16,3 +21,13 @@ def test_plan_store_holds_nothing_but_plan_and_target() -> None:
     """字段集恰为两项：PlanStore 不得变成状态、审批、证据或 render 的第二真源。"""
     assert set(StoredPlan.model_fields) == {"plan", "target"}
     assert {m for m in dir(PlanStore) if not m.startswith("_")} == {"save", "load"}
+
+
+def test_raw_stored_v1_plan_is_rejected_before_contract_decode() -> None:
+    try:
+        reject_unsupported_plan_schema({"plan_schema_version": 1}, task_id="task-1")
+    except PlanSchemaVersionUnsupportedError as exc:
+        assert exc.reason_code == "plan.schema_version_unsupported"
+        assert "task-1" not in str(exc)
+    else:
+        raise AssertionError("old stored plan schema must be rejected")

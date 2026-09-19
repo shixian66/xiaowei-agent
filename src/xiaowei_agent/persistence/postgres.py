@@ -142,6 +142,7 @@ from xiaowei_agent.persistence.plans import (
     PlanConflictError,
     PlanNotFoundError,
     StoredPlan,
+    reject_unsupported_plan_schema,
 )
 from xiaowei_agent.persistence.rows import (
     channel_binding_to_row,
@@ -1527,7 +1528,10 @@ class PostgresTaskStore:
                 sa.select(TASK_PLANS.c.plan).where(TASK_PLANS.c.task_id == task_id)
             )
         ).scalar_one_or_none()
-        return None if payload is None else load_contract(ExecutionPlan, payload)
+        if payload is None:
+            return None
+        reject_unsupported_plan_schema(payload, task_id=task_id)
+        return load_contract(ExecutionPlan, payload)
 
     async def _step_attempts_used(
         self, connection: AsyncConnection, *, task_id: str
@@ -2248,6 +2252,7 @@ class PostgresPlanStore:
         )
         if row is None:
             return None
+        reject_unsupported_plan_schema(row["plan"], task_id=task_id)
         return StoredPlan(
             plan=load_contract(ExecutionPlan, row["plan"]),
             target=load_contract(ResolvedTarget, row["target"]),

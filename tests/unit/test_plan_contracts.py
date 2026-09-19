@@ -1,5 +1,7 @@
 """计划契约的结构完整性。"""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -10,10 +12,12 @@ from xiaowei_agent.contracts import (
     ExecutionPlan,
     PlanBudget,
     PlanStep,
+    ReadClass,
     StepCondition,
     StepConditionKind,
     StepResultStatus,
 )
+from xiaowei_agent.contracts.plan import PLAN_SCHEMA_VERSION
 
 _BUDGET = PlanBudget(max_steps=2, max_tool_calls=2, max_model_tokens=8000)
 
@@ -26,19 +30,48 @@ def _step(step_id: str = "s1", **overrides: object) -> PlanStep:
         "depends_on": (),
         "side_effect": False,
         "effect_class": EffectClass.READ,
+        "read_class": ReadClass.BOUNDED,
     }
     return PlanStep(**(base | overrides))
 
 
-def _plan(*steps: PlanStep, budget: PlanBudget = _BUDGET) -> ExecutionPlan:
-    return ExecutionPlan(
-        capability_id="starrocks.slow_query.diagnose",
-        capability_version="1.0.0",
-        steps=steps,
-        policy_profile="readonly.default",
-        policy_revision="policy-2026-09-01",
-        budget=budget,
-    )
+def _plan(
+    *steps: PlanStep, budget: PlanBudget = _BUDGET, **overrides: object
+) -> ExecutionPlan:
+    base: dict[str, object] = {
+        "capability_id": "starrocks.slow_query.diagnose",
+        "capability_version": "1.0.0",
+        "steps": steps,
+        "policy_profile": "readonly.default",
+        "policy_revision": "policy-2026-09-01",
+        "budget": budget,
+    }
+    return ExecutionPlan(**(base | overrides))
+
+
+def _v1_plan_payload_without_read_class() -> dict[str, object]:
+    return {
+        "plan_schema_version": 1,
+        "capability_id": "starrocks.slow_query.diagnose",
+        "capability_version": "1.0.0",
+        "steps": [
+            {
+                "step_id": "s1",
+                "operation": "list_slow_queries",
+                "typed_arguments": {"window_minutes": 30},
+                "depends_on": [],
+                "side_effect": False,
+                "effect_class": "read",
+            }
+        ],
+        "policy_profile": "readonly.default",
+        "policy_revision": "policy-2026-09-01",
+        "budget": {
+            "max_steps": 2,
+            "max_tool_calls": 2,
+            "max_model_tokens": 8000,
+        },
+    }
 
 
 def test_plan_step_carries_no_capability_fields() -> None:
@@ -48,6 +81,31 @@ def test_plan_step_carries_no_capability_fields() -> None:
 
 def test_execution_plan_has_no_self_declared_hash_fields() -> None:
     assert not ({"plan_hash", "target_fingerprint"} & set(ExecutionPlan.model_fields))
+
+
+def test_plan_schema_version_is_v2_for_read_class_hash_coverage() -> None:
+    assert PLAN_SCHEMA_VERSION == 2
+
+
+def test_old_plan_schema_version_is_rejected_fail_closed() -> None:
+    with pytest.raises(ValidationError):
+        ExecutionPlan.model_validate_json(
+            json.dumps(_v1_plan_payload_without_read_class())
+        )
+
+
+def test_read_step_requires_read_class() -> None:
+    with pytest.raises(ValidationError, match="read_class"):
+        _step(read_class=None)
+
+
+def test_non_read_step_must_not_have_read_class() -> None:
+    with pytest.raises(ValidationError, match="read_class"):
+        _step(
+            effect_class=EffectClass.MUTATE_TARGET,
+            side_effect=True,
+            read_class=ReadClass.BOUNDED,
+        )
 
 
 def test_duplicate_step_ids_are_rejected() -> None:

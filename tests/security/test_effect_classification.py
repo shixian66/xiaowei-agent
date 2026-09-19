@@ -14,7 +14,13 @@ from xiaowei_agent.capabilities import (
     derive_effect,
     verify_plan_effects,
 )
-from xiaowei_agent.contracts import EffectClass, ExecutionPlan, PlanBudget, PlanStep
+from xiaowei_agent.contracts import (
+    EffectClass,
+    ExecutionPlan,
+    PlanBudget,
+    PlanStep,
+    ReadClass,
+)
 
 pytestmark = pytest.mark.security
 
@@ -40,6 +46,7 @@ def _forged(**overrides: object) -> PlanStep:
         "depends_on": (),
         "side_effect": False,
         "effect_class": EffectClass.READ,
+        "read_class": ReadClass.BOUNDED,
     }
     return PlanStep(**(base | overrides))
 
@@ -108,7 +115,12 @@ def test_side_effect_mismatch_alone_is_rejected() -> None:
     有效——变异测试（移除该比对仍全绿）暴露了这个覆盖缺口。
     """
     plan = _plan(
-        _forged(operation=WRITE_OP, side_effect=False, effect_class=EffectClass.MUTATE_TARGET),
+        _forged(
+            operation=WRITE_OP,
+            side_effect=False,
+            effect_class=EffectClass.MUTATE_TARGET,
+            read_class=None,
+        ),
         capability_id=WRITE_CAP,
     )
     with pytest.raises(SpecResolutionError, match="side_effect mismatch"):
@@ -127,8 +139,20 @@ def test_effect_class_mismatch_alone_is_rejected() -> None:
 
 def test_readonly_operation_forged_as_write_is_rejected() -> None:
     """反向伪造同样拒绝：提权不比降权更可接受。"""
-    plan = _plan(_forged(side_effect=True, effect_class=EffectClass.MUTATE_TARGET))
+    plan = _plan(
+        _forged(
+            side_effect=True,
+            effect_class=EffectClass.MUTATE_TARGET,
+            read_class=None,
+        )
+    )
     with pytest.raises(SpecResolutionError):
+        verify_plan_effects(SNAPSHOT, plan)
+
+
+def test_read_class_mismatch_is_rejected() -> None:
+    plan = _plan(_forged(read_class=ReadClass.RESTRICTED))
+    with pytest.raises(SpecResolutionError, match="read_class mismatch"):
         verify_plan_effects(SNAPSHOT, plan)
 
 
@@ -142,7 +166,12 @@ def test_every_step_is_verified_not_just_the_first() -> None:
         step_id="s1",
         typed_arguments={},
     )
-    bad = _forged(step_id="s2", side_effect=True, effect_class=EffectClass.MUTATE_TARGET)
+    bad = _forged(
+        step_id="s2",
+        side_effect=True,
+        effect_class=EffectClass.MUTATE_TARGET,
+        read_class=None,
+    )
     with pytest.raises(SpecResolutionError):
         verify_plan_effects(SNAPSHOT, _plan(good, bad))
 
@@ -170,13 +199,14 @@ def test_build_plan_step_derives_classification_from_the_snapshot() -> None:
         typed_arguments={"window_minutes": 30},
     )
     assert step.effect_class is EffectClass.READ
+    assert step.read_class is ReadClass.BOUNDED
     assert step.side_effect is False
 
 
 def test_build_plan_step_accepts_no_classification_override() -> None:
     """调用方无从传入分类：它不是参数（ADR-007 D7 承重断言 2）。"""
     params = set(inspect.signature(build_plan_step).parameters)
-    assert not ({"side_effect", "effect_class"} & params)
+    assert not ({"side_effect", "effect_class", "read_class"} & params)
 
 
 def test_build_plan_step_fails_closed_on_an_undeclared_operation() -> None:

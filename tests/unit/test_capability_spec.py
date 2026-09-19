@@ -9,6 +9,7 @@ from xiaowei_agent.contracts import (
     CapabilitySpec,
     EffectClass,
     OperationSpec,
+    ReadClass,
 )
 
 
@@ -17,6 +18,7 @@ def _op(**overrides: object) -> OperationSpec:
         "operation": "list_slow_queries",
         "gateway": "starrocks",
         "effect_class": EffectClass.READ,
+        "read_class": ReadClass.BOUNDED,
         "side_effect": False,
         "argument_schema_ref": "schema.v1",
     }
@@ -47,12 +49,33 @@ def test_read_declared_as_side_effecting_is_rejected() -> None:
         _op(effect_class=EffectClass.READ, side_effect=True)
 
 
+def test_read_operation_requires_read_class() -> None:
+    with pytest.raises(ValidationError, match="read_class"):
+        _op(read_class=None)
+
+
+@pytest.mark.parametrize("read_class", [ReadClass.BOUNDED, ReadClass.RESTRICTED])
+def test_read_operation_accepts_a_closed_read_class(read_class: ReadClass) -> None:
+    operation = _op(read_class=read_class)
+    assert operation.read_class is read_class
+
+
+def test_non_read_operation_must_not_have_read_class() -> None:
+    with pytest.raises(ValidationError, match="read_class"):
+        _op(
+            effect_class=EffectClass.MUTATE_TARGET,
+            side_effect=True,
+            read_class=ReadClass.RESTRICTED,
+        )
+
+
 def test_operation_requires_a_gateway() -> None:
     """没有 adapter 路由归属的 operation 不能进入能力声明。"""
     with pytest.raises(ValidationError):
         OperationSpec(
             operation="list_slow_queries",
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.v1",
         )

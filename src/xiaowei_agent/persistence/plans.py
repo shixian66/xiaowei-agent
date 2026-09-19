@@ -9,10 +9,18 @@
 表达比用注释约定更强——PlanStore 不得变成状态、审批、证据或 render 的第二真源。
 """
 
-from typing import Protocol, cast
+from collections.abc import Mapping
+from typing import Any, Final, Protocol, cast
 
-from xiaowei_agent.contracts import Contract, ExecutionPlan, ResolvedTarget
+from xiaowei_agent.contracts import (
+    PLAN_SCHEMA_VERSION,
+    Contract,
+    ExecutionPlan,
+    ResolvedTarget,
+)
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+
+PLAN_SCHEMA_VERSION_UNSUPPORTED_REASON: Final[str] = "plan.schema_version_unsupported"
 
 
 class PlanStoreError(Exception):
@@ -33,6 +41,22 @@ class PlanNotFoundError(PlanStoreError, LookupError):
 
 class PlanConflictError(PlanStoreError):
     """同一 task_id 已存在**不同**的计划或目标。"""
+
+
+class PlanSchemaVersionUnsupportedError(PlanStoreError):
+    """已持久化计划不是当前 schema；调用方必须 fail-closed 新建任务。"""
+
+    def __init__(self, *, task_id: str) -> None:
+        super().__init__("stored plan schema version is unsupported", task_id=task_id)
+        self.reason_code = PLAN_SCHEMA_VERSION_UNSUPPORTED_REASON
+
+
+def reject_unsupported_plan_schema(
+    payload: Mapping[str, Any], *, task_id: str
+) -> None:
+    """在构造 ``ExecutionPlan`` 前拒绝旧 schema，避免嵌套字段误分类。"""
+    if payload.get("plan_schema_version") != PLAN_SCHEMA_VERSION:
+        raise PlanSchemaVersionUnsupportedError(task_id=task_id)
 
 
 class StoredPlan(Contract):

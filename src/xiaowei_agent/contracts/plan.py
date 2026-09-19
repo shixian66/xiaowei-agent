@@ -21,10 +21,15 @@ from typing import Final, Self
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import Contract, FrozenMap, StrictInt, StrictStr
-from xiaowei_agent.contracts.enums import EffectClass, StepConditionKind, StepResultStatus
+from xiaowei_agent.contracts.enums import (
+    EffectClass,
+    ReadClass,
+    StepConditionKind,
+    StepResultStatus,
+)
 
-PLAN_SCHEMA_VERSION: Final[int] = 1
-"""含 effect_class、condition 与 budget 的首个规范形状（ADR-009 D1）。
+PLAN_SCHEMA_VERSION: Final[int] = 2
+"""含 read_class、effect_class、condition 与 budget 的规范形状。
 
 计划字段新增或语义变化必须递增本常量，并同步更新 ARCHITECTURE.md §7.1 与
 ``planning`` 的「字段 → 指纹键」映射表。
@@ -70,7 +75,17 @@ class PlanStep(Contract):
     depends_on: tuple[StrictStr, ...]
     side_effect: bool
     effect_class: EffectClass
+    read_class: ReadClass | None
     condition: StepCondition = StepCondition()
+
+    @model_validator(mode="after")
+    def _read_class_matches_effect_class(self) -> Self:
+        if self.effect_class is EffectClass.READ:
+            if self.read_class is None:
+                raise ValueError("read_class is required for READ step")
+        elif self.read_class is not None:
+            raise ValueError("read_class must be None for non-READ step")
+        return self
 
 
 class PlanBudget(Contract):
@@ -97,6 +112,8 @@ class ExecutionPlan(Contract):
         ``ordered_steps`` 才有确定语义。可选分支的 ``ref_step_id`` 受同一约束：
         条件只能看已经执行过的步骤。
         """
+        if self.plan_schema_version != PLAN_SCHEMA_VERSION:
+            raise ValueError("plan_schema_version must match current schema")
         seen: set[str] = set()
         # 用步骤序号而不是 step_id 定位：step_id 由计划编译产生，仍是数据；
         # 拒绝路径统一不回显取值（与 canonical、Gateway、ValidationError 同一条

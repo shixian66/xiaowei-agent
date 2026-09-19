@@ -23,17 +23,28 @@ from tests.fakes.admission import (
 
 from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.contracts import (
+    CapabilitySnapshot,
+    CapabilitySpec,
     EffectClass,
+    ExecutionPlan,
+    OperationSpec,
+    PlanBudget,
     PlanStep,
+    PolicyProfile,
     PolicyReason,
+    PolicySnapshot,
     PromqlGuardRejection,
     PromqlSurface,
+    ReadClass,
+    RiskLevel,
+    ToolCall,
 )
-from xiaowei_agent.governance.approval import ApprovalRequiredError
+from xiaowei_agent.governance.approval import ApprovalRequiredError, NeverGrantingApprovalGate
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
 from xiaowei_agent.governance.promqlguard import PromqlGuardError
 from xiaowei_agent.governance.sqlguard import SqlGuardError
+from xiaowei_agent.governance.step_admission import admit_step
 from xiaowei_agent.planning.prometheus.compiler import compile_promql
 from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
 from xiaowei_agent.planning.prometheus.templates import (
@@ -118,6 +129,90 @@ def test_operation_outside_the_profile_is_denied() -> None:
             call=slow_query_call(operation="drop_everything"),
         )
     assert err.value.reason is PolicyReason.OPERATION_NOT_ALLOWED
+
+
+def test_read_class_outside_the_profile_is_denied() -> None:
+    from tests.fakes.admission import CONTEXT, POLICY_REVISION, TARGET, TASK_ID
+
+    operation = "restricted_read_probe"
+    profile_id = "readonly.restricted-deny-test"
+    snapshot = CapabilitySnapshot(
+        snapshot_id="snap-restricted-read-test",
+        specs=(
+            CapabilitySpec(
+                capability_id="test.restricted.read",
+                version="1.0.0",
+                domain="test",
+                input_schema_ref="input.test.restricted.v1",
+                operations=(
+                    OperationSpec(
+                        operation=operation,
+                        gateway="test",
+                        effect_class=EffectClass.READ,
+                        read_class=ReadClass.RESTRICTED,
+                        side_effect=False,
+                        argument_schema_ref="schema.test.restricted.v1",
+                    ),
+                ),
+                policy_profile=profile_id,
+                evidence_contract="evidence.test.restricted.v1",
+                eval_ref="evals.test.restricted",
+            ),
+        ),
+    )
+    step = PlanStep(
+        step_id="s1",
+        operation=operation,
+        typed_arguments={},
+        depends_on=(),
+        side_effect=False,
+        effect_class=EffectClass.READ,
+        read_class=ReadClass.RESTRICTED,
+    )
+    plan = ExecutionPlan(
+        capability_id="test.restricted.read",
+        capability_version="1.0.0",
+        steps=(step,),
+        policy_profile=profile_id,
+        policy_revision=POLICY_REVISION,
+        budget=PlanBudget(max_steps=1, max_tool_calls=1, max_model_tokens=1000),
+    )
+    profile = PolicyProfile(
+        profile_id=profile_id,
+        allowed_operations=(operation,),
+        allowed_effect_classes=(EffectClass.READ,),
+        allowed_read_classes=(ReadClass.BOUNDED,),
+        allowed_environment_ids=("dev",),
+        risk=RiskLevel.LOW,
+        max_timeout_seconds=30.0,
+    )
+    call = ToolCall(
+        gateway="test",
+        operation=operation,
+        step_id="s1",
+        typed_args={},
+        timeout_seconds=30.0,
+        idempotency_key="idem-restricted-1",
+    )
+    with pytest.raises(PolicyDeniedError) as err:
+        admit_step(
+            step=step,
+            plan=plan,
+            call=call,
+            context=CONTEXT,
+            target=TARGET,
+            snapshot=snapshot,
+            policy_snapshot=PolicySnapshot(
+                policy_revision=POLICY_REVISION, profiles=(profile_id,)
+            ),
+            profile=profile,
+            sql_surface=None,
+            promql_surface=None,
+            approval_gate=NeverGrantingApprovalGate(),
+            task_id=TASK_ID,
+            now=NOW,
+        )
+    assert err.value.reason is PolicyReason.READ_CLASS_NOT_ALLOWED
 
 
 def test_environment_outside_the_profile_is_denied() -> None:
