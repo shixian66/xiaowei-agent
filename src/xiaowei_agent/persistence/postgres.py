@@ -41,6 +41,7 @@ from xiaowei_agent.contracts import (
     ApprovalRequest,
     AttemptIntent,
     ChannelKind,
+    ClarificationRecord,
     EvidenceEnvelope,
     ExecutionPlan,
     GrantRejection,
@@ -98,6 +99,12 @@ from xiaowei_agent.persistence.channel import (
     schedule_task_recheck,
     subscription_matches_command,
 )
+from xiaowei_agent.persistence.clarification_records import (
+    ClarificationRecordCandidate,
+    ClarificationRecordConflictError,
+    record_matches_candidate,
+    require_clarification_record_grant,
+)
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
     attempt_statuses,
@@ -138,6 +145,7 @@ from xiaowei_agent.persistence.plans import (
 )
 from xiaowei_agent.persistence.rows import (
     channel_binding_to_row,
+    clarification_record_to_row,
     dump_contract,
     interaction_artifact_to_row,
     load_contract,
@@ -146,6 +154,7 @@ from xiaowei_agent.persistence.rows import (
     projection_subscription_to_row,
     record_to_row,
     row_to_channel_binding,
+    row_to_clarification_record,
     row_to_interaction_artifact,
     row_to_model_advisory,
     row_to_oauth_state,
@@ -164,6 +173,7 @@ from xiaowei_agent.persistence.schema import (
     PROJECTION_SUBSCRIPTIONS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
+    TASK_CLARIFICATION_RECORDS,
     TASK_EVIDENCE,
     TASK_INTERACTION_ARTIFACTS,
     TASK_MODEL_ADVISORIES,
@@ -2341,6 +2351,84 @@ class PostgresModelArtifactStore:
             ):
                 raise ModelArtifactConflictError(
                     "different model advisory is already stored",
+                    task_id=grant.task_id,
+                )
+            return existing
+
+
+class PostgresClarificationRecordStore:
+    """ClarificationRecordStore 的 PostgreSQL 实现；任务行锁内验证 grant 并插入。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    async def _current_for_update(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> TaskRecord | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASKS)
+                    .where(TASKS.c.task_id == task_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_record(_as_row(row))
+
+    async def _load_row(
+        self, connection: AsyncConnection, *, task_id: str
+    ) -> ClarificationRecord | None:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_CLARIFICATION_RECORDS).where(
+                        TASK_CLARIFICATION_RECORDS.c.task_id == task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else row_to_clarification_record(row)
+
+    @_persistence_boundary(write=False)
+    async def load(self, *, task_id: str) -> ClarificationRecord | None:
+        async with self._engine.connect() as connection:
+            return await self._load_row(connection, task_id=task_id)
+
+    @_persistence_boundary(write=True)
+    async def save(
+        self, *, grant: TaskAttemptGrant, candidate: ClarificationRecordCandidate
+    ) -> ClarificationRecord:
+        async with _write_transaction(self._engine) as connection:
+            current = await self._current_for_update(connection, task_id=grant.task_id)
+            require_clarification_record_grant(
+                current,
+                grant,
+                now=self._clock(),
+            )
+            record = ClarificationRecord(
+                **candidate.model_dump(mode="python"),
+                task_id=grant.task_id,
+                created_at=self._clock(),
+                fencing_token=grant.fencing_token,
+            )
+            insert = (
+                sa.dialects.postgresql.insert(TASK_CLARIFICATION_RECORDS)
+                .values(**clarification_record_to_row(record))
+                .on_conflict_do_nothing(index_elements=["task_id"])
+                .returning(TASK_CLARIFICATION_RECORDS.c.task_id)
+            )
+            if (await connection.execute(insert)).first() is not None:
+                return record
+            existing = await self._load_row(connection, task_id=grant.task_id)
+            if existing is None or not record_matches_candidate(existing, candidate):
+                raise ClarificationRecordConflictError(
+                    "different clarification record is already stored",
                     task_id=grant.task_id,
                 )
             return existing

@@ -18,6 +18,7 @@ from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     AwareDatetime,
     ChannelPermission,
+    ClarificationPayload,
     NonEmptyText,
     ProviderName,
     RenderPayload,
@@ -295,6 +296,7 @@ class WebTaskDetail(_WebModel):
     task_version: StrictInt = Field(ge=0)
     detail_path: StrictStr
     render: RenderPayload | None = None
+    clarification: ClarificationPayload | None = None
     parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
@@ -314,6 +316,7 @@ class WebTaskDetail(_WebModel):
             task_version=accessible.task_version,
             detail_path=web_task_detail_path(view.task_id),
             render=view.render,
+            clarification=view.clarification,
             parent_task_id=accessible.parent_task_id,
         )
 

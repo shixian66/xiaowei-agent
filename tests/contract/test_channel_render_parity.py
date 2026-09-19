@@ -10,6 +10,9 @@ import httpx
 from xiaowei_agent.application.channel_access import AccessibleTask
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
+    ClarificationField,
+    ClarificationPayload,
+    ClarificationReasonCode,
     FeishuProjectionInput,
     ReadinessReport,
     RenderPayload,
@@ -62,6 +65,20 @@ def _view(
             next_steps=("继续观察指标变化。",),
             status=TaskStatus.SUCCEEDED,
             refs=("trace:channel-parity", "evidence:root"),
+        ),
+        query_path=task_query_path(task_id),
+    )
+
+
+def _clarification_view() -> TaskView:
+    task_id = "task-channel-clarification"
+    return TaskView(
+        task_id=task_id,
+        status=TaskStatus.CLARIFICATION_REQUIRED,
+        clarification=ClarificationPayload(
+            reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+            missing_fields=(ClarificationField.TIME_RANGE,),
+            prompt="请补充你要处理的具体目标。",
         ),
         query_path=task_query_path(task_id),
     )
@@ -223,3 +240,60 @@ def test_feishu_clips_the_fourth_advisory_but_web_keeps_the_full_payload() -> No
     assert web.render == view.render
     assert web.render is not None
     assert web.render.sections[3].body == advisory_body
+
+
+async def test_channels_preserve_clarification_projection() -> None:
+    view = _clarification_view()
+    settings = Settings(environment_id="dev")
+    app = create_internal_app(
+        runtime=_Runtime(view),
+        settings=settings,
+        readiness=_Probe(),
+        clock=lambda: _NOW,
+        policy_revision="policy-2026-09-01",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://testserver",
+    ) as client:
+        api_response = await client.get(view.query_path)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    cli_code = run_cli(
+        ["task", "get", view.task_id],
+        opener=lambda *_args, **_kwargs: _Response(api_response.content),
+        stdout=stdout,
+        stderr=stderr,
+    )
+    web = WebTaskDetail.from_accessible(
+        AccessibleTask(
+            task_view=view,
+            request_preview="你自己看着办",
+            submitted_at=_NOW,
+            task_version=3,
+        )
+    )
+    feishu = render_feishu_card(
+        FeishuProjectionInput(
+            task_view=view,
+            request_preview="你自己看着办",
+            task_version=3,
+            detail_url="https://ops.example.test/app/tasks/task-channel-clarification",
+        )
+    )
+
+    canonical = view.model_dump(mode="json")
+    assert api_response.status_code == 200
+    assert api_response.json() == canonical
+    assert cli_code == 0
+    assert stderr.getvalue() == ""
+    assert json.loads(stdout.getvalue()) == canonical
+    assert web.status is TaskStatus.CLARIFICATION_REQUIRED
+    assert web.render is None
+    assert web.clarification == view.clarification
+
+    card_text = _plain_card_text(json.loads(feishu.content_json))
+    assert "任务状态：需要补充信息" in card_text
+    assert view.clarification is not None
+    assert view.clarification.prompt in card_text

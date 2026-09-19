@@ -73,6 +73,23 @@ def test_unknown_route_requires_one_to_one_clarification(context: object) -> Non
     )
 
 
+def test_rule_unknown_route_stays_a_preplan_rejection(context: object) -> None:
+    decision = route_interaction(
+        draft=InteractionDraft(
+            proposed_kind=InteractionKind.UNKNOWN,
+            capability_draft=None,
+            confidence=0.0,
+            source=InteractionSource.RULE,
+        ),
+        context=context,
+    )
+
+    assert decision.disposition is RoutingDisposition.REFUSE
+    assert decision.reason_code is InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE
+    assert decision.intent_draft is None
+    assert decision.subject is None
+
+
 def test_non_capability_route_cannot_smuggle_capability_draft(context: object) -> None:
     decision = route_interaction(
         draft=_draft(InteractionKind.CONVERSATION, capability=_capability()),

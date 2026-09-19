@@ -4,22 +4,22 @@
 
 ## 0. 当前 I1-A 事实
 
-- 当前开发分支：`claude/i1-task-1-2-interaction-artifacts`，基于
-  `origin/main@5532ba2be3ae58cb92ee32c6f9bcda7a5ff70116`。该基线已包含 I0-DOC 与
-  I1-A Task 1.1/首轮复审补修的合入结果。
+- 当前开发分支：`claude/i1-task-1-4-clarification-loop`，基于
+  `origin/main@befaa6bc0fa3b0ad623f19ef447f1c157a4abfcd`。该基线已包含 PR #46 合入结果。
 - I0-DOC 目标已完成并绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
   智能交互入口、终态澄清、`ReadClass` 与执行披露边界已写入项目真相文档。
-- I1-A 正在实现中；当前源码已完成 Task 1.1 契约切片，并在本分支完成 Task 1.2/1.3 的
-  interaction classifier、insert-once interaction artifact、确定性 Router 与 Runtime 接入切片：
+- I1-A 正在实现中；`main` 已包含 Task 1.1–1.3 的 interaction classifier、insert-once
+  interaction artifact、确定性 Router 与 Runtime 接入切片：
   `InteractionClassifierPort.classify()` 替代旧 `IntentModelPort.generate_intent()`；`application/model_interaction.py`
   负责单次分类预算、规则 fallback、input/result digest 与 artifact identity 复验；`ModelArtifactStore`
   改为 `load_interaction/save_interaction` 与 `load_advisory/save_advisory` 四个窄方法；Gemini adapter
   只返回 `InteractionModelResult`；Runtime 在 Resolver 前读写 `AcceptedInteractionArtifact` 并经
   `route_interaction()` 分流。
-- 当前 Router 已实现普通对话/知识查询/日志分析拒绝、UNKNOWN 澄清裁决、capability draft 缺失/越界拒绝，
-  以及 `environment_id` 槽位与 `RequestContext.environment_id` 的共享复核。`CLARIFY` 裁决的纯函数已存在，
-  但 Runtime 仍在缺少 `ClarificationRecordStore` 前把这类 preplan 路由收成 `REJECTED` 终态；真正的
-  `CLARIFICATION_REQUIRED` 持久闭环仍属后续 I1-A/Task 1.4。
+- 本分支实现 I1-A Task 1.4：新增 grant-fenced、insert-once `ClarificationRecordStore`
+  与 `task_clarification_records` 表；Runtime 在模型 `UNKNOWN` route clarify 时先保存
+  `ClarificationRecord`，再收成 `CLARIFICATION_REQUIRED`；TaskView/Web/飞书从持久澄清事实投影，
+  缺记录 fail-closed 为 `clarification.integrity_error`。规则 fallback 的 `UNKNOWN` 仍保持旧
+  preplan `REJECTED` 边界，避免把明确不支持的写/未知能力改成澄清。
 - `rev_0011_interaction_clarification` 已把 `task_accepted_intents` 物理表重命名为
   `task_interaction_artifacts`，新写入 artifact version 2；旧 V1 行保留但 Postgres loader 只解释 V2，
   防止旧 accepted intent 被新运行路径误执行。复审打回后已补：0011 downgrade 对 V2 interaction rows
@@ -31,15 +31,12 @@
   外层 cancellation 传播、usage metadata 与 API error 安全归一保护。隔离变异已证明移除 V2 loader 过滤、
   调大 Gemini close timeout 会使新增测试变红。当前证据仍为本机 `tests` 与本机 PostgreSQL integration，
   不是 CI、部署、canary 或用户验收。
-- 本轮按复审意见完成 I1-A 契约根因修复：`TaskId` 已移动到 `contracts.ids` leaf module，
-  所有 Contract `task_id`/`parent_task_id` 字段复用同一域；`InteractionDraft` 不再携带
-  `RoutingDisposition`，该枚举仅保留给后续确定性 Router；`ConfirmedTimeRangeValue` 使用 UTC
-  offset 语义并把 `timezone_id` 收紧为 `UTC`/`Asia/Shanghai` 闭集，JSONB 往返覆盖
-  `ClarificationRecord`/`ClarificationContext`/`ClarificationPayload`。
-- 本轮二次复审 P2 已关闭：三处任务详情 URL 生成函数恢复对 `quote(..., safe="")` 的承重测试；
-  `/v1/tasks/{task_id}` 对非法 TaskId 形状在构造 `TaskLookup` 前返回 404，且不触达 Runtime。
-- 本分支额外修复了一处测试隔离问题：`tests/contract/test_trace_delivery.py` 不再依赖 root logging
-  propagation 或 pytest 共享 `caplog.handler`，避免被 `configure_logging()` 的全局 logger/filter 状态污染。
+- 本分支已补同根护栏：ClarificationRecordStore 内存/PostgreSQL 共享套件、schema/migration
+  离线一致性、row mapping JSONB 往返、Protocol conformance、只读进程 module surface、通道
+  parity 与安全 marker gate。
+- Task 1.5（`clarification_parent_task_id`、一对一澄清子任务消费、重复消费/目标漂移/环境漂移处理）尚未实现；
+  `SlotVerifier`、ReadClass/Plan schema V2、ExecutionDisclosure、I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
+  M8 与 M9 也均未在本分支实现。
 - I1-A 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
   不改变 RI2/RI3/RI4/H 层生产只读、RI6 或 E1 的独立 GO 门。当前证据等级仍为 `tests`。
 
@@ -47,9 +44,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-task-1-2-interaction-artifacts` 基于 `origin/main@5532ba2be3ae58cb92ee32c6f9bcda7a5ff70116` |
-| 截止时间 | 2026-09-15（Asia/Shanghai） |
-| 阶段 | **I1-A 开发中。I0-DOC 已合入 `main`；当前分支完成 Task 1.2/1.3 的 interaction classifier、artifact/store、确定性 Router 与 Runtime 接入切片。尚未实现 `ClarificationRecordStore`/clarification child、`SlotVerifier`、ReadClass/Plan schema V2 或 Disclosure。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-task-1-4-clarification-loop` 基于 `origin/main@befaa6bc0fa3b0ad623f19ef447f1c157a4abfcd` |
+| 截止时间 | 2026-09-19（Asia/Shanghai） |
+| 阶段 | **I1-A 开发中。PR #46 已合入 `main`；当前分支完成 Task 1.4 的 `ClarificationRecordStore` 与 `CLARIFICATION_REQUIRED` 持久投影闭环。尚未实现 clarification child/Task 1.5、`SlotVerifier`、ReadClass/Plan schema V2 或 Disclosure。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -99,9 +96,9 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | 继续 I1-A Task 1.4：做 `ClarificationRecordStore`/澄清子任务消费与 `CLARIFICATION_REQUIRED` 持久闭环。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | 继续 I1-A Task 1.5：`clarification_parent_task_id`、澄清子任务一对一消费、重复消费/目标漂移/环境漂移处理。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已包含 I0-DOC 与 I1-A Task 1.1/复审补修；当前 worktree 的 Task 1.2/1.3 interaction artifact/router 切片尚未合入。仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已包含 I0-DOC 与 I1-A Task 1.1–1.3（经 PR #46）；当前 worktree 的 Task 1.4 clarification record/terminal projection 切片尚未合入。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 

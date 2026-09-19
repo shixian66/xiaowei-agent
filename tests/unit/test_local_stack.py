@@ -535,10 +535,11 @@ async def test_postgres_task_view_stack_has_only_projection_dependencies(
     assert set(vars(stack.runtime)) == {
         "_tasks",
         "_plans",
-        "_ledger",
-        "_bindings",
-        "_model_artifacts",
-        "_model_profile",
+            "_ledger",
+            "_bindings",
+            "_clarification_records",
+            "_model_artifacts",
+            "_model_profile",
     }
     assert stack.task_store._engine is engine
     assert stack.plan_store._engine is engine
@@ -758,10 +759,11 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     assert set(vars(stack.runtime)) == {
         "_tasks",
         "_plans",
-        "_ledger",
-        "_bindings",
-        "_model_artifacts",
-        "_model_profile",
+            "_ledger",
+            "_bindings",
+            "_clarification_records",
+            "_model_artifacts",
+            "_model_profile",
     }
     assert stack.oauth_port is oauth
     assert stack.membership is membership
@@ -968,10 +970,11 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     assert set(vars(stack.runtime)) == {
         "_tasks",
         "_plans",
-        "_ledger",
-        "_bindings",
-        "_model_artifacts",
-        "_model_profile",
+            "_ledger",
+            "_bindings",
+            "_clarification_records",
+            "_model_artifacts",
+            "_model_profile",
     }
     assert stack.transport is fake_transport
     assert stack.task_store._engine is engine
@@ -1096,10 +1099,11 @@ async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
     assert set(vars(stack.runtime)) == {
         "_tasks",
         "_plans",
-        "_ledger",
-        "_bindings",
-        "_model_artifacts",
-        "_model_profile",
+            "_ledger",
+            "_bindings",
+            "_clarification_records",
+            "_model_artifacts",
+            "_model_profile",
     }
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine

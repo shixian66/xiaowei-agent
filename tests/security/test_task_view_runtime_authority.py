@@ -85,6 +85,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.persistence
     xiaowei_agent.persistence.local_admin
     xiaowei_agent.persistence.channel
+    xiaowei_agent.persistence.clarification_records
     xiaowei_agent.persistence.database
     xiaowei_agent.persistence.decisions
     xiaowei_agent.persistence.errors
@@ -216,6 +217,9 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
     }
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_model_artifacts") == {
         "load_advisory"
+    }
+    assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_clarification_records") == {
+        "load"
     }
 
 

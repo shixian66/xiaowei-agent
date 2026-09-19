@@ -64,6 +64,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
     from xiaowei_agent.persistence.channel import ChannelStore
+    from xiaowei_agent.persistence.clarification_records import (
+        ClarificationRecordStore,
+        InMemoryClarificationRecordStore,
+    )
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import (
         InMemoryChannelStore,
@@ -77,6 +81,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
         PostgresChannelStore,
+        PostgresClarificationRecordStore,
         PostgresEvidenceLedger,
         PostgresModelArtifactStore,
         PostgresPlanStore,
@@ -141,6 +146,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """两种模型事实存储都必须保持同一 grant-fenced 窄协议。"""
         memory_port: ModelArtifactStore = memory
         postgres_port: ModelArtifactStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _clarification_record_store_anchors(
+        memory: "InMemoryClarificationRecordStore",
+        postgres: "PostgresClarificationRecordStore",
+    ) -> None:
+        """两种澄清事实存储都必须保持同一 grant-fenced 窄协议。"""
+        memory_port: ClarificationRecordStore = memory
+        postgres_port: ClarificationRecordStore = postgres
         _ = (memory_port, postgres_port)
 
     def _lease_renewal_anchor(store: "PostgresTaskStore") -> None:

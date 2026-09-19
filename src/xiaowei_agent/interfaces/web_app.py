@@ -1341,6 +1341,8 @@ def create_app(
         )
         detail = WebTaskDetail.from_accessible(accessible)
         exclude = {"parent_task_id"} if detail.parent_task_id is None else set()
+        if detail.clarification is None:
+            exclude.add("clarification")
         return detail.model_dump(mode="json", exclude=exclude)
 
     @app.post("/app/api/login")

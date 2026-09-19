@@ -25,6 +25,7 @@ from pathlib import Path
 from types import ModuleType
 
 from tests.suites import channel_store as channel_suite
+from tests.suites import clarification_records as clarification_suite
 from tests.suites import evidence_ledger as evidence_suite
 from tests.suites import model_artifacts as model_artifact_suite
 from tests.suites import plan_store as plan_suite
@@ -35,6 +36,7 @@ _TESTS_ROOT = Path(__file__).resolve().parents[1]
 
 _SUITES: dict[str, ModuleType] = {
     "channel_store": channel_suite,
+    "clarification_records": clarification_suite,
     "task_store": task_suite,
     "plan_store": plan_suite,
     "model_artifacts": model_artifact_suite,
@@ -137,6 +139,16 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
     "tests.integration.test_web_session_postgres": (
         "web_session_store",
         "web_session_store",
+        "postgres",
+    ),
+    "tests.contract.test_clarification_record_store": (
+        "clarification_records",
+        "clarification_records",
+        "memory",
+    ),
+    "tests.integration.test_clarification_record_store_postgres": (
+        "clarification_records",
+        "clarification_records",
         "postgres",
     ),
 }

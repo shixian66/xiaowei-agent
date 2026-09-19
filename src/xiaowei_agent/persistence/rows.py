@@ -23,8 +23,12 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from pydantic import TypeAdapter
+
 from xiaowei_agent.contracts import (
     ChannelKind,
+    ClarificationRecord,
+    ClarificationSubject,
     Contract,
     DestinationKind,
     IdentitySource,
@@ -214,6 +218,46 @@ def row_to_model_advisory(row: Mapping[Any, Any]) -> "StoredModelAdvisory":
         input_digest=row["input_digest"],
         result_digest=row["result_digest"],
         usage=load_contract(ModelUsage, row["usage"]),
+        created_at=row["created_at"],
+        fencing_token=row["fencing_token"],
+    )
+
+
+def clarification_record_to_row(record: ClarificationRecord) -> dict[str, Any]:
+    """ClarificationRecord → 展开列与严格 JSONB。"""
+    return {
+        "task_id": record.task_id,
+        "record_version": record.record_version,
+        "subject": dump_contract(record.subject),
+        "reason_code": record.reason_code.value,
+        "missing_fields": [field.value for field in record.missing_fields],
+        "confirmed_slots": [dump_contract(slot) for slot in record.confirmed_slots],
+        "created_at": record.created_at,
+        "fencing_token": record.fencing_token,
+    }
+
+
+def row_to_clarification_record(row: Mapping[Any, Any]) -> ClarificationRecord:
+    """数据库行 → 自校验 ClarificationRecord。"""
+    from xiaowei_agent.contracts import (
+        ClarificationField,
+        ClarificationReasonCode,
+        ConfirmedSlot,
+    )
+
+    return ClarificationRecord(
+        task_id=row["task_id"],
+        record_version=row["record_version"],
+        subject=TypeAdapter(ClarificationSubject).validate_json(
+            json.dumps(row["subject"])
+        ),
+        reason_code=ClarificationReasonCode(row["reason_code"]),
+        missing_fields=tuple(
+            ClarificationField(value) for value in row["missing_fields"]
+        ),
+        confirmed_slots=tuple(
+            load_contract(ConfirmedSlot, slot) for slot in row["confirmed_slots"]
+        ),
         created_at=row["created_at"],
         fencing_token=row["fencing_token"],
     )
