@@ -81,6 +81,8 @@ from xiaowei_agent.contracts import (
     ModelFallbackCode,
     ModelInvocationProfile,
     PipelineStage,
+    PolicyReason,
+    ReadClass,
     RenderPayload,
     RequestContext,
     RequestEnvelope,
@@ -124,7 +126,12 @@ from xiaowei_agent.persistence.model_artifacts import (
     ModelArtifactStateError,
     ModelArtifactStore,
 )
-from xiaowei_agent.persistence.plans import PlanConflictError, PlanNotFoundError, PlanStore
+from xiaowei_agent.persistence.plans import (
+    PlanConflictError,
+    PlanNotFoundError,
+    PlanSchemaVersionUnsupportedError,
+    PlanStore,
+)
 from xiaowei_agent.persistence.store import (
     Clock,
     TaskAttemptCommand,
@@ -414,7 +421,13 @@ class XiaoweiRuntime:
                 raise _ClarificationTerminalizedError
             plan = prepared.plan
             target = prepared.target
-            if record.status is TaskStatus.CREATED:
+            if _plan_contains_restricted_read(plan):
+                terminal = _task_outcome(
+                    task_id=grant.task_id,
+                    status=TaskStatus.REJECTED,
+                    terminal_reason=PolicyReason.READ_CLASS_NOT_ALLOWED.value,
+                )
+            elif record.status is TaskStatus.CREATED:
                 terminal = await self._runner.start(
                     grant, plan=plan, target=target, context=context
                 )
@@ -428,6 +441,12 @@ class XiaoweiRuntime:
             raise
         except (PersistenceUnavailableError, PersistenceIntegrityError):
             raise
+        except PlanSchemaVersionUnsupportedError as exc:
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.REJECTED,
+                terminal_reason=exc.reason_code,
+            )
         except ModelArtifactConflictError:
             # Interaction artifact 在 Resolver 前被复验；若上次尝试已经提交过 plan/证据，
             # 本次必须恢复该 plan 的 binding 才能按事实收成 recovery_drift。否则
@@ -1054,6 +1073,10 @@ def _task_outcome(
         evidence_refs=(),
         render_ref=None,
     )
+
+
+def _plan_contains_restricted_read(plan: ExecutionPlan) -> bool:
+    return any(step.read_class is ReadClass.RESTRICTED for step in plan.steps)
 
 
 def _terminal_status(

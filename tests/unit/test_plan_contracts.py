@@ -1,5 +1,7 @@
 """计划契约的结构完整性。"""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -47,6 +49,31 @@ def _plan(
     return ExecutionPlan(**(base | overrides))
 
 
+def _v1_plan_payload_without_read_class() -> dict[str, object]:
+    return {
+        "plan_schema_version": 1,
+        "capability_id": "starrocks.slow_query.diagnose",
+        "capability_version": "1.0.0",
+        "steps": [
+            {
+                "step_id": "s1",
+                "operation": "list_slow_queries",
+                "typed_arguments": {"window_minutes": 30},
+                "depends_on": [],
+                "side_effect": False,
+                "effect_class": "read",
+            }
+        ],
+        "policy_profile": "readonly.default",
+        "policy_revision": "policy-2026-09-01",
+        "budget": {
+            "max_steps": 2,
+            "max_tool_calls": 2,
+            "max_model_tokens": 8000,
+        },
+    }
+
+
 def test_plan_step_carries_no_capability_fields() -> None:
     """计划绑定单 capability；step 级 capability 字段会造成 hash 覆盖缺口。"""
     assert not ({"capability_id", "capability_version"} & set(PlanStep.model_fields))
@@ -61,8 +88,10 @@ def test_plan_schema_version_is_v2_for_read_class_hash_coverage() -> None:
 
 
 def test_old_plan_schema_version_is_rejected_fail_closed() -> None:
-    with pytest.raises(ValidationError, match="plan_schema_version"):
-        _plan(_step(), plan_schema_version=1)
+    with pytest.raises(ValidationError):
+        ExecutionPlan.model_validate_json(
+            json.dumps(_v1_plan_payload_without_read_class())
+        )
 
 
 def test_read_step_requires_read_class() -> None:

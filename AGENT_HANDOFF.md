@@ -54,6 +54,11 @@
   `build_plan_step()` 派生 `PlanStep.read_class`，`PLAN_SCHEMA_VERSION = 2` 且 `plan_hash` 覆盖
   `read_class`；StepAdmission 在 Gateway 前重新从 `CapabilitySnapshot` 派生并交给 ToolPolicy 判定。
   当前三个生产只读 operation 均声明为 `BOUNDED`，I1-C 不新增受限读取额外确认。
+- PR #50 复审补修：Postgres 读取持久化 plan 时会在构造 `ExecutionPlan` 前拒绝 V1/raw 旧 schema，
+  返回闭集 `plan.schema_version_unsupported`，Runtime 将其收成任务级 `REJECTED` 而不是 worker 系统失败；
+  Runtime 在已编译 plan 聚合出 `RESTRICTED` read 时于 Runner/Admission/Gateway 前拒绝，原因保持
+  `policy.read_class_not_allowed`。本机最终证据：`python -m pytest -q` 3862 passed / 265 skipped；
+  `python -m pytest -m security -q` 1411 passed / 83 skipped；`ruff check .` 与 `mypy src` 通过。
 - ExecutionDisclosure、I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
   M8 与 M9 仍未在本分支实现。
 - I1-C 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
@@ -594,7 +599,8 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **I1-C 仍只是本地离线 `tests` 证据**：没有读取真实 Gemini key，没有 Gemini/飞书/
   StarRocks 网络调用，没有部署、canary、测试环境验证或用户验收。`CLARIFICATION_REQUIRED` 终态澄清、
   clarification child 消费、typed SlotVerifier/可信槽位升级与 ReadClass/Plan schema V2 已有离线闭环；
-  ExecutionDisclosure 仍未实现。
+  ExecutionDisclosure 仍未实现。本机未提供 `PYTEST_POSTGRES_DSN`，因此新增 V1 plan JSONB 的真实
+  PostgreSQL integration 用例本地跳过，需以 CI 或本机 DSN 实跑补足真实库证据。
 
 - **RI3 PR 3C/3D 已合入，但证据仍只到离线 `tests`**：durable Runtime、
   `rev_0008`、artifact、MODEL trace、fallback/retry service 和慢查询 advisory 已在 fake/临时

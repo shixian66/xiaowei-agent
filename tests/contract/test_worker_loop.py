@@ -31,6 +31,7 @@ from xiaowei_agent.contracts import (
     RequestContext,
     RetryReason,
     TaskLookup,
+    TaskStatus,
     TransitionRejection,
 )
 from xiaowei_agent.persistence.errors import (
@@ -40,7 +41,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.fake import InMemoryTaskStore
-from xiaowei_agent.persistence.store import TaskAttemptGrant
+from xiaowei_agent.persistence.store import TaskAttemptGrant, TransitionCommand
 from xiaowei_agent.runners.runner import WorkflowPaused
 
 _NOW = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
@@ -69,6 +70,16 @@ class _Runtime:
     async def execute_task(self, *, grant: TaskAttemptGrant, submission: Any) -> None:
         self.grants.append(grant)
         await self._action(grant)
+
+
+class _UnsupportedSchemaPlanStore:
+    async def save(self, **_: Any) -> None:
+        raise AssertionError("resume must not save a new plan")
+
+    async def load(self, *, task_id: str) -> Any:
+        from xiaowei_agent.persistence.plans import PlanSchemaVersionUnsupportedError
+
+        raise PlanSchemaVersionUnsupportedError(task_id=task_id)
 
 
 class _BlockingInteractionModel:
@@ -478,6 +489,43 @@ async def test_integrity_failure_is_fail_stop_and_does_not_modify_the_task() -> 
             "fencing_token": after.fencing_token,
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_unsupported_plan_schema_terminalizes_without_worker_system_failure() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    submission = harness.submission("最近30分钟有哪些慢查询")
+    view = await harness.runtime.submit_task(submission=submission)
+    harness.task_id = view.task_id
+    record = await harness.store.get(lookup=harness.lookup)
+    await harness.store.transition(
+        command=TransitionCommand(
+            task_id=view.task_id,
+            expected_version=record.version,
+            to_status=TaskStatus.PLANNING,
+            fencing_token=None,
+            terminal_reason=None,
+        )
+    )
+    old_plan_store = _UnsupportedSchemaPlanStore()
+    harness.runtime._plans = old_plan_store  # type: ignore[assignment]
+    harness.runtime._runner._plans = old_plan_store  # type: ignore[attr-defined]
+
+    worker = WorkerLoop(
+        runtime=harness.runtime,
+        task_store=harness.store,
+        clock=harness.clock,
+        monotonic=lambda: 0.0,
+        settings=_settings(),
+        sleep=asyncio.sleep,
+    )
+
+    assert await worker.poll_once() == 1
+
+    winner = await harness.store.get(lookup=harness.lookup)
+    assert winner.status is TaskStatus.REJECTED
+    assert winner.terminal_reason == "plan.schema_version_unsupported"
+    assert harness.gateway.invocations == 0
 
 
 class _UnavailableBeginStore:
