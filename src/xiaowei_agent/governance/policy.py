@@ -14,6 +14,7 @@ from xiaowei_agent.contracts import (
     PolicyDecision,
     PolicyProfile,
     PolicyReason,
+    ReadClass,
     RequestContext,
     ResolvedTarget,
     ToolCall,
@@ -54,6 +55,7 @@ def evaluate_tool_policy(
     context: RequestContext,
     target: ResolvedTarget,
     effect_class: EffectClass,
+    read_class: ReadClass | None,
 ) -> PolicyDecision:
     """判定一次工具调用是否被当前 profile 允许。
 
@@ -72,6 +74,11 @@ def evaluate_tool_policy(
         return _decide(profile, PolicyReason.OPERATION_NOT_ALLOWED, revision)
     if effect_class not in profile.allowed_effect_classes:
         return _decide(profile, PolicyReason.EFFECT_CLASS_NOT_ALLOWED, revision)
+    if effect_class is EffectClass.READ:
+        if read_class not in profile.allowed_read_classes:
+            return _decide(profile, PolicyReason.READ_CLASS_NOT_ALLOWED, revision)
+    elif read_class is not None:
+        return _decide(profile, PolicyReason.READ_CLASS_NOT_ALLOWED, revision)
     if context.environment_id not in profile.allowed_environment_ids:
         return _decide(profile, PolicyReason.ENVIRONMENT_NOT_ALLOWED, revision)
     if call.timeout_seconds > profile.max_timeout_seconds:

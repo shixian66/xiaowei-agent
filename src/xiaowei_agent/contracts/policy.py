@@ -9,7 +9,7 @@ from typing import Self
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts.base import Contract, FiniteFloat, StrictStr
-from xiaowei_agent.contracts.enums import EffectClass, RiskLevel
+from xiaowei_agent.contracts.enums import EffectClass, ReadClass, RiskLevel
 
 
 class PolicyDecision(Contract):
@@ -34,6 +34,7 @@ class PolicyProfile(Contract):
     profile_id: StrictStr
     allowed_operations: tuple[StrictStr, ...]
     allowed_effect_classes: tuple[EffectClass, ...]
+    allowed_read_classes: tuple[ReadClass, ...] = ()
     allowed_environment_ids: tuple[StrictStr, ...]
     risk: RiskLevel
     max_timeout_seconds: FiniteFloat = Field(gt=0.0)
@@ -49,6 +50,13 @@ class PolicyProfile(Contract):
                 raise ValueError(f"profile must allow at least one of: {label}")
             if len(set(values)) != len(values):
                 raise ValueError(f"duplicate entry in allowed {label}")
+        if EffectClass.READ in self.allowed_effect_classes:
+            if not self.allowed_read_classes:
+                raise ValueError("profile allowing READ must declare read classes")
+            if len(set(self.allowed_read_classes)) != len(self.allowed_read_classes):
+                raise ValueError("duplicate entry in allowed read classes")
+        elif self.allowed_read_classes:
+            raise ValueError("non-READ profile must not declare read classes")
         return self
 
 

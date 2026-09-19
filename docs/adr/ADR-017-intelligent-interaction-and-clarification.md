@@ -171,8 +171,8 @@ OperationSpec.read_class
 ```
 
 `effect_class == READ` 时 `read_class` 必填；非 READ 时必须为 `None`。调用者不能给
-`build_plan_step()` 传 `read_class`，Admission 不能信任 PlanStep 自带值。`PLAN_SCHEMA_VERSION` 在 I1-C
-目标升为 2，`PlanStep.read_class` 进入 hash coverage；已持久化 V1 Plan 不补默认值、不重算 hash、
+`build_plan_step()` 传 `read_class`，Admission 不能信任 PlanStep 自带值。`PLAN_SCHEMA_VERSION` 已在
+I1-C 升为 2，`PlanStep.read_class` 进入 hash coverage；已持久化 V1 Plan 不补默认值、不重算 hash、
 不复用旧审批，读取后 fail-closed 并要求新建任务。
 
 I1 不实现“受限读取额外确认”。`RESTRICTED` 读取不能复用 `ApprovalGate`；可缩小为有界读取的场景，

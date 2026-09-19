@@ -28,7 +28,7 @@ from xiaowei_agent.capabilities.specs import (
     SLOW_QUERY_SPEC,
     SLOW_QUERY_SURFACE,
 )
-from xiaowei_agent.contracts import EffectClass
+from xiaowei_agent.contracts import EffectClass, ReadClass
 from xiaowei_agent.contracts.sql_surface import MAX_ROW_LIMIT, MAX_WINDOW_MINUTES
 
 
@@ -72,6 +72,7 @@ def test_every_registered_operation_is_read_only() -> None:
     for spec in StaticCapabilityRegistry().snapshot().specs:
         for operation in spec.operations:
             assert operation.effect_class is EffectClass.READ
+            assert operation.read_class is ReadClass.BOUNDED
             assert operation.side_effect is False
 
 

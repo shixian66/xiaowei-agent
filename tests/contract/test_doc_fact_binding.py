@@ -144,6 +144,7 @@ def test_the_ri5_gate_binding_is_discriminating() -> None:
 # --- I0/I1 智能交互入口文档门 -------------------------------------------------
 
 _ADR_017 = _ROOT / "docs/adr/ADR-017-intelligent-interaction-and-clarification.md"
+_ADR_009 = _ROOT / "docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md"
 _ADR_017_REQUIRED_TERMS = (
     "InteractionKind",
     "RoutingDisposition",
@@ -154,6 +155,12 @@ _ADR_017_REQUIRED_TERMS = (
     "ReadClass",
     "ExecutionDisclosure",
 )
+_ADR_009_V2_TERMS = (
+    "I1-C 修订",
+    "`read_class`",
+    "`PLAN_SCHEMA_VERSION` 当前取值为 `2`",
+    "旧 V1 plan 读取后 fail-closed",
+)
 
 
 def test_adr_017_freezes_the_i0_i1_interaction_terms() -> None:
@@ -161,6 +168,13 @@ def test_adr_017_freezes_the_i0_i1_interaction_terms() -> None:
     text = _ADR_017.read_text(encoding="utf-8")
     missing = [term for term in _ADR_017_REQUIRED_TERMS if term not in text]
     assert not missing, f"ADR-017 未冻结这些 I0/I1 术语：{missing}"
+
+
+def test_adr_009_records_i1c_plan_schema_v2_terms() -> None:
+    assert _ADR_009.exists(), "ADR-009 缺失，plan_hash 规范真源不可缺"
+    text = _ADR_009.read_text(encoding="utf-8")
+    missing = [term for term in _ADR_009_V2_TERMS if term not in text]
+    assert not missing, f"ADR-009 未同步 I1-C Plan schema V2 事实：{missing}"
 
 
 _I0_TRUTH_DOC_TERMS = {
@@ -178,7 +192,7 @@ _I0_TRUTH_DOC_TERMS = {
     ),
     "README.md": (
         "智能交互入口 I0-DOC 已绑定",
-        "不能把 I1-B 写成完整 I1",
+        "不能把 I1-C 写成完整 I1",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
     "AGENT_HANDOFF.md": (
@@ -239,12 +253,13 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     readme_i0_status = (
         "> 智能交互入口 I0-DOC 已绑定 "
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> 当前工作树正在实现 I1-B：已有 interaction classifier、insert-once "
+        "> 当前工作树正在实现 I1-C：已有 interaction classifier、insert-once "
         "interaction artifact、确定性\n"
         "> Router 与 Runtime 接入切片、终态澄清存储、澄清子任务一次性消费；可信槽位 / "
         "`SlotVerifier` 已完成离线实现；\n"
-        "> `ReadClass` 和执行披露屏障仍未实现，不能把 I1-B 写成完整 I1、真实模型、"
-        "部署或用户验收。\n"
+        "> ReadClass/Plan schema V2 已完成离线实现；执行披露屏障仍未实现，"
+        "不能把 I1-C 写成完整 I1、\n"
+        "> 真实模型、部署或用户验收。\n"
     )
     without_readme_status = {
         **docs,
@@ -252,7 +267,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "不能把 I1-B 写成完整 I1" in readme_missing["README.md"]
+    assert "不能把 I1-C 写成完整 I1" in readme_missing["README.md"]
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -283,44 +298,48 @@ def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
     assert not found, f"I0 真相文档仍在使用旧入口/父上下文形状：{found}"
 
 
-_I1B_TRUTH_DOC_TERMS = {
+_I1C_TRUTH_DOC_TERMS = {
     "README.md": (
         "可信槽位 / `SlotVerifier` 已完成离线实现",
-        "`ReadClass` 和执行披露屏障仍未实现",
-        "不能把 I1-B 写成完整 I1、真实模型、部署或用户验收",
+        "ReadClass/Plan schema V2 已完成离线实现",
+        "执行披露屏障仍未实现",
+        "不能把 I1-C 写成完整 I1",
     ),
     "AGENT_HANDOFF.md": (
-        "I1-B",
+        "I1-C",
         "`SlotVerifier`/可信槽位升级已完成离线实现",
-        "ReadClass/Plan schema V2 与 ExecutionDisclosure 仍未实现",
+        "ReadClass/Plan schema V2 已有离线闭环",
+        "ExecutionDisclosure 仍未实现",
     ),
 }
 
-_STALE_I1B_SLOTVERIFIER_PHRASES = (
+_STALE_I1C_PHRASES = (
     "可信槽位、`ReadClass` 和执行披露屏障仍未实现",
     "尚未实现 `SlotVerifier`",
     "`SlotVerifier`、ReadClass/Plan schema V2、ExecutionDisclosure",
+    "`ReadClass` 和执行披露屏障仍未实现",
+    "ReadClass/Plan schema V2 与 ExecutionDisclosure 仍未实现",
 )
 
 
-def test_i1b_truth_docs_reflect_typed_slot_verifier_scope() -> None:
+def test_i1c_truth_docs_reflect_read_class_scope() -> None:
     missing = {
         name: [
             term
             for term in terms
             if term not in (_ROOT / name).read_text(encoding="utf-8")
         ]
-        for name, terms in _I1B_TRUTH_DOC_TERMS.items()
+        for name, terms in _I1C_TRUTH_DOC_TERMS.items()
     }
     missing = {name: terms for name, terms in missing.items() if terms}
-    assert not missing, f"I1-B 真相文档未同步 typed SlotVerifier 当前范围：{missing}"
+    assert not missing, f"I1-C 真相文档未同步 ReadClass 当前范围：{missing}"
 
 
-def test_i1b_truth_docs_do_not_claim_slot_verifier_is_missing() -> None:
+def test_i1c_truth_docs_do_not_revive_stale_i1b_scope() -> None:
     found = [
         (name, phrase)
-        for name in _I1B_TRUTH_DOC_TERMS
-        for phrase in _STALE_I1B_SLOTVERIFIER_PHRASES
+        for name in _I1C_TRUTH_DOC_TERMS
+        for phrase in _STALE_I1C_PHRASES
         if phrase in (_ROOT / name).read_text(encoding="utf-8")
     ]
-    assert not found, f"I1-B 真相文档仍含 SlotVerifier 未实现旧口径：{found}"
+    assert not found, f"I1-C 真相文档仍含旧范围口径：{found}"

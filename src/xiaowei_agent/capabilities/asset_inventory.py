@@ -2,7 +2,7 @@
 
 from typing import Final
 
-from xiaowei_agent.contracts import CapabilitySpec, EffectClass, OperationSpec
+from xiaowei_agent.contracts import CapabilitySpec, EffectClass, OperationSpec, ReadClass
 
 ASSET_INVENTORY_CAPABILITY_ID: Final[str] = "asset.inventory.lookup"
 ASSET_INVENTORY_CAPABILITY_VERSION: Final[str] = "1.0.0"
@@ -23,6 +23,7 @@ ASSET_INVENTORY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             operation=OP_LOOKUP_ASSET,
             gateway=ASSET_INVENTORY_GATEWAY,
             effect_class=EffectClass.READ,
+            read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.asset.inventory.lookup.v1",
         ),

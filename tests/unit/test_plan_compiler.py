@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     IntentSource,
     OperationSpec,
     PlanBudget,
+    ReadClass,
     RequestContext,
     StepConditionKind,
 )
@@ -96,6 +97,11 @@ def _snapshot_with(operation: str, effect: EffectClass, *, side_effect: bool) ->
                         operation=op.operation,
                         gateway=op.gateway,
                         effect_class=effect if op.operation == operation else op.effect_class,
+                        read_class=(
+                            None
+                            if op.operation == operation and effect is not EffectClass.READ
+                            else op.read_class
+                        ),
                         side_effect=(
                             side_effect if op.operation == operation else op.side_effect
                         ),
@@ -181,6 +187,7 @@ def test_effect_classification_is_derived_not_hardcoded() -> None:
     hostile = _snapshot_with(OP_LIST, EffectClass.MUTATE_TARGET, side_effect=True)
     step = _plan(snapshot=hostile).steps[0]
     assert step.effect_class is EffectClass.MUTATE_TARGET
+    assert step.read_class is None
     assert step.side_effect is True
 
 
@@ -188,6 +195,7 @@ def test_default_classification_is_read_only() -> None:
     """反例配对：未被篡改的快照必须编译出只读步骤。"""
     for step in _plan().steps:
         assert step.effect_class is EffectClass.READ
+        assert step.read_class is ReadClass.BOUNDED
         assert step.side_effect is False
 
 

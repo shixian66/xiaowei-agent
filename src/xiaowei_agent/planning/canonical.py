@@ -52,6 +52,7 @@ STEP_FIELD_TO_HASH_KEY: Final[Mapping[str, str]] = MappingProxyType(
         "depends_on": "depends_on",
         "side_effect": "side_effect",
         "effect_class": "effect_class",
+        "read_class": "read_class",
         "condition": "condition",
     }
 )
@@ -172,6 +173,9 @@ def _step_payload(step: PlanStep) -> dict[str, Any]:
         key["depends_on"]: list(step.depends_on),
         key["side_effect"]: step.side_effect,
         key["effect_class"]: step.effect_class.value,
+        key["read_class"]: (
+            step.read_class.value if step.read_class is not None else None
+        ),
         key["condition"]: _condition_payload(step.condition),
     }
 

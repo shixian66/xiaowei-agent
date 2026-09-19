@@ -14,6 +14,7 @@ from xiaowei_agent.contracts import (
     Channel,
     EffectClass,
     ExecutionPlan,
+    ReadClass,
     RequestContext,
     RequestEnvelope,
     StepCondition,
@@ -36,9 +37,9 @@ _PLAN_CANONICAL = (
     b'"capability_id":"starrocks.slow_query.diagnose","capability_version":"1.0.0",'
     b'"ordered_steps":[{"condition":{"expected_result":null,"field":null,'
     b'"kind":"always","ref_step_id":null,"threshold":null},"depends_on":[],'
-    b'"effect_class":"read","operation":"list_slow_queries","side_effect":false,'
-    b'"step_id":"s1","typed_arguments":{"window_minutes":30}}],'
-    b'"plan_schema_version":1,"policy_profile":"readonly.default",'
+    b'"effect_class":"read","operation":"list_slow_queries","read_class":"bounded",'
+    b'"side_effect":false,"step_id":"s1","typed_arguments":{"window_minutes":30}}],'
+    b'"plan_schema_version":2,"policy_profile":"readonly.default",'
     b'"policy_revision":"policy-2026-09-01"}'
 )
 
@@ -137,7 +138,16 @@ def _plan_with_step(**overrides: object) -> ExecutionPlan:
 
 def test_changing_effect_class_changes_plan_hash() -> None:
     """分类漂移必须被 plan_hash 检出（ADR-009 D1）。"""
-    mutated = _plan_with_step(effect_class=EffectClass.MUTATE_TARGET, side_effect=True)
+    mutated = _plan_with_step(
+        effect_class=EffectClass.MUTATE_TARGET,
+        read_class=None,
+        side_effect=True,
+    )
+    assert compute_plan_hash(mutated) != compute_plan_hash(FIXTURE_PLAN)
+
+
+def test_changing_read_class_changes_plan_hash() -> None:
+    mutated = _plan_with_step(read_class=ReadClass.RESTRICTED)
     assert compute_plan_hash(mutated) != compute_plan_hash(FIXTURE_PLAN)
 
 

@@ -23,6 +23,7 @@ from xiaowei_agent.contracts import (
     EffectClass,
     PolicyProfile,
     PolicySnapshot,
+    ReadClass,
     RiskLevel,
 )
 
@@ -41,6 +42,7 @@ SLOW_QUERY_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     # 只读闭环的允许分类只有 READ 一项：即使某个 operation 在快照里被改成写，
     # 策略层也不放行——两层独立成立，不互相替代。
     allowed_effect_classes=(EffectClass.READ,),
+    allowed_read_classes=(ReadClass.BOUNDED,),
     allowed_environment_ids=KNOWN_ENVIRONMENT_IDS,
     risk=RiskLevel.LOW,
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
@@ -50,6 +52,7 @@ PROMETHEUS_ALERT_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     profile_id=PROMETHEUS_ALERT_POLICY_PROFILE,
     allowed_operations=(OP_GET_ACTIVE_ALERTS, OP_QUERY_METRIC_RANGE),
     allowed_effect_classes=(EffectClass.READ,),
+    allowed_read_classes=(ReadClass.BOUNDED,),
     allowed_environment_ids=PROMETHEUS_ENVIRONMENT_IDS,
     risk=RiskLevel.LOW,
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
@@ -59,6 +62,7 @@ ASSET_INVENTORY_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     profile_id=ASSET_INVENTORY_POLICY_PROFILE,
     allowed_operations=(OP_LOOKUP_ASSET,),
     allowed_effect_classes=(EffectClass.READ,),
+    allowed_read_classes=(ReadClass.BOUNDED,),
     allowed_environment_ids=ASSET_INVENTORY_ENVIRONMENT_IDS,
     risk=RiskLevel.LOW,
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,

@@ -20,6 +20,7 @@ from xiaowei_agent.contracts.enums import (
     ClarificationReasonCode,
     EffectClass,
     InteractionRejectionReasonCode,
+    ReadClass,
 )
 
 ParamsT = TypeVar("ParamsT", bound="CapabilityParams")
@@ -29,13 +30,19 @@ class OperationSpec(Contract):
     operation: StrictStr
     gateway: StrictStr
     effect_class: EffectClass
+    read_class: ReadClass | None
     side_effect: bool
     argument_schema_ref: StrictStr
 
     @model_validator(mode="after")
-    def _side_effect_matches_effect_class(self) -> Self:
+    def _classifications_match_effect_class(self) -> Self:
         if self.side_effect != (self.effect_class is not EffectClass.READ):
             raise ValueError("side_effect must equal (effect_class is not READ)")
+        if self.effect_class is EffectClass.READ:
+            if self.read_class is None:
+                raise ValueError("read_class is required for READ operation")
+        elif self.read_class is not None:
+            raise ValueError("read_class must be None for non-READ operation")
         return self
 
 

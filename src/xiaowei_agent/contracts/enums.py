@@ -32,6 +32,13 @@ class EffectClass(StrEnum):
     MUTATE_TARGET = "mutate_target"
 
 
+class ReadClass(StrEnum):
+    """只读操作的静态读取范围分类。"""
+
+    BOUNDED = "bounded"
+    RESTRICTED = "restricted"
+
+
 class ErrorCategory(StrEnum):
     VALIDATION = "validation"
     POLICY = "policy"
@@ -375,6 +382,7 @@ class PolicyReason(StrEnum):
     PROFILE_MISMATCH = "policy.profile_mismatch"
     OPERATION_NOT_ALLOWED = "policy.operation_not_allowed"
     EFFECT_CLASS_NOT_ALLOWED = "policy.effect_class_not_allowed"
+    READ_CLASS_NOT_ALLOWED = "policy.read_class_not_allowed"
     ENVIRONMENT_MISMATCH = "policy.environment_mismatch"
     ENVIRONMENT_NOT_ALLOWED = "policy.environment_not_allowed"
     TIMEOUT_EXCEEDS_PROFILE = "policy.timeout_exceeds_profile"

@@ -78,6 +78,7 @@ def build_plan_step(
         depends_on=depends_on,
         side_effect=declared.side_effect,
         effect_class=declared.effect_class,
+        read_class=declared.read_class,
         condition=condition if condition is not None else StepCondition(),
     )
 
@@ -98,3 +99,5 @@ def verify_plan_effects(snapshot: CapabilitySnapshot, plan: ExecutionPlan) -> No
             raise SpecResolutionError(f"effect_class mismatch on step #{index}")
         if step.side_effect != declared.side_effect:
             raise SpecResolutionError(f"side_effect mismatch on step #{index}")
+        if step.read_class is not declared.read_class:
+            raise SpecResolutionError(f"read_class mismatch on step #{index}")
