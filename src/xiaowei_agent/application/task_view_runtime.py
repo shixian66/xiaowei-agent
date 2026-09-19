@@ -109,6 +109,19 @@ class TaskViewRuntime:
         record = await self._tasks.create_task(submission=submission)
         return await self.project_task(record=record)
 
+    async def submit_clarification_child(
+        self,
+        *,
+        submission: TaskSubmission,
+        authenticated_channel_owner: str,
+    ) -> TaskView:
+        """一次性消费澄清父任务并返回子任务投影，不解释或执行。"""
+        record = await self._tasks.create_clarification_child(
+            submission=submission,
+            authenticated_channel_owner=authenticated_channel_owner,
+        )
+        return await self.project_task(record=record)
+
     async def query_task(self, *, lookup: TaskLookup) -> TaskView:
         """按受信 scope 纯读任务；不发 trace、不改变任务事实。"""
         record = await self._tasks.get(lookup=lookup)

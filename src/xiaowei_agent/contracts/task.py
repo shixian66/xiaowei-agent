@@ -43,7 +43,7 @@ class TaskSubmission(Contract):
     envelope: RequestEnvelope
     context: RequestContext
     as_of: AwareDatetime
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
 
 class TaskLookup(Contract):

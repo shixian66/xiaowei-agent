@@ -54,6 +54,7 @@ from xiaowei_agent.contracts import (
     TransitionRejection,
 )
 from xiaowei_agent.persistence import (
+    ClarificationParentRequiredError,
     ContextMismatchError,
     IdempotencyConflictError,
     TaskNotFoundError,
@@ -219,21 +220,25 @@ async def test_same_key_with_a_different_parent_is_rejected(store, context) -> N
         idempotency_key="parent-aware-child",
         text="continue diagnosis",
     )
-    await store.create_task(
+    await drive_to_terminal(store, lookup_for(first_parent), TaskStatus.CLARIFICATION_REQUIRED)
+    await drive_to_terminal(store, lookup_for(second_parent), TaskStatus.CLARIFICATION_REQUIRED)
+    await store.create_clarification_child(
         submission=make_submission(
             context,
             envelope=child_envelope,
-            parent_task_id=first_parent.task_id,
-        )
+            clarification_parent_task_id=first_parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
     )
 
     with pytest.raises(IdempotencyConflictError):
-        await store.create_task(
+        await store.create_clarification_child(
             submission=make_submission(
                 context,
                 envelope=child_envelope.model_copy(update={"request_id": "child-2"}),
-                parent_task_id=second_parent.task_id,
-            )
+                clarification_parent_task_id=second_parent.task_id,
+            ),
+            authenticated_channel_owner=context.actor,
         )
 
 
@@ -254,23 +259,209 @@ async def test_same_parent_and_key_with_different_text_is_rejected(
         idempotency_key="parent-aware-text",
         text="continue diagnosis",
     )
-    await store.create_task(
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    await store.create_clarification_child(
         submission=make_submission(
             context,
             envelope=child_envelope,
-            parent_task_id=parent.task_id,
-        )
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
     )
 
     with pytest.raises(IdempotencyConflictError):
-        await store.create_task(
+        await store.create_clarification_child(
             submission=make_submission(
                 context,
                 envelope=child_envelope.model_copy(
                     update={"request_id": "child-text-2", "text": "change diagnosis"}
                 ),
-                parent_task_id=parent.task_id,
+                clarification_parent_task_id=parent.task_id,
+            ),
+            authenticated_channel_owner=context.actor,
+        )
+
+
+async def test_plain_create_rejects_a_clarification_parent(store, context) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="plain-parent",
+                idempotency_key="plain-parent",
+            ),
+        )
+    )
+
+    with pytest.raises(ClarificationParentRequiredError):
+        await store.create_task(
+            submission=make_submission(
+                context,
+                envelope=make_envelope(
+                    request_id="plain-child",
+                    idempotency_key="plain-child",
+                ),
+                clarification_parent_task_id=parent.task_id,
             )
+        )
+
+
+async def test_clarification_parent_can_be_consumed_once(store, context) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="single-parent",
+                idempotency_key="single-parent",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    first = await store.create_clarification_child(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="single-child-1",
+                idempotency_key="single-child-1",
+            ),
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
+    )
+
+    with pytest.raises(TaskNotFoundError):
+        await store.create_clarification_child(
+            submission=make_submission(
+                context,
+                envelope=make_envelope(
+                    request_id="single-child-2",
+                    idempotency_key="single-child-2",
+                ),
+                clarification_parent_task_id=parent.task_id,
+            ),
+            authenticated_channel_owner=context.actor,
+        )
+
+    stored = await store.get_submission(lookup=lookup_for(first))
+    assert stored.clarification_parent_task_id == parent.task_id
+
+
+async def test_same_clarification_child_key_replays_the_same_child(
+    store, context
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="replay-parent",
+                idempotency_key="replay-parent",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    envelope = make_envelope(
+        request_id="replay-child-1",
+        idempotency_key="replay-child",
+        text="continue diagnosis",
+    )
+
+    first = await store.create_clarification_child(
+        submission=make_submission(
+            context,
+            envelope=envelope,
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
+    )
+    retry = await store.create_clarification_child(
+        submission=make_submission(
+            context.model_copy(update={"trace_id": "9" * 32}),
+            envelope=envelope.model_copy(update={"request_id": "replay-child-2"}),
+            as_of=_APPROVAL_AT + _dt.timedelta(minutes=5),
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
+    )
+
+    assert retry.task_id == first.task_id
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+        TaskStatus.CANCELED,
+        TaskStatus.INDETERMINATE,
+    ],
+)
+async def test_only_clarification_required_can_be_a_parent(
+    store, context, terminal_status
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id=f"non-clarification-parent-{terminal_status.value}",
+                idempotency_key=f"non-clarification-parent-{terminal_status.value}",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), terminal_status)
+
+    with pytest.raises(TaskNotFoundError):
+        await store.create_clarification_child(
+            submission=make_submission(
+                context,
+                envelope=make_envelope(
+                    request_id=f"non-clarification-child-{terminal_status.value}",
+                    idempotency_key=f"non-clarification-child-{terminal_status.value}",
+                ),
+                clarification_parent_task_id=parent.task_id,
+            ),
+            authenticated_channel_owner=context.actor,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "context_updates", "authenticated_channel_owner"),
+    [
+        ("tenant", {"tenant_id": "other-tenant"}, "alice"),
+        ("environment", {"environment_id": "prod"}, "alice"),
+        ("actor", {"actor": "mallory"}, "mallory"),
+        ("owner", {}, "mallory"),
+    ],
+)
+async def test_clarification_child_rejects_parent_scope_and_owner_drift(
+    store, context, case, context_updates, authenticated_channel_owner
+) -> None:
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id=f"scope-parent-{case}",
+                idempotency_key=f"scope-parent-{case}",
+            ),
+        )
+    )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
+    child_context = context.model_copy(update=context_updates)
+
+    with pytest.raises(TaskNotFoundError):
+        await store.create_clarification_child(
+            submission=make_submission(
+                child_context,
+                envelope=make_envelope(
+                    request_id=f"scope-child-{case}",
+                    idempotency_key=f"scope-child-{case}",
+                    tenant_id=child_context.tenant_id,
+                    actor=child_context.actor,
+                    environment_id=child_context.environment_id,
+                ),
+                clarification_parent_task_id=parent.task_id,
+            ),
+            authenticated_channel_owner=authenticated_channel_owner,
         )
 
 
@@ -396,17 +587,22 @@ async def test_parented_submission_survives_create_read_retry_and_attempt(
     submission = make_submission(
         context,
         envelope=envelope,
-        parent_task_id=parent.task_id,
+        clarification_parent_task_id=parent.task_id,
     )
+    await drive_to_terminal(store, lookup_for(parent), TaskStatus.CLARIFICATION_REQUIRED)
 
-    created = await store.create_task(submission=submission)
-    retry = await store.create_task(
+    created = await store.create_clarification_child(
+        submission=submission,
+        authenticated_channel_owner=context.actor,
+    )
+    retry = await store.create_clarification_child(
         submission=make_submission(
             context.model_copy(update={"trace_id": "9" * 32}),
             envelope=envelope.model_copy(update={"request_id": "parented-child-2"}),
             as_of=_APPROVAL_AT + _dt.timedelta(hours=1),
-            parent_task_id=parent.task_id,
-        )
+            clarification_parent_task_id=parent.task_id,
+        ),
+        authenticated_channel_owner=context.actor,
     )
     loaded = await store.get_submission(lookup=lookup_for(created))
     attempt = await store.begin_task_attempt(
@@ -423,7 +619,7 @@ async def test_parented_submission_survives_create_read_retry_and_attempt(
     assert loaded == submission
     assert attempt.applied
     assert attempt.submission == submission
-    assert attempt.submission.parent_task_id == parent.task_id
+    assert attempt.submission.clarification_parent_task_id == parent.task_id
 
 
 async def test_actor_page_filters_before_limit_and_is_strictly_descending(
@@ -1869,6 +2065,11 @@ CONTRACT_CASES = (
     test_same_key_with_a_different_request_is_rejected,
     test_same_key_with_a_different_parent_is_rejected,
     test_same_parent_and_key_with_different_text_is_rejected,
+    test_plain_create_rejects_a_clarification_parent,
+    test_clarification_parent_can_be_consumed_once,
+    test_same_clarification_child_key_replays_the_same_child,
+    test_only_clarification_required_can_be_a_parent,
+    test_clarification_child_rejects_parent_scope_and_owner_drift,
     test_envelope_context_mismatch_is_rejected,
     test_envelope_without_environment_id_is_accepted,
     test_get_unknown_task_raises,

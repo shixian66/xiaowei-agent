@@ -176,8 +176,8 @@ function renderTask(task) {
   setStatus(task.status);
   elements.request.textContent = text(task.request_preview, "未提供任务摘要");
   elements.taskId.textContent = text(task.task_id);
-  const parentTaskId = typeof task.parent_task_id === "string" && task.parent_task_id.length > 0
-    ? task.parent_task_id
+  const parentTaskId = typeof task.clarification_parent_task_id === "string" && task.clarification_parent_task_id.length > 0
+    ? task.clarification_parent_task_id
     : null;
   elements.parent.textContent = parentTaskId || "";
   elements.parent.href = parentTaskId === null
@@ -187,10 +187,11 @@ function renderTask(task) {
   elements.submittedAt.textContent = formatTime(task.submitted_at);
   elements.version.textContent = Number.isInteger(task.task_version) ? String(task.task_version) : "—";
   const terminal = TERMINAL_STATUSES.has(task.status);
-  elements.continueTask.href = terminal
-    ? `/app?parent_task_id=${encodeURIComponent(task.task_id)}`
+  const canContinue = task.status === "clarification_required";
+  elements.continueTask.href = canContinue
+    ? `/app?clarification_parent_task_id=${encodeURIComponent(task.task_id)}`
     : "/app";
-  setVisible(elements.continueTask, terminal);
+  setVisible(elements.continueTask, canContinue);
   setVisible(elements.progress, !terminal);
   if (terminal) {
     elements.polling.textContent = "已停止同步";

@@ -7,7 +7,6 @@ from pydantic import Field
 
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.contracts import (
-    TERMINAL_STATUSES,
     ActorTaskPageQuery,
     AuthenticatedPrincipal,
     AwareDatetime,
@@ -79,7 +78,7 @@ class AccessibleTask(Contract):
     request_preview: NonEmptyText = Field(max_length=TASK_DETAIL_PREVIEW_LIMIT)
     submitted_at: AwareDatetime
     task_version: StrictInt = Field(ge=0)
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
 
 class TaskSummary(Contract):
@@ -136,14 +135,14 @@ class TaskAccessService:
         self,
         *,
         principal: AuthenticatedPrincipal,
-        parent_task_id: str,
+        clarification_parent_task_id: str,
     ) -> None:
         """父任务必须属于同一 Web 身份；所有拒绝统一隐藏存在性。"""
         if ChannelPermission.VIEW_SAFE_TASK not in principal.permissions:
             raise TaskAccessNotFoundError
         try:
             lookup = TaskLookup(
-                task_id=parent_task_id,
+                task_id=clarification_parent_task_id,
                 tenant_id=principal.tenant_id,
                 environment_id=principal.environment_id,
             )
@@ -151,7 +150,7 @@ class TaskAccessService:
             submission = await self._tasks.get_submission(lookup=lookup)
             binding = await self._channels.get_binding(
                 lookup=ChannelBindingLookup(
-                    task_id=parent_task_id,
+                    task_id=clarification_parent_task_id,
                     tenant_id=principal.tenant_id,
                     environment_id=principal.environment_id,
                 )
@@ -159,9 +158,9 @@ class TaskAccessService:
         except (TaskNotFoundError, ChannelBindingNotFoundError):
             raise TaskAccessNotFoundError from None
         if (
-            record.status not in TERMINAL_STATUSES
+            record.status is not TaskStatus.CLARIFICATION_REQUIRED
             or record.actor != principal.actor
-            or submission.parent_task_id == parent_task_id
+            or submission.clarification_parent_task_id == clarification_parent_task_id
             or submission.envelope.channel is not Channel.WEB
             or binding.channel is not ChannelKind.WEB
             or binding.initiator_subject_ref != principal.subject_ref
@@ -247,7 +246,7 @@ class TaskAccessService:
             ),
             submitted_at=submission.as_of,
             task_version=record.version,
-            parent_task_id=submission.parent_task_id,
+            clarification_parent_task_id=submission.clarification_parent_task_id,
         )
 
     @staticmethod

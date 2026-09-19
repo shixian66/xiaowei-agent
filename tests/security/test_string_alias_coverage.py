@@ -151,10 +151,10 @@ def test_every_parent_task_field_uses_the_shared_task_id_domain() -> None:
                 if not (
                     isinstance(stmt, ast.AnnAssign)
                     and isinstance(stmt.target, ast.Name)
-                    and stmt.target.id == "parent_task_id"
+                    and stmt.target.id == "clarification_parent_task_id"
                 ):
                     continue
-                location = f"{path.relative_to(SRC)}::{cls.name}.parent_task_id"
+                location = f"{path.relative_to(SRC)}::{cls.name}.clarification_parent_task_id"
                 found.append(location)
                 names = {
                     node.id
@@ -164,8 +164,8 @@ def test_every_parent_task_field_uses_the_shared_task_id_domain() -> None:
                 if "TaskId" not in names:
                     offenders.append(location)
 
-    assert len(found) == 7, f"parent_task_id 字段集合发生变化，需复核契约：{found}"
-    assert offenders == [], "以下 parent_task_id 未使用 TaskId：\n" + "\n".join(
+    assert len(found) == 7, f"clarification_parent_task_id 字段集合发生变化，需复核契约：{found}"
+    assert offenders == [], "以下 clarification_parent_task_id 未使用 TaskId：\n" + "\n".join(
         offenders
     )
 

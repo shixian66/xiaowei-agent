@@ -71,7 +71,7 @@ class WebTaskSubmitRequest(_WebModel):
         max_length=200,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
 
 class WebLoginRequest(_WebModel):
@@ -269,7 +269,7 @@ class WebTaskAccepted(_WebModel):
     task_id: TaskId
     status: TaskStatus
     detail_path: StrictStr
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:
@@ -284,7 +284,7 @@ class WebTaskAccepted(_WebModel):
             task_id=view.task_id,
             status=view.status,
             detail_path=web_task_detail_path(view.task_id),
-            parent_task_id=submission.parent_task_id,
+            clarification_parent_task_id=submission.clarification_parent_task_id,
         )
 
 
@@ -297,7 +297,7 @@ class WebTaskDetail(_WebModel):
     detail_path: StrictStr
     render: RenderPayload | None = None
     clarification: ClarificationPayload | None = None
-    parent_task_id: TaskId | None = None
+    clarification_parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
     def _detail_path_belongs_to_task(self) -> Self:
@@ -317,7 +317,7 @@ class WebTaskDetail(_WebModel):
             detail_path=web_task_detail_path(view.task_id),
             render=view.render,
             clarification=view.clarification,
-            parent_task_id=accessible.parent_task_id,
+            clarification_parent_task_id=accessible.clarification_parent_task_id,
         )
 
 

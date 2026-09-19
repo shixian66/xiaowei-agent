@@ -60,12 +60,20 @@ def test_submission_parent_is_optional_strict_text() -> None:
         "envelope",
         "context",
         "as_of",
-        "parent_task_id",
+        "clarification_parent_task_id",
     }
-    assert _submission().parent_task_id is None
-    assert _submission(parent_task_id="task-parent").parent_task_id == "task-parent"
-    assert _submission(parent_task_id="a" + ("-" * 199)).parent_task_id == (
-        "a" + ("-" * 199)
+    assert _submission().clarification_parent_task_id is None
+    assert (
+        _submission(
+            clarification_parent_task_id="task-parent"
+        ).clarification_parent_task_id
+        == "task-parent"
+    )
+    assert (
+        _submission(
+            clarification_parent_task_id="a" + ("-" * 199)
+        ).clarification_parent_task_id
+        == "a" + ("-" * 199)
     )
     for invalid in (
         "_task-parent",
@@ -77,7 +85,7 @@ def test_submission_parent_is_optional_strict_text() -> None:
         b"task-parent",
     ):
         with pytest.raises(ValidationError):
-            _submission(parent_task_id=invalid)
+            _submission(clarification_parent_task_id=invalid)
 
 
 def test_submission_requires_an_aware_as_of() -> None:
@@ -104,7 +112,7 @@ def test_submission_digest_is_a_sha256_hex_checksum() -> None:
 
 
 def test_submission_digest_covers_a_non_null_parent() -> None:
-    assert submission_digest(_submission(parent_task_id="task-parent")) != (
+    assert submission_digest(_submission(clarification_parent_task_id="task-parent")) != (
         submission_digest(_submission())
     )
 
@@ -117,9 +125,9 @@ def test_request_dedup_digest_excludes_retry_identity_and_time() -> None:
         as_of=_AS_OF + dt.timedelta(hours=1),
     )
     assert request_dedup_digest(
-        original.envelope, original.context, parent_task_id=None
+        original.envelope, original.context, clarification_parent_task_id=None
     ) == (
-        request_dedup_digest(retry.envelope, retry.context, parent_task_id=None)
+        request_dedup_digest(retry.envelope, retry.context, clarification_parent_task_id=None)
     )
 
 
@@ -127,9 +135,9 @@ def test_request_dedup_digest_includes_channel() -> None:
     original = _submission()
     changed = _submission(envelope=_envelope(channel=Channel.CLI))
     assert request_dedup_digest(
-        original.envelope, original.context, parent_task_id=None
+        original.envelope, original.context, clarification_parent_task_id=None
     ) != (
-        request_dedup_digest(changed.envelope, changed.context, parent_task_id=None)
+        request_dedup_digest(changed.envelope, changed.context, clarification_parent_task_id=None)
     )
 
 
@@ -143,26 +151,26 @@ def test_request_dedup_parent_must_be_explicit_and_keyword_only() -> None:
 
 def test_parent_changes_semantic_and_submission_digests_but_not_scope() -> None:
     without_parent = _submission()
-    first_parent = _submission(parent_task_id="task-parent-1")
-    second_parent = _submission(parent_task_id="task-parent-2")
+    first_parent = _submission(clarification_parent_task_id="task-parent-1")
+    second_parent = _submission(clarification_parent_task_id="task-parent-2")
 
     assert request_dedup_digest(
         without_parent.envelope,
         without_parent.context,
-        parent_task_id=None,
+        clarification_parent_task_id=None,
     ) != request_dedup_digest(
         first_parent.envelope,
         first_parent.context,
-        parent_task_id=first_parent.parent_task_id,
+        clarification_parent_task_id=first_parent.clarification_parent_task_id,
     )
     assert request_dedup_digest(
         first_parent.envelope,
         first_parent.context,
-        parent_task_id=first_parent.parent_task_id,
+        clarification_parent_task_id=first_parent.clarification_parent_task_id,
     ) != request_dedup_digest(
         second_parent.envelope,
         second_parent.context,
-        parent_task_id=second_parent.parent_task_id,
+        clarification_parent_task_id=second_parent.clarification_parent_task_id,
     )
     assert submission_digest(without_parent) != submission_digest(first_parent)
     assert submission_digest(first_parent) != submission_digest(second_parent)

@@ -56,6 +56,23 @@ def test_guard_rejects_data_when_the_attribute_is_missing(
     assert caught.value.counts == (("task_submissions", 2),)
 
 
+def test_upgrade_precondition_rejects_protected_rows() -> None:
+    with pytest.raises(guards.MigrationPreconditionError) as caught:
+        guards.require_no_rows(
+            _Connection(1),
+            guarded=((sa.table("task_submissions"), "legacy_parent_context"),),
+        )
+    assert str(caught.value) == "MIGRATION_PRECONDITION_FAILED"
+    assert caught.value.counts == (("legacy_parent_context", 1),)
+
+
+def test_upgrade_precondition_allows_empty_sets() -> None:
+    guards.require_no_rows(
+        _Connection(0),
+        guarded=((sa.table("task_submissions"), "legacy_parent_context"),),
+    )
+
+
 def test_guard_requires_the_literal_true_value(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_attributes(monkeypatch, {"allow_destructive": 1})
     with pytest.raises(guards.MigrationSafetyError):
@@ -73,3 +90,23 @@ def test_guard_accepts_explicit_destructive_authorization(
         _Connection(1),
         guarded=((sa.table("task_submissions"), "task_submissions"),),
     )
+
+
+def test_rev_0013_downgrade_requires_authorization_for_parent_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0013_clarification_parent as revision,
+    )
+
+    _set_attributes(monkeypatch, {})
+    monkeypatch.setattr(revision.context, "is_offline_mode", lambda: False)
+    monkeypatch.setattr(revision.op, "get_bind", lambda: _Connection(1))
+    monkeypatch.setattr(revision.op, "drop_constraint", lambda *_, **__: None)
+    monkeypatch.setattr(revision.op, "alter_column", lambda *_, **__: None)
+    monkeypatch.setattr(revision.op, "create_foreign_key", lambda *_, **__: None)
+    monkeypatch.setattr(revision.op, "create_index", lambda *_, **__: None)
+
+    with pytest.raises(guards.MigrationSafetyError) as caught:
+        revision.downgrade()
+    assert caught.value.counts == (("task_parent_context", 1),)

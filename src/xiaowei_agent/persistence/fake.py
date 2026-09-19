@@ -105,6 +105,7 @@ from xiaowei_agent.persistence.provider_state import (
     RecordTestCommand,
 )
 from xiaowei_agent.persistence.store import (
+    ClarificationParentRequiredError,
     Clock,
     ContextMismatchError,
     DispatchQuery,
@@ -125,6 +126,8 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
     UnscopedAuditEventError,
     attempt_terminal_event,
+    clarification_parent_is_usable,
+    reject_clarification_parent_on_plain_create,
     request_dedup_digest,
     retry_command_digest,
     step_commit_digest,
@@ -689,47 +692,114 @@ class InMemoryTaskStore:
         except KeyError as exc:
             raise TaskNotFoundError(task_id=task_id) from exc
 
+    def _create_task_locked(
+        self, *, submission: TaskSubmission, digest: str
+    ) -> TaskRecord:
+        envelope = submission.envelope
+        context = submission.context
+        record = TaskRecord(
+            task_id=str(uuid.uuid4()),
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            actor=context.actor,
+            idempotency_key=envelope.idempotency_key,
+            request_digest=digest,
+            status=TaskStatus.CREATED,
+            version=0,
+            created_seq=self._state.next_created_seq,
+            attempt_number=0,
+            task_failure_count=0,
+            next_attempt_at=None,
+        )
+        self._state.next_created_seq += 1
+        self._records[record.task_id] = record
+        self._state.submissions[record.task_id] = submission
+        self._state.submission_digests[record.task_id] = submission_digest(submission)
+        self._by_key[
+            (context.tenant_id, context.environment_id, envelope.idempotency_key)
+        ] = record.task_id
+        return record
+
+    def _existing_task_for_submission_locked(
+        self, *, submission: TaskSubmission, digest: str
+    ) -> TaskRecord | None:
+        envelope = submission.envelope
+        context = submission.context
+        scope = (context.tenant_id, context.environment_id, envelope.idempotency_key)
+        existing_id = self._by_key.get(scope)
+        if existing_id is None:
+            return None
+        existing = self._records[existing_id]
+        if existing.request_digest != digest:
+            raise IdempotencyConflictError(
+                "idempotency key reused for a different request"
+            )
+        return existing
+
+    def _clarification_parent_is_consumed_locked(
+        self, *, clarification_parent_id: str
+    ) -> bool:
+        return any(
+            submission.clarification_parent_task_id == clarification_parent_id
+            for submission in self._state.submissions.values()
+        )
+
     async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
         envelope = submission.envelope
         context = submission.context
         # 先校验上下文一致性，再谈幂等：不一致时连"属于哪个作用域"都不成立。
         if not context_matches_envelope(envelope, context):
             raise ContextMismatchError("envelope and context disagree on execution context")
+        reject_clarification_parent_on_plain_create(submission)
         digest = request_dedup_digest(
             envelope,
             context,
-            parent_task_id=submission.parent_task_id,
+            clarification_parent_task_id=submission.clarification_parent_task_id,
         )
-        scope = (context.tenant_id, context.environment_id, envelope.idempotency_key)
         async with self._lock:
-            existing_id = self._by_key.get(scope)
-            if existing_id is not None:
-                existing = self._records[existing_id]
-                if existing.request_digest != digest:
-                    raise IdempotencyConflictError(
-                        "idempotency key reused for a different request"
-                    )
-                return existing
-            record = TaskRecord(
-                task_id=str(uuid.uuid4()),
-                tenant_id=context.tenant_id,
-                environment_id=context.environment_id,
-                actor=context.actor,
-                idempotency_key=envelope.idempotency_key,
-                request_digest=digest,
-                status=TaskStatus.CREATED,
-                version=0,
-                created_seq=self._state.next_created_seq,
-                attempt_number=0,
-                task_failure_count=0,
-                next_attempt_at=None,
+            existing = self._existing_task_for_submission_locked(
+                submission=submission, digest=digest
             )
-            self._state.next_created_seq += 1
-            self._records[record.task_id] = record
-            self._state.submissions[record.task_id] = submission
-            self._state.submission_digests[record.task_id] = submission_digest(submission)
-            self._by_key[scope] = record.task_id
-            return record
+            if existing is not None:
+                return existing
+            return self._create_task_locked(submission=submission, digest=digest)
+
+    async def create_clarification_child(
+        self,
+        *,
+        submission: TaskSubmission,
+        authenticated_channel_owner: str,
+    ) -> TaskRecord:
+        clarification_parent_id = submission.clarification_parent_task_id
+        if clarification_parent_id is None:
+            raise ClarificationParentRequiredError("clarification parent is required")
+        envelope = submission.envelope
+        context = submission.context
+        if not context_matches_envelope(envelope, context):
+            raise ContextMismatchError("envelope and context disagree on execution context")
+        digest = request_dedup_digest(
+            envelope,
+            context,
+            clarification_parent_task_id=clarification_parent_id,
+        )
+        async with self._lock:
+            existing = self._existing_task_for_submission_locked(
+                submission=submission, digest=digest
+            )
+            if existing is not None:
+                return existing
+            parent = self._records.get(clarification_parent_id)
+            if parent is None or not clarification_parent_is_usable(
+                parent=parent,
+                submission=submission,
+                authenticated_channel_owner=authenticated_channel_owner,
+            ):
+                raise TaskNotFoundError(task_id=clarification_parent_id)
+            if self._clarification_parent_is_consumed_locked(
+                clarification_parent_id=clarification_parent_id
+            ):
+                raise TaskNotFoundError(task_id=clarification_parent_id)
+            return self._create_task_locked(submission=submission, digest=digest)
 
     async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         current = self._require(lookup.task_id)

@@ -535,12 +535,13 @@ I1-A 新分类事件使用 `ModelCallKind.INTERACTION`，单 attempt 的
 I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，错误归因阶段从当前十个
 扩展为十一个阶段；在 I1-D 合入前，当前源码和契约测试仍是 RI3 后的十个阶段。
 
-以下 parent-aware idempotency 是 RI3 当前源码事实；ADR-017/I1 目标会以
-`clarification_parent_task_id` 取代通用父任务历史。当前事实为：非空 `parent_task_id` 进入
-`request_dedup_digest` 和已存 `submission_digest`，但不进入 `idempotency_scope_digest`。前者判定
-同 key 语义冲突，完整 submission digest 只作为存储行一致性 checksum。空 parent 的 canonical bytes
-保持不变。所有创建路径与共享 submission-integrity readback 都必须用持久化 parent 重算该语义 digest；
-创建与后续完整性检查不能使用不同输入。
+以下 clarification-aware idempotency 是 I1-A 当前源码事实：非空
+`clarification_parent_task_id` 进入 `request_dedup_digest` 和已存 `submission_digest`，但不进入
+`idempotency_scope_digest`。前者判定同 key 语义冲突，完整 submission digest 只作为存储行一致性
+checksum。空 parent 的 canonical bytes 保持不变。普通 `create_task()` 不接受澄清父任务；澄清
+回复必须经 `TaskStore.create_clarification_child()` 一次性消费 `CLARIFICATION_REQUIRED` 父任务。
+所有创建路径与共享 submission-integrity readback 都必须用持久化 clarification parent 重算该语义
+digest；创建与后续完整性检查不能使用不同输入。
 
 Worker 复用现有 heartbeat，覆盖整个 `execute_task()` 与 retry scheduling；Runner 不启动第二份。
 RI3 does not add a whole-task deadline. It preserves the current 25-second StarRocks

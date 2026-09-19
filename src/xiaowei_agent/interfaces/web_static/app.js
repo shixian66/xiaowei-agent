@@ -120,8 +120,8 @@ function setParentContext(taskId) {
 }
 
 function renderParentReference(task) {
-  const parentTaskId = typeof task.parent_task_id === "string" && task.parent_task_id.length > 0
-    ? task.parent_task_id
+  const parentTaskId = typeof task.clarification_parent_task_id === "string" && task.clarification_parent_task_id.length > 0
+    ? task.clarification_parent_task_id
     : null;
   elements.parent.textContent = parentTaskId || "";
   elements.parent.href = parentTaskId === null
@@ -315,12 +315,13 @@ function renderTaskDetail(task) {
   elements.openDetail.href = text(task.detail_path, "/app");
   setVisible(elements.openDetail, true);
   const terminal = TERMINAL_STATUSES.has(task.status);
-  setVisible(elements.continueTask, terminal);
+  const canContinue = task.status === "clarification_required";
+  setVisible(elements.continueTask, canContinue);
   setVisible(elements.progress, !terminal);
   if (terminal) {
     elements.pollingState.textContent = "已停止轮询";
     renderSafeResult(task.render);
-    if (requestedParentTaskId === task.task_id) {
+    if (canContinue && requestedParentTaskId === task.task_id) {
       setParentContext(task.task_id);
       requestedParentTaskId = null;
       elements.input.focus();
@@ -417,7 +418,7 @@ async function submitTask() {
       client_submission_id: pendingSubmission.id,
     };
     if (pendingSubmission.parentTaskId !== null) {
-      body.parent_task_id = pendingSubmission.parentTaskId;
+      body.clarification_parent_task_id = pendingSubmission.parentTaskId;
     }
     const accepted = await requestJson("/app/api/tasks", {
       method: "POST",
@@ -501,7 +502,8 @@ elements.refreshList.addEventListener("click", () => loadTasks());
 elements.loadMore.addEventListener("click", () => loadTasks({ append: true }));
 elements.retryDetail.addEventListener("click", () => readSelectedTask({ immediate: true }));
 elements.continueTask.addEventListener("click", () => {
-  if (selectedTaskId !== null) {
+  const selected = tasks.find(task => task.task_id === selectedTaskId);
+  if (selected && selected.status === "clarification_required") {
     setParentContext(selectedTaskId);
     elements.input.focus();
   }
@@ -718,7 +720,7 @@ async function start() {
       setVisible(configElements.panel, false);
     }
     await loadTasks();
-    const requested = new URLSearchParams(window.location.search).get("parent_task_id");
+    const requested = new URLSearchParams(window.location.search).get("clarification_parent_task_id");
     if (typeof requested === "string" && requested.length > 0) {
       requestedParentTaskId = requested;
       selectTask(requested);
