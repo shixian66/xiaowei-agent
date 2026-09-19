@@ -31,6 +31,7 @@ from xiaowei_agent.contracts import (
     ApprovalRequest,
     ApprovalState,
     CapabilitySnapshot,
+    ConfirmedSlot,
     EvidenceEnvelope,
     ExecutionPlan,
     ExternalInput,
@@ -80,6 +81,10 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
 )
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
+from xiaowei_agent.planning.disclosure import (
+    DisclosureProjectionError,
+    project_execution_disclosure,
+)
 from xiaowei_agent.runners.binding import ExecutionBindingProvider
 from xiaowei_agent.runners.runner import WorkflowPaused
 from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
@@ -243,6 +248,7 @@ class DeterministicStepRunner:
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome:
         """执行一份新编译的计划。
 
@@ -254,7 +260,11 @@ class DeterministicStepRunner:
         """
         await self._require_current_grant(grant)
         return await self._start(
-            grant=grant, plan=plan, target=target, context=context
+            grant=grant,
+            plan=plan,
+            target=target,
+            context=context,
+            parent_confirmed_slots=parent_confirmed_slots,
         )
 
     async def _start(
@@ -264,11 +274,15 @@ class DeterministicStepRunner:
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None,
     ) -> TaskOutcome:
         task_id = grant.task_id
         if await self._tasks.load_step_executions(task_id=task_id):
             raise StepJournalInvariantError("new execution already has a step journal")
         await self._plans.save(task_id=task_id, plan=plan, target=target)
+        stored = await self._plans.load(task_id=task_id)
+        plan = stored.plan
+        target = stored.target
         record = await self._tasks.get(
             lookup=TaskLookup(
                 task_id=task_id,
@@ -289,6 +303,7 @@ class DeterministicStepRunner:
             plan=plan,
             target=target,
             context=context,
+            parent_confirmed_slots=parent_confirmed_slots,
         )
 
     async def resume(
@@ -300,6 +315,7 @@ class DeterministicStepRunner:
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome:
         """恢复一个暂停的任务。
 
@@ -321,6 +337,7 @@ class DeterministicStepRunner:
             context=context,
             target=target,
             approval=approval,
+            parent_confirmed_slots=parent_confirmed_slots,
         )
 
     async def _resume(
@@ -332,6 +349,7 @@ class DeterministicStepRunner:
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None,
     ) -> TaskOutcome:
         task_id = grant.task_id
         self._verify_external_input(external_input, approval=approval)
@@ -367,6 +385,7 @@ class DeterministicStepRunner:
             target=stored.target,
             context=context,
             approval=approval,
+            parent_confirmed_slots=parent_confirmed_slots,
         )
 
     # --- 漂移检测 -----------------------------------------------------------
@@ -478,8 +497,16 @@ class DeterministicStepRunner:
         target: ResolvedTarget,
         context: RequestContext,
         approval: ApprovalRequest | None = None,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome:
         task_id = grant.task_id
+        await self._disclose(
+            grant=grant,
+            plan=plan,
+            target=target,
+            context=context,
+            parent_confirmed_slots=parent_confirmed_slots,
+        )
         recorded = await self._tasks.load_step_executions(task_id=task_id)
         result_by_step = {
             item.step_id: item.result_status
@@ -693,6 +720,46 @@ class DeterministicStepRunner:
             )
         status = TaskStatus.INDETERMINATE if degraded else TaskStatus.SUCCEEDED
         return await self._outcome(task_id, status, terminal_reason=None)
+
+    async def _disclose(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        plan: ExecutionPlan,
+        target: ResolvedTarget,
+        context: RequestContext,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None,
+    ) -> None:
+        try:
+            execution = self._bindings.execution_for(plan=plan)
+            project_execution_disclosure(
+                plan=plan,
+                target=target,
+                binding=execution.disclosure,
+                parent_confirmed_slots=parent_confirmed_slots or (),
+            )
+        except Exception as exc:
+            await self._emit(
+                stage=PipelineStage.DISCLOSURE,
+                outcome=StageOutcome.FAILED,
+                context=context,
+                task_id=grant.task_id,
+                plan=plan,
+                attempt_number=grant.attempt_number,
+                delivery=Delivery.LOG_AND_DURABLE,
+            )
+            if isinstance(exc, DisclosureProjectionError):
+                raise
+            raise DisclosureProjectionError from None
+        await self._emit(
+            stage=PipelineStage.DISCLOSURE,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=grant.task_id,
+            plan=plan,
+            attempt_number=grant.attempt_number,
+            delivery=Delivery.LOG_AND_DURABLE,
+        )
 
     async def _commit_step(
         self, command: StepCommitCommand, *, events: tuple[TraceEvent, ...]

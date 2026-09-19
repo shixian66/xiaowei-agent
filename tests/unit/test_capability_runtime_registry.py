@@ -37,6 +37,7 @@ from xiaowei_agent.contracts import (
     ToolResult,
 )
 from xiaowei_agent.governance.profiles import SLOW_QUERY_READONLY_PROFILE
+from xiaowei_agent.planning.disclosure import DisclosureProjectionBinding
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
@@ -144,6 +145,18 @@ def _binding(
                 else execution_capability_id
             ),
             capability_version=capability_version,
+            disclosure=DisclosureProjectionBinding(
+                capability_id=(
+                    capability_id
+                    if execution_capability_id is None
+                    else execution_capability_id
+                ),
+                capability_version=capability_version,
+                allowed_clarification_fields=allowed_clarification_fields,
+                confirmed_slot_projector=(
+                    _never_project_slots if allowed_clarification_fields else None
+                ),
+            ),
             policy_profile=profile,
             sql_surface=None,
             promql_surface=None,

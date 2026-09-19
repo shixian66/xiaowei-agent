@@ -1355,6 +1355,8 @@ def create_app(
         )
         if detail.clarification is None:
             exclude.add("clarification")
+        if detail.disclosure is None:
+            exclude.add("disclosure")
         return detail.model_dump(mode="json", exclude=exclude)
 
     @app.post("/app/api/login")

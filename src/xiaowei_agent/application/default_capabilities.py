@@ -69,6 +69,7 @@ from xiaowei_agent.planning.assets.slots import (
     project_asset_lookup_confirmed_slots,
     verify_asset_lookup_slots,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionBinding
 from xiaowei_agent.planning.prometheus.compiler import (
     ALERT_LIMIT,
     compile_alert_plan,
@@ -234,6 +235,12 @@ SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
     execution=CapabilityExecutionBinding(
         capability_id=CAPABILITY_ID,
         capability_version=CAPABILITY_VERSION,
+        disclosure=DisclosureProjectionBinding(
+            capability_id=CAPABILITY_ID,
+            capability_version=CAPABILITY_VERSION,
+            allowed_clarification_fields=SLOW_QUERY_CLARIFICATION_FIELDS,
+            confirmed_slot_projector=project_slow_query_confirmed_slots,
+        ),
         policy_profile=SLOW_QUERY_READONLY_PROFILE,
         sql_surface=SLOW_QUERY_SURFACE,
         promql_surface=None,
@@ -319,6 +326,12 @@ PROMETHEUS_ALERT_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBin
     execution=CapabilityExecutionBinding(
         capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
         capability_version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
+        disclosure=DisclosureProjectionBinding(
+            capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
+            capability_version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
+            allowed_clarification_fields=PROMETHEUS_ALERT_CLARIFICATION_FIELDS,
+            confirmed_slot_projector=project_prometheus_alert_confirmed_slots,
+        ),
         policy_profile=PROMETHEUS_ALERT_READONLY_PROFILE,
         sql_surface=None,
         promql_surface=PROMQL_SURFACE,
@@ -362,6 +375,12 @@ ASSET_INVENTORY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBind
     execution=CapabilityExecutionBinding(
         capability_id=ASSET_INVENTORY_CAPABILITY_ID,
         capability_version=ASSET_INVENTORY_CAPABILITY_VERSION,
+        disclosure=DisclosureProjectionBinding(
+            capability_id=ASSET_INVENTORY_CAPABILITY_ID,
+            capability_version=ASSET_INVENTORY_CAPABILITY_VERSION,
+            allowed_clarification_fields=ASSET_CLARIFICATION_FIELDS,
+            confirmed_slot_projector=project_asset_lookup_confirmed_slots,
+        ),
         policy_profile=ASSET_INVENTORY_READONLY_PROFILE,
         sql_surface=None,
         promql_surface=None,

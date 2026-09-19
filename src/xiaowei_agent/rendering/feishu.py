@@ -25,6 +25,7 @@ _REF_CHARACTERS: Final[int] = 120
 _NEXT_STEP_COUNT: Final[int] = 4
 _NEXT_STEP_CHARACTERS: Final[int] = 240
 _ROOT_REF_COUNT: Final[int] = 6
+_DISCLOSURE_CHARACTERS: Final[int] = 700
 _MORE_EVIDENCE_TEXT: Final[str] = "还有更多证据，请打开详情查看完整结果。"
 
 _STATUS_PRESENTATION: Final[dict[TaskStatus, tuple[str, str, str]]] = {
@@ -160,6 +161,26 @@ def render_feishu_card(projection: FeishuProjectionInput) -> RenderedFeishuCard:
         value=projection.request_preview,
         limit=_REQUEST_CHARACTERS,
     )
+
+    if view.disclosure is not None:
+        disclosure = view.disclosure
+        disclosure_lines = [
+            f"能力：{disclosure.capability_id}@{disclosure.capability_version}",
+            f"环境：{disclosure.environment_id}",
+            (
+                "目标："
+                f"{disclosure.provider}/{disclosure.resource_kind}/"
+                f"{','.join(disclosure.resource_ids)}"
+            ),
+            f"计划分类：{disclosure.plan_disposition.value}",
+            f"外部目标访问：{str(disclosure.external_target_access).lower()}",
+        ]
+        truncated |= _append_clipped_block(
+            elements,
+            label="执行披露",
+            value="\n".join(disclosure_lines),
+            limit=_DISCLOSURE_CHARACTERS,
+        )
 
     if view.clarification is not None:
         truncated |= _append_clipped_block(

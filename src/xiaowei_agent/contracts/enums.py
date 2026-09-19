@@ -350,12 +350,21 @@ class PipelineStage(StrEnum):
     MODEL = "model"
     RESOLVER = "resolver"
     PLANNER = "planner"
+    DISCLOSURE = "disclosure"
     ADMISSION = "admission"
     GATEWAY = "gateway"
     EVIDENCE = "evidence"
     REFLECTION = "reflection"
     RENDERING = "rendering"
     LIFECYCLE = "lifecycle"
+
+
+class ExecutionDisclosureDisposition(StrEnum):
+    """计划级执行披露分类。"""
+
+    BOUNDED_READ = "bounded_read"
+    RESTRICTED_READ = "restricted_read"
+    SIDE_EFFECT = "side_effect"
 
 
 class StageOutcome(StrEnum):

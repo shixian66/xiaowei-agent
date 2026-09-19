@@ -50,6 +50,11 @@ from xiaowei_agent.contracts.clarification import (
     ConfirmedValue,
     RouteSubject,
 )
+from xiaowei_agent.contracts.disclosure import (
+    ExecutionDisclosure,
+    ExecutionDisclosureSlotChange,
+    ExecutionDisclosureStep,
+)
 from xiaowei_agent.contracts.enums import (
     AdapterStatus,
     ApprovalState,
@@ -63,6 +68,7 @@ from xiaowei_agent.contracts.enums import (
     DestinationKind,
     EffectClass,
     ErrorCategory,
+    ExecutionDisclosureDisposition,
     ExternalInputKind,
     ExternalSource,
     GrantRejection,
@@ -233,6 +239,10 @@ __all__ = [
     "EffectClass",
     "ErrorCategory",
     "EvidenceEnvelope",
+    "ExecutionDisclosure",
+    "ExecutionDisclosureDisposition",
+    "ExecutionDisclosureSlotChange",
+    "ExecutionDisclosureStep",
     "ExecutionPlan",
     "ExternalContent",
     "ExternalInput",

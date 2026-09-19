@@ -38,6 +38,7 @@ from xiaowei_agent.contracts import (
     TaskStatus,
     ToolResult,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionBinding
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
 
@@ -121,6 +122,12 @@ SYNTHETIC_WRITE_BINDING = CapabilityRuntimeBinding(
     execution=CapabilityExecutionBinding(
         capability_id=WRITE_CAP,
         capability_version=CAP_VERSION,
+        disclosure=DisclosureProjectionBinding(
+            capability_id=WRITE_CAP,
+            capability_version=CAP_VERSION,
+            allowed_clarification_fields=frozenset(),
+            confirmed_slot_projector=None,
+        ),
         policy_profile=WRITE_PROFILE,
         sql_surface=None,
         promql_surface=None,

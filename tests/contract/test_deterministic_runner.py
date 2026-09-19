@@ -17,7 +17,6 @@ from tests.fakes.recordings import (
 )
 from tests.fakes.runner import RunnerHarness
 
-from xiaowei_agent.capabilities.effect import SpecResolutionError
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
 from xiaowei_agent.contracts import (
     AttemptIntent,
@@ -48,6 +47,7 @@ from xiaowei_agent.persistence.store import (
     TaskAttemptGrant,
     TransitionCommand,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionError
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 from xiaowei_agent.runners.deterministic import (
     _STEP_RESULT_STATUS,
@@ -976,8 +976,11 @@ def test_step_arguments_cannot_override_the_declared_gateway() -> None:
 async def test_unknown_capability_key_is_rejected_before_gateway(field: str) -> None:
     harness = RunnerHarness(GOLDEN)
     harness.plan = harness.plan.model_copy(update={field: "unknown"})
-    with pytest.raises(SpecResolutionError):
+    with pytest.raises(DisclosureProjectionError):
         await harness.start()
+    assert harness.sink.events[-1].stage is PipelineStage.DISCLOSURE
+    assert harness.sink.events[-1].outcome is StageOutcome.FAILED
+    assert PipelineStage.ADMISSION not in [event.stage for event in harness.sink.events]
     assert harness.gateway.invocations == 0
 
 
@@ -987,6 +990,9 @@ async def test_unknown_operation_is_rejected_before_gateway() -> None:
     harness.plan = harness.plan.model_copy(
         update={"steps": (first, *harness.plan.steps[1:])}
     )
-    with pytest.raises(SpecResolutionError):
+    with pytest.raises(DisclosureProjectionError):
         await harness.start()
+    assert harness.sink.events[-1].stage is PipelineStage.DISCLOSURE
+    assert harness.sink.events[-1].outcome is StageOutcome.FAILED
+    assert PipelineStage.ADMISSION not in [event.stage for event in harness.sink.events]
     assert harness.gateway.invocations == 0

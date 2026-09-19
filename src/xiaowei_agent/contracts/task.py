@@ -21,6 +21,7 @@ from xiaowei_agent.contracts.base import (
     StrictStr,
 )
 from xiaowei_agent.contracts.clarification import ClarificationPayload
+from xiaowei_agent.contracts.disclosure import ExecutionDisclosure
 from xiaowei_agent.contracts.enums import TaskStatus, TransitionRejection
 from xiaowei_agent.contracts.ids import TaskId
 from xiaowei_agent.contracts.render import RenderPayload
@@ -85,6 +86,7 @@ class TaskView(Contract):
     status: TaskStatus
     render: RenderPayload | None = None
     clarification: ClarificationPayload | None = None
+    disclosure: ExecutionDisclosure | None = None
     query_path: StrictStr
 
     @model_validator(mode="after")

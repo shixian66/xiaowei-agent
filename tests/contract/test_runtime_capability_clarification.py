@@ -179,6 +179,73 @@ async def test_prometheus_capability_child_reply_shapes_are_stable(
     assert harness.adapters["prometheus"].call_count == expected_calls
 
 
+async def test_runtime_passes_parent_confirmed_slots_to_runner_disclosure() -> None:
+    harness = _prometheus_harness()
+    captured: list[object] = []
+    inner_runner = harness.runtime._runner
+
+    class CapturingRunner:
+        async def start(self, grant: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("parent_confirmed_slots"))
+            return await inner_runner.start(grant, **kwargs)  # type: ignore[arg-type]
+
+        async def resume(self, grant: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("parent_confirmed_slots"))
+            return await inner_runner.resume(grant, **kwargs)  # type: ignore[arg-type]
+
+    harness.runtime._runner = CapturingRunner()  # type: ignore[assignment]
+    parent_submission = harness.submission(
+        "查告警 HostHighCpu 的证据",
+        idempotency_key="parent-disclosure-slots",
+    )
+    parent = await harness.runtime.submit_task(submission=parent_submission)
+    parent_attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=parent.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-parent-disclosure",
+            ttl_seconds=60,
+            trace_id=parent_submission.context.trace_id,
+        )
+    )
+    assert parent_attempt.grant is not None and parent_attempt.submission is not None
+    parent_outcome = await harness.runtime.execute_task(
+        grant=parent_attempt.grant,
+        submission=parent_attempt.submission,
+    )
+    assert parent_outcome.status is TaskStatus.CLARIFICATION_REQUIRED
+    saved = await harness.clarification_records.load(task_id=parent.task_id)
+    assert saved is not None
+
+    child_submission = harness.submission(
+        "node-1.example.com:9100",
+        idempotency_key="child-disclosure-slots",
+    ).model_copy(update={"clarification_parent_task_id": parent.task_id})
+    child = await harness.store.create_clarification_child(
+        submission=child_submission,
+        authenticated_channel_owner=harness.context.actor,
+    )
+    harness.task_id = child.task_id
+    child_attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=child.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-child-disclosure",
+            ttl_seconds=60,
+            trace_id=child_submission.context.trace_id,
+        )
+    )
+    assert child_attempt.grant is not None
+
+    child_outcome = await harness.runtime.execute_task(
+        grant=child_attempt.grant,
+        submission=child_submission,
+    )
+
+    assert child_outcome.status is TaskStatus.SUCCEEDED
+    assert captured == [saved.confirmed_slots]
+
+
 @pytest.mark.parametrize(
     ("child_text", "expected_status"),
     [

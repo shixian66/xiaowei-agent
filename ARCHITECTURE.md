@@ -537,8 +537,8 @@ I1-A 新分类事件使用 `ModelCallKind.INTERACTION`，单 attempt 的
 `ModelCallObservation.request_count` 为 `0..1`；历史 `ModelCallKind.INTENT`
 只保留为 legacy trace read compatibility，仍按 `0..2` 只读兼容，`ADVISORY` 仍为 `0..1`，
 不得把字段级上限全局降为 1。
-I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，错误归因阶段从当前十个
-扩展为十一个阶段；在 I1-D 合入前，当前源码和契约测试仍是 RI3 后的十个阶段。
+I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，错误归因阶段从 RI3 后的十个
+扩展为十一个阶段；当前源码和契约测试已包含该披露阶段。
 
 以下 clarification-aware idempotency 是 I1-A 当前源码事实：非空
 `clarification_parent_task_id` 进入 `request_dedup_digest` 和已存 `submission_digest`，但不进入
@@ -797,9 +797,8 @@ Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、L
 记到两个阶段。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3 与 RI3。
 
 ADR-017/I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，位于 PlanStore
-读回/投影校验之后、StepAdmission/Gateway 之前；届时错误归因阶段扩展为十一个阶段。在 I1-D
-合入前，当前源码事实仍是十个阶段。Disclosure 只表示披露事实与审计持久化，不表示渠道送达、
-用户已读、审批通过或真实目标已联网。
+读回/投影校验之后、StepAdmission/Gateway 之前；当前错误归因阶段为十一个阶段。Disclosure
+只表示披露事实与审计持久化，不表示渠道送达、用户已读、审批通过或真实目标已联网。
 
 ### 13.2 eval 的边界
 

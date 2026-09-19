@@ -13,7 +13,12 @@ from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationPayload,
     ClarificationReasonCode,
+    EffectClass,
+    ExecutionDisclosure,
+    ExecutionDisclosureDisposition,
+    ExecutionDisclosureStep,
     FeishuProjectionInput,
+    ReadClass,
     ReadinessReport,
     RenderPayload,
     RenderSection,
@@ -27,6 +32,31 @@ from xiaowei_agent.interfaces.web_models import WebTaskDetail
 from xiaowei_agent.rendering.feishu import render_feishu_card
 
 _NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
+
+
+def _disclosure() -> ExecutionDisclosure:
+    return ExecutionDisclosure(
+        capability_id="starrocks.slow_query.diagnose",
+        capability_version="1.0.0",
+        environment_id="dev",
+        provider="starrocks",
+        resource_kind="cluster",
+        resource_ids=("starrocks-dev-1",),
+        pure_read_only=True,
+        plan_disposition=ExecutionDisclosureDisposition.BOUNDED_READ,
+        read_classes=(ReadClass.BOUNDED,),
+        has_side_effect=False,
+        steps=(
+            ExecutionDisclosureStep(
+                step_id="s1",
+                operation="list_slow_queries",
+                effect_class=EffectClass.READ,
+                read_class=ReadClass.BOUNDED,
+                side_effect=False,
+            ),
+        ),
+        external_target_access=True,
+    )
 
 
 def _view(
@@ -66,6 +96,7 @@ def _view(
             status=TaskStatus.SUCCEEDED,
             refs=("trace:channel-parity", "evidence:root"),
         ),
+        disclosure=_disclosure(),
         query_path=task_query_path(task_id),
     )
 
@@ -185,12 +216,17 @@ async def test_all_thin_channels_preserve_one_terminal_render_payload() -> None:
     assert json.loads(stdout.getvalue()) == canonical
     assert web.status is view.status
     assert web.render == view.render
+    assert web.disclosure == view.disclosure
     assert web.task_id == view.task_id
 
     assert feishu.truncated is False
     card = json.loads(feishu.content_json)
     card_text = _plain_card_text(card)
     assert "任务状态：已完成" in card_text
+    assert "执行披露" in card_text
+    assert "bounded_read" in card_text
+    assert "已送达" not in card_text
+    assert "已确认" not in card_text
     assert view.task_id in card_text
     assert view.render is not None
     assert len(view.render.sections) == 4

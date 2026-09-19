@@ -118,6 +118,21 @@ class CapabilityBindingRegistry:
             execution = binding.execution
             if (execution.capability_id, execution.capability_version) != key:
                 raise CapabilityBindingError("execution binding key differs")
+            if (
+                execution.disclosure.capability_id,
+                execution.disclosure.capability_version,
+            ) != key:
+                raise CapabilityBindingError("disclosure binding key differs")
+            if (
+                execution.disclosure.allowed_clarification_fields
+                != binding.input_binding.allowed_clarification_fields
+            ):
+                raise CapabilityBindingError("disclosure slot fields differ")
+            if (
+                execution.disclosure.confirmed_slot_projector
+                is not binding.input_binding.confirmed_slot_projector
+            ):
+                raise CapabilityBindingError("disclosure projector differs")
             if execution.policy_profile.profile_id != spec.policy_profile:
                 raise CapabilityBindingError("binding policy profile differs from spec")
             if execution.policy_profile.profile_id not in policy_snapshot.profiles:

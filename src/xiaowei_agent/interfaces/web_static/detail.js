@@ -39,6 +39,8 @@ const elements = Object.freeze({
   progress: document.querySelector("#detail-progress"),
   result: document.querySelector("#detail-result"),
   answer: document.querySelector("#detail-answer"),
+  disclosureBlock: document.querySelector("#detail-disclosure-block"),
+  disclosure: document.querySelector("#detail-disclosure"),
   sections: document.querySelector("#detail-sections"),
   nextBlock: document.querySelector("#detail-next-block"),
   nextSteps: document.querySelector("#detail-next-steps"),
@@ -92,12 +94,34 @@ function formatTime(value) {
 
 function clearSafeResult() {
   elements.answer.textContent = "";
+  elements.disclosure.replaceChildren();
   elements.sections.replaceChildren();
   elements.nextSteps.replaceChildren();
   elements.refs.replaceChildren();
   setVisible(elements.nextBlock, false);
   setVisible(elements.refsBlock, false);
+  setVisible(elements.disclosureBlock, false);
   setVisible(elements.result, false);
+}
+
+function renderDisclosure(disclosure) {
+  if (!disclosure || typeof disclosure !== "object") {
+    return;
+  }
+  const resourceIds = Array.isArray(disclosure.resource_ids) ? disclosure.resource_ids.join(",") : "—";
+  const rows = [
+    ["能力", `${text(disclosure.capability_id)}@${text(disclosure.capability_version)}`],
+    ["环境", text(disclosure.environment_id)],
+    ["目标", `${text(disclosure.provider)}/${text(disclosure.resource_kind)}/${resourceIds}`],
+    ["计划分类", text(disclosure.plan_disposition)],
+    ["外部目标访问", disclosure.external_target_access === true ? "true" : "false"],
+  ];
+  for (const [label, value] of rows) {
+    const item = document.createElement("li");
+    item.textContent = `${label}：${value}`;
+    elements.disclosure.append(item);
+  }
+  setVisible(elements.disclosureBlock, true);
 }
 
 function clearTaskDetail() {
@@ -196,6 +220,7 @@ function renderTask(task) {
   if (terminal) {
     elements.polling.textContent = "已停止同步";
     renderSafeResult(task.render);
+    renderDisclosure(task.disclosure);
   } else {
     elements.polling.textContent = document.visibilityState === "hidden" ? "后台低频同步" : "自动同步";
     clearSafeResult();
