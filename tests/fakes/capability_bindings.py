@@ -2,10 +2,12 @@
 
 import datetime as dt
 from dataclasses import replace
+from typing import ClassVar
 
 from tests.fakes.admission import WRITE_PROFILE
 from tests.fakes.fixtures import CAP_VERSION, WRITE_CAP, WRITE_OP
 
+from xiaowei_agent.application.capability_input import SlotInvalid, bind_capability_input
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingRegistry,
     CapabilityRuntimeBinding,
@@ -19,11 +21,14 @@ from xiaowei_agent.application.default_capabilities import (
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     Candidate,
+    CapabilityParams,
     CapabilitySnapshot,
+    ClarificationContext,
     EffectClass,
     EvidenceEnvelope,
     ExecutionPlan,
     IntentDraft,
+    InteractionRejectionReasonCode,
     MissingItem,
     PlanStep,
     PolicySnapshot,
@@ -36,14 +41,33 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
 
-def _never_prepare(
+class _SyntheticWriteParams(CapabilityParams):
+    INPUT_SCHEMA_REF: ClassVar[str] = "input.synthetic.write.v1"
+
+
+def _never_verify_slots(
     *,
     candidate: Candidate,
     draft: IntentDraft,
     context: RequestContext,
     as_of: dt.datetime,
+    user_text: str,
+    clarification: ClarificationContext | None = None,
+) -> SlotInvalid:
+    _ = (candidate, draft, context, as_of, user_text, clarification)
+    return SlotInvalid(
+        reason_code=InteractionRejectionReasonCode.CAPABILITY_FIELDS_INVALID
+    )
+
+
+def _never_plan_typed_input(
+    *,
+    candidate: Candidate,
+    params: _SyntheticWriteParams,
+    context: RequestContext,
     snapshot: CapabilitySnapshot,
 ) -> PreparedCapability:
+    _ = (candidate, params, context, snapshot)
     raise AssertionError("synthetic capability is never planned by Runtime")
 
 
@@ -84,7 +108,14 @@ SYNTHETIC_WRITE_BINDING = CapabilityRuntimeBinding(
     capability_id=WRITE_CAP,
     capability_version=CAP_VERSION,
     entry_operation=WRITE_OP,
-    planner=_never_prepare,
+    input_binding=bind_capability_input(
+        params_type=_SyntheticWriteParams,
+        input_schema_ref=_SyntheticWriteParams.INPUT_SCHEMA_REF,
+        allowed_clarification_fields=frozenset(),
+        slot_verifier=_never_verify_slots,
+        planner=_never_plan_typed_input,
+        confirmed_slot_projector=None,
+    ),
     assessor=_assess_synthetic,
     renderer=_never_render,
     execution=CapabilityExecutionBinding(

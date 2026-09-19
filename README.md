@@ -27,9 +27,9 @@
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
-> 当前工作树正在实现 I1-A：已有 interaction classifier、insert-once interaction artifact、确定性
-> Router 与 Runtime 接入切片、终态澄清存储与澄清子任务一次性消费；可信槽位、`ReadClass` 和执行披露屏障仍未实现，
-> 不能把本地离线切片写成完整 I1、真实模型、部署或用户验收。
+> 当前工作树正在实现 I1-B：已有 interaction classifier、insert-once interaction artifact、确定性
+> Router 与 Runtime 接入切片、终态澄清存储、澄清子任务一次性消费；可信槽位 / `SlotVerifier` 已完成离线实现；
+> `ReadClass` 和执行披露屏障仍未实现，不能把 I1-B 写成完整 I1、真实模型、部署或用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现

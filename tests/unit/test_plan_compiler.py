@@ -51,14 +51,13 @@ CONTEXT = RequestContext(
 DRAFT = IntentDraft(
     intent=CAPABILITY_ID, slots={}, missing=(), confidence=0.9, source=IntentSource.USER
 )
-TARGET = resolve_target(context=CONTEXT, draft=DRAFT)
-
 _PARAMS = SlowQueryParams(
     window_start=dt.datetime(2026, 9, 2, 11, 30, tzinfo=dt.UTC),
     window_end=dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC),
     min_query_time_ms=10_000,
     row_limit=20,
 )
+TARGET = resolve_target(context=CONTEXT, params=_PARAMS)
 
 
 def _entry_candidate(snapshot: CapabilitySnapshot = SNAPSHOT) -> Candidate:
@@ -91,6 +90,7 @@ def _snapshot_with(operation: str, effect: EffectClass, *, side_effect: bool) ->
                 capability_id=spec.capability_id,
                 version=spec.version,
                 domain=spec.domain,
+                input_schema_ref=spec.input_schema_ref,
                 operations=tuple(
                     OperationSpec(
                         operation=op.operation,

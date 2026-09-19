@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from tests.fakes.asset_recordings import recording_for
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.capability_input import SlotReady
 from xiaowei_agent.application.default_capabilities import ASSET_INVENTORY_BINDING
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
@@ -60,11 +61,18 @@ def _prepared(text: str = _TEXT):
         .items
         if item.operation == ASSET_INVENTORY_BINDING.entry_operation
     )
-    return ASSET_INVENTORY_BINDING.planner(
+    verified = ASSET_INVENTORY_BINDING.input_binding.slot_verifier(
         candidate=candidate,
         draft=draft,
         context=_context(),
         as_of=_AT,
+        user_text=text,
+    )
+    assert isinstance(verified, SlotReady)
+    return ASSET_INVENTORY_BINDING.input_binding.planner(
+        candidate=candidate,
+        params=verified.params,
+        context=_context(),
         snapshot=_SNAPSHOT,
     )
 

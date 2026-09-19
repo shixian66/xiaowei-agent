@@ -121,6 +121,7 @@ class ClarificationRecord(Contract):
 class ClarificationContext(Contract):
     subject: ClarificationSubject
     confirmed_slots: tuple[ConfirmedSlot, ...]
+    missing_fields: tuple[ClarificationField, ...] = ()
 
     @model_validator(mode="after")
     def _snapshot_is_canonical(self) -> Self:

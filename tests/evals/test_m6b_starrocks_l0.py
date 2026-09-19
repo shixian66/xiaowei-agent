@@ -9,13 +9,7 @@ import pytest
 
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST, SLOW_QUERY_SURFACE
 from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_target
-from xiaowei_agent.contracts import (
-    AdapterStatus,
-    IntentDraft,
-    IntentSource,
-    RequestContext,
-    ToolCall,
-)
+from xiaowei_agent.contracts import AdapterStatus, RequestContext, ToolCall
 from xiaowei_agent.planning.starrocks.compiler import COUNT_V1, LIST_V1, compile_sql
 from xiaowei_agent.planning.starrocks.params import SlowQueryParams
 from xiaowei_agent.tools.starrocks import (
@@ -148,12 +142,5 @@ def test_identity_sql_surface_cannot_expand(case: dict[str, Any]) -> None:
 
 
 def test_unapproved_test_target_remains_ambiguous() -> None:
-    draft = IntentDraft(
-        intent="starrocks.slow_query.diagnose",
-        slots={},
-        missing=(),
-        confidence=1.0,
-        source=IntentSource.USER,
-    )
     with pytest.raises(TargetResolutionError):
-        resolve_target(context=_CONTEXT, draft=draft)
+        resolve_target(context=_CONTEXT, params=_PARAMS)

@@ -34,6 +34,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Final
 
+from xiaowei_agent.application.capability_input import (
+    CapabilityInputBindingError,
+    require_exact_params_type,
+)
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
     CapabilityBindingRegistry,
@@ -66,6 +70,8 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     Candidate,
     CapabilitySnapshot,
+    CapabilitySubject,
+    ClarificationContext,
     ClarificationReasonCode,
     EvidenceEnvelope,
     ExecutionPlan,
@@ -80,6 +86,9 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     RetryReason,
     RoutingDisposition,
+    SlotIncomplete,
+    SlotInvalid,
+    SlotReady,
     StageOutcome,
     TaskLookup,
     TaskOutcome,
@@ -124,7 +133,12 @@ from xiaowei_agent.persistence.store import (
     TaskStore,
     TransitionCommand,
 )
+from xiaowei_agent.planning.slot_verification import (
+    SlotVerificationError,
+    require_confirmed_projection,
+)
 from xiaowei_agent.reflection.status import terminal_status_for
+from xiaowei_agent.rendering.generic import render_clarification_as_payload
 from xiaowei_agent.rendering.pending import render_pending
 from xiaowei_agent.runners.deterministic import (
     RECOVERY_DRIFT_REASON,
@@ -311,6 +325,9 @@ class XiaoweiRuntime:
         recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
+            clarification = await self._load_clarification_context(
+                submission=submission
+            )
             accepted = await load_or_accept_interaction(
                 grant=grant,
                 envelope=submission.envelope,
@@ -319,6 +336,7 @@ class XiaoweiRuntime:
                 model=self._interaction_classifier,
                 profile=self._model_profile,
                 artifacts=self._model_artifacts,
+                clarification=clarification,
                 monotonic=self._model_monotonic,
             )
             if (
@@ -381,9 +399,19 @@ class XiaoweiRuntime:
                 draft=draft,
                 context=context,
                 as_of=submission.as_of,
+                grant=grant,
+                clarification=clarification,
+                user_text=submission.envelope.text,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
             )
+            if prepared is None:
+                terminal = _task_outcome(
+                    task_id=grant.task_id,
+                    status=TaskStatus.CLARIFICATION_REQUIRED,
+                    terminal_reason=None,
+                )
+                raise _ClarificationTerminalizedError
             plan = prepared.plan
             target = prepared.target
             if record.status is TaskStatus.CREATED:
@@ -590,6 +618,17 @@ class XiaoweiRuntime:
     async def _render_recorded(
         self, *, record: TaskRecord, context: RequestContext
     ) -> RenderPayload:
+        if record.status is TaskStatus.CLARIFICATION_REQUIRED:
+            clarification = await self._task_views.project_clarification(record=record)
+            payload = render_clarification_as_payload(clarification=clarification)
+            await self._emit(
+                stage=PipelineStage.RENDERING,
+                outcome=StageOutcome.OK,
+                context=context,
+                task_id=record.task_id,
+                delivery=Delivery.LOG_AND_DURABLE,
+            )
+            return payload
         payload = await self._task_views.project_recorded(record=record)
         await self._emit(
             stage=PipelineStage.RENDERING,
@@ -670,18 +709,65 @@ class XiaoweiRuntime:
         draft: IntentDraft,
         context: RequestContext,
         as_of: _dt.datetime,
+        grant: TaskAttemptGrant,
+        clarification: ClarificationContext | None,
+        user_text: str,
         task_id: str | None = None,
         attempt_number: int | None = None,
-    ) -> PreparedCapability:
+    ) -> PreparedCapability | None:
         try:
-            prepared = binding.planner(
+            capability_clarification = self._capability_clarification_context(
+                clarification=clarification,
+                binding=binding,
+                candidate=candidate,
+            )
+            verified = binding.input_binding.slot_verifier(
                 candidate=candidate,
                 draft=draft,
                 context=context,
                 as_of=as_of,
+                user_text=user_text,
+                clarification=capability_clarification,
+            )
+            if isinstance(verified, SlotIncomplete):
+                await self._save_capability_clarification(
+                    grant=grant,
+                    binding=binding,
+                    candidate=candidate,
+                    result=verified,
+                )
+                await self._emit(
+                    stage=PipelineStage.PLANNER,
+                    outcome=StageOutcome.REJECTED,
+                    context=context,
+                    task_id=task_id,
+                    attempt_number=attempt_number,
+                    delivery=_independent_delivery(task_id),
+                )
+                return None
+            if isinstance(verified, SlotInvalid):
+                raise CapabilityPreparationError("slot verification rejected")
+            if not isinstance(verified, SlotReady):
+                raise CapabilityPreparationError("slot verifier returned unknown result")
+            params = require_exact_params_type(binding.input_binding, verified)
+            prepared = binding.input_binding.planner(
+                candidate=candidate,
+                params=params,
+                context=context,
                 snapshot=self._snapshot,
             )
-        except CapabilityPreparationError as exc:
+            projector = binding.input_binding.confirmed_slot_projector
+            if projector is not None:
+                projected = projector(plan=prepared.plan, target=prepared.target)
+                require_confirmed_projection(
+                    confirmed=verified.confirmed_slots,
+                    projected=projected,
+                )
+        except (
+            CapabilityPreparationError,
+            CapabilityInputBindingError,
+            SlotVerificationError,
+        ) as exc:
             await self._emit(
                 stage=PipelineStage.PLANNER,
                 outcome=StageOutcome.REJECTED,
@@ -703,6 +789,77 @@ class XiaoweiRuntime:
             delivery=_independent_delivery(task_id),
         )
         return prepared
+
+    async def _load_clarification_context(
+        self,
+        *,
+        submission: TaskSubmission,
+    ) -> ClarificationContext | None:
+        parent_id = submission.clarification_parent_task_id
+        if parent_id is None:
+            return None
+        parent = await self._clarification_records.load(task_id=parent_id)
+        if parent is None:
+            raise RequestRejectedError(
+                "clarification parent is missing",
+                stage=PipelineStage.INTENT,
+            )
+        return ClarificationContext(
+            subject=parent.subject,
+            confirmed_slots=parent.confirmed_slots,
+            missing_fields=parent.missing_fields,
+        )
+
+    def _capability_clarification_context(
+        self,
+        *,
+        clarification: ClarificationContext | None,
+        binding: CapabilityRuntimeBinding,
+        candidate: Candidate,
+    ) -> ClarificationContext | None:
+        if clarification is None:
+            return None
+        if not isinstance(clarification.subject, CapabilitySubject):
+            return None
+        subject = clarification.subject
+        if (
+            subject.capability_id != binding.capability_id
+            or subject.capability_version != binding.capability_version
+            or subject.operation != candidate.operation
+            or subject.input_schema_ref != binding.input_binding.input_schema_ref
+        ):
+            raise CapabilityPreparationError("clarification parent is incompatible")
+        return ClarificationContext(
+            subject=subject,
+            confirmed_slots=clarification.confirmed_slots,
+            missing_fields=clarification.missing_fields,
+        )
+
+    async def _save_capability_clarification(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        binding: CapabilityRuntimeBinding,
+        candidate: Candidate,
+        result: SlotIncomplete,
+    ) -> None:
+        subject = CapabilitySubject(
+            kind="capability",
+            capability_id=binding.capability_id,
+            capability_version=binding.capability_version,
+            operation=candidate.operation,
+            input_schema_ref=binding.input_binding.input_schema_ref,
+            confirmed_slots=result.confirmed_slots,
+        )
+        await self._clarification_records.save(
+            grant=grant,
+            candidate=ClarificationRecordCandidate(
+                subject=subject,
+                reason_code=result.reason_code,
+                missing_fields=result.missing_fields,
+                confirmed_slots=result.confirmed_slots,
+            ),
+        )
 
     async def _finish(
         self,

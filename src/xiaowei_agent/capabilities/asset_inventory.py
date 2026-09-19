@@ -9,6 +9,7 @@ ASSET_INVENTORY_CAPABILITY_VERSION: Final[str] = "1.0.0"
 OP_LOOKUP_ASSET: Final[str] = "lookup_asset"
 ASSET_INVENTORY_GATEWAY: Final[str] = "asset_inventory"
 ASSET_INVENTORY_POLICY_PROFILE: Final[str] = "readonly.asset.inventory.lookup.v1"
+ASSET_INVENTORY_INPUT_SCHEMA_REF: Final[str] = "input.asset.lookup.v1"
 ASSET_INVENTORY_ENVIRONMENT_IDS: Final[tuple[str, ...]] = ("dev", "test")
 """fake 资产目录允许的非生产环境闭集。"""
 
@@ -16,6 +17,7 @@ ASSET_INVENTORY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
     capability_id=ASSET_INVENTORY_CAPABILITY_ID,
     version=ASSET_INVENTORY_CAPABILITY_VERSION,
     domain="asset",
+    input_schema_ref=ASSET_INVENTORY_INPUT_SCHEMA_REF,
     operations=(
         OperationSpec(
             operation=OP_LOOKUP_ASSET,

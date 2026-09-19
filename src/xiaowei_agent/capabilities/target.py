@@ -1,14 +1,14 @@
-"""目标解析：``RequestContext`` + ``IntentDraft`` → ``ResolvedTarget``。
+"""目标解析：``RequestContext`` + ``SlowQueryParams`` → ``ResolvedTarget``。
 
 两条承重规则：
 
 1. **执行上下文优先于模型线索。** ``environment_id`` 一律取自 ``RequestContext``；
-   槽位里的同名值只是线索，冲突时被丢弃。模型能改目标，等于模型能把一份已批准
-   的计划指向另一套集群。
+   StarRocks 参数不携带目标环境。模型能改目标，等于模型能把一份已批准的计划
+   指向另一套集群。
 2. **环境必须解析出唯一值，否则 fail-closed。** 不取默认环境、不猜、不回退
    （ADR-007 D2）。目录里没有的环境就是解析失败。
 
-槽位里的 ``database`` / ``user_name`` / ``query_id`` **不进目标**：它们是查询的
+参数里的 ``database`` / ``user_name`` / ``query_id`` **不进目标**：它们是查询的
 过滤条件，不是执行目标。把它们算进指纹会让同一套集群随过滤条件产生不同目标，
 审批绑定随之失去意义。
 """
@@ -18,7 +18,6 @@ from types import MappingProxyType
 from typing import Final
 
 from xiaowei_agent.contracts import (
-    IntentDraft,
     RequestContext,
     ResolvedTarget,
     TargetRejection,
@@ -77,9 +76,7 @@ def resolve_context_target(*, context: RequestContext) -> ResolvedTarget:
     )
 
 
-def resolve_target(*, context: RequestContext, draft: IntentDraft) -> ResolvedTarget:
-    """把执行上下文解析成唯一目标；草案只可见，不参与目标构成。"""
-    # draft 显式不参与：保留它是为了让"目标解析看得到草案但不采纳它"成为
-    # 一个可读事实，而不是靠调用方记得不传。
-    _ = draft
+def resolve_target(*, context: RequestContext, params: object) -> ResolvedTarget:
+    """把执行上下文解析成唯一目标；查询参数不参与目标构成。"""
+    _ = params
     return resolve_context_target(context=context)

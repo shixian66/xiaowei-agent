@@ -64,9 +64,19 @@ _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 def _annotated_names(path: Path) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
-            names.add(node.annotation.id)
+        if isinstance(node, ast.AnnAssign):
+            name = _annotation_name(node.annotation)
+            if name is not None:
+                names.add(name)
     return names
+
+
+def _annotation_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Subscript):
+        return _annotation_name(node.value)
+    return None
 
 
 def test_every_implemented_protocol_has_a_typed_anchor() -> None:

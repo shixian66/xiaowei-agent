@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from tests.fakes.model import ScriptedModelAdapter
 
+    from xiaowei_agent.application.capability_input import CapabilityPlanner
     from xiaowei_agent.application.capability_runtime import (
         CapabilityAdvisoryProjector,
         CapabilityAssessor,
         CapabilityBindingRegistry,
-        CapabilityPlanner,
         CapabilityRenderer,
     )
     from xiaowei_agent.application.channel_access import FeishuMembershipPort
@@ -90,6 +90,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.store import Clock, TaskStore
     from xiaowei_agent.persistence.web_session import WebSessionStore
+    from xiaowei_agent.planning.starrocks.params import SlowQueryParams
     from xiaowei_agent.runners.binding import (
         ExecutionBindingProvider,
         StepEvidenceBuilder,
@@ -227,7 +228,9 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     ) -> None:
         """显式 binding 实现必须保持 application 与 Runner 两侧的窄协议。"""
         provider: ExecutionBindingProvider = registry
-        planner: CapabilityPlanner = SLOW_QUERY_BINDING.planner
+        planner: CapabilityPlanner[SlowQueryParams] = (
+            SLOW_QUERY_BINDING.input_binding.planner
+        )
         assessor: CapabilityAssessor = SLOW_QUERY_BINDING.assessor
         renderer: CapabilityRenderer = SLOW_QUERY_BINDING.renderer
         advisory_projector: CapabilityAdvisoryProjector = (

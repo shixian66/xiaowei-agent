@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from tests.fakes.admission import CONTEXT
 
-from xiaowei_agent.application.capability_runtime import CapabilityPreparationError
+from xiaowei_agent.application.capability_input import SlotInvalid, SlotReady
 from xiaowei_agent.application.default_capabilities import ASSET_INVENTORY_BINDING
 from xiaowei_agent.capabilities.asset_inventory import ASSET_INVENTORY_CAPABILITY_ID
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
@@ -57,11 +57,18 @@ def test_golden_cases_resolve_and_normalise_exact_selector(
         for item in selected.items
         if item.operation == ASSET_INVENTORY_BINDING.entry_operation
     )
-    prepared = ASSET_INVENTORY_BINDING.planner(
+    verified = ASSET_INVENTORY_BINDING.input_binding.slot_verifier(
         candidate=candidate,
         draft=draft,
         context=CONTEXT,
         as_of=dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC),
+        user_text=case["text"],
+    )
+    assert isinstance(verified, SlotReady)
+    prepared = ASSET_INVENTORY_BINDING.input_binding.planner(
+        candidate=candidate,
+        params=verified.params,
+        context=CONTEXT,
         snapshot=_SNAPSHOT,
     )
     assert prepared.target.resource_ids == (
@@ -90,14 +97,14 @@ def test_missing_cases_never_invent_a_selector(case: dict[str, Any]) -> None:
         for item in selected.items
         if item.operation == ASSET_INVENTORY_BINDING.entry_operation
     )
-    with pytest.raises(CapabilityPreparationError):
-        ASSET_INVENTORY_BINDING.planner(
-            candidate=candidate,
-            draft=draft,
-            context=CONTEXT,
-            as_of=dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC),
-            snapshot=_SNAPSHOT,
-        )
+    result = ASSET_INVENTORY_BINDING.input_binding.slot_verifier(
+        candidate=candidate,
+        draft=draft,
+        context=CONTEXT,
+        as_of=dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC),
+        user_text=case["text"],
+    )
+    assert isinstance(result, SlotInvalid)
 
 
 @pytest.mark.parametrize("case", _by("pollution"), ids=lambda case: case["id"])

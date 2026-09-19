@@ -68,14 +68,14 @@ DRAFT: Final[IntentDraft] = IntentDraft(
     intent=CAPABILITY_ID, slots={}, missing=(), confidence=0.9, source=IntentSource.USER
 )
 
-TARGET = resolve_target(context=CONTEXT, draft=DRAFT)
-
 PARAMS: Final[SlowQueryParams] = SlowQueryParams(
     window_start=dt.datetime(2026, 9, 2, 11, 30, tzinfo=dt.UTC),
     window_end=NOW,
     min_query_time_ms=10_000,
     row_limit=20,
 )
+
+TARGET = resolve_target(context=CONTEXT, params=PARAMS)
 
 REGISTRY_SNAPSHOT = StaticCapabilityRegistry().snapshot()
 

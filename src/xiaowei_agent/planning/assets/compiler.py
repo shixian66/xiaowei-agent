@@ -21,6 +21,9 @@ ASSET_ENTRY_OPERATION = OP_LOOKUP_ASSET
 ASSET_STEP_ID = "s1"
 ASSET_FIELD_SET_ID = "asset.summary.v1"
 ASSET_LOOKUP_LIMIT = 2
+ASSET_PROVIDER = "asset_inventory"
+ASSET_RESOURCE_KIND = "asset"
+ASSET_SELECTOR_VERSION = "asset.exact.v1"
 ASSET_PLAN_BUDGET = PlanBudget(
     max_steps=1,
     max_tool_calls=1,
@@ -38,10 +41,10 @@ def resolve_asset_target(
     return ResolvedTarget(
         tenant_id=context.tenant_id,
         environment_id=context.environment_id,
-        provider="asset_inventory",
-        resource_kind="asset",
+        provider=ASSET_PROVIDER,
+        resource_kind=ASSET_RESOURCE_KIND,
         resource_ids=(f"{selector_kind}:{selector_value}",),
-        selector_version="asset.exact.v1",
+        selector_version=ASSET_SELECTOR_VERSION,
     )
 
 

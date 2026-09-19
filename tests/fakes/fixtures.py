@@ -29,6 +29,7 @@ SNAPSHOT = CapabilitySnapshot(
             capability_id=READ_CAP,
             version=CAP_VERSION,
             domain="starrocks",
+            input_schema_ref="input.starrocks.slow_query.v1",
             operations=(
                 OperationSpec(
                     operation=READ_OP,
@@ -46,6 +47,7 @@ SNAPSHOT = CapabilitySnapshot(
             capability_id=WRITE_CAP,
             version=CAP_VERSION,
             domain="test",
+            input_schema_ref="input.synthetic.write.v1",
             operations=(
                 OperationSpec(
                     operation=WRITE_OP,

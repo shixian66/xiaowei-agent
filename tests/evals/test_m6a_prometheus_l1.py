@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from tests.fakes.admission import CONTEXT
 
-from xiaowei_agent.application.capability_runtime import CapabilityPreparationError
+from xiaowei_agent.application.capability_input import SlotInvalid
 from xiaowei_agent.application.default_capabilities import PROMETHEUS_ALERT_BINDING
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
 from xiaowei_agent.capabilities.prometheus_alert import PROMETHEUS_ALERT_CAPABILITY_ID
@@ -78,7 +78,7 @@ def test_missing_cases_never_invent_required_slots(case: dict[str, Any]) -> None
 
 
 @pytest.mark.parametrize("case", _by("invalid"), ids=lambda case: case["id"])
-def test_invalid_window_is_rejected_by_the_planner(case: dict[str, Any]) -> None:
+def test_invalid_window_is_rejected_by_the_slot_verifier(case: dict[str, Any]) -> None:
     draft = _draft(case["text"])
     candidate = next(
         item
@@ -87,14 +87,14 @@ def test_invalid_window_is_rejected_by_the_planner(case: dict[str, Any]) -> None
         .items
         if item.operation == PROMETHEUS_ALERT_BINDING.entry_operation
     )
-    with pytest.raises(CapabilityPreparationError):
-        PROMETHEUS_ALERT_BINDING.planner(
-            candidate=candidate,
-            draft=draft,
-            context=CONTEXT,
-            as_of=dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC),
-            snapshot=_SNAPSHOT,
-        )
+    result = PROMETHEUS_ALERT_BINDING.input_binding.slot_verifier(
+        candidate=candidate,
+        draft=draft,
+        context=CONTEXT,
+        as_of=dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC),
+        user_text=case["text"],
+    )
+    assert isinstance(result, SlotInvalid)
 
 
 @pytest.mark.parametrize("case", _by("pollution"), ids=lambda case: case["id"])

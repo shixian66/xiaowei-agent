@@ -4,6 +4,7 @@ import datetime as dt
 from dataclasses import dataclass, replace
 from typing import Final
 
+from xiaowei_agent.application.capability_input import bind_capability_input
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingRegistry,
     CapabilityPreparationError,
@@ -16,6 +17,7 @@ from xiaowei_agent.application.model_advisory import (
 from xiaowei_agent.capabilities.asset_inventory import (
     ASSET_INVENTORY_CAPABILITY_ID,
     ASSET_INVENTORY_CAPABILITY_VERSION,
+    ASSET_INVENTORY_INPUT_SCHEMA_REF,
     OP_LOOKUP_ASSET,
 )
 from xiaowei_agent.capabilities.prometheus_alert import (
@@ -23,11 +25,13 @@ from xiaowei_agent.capabilities.prometheus_alert import (
     OP_QUERY_METRIC_RANGE,
     PROMETHEUS_ALERT_CAPABILITY_ID,
     PROMETHEUS_ALERT_CAPABILITY_VERSION,
+    PROMETHEUS_ALERT_INPUT_SCHEMA_REF,
     PROMQL_SURFACE,
 )
 from xiaowei_agent.capabilities.specs import (
     CAPABILITY_ID,
     CAPABILITY_VERSION,
+    INPUT_SCHEMA_REF,
     OP_LIST,
     SLOW_QUERY_SURFACE,
 )
@@ -37,7 +41,6 @@ from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     EvidenceEnvelope,
     ExecutionPlan,
-    IntentDraft,
     PlanStep,
     PolicySnapshot,
     RequestContext,
@@ -61,28 +64,33 @@ from xiaowei_agent.planning.assets.compiler import (
     resolve_asset_target,
 )
 from xiaowei_agent.planning.assets.params import AssetLookupParams
+from xiaowei_agent.planning.assets.slots import (
+    ASSET_CLARIFICATION_FIELDS,
+    project_asset_lookup_confirmed_slots,
+    verify_asset_lookup_slots,
+)
 from xiaowei_agent.planning.prometheus.compiler import (
     ALERT_LIMIT,
     compile_alert_plan,
 )
 from xiaowei_agent.planning.prometheus.params import (
-    DEFAULT_WINDOW_MINUTES as DEFAULT_PROMETHEUS_WINDOW_MINUTES,
-)
-from xiaowei_agent.planning.prometheus.params import (
     PrometheusAlertParams,
 )
-from xiaowei_agent.planning.prometheus.params import (
-    normalise_window as normalise_prometheus_window,
+from xiaowei_agent.planning.prometheus.slots import (
+    PROMETHEUS_ALERT_CLARIFICATION_FIELDS,
+    project_prometheus_alert_confirmed_slots,
+    verify_prometheus_alert_slots,
 )
 from xiaowei_agent.planning.prometheus.target import resolve_prometheus_alert_target
 from xiaowei_agent.planning.prometheus.templates import metric_name_for_template
 from xiaowei_agent.planning.starrocks.compiler import compile_plan
 from xiaowei_agent.planning.starrocks.params import (
-    DEFAULT_MIN_QUERY_TIME_MS,
-    DEFAULT_ROW_LIMIT,
-    DEFAULT_WINDOW_MINUTES,
     SlowQueryParams,
-    normalise_window,
+)
+from xiaowei_agent.planning.starrocks.slots import (
+    SLOW_QUERY_CLARIFICATION_FIELDS,
+    project_slow_query_confirmed_slots,
+    verify_slow_query_slots,
 )
 from xiaowei_agent.reflection.answerability import assess
 from xiaowei_agent.reflection.asset_inventory import assess_asset_inventory
@@ -93,35 +101,15 @@ from xiaowei_agent.rendering.slow_query import render
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 
 
-def _window_minutes(draft: IntentDraft) -> int:
-    raw = draft.slots.get("window_minutes")
-    if raw is None or not raw.isdigit():
-        return DEFAULT_WINDOW_MINUTES
-    return int(raw)
-
-
-def _prepare_slow_query(
+def _plan_slow_query(
     *,
     candidate: Candidate,
-    draft: IntentDraft,
+    params: SlowQueryParams,
     context: RequestContext,
-    as_of: dt.datetime,
     snapshot: CapabilitySnapshot,
 ) -> PreparedCapability:
     try:
-        target = resolve_target(context=context, draft=draft)
-        start, end = normalise_window(
-            as_of=as_of, window_minutes=_window_minutes(draft)
-        )
-        params = SlowQueryParams(
-            window_start=start,
-            window_end=end,
-            min_query_time_ms=DEFAULT_MIN_QUERY_TIME_MS,
-            row_limit=DEFAULT_ROW_LIMIT,
-            database=draft.slots.get("database"),
-            user_name=draft.slots.get("user_name"),
-            query_id=draft.slots.get("query_id"),
-        )
+        target = resolve_target(context=context, params=params)
         plan = compile_plan(
             candidate=candidate,
             params=params,
@@ -136,6 +124,50 @@ def _prepare_slow_query(
         ) from exc
     return PreparedCapability(target=target, plan=plan)
 
+
+def _plan_prometheus_alert(
+    *,
+    candidate: Candidate,
+    params: PrometheusAlertParams,
+    context: RequestContext,
+    snapshot: CapabilitySnapshot,
+) -> PreparedCapability:
+    try:
+        target = resolve_prometheus_alert_target(context=context, params=params)
+        plan = compile_alert_plan(
+            candidate=candidate,
+            params=params,
+            target=target,
+            context=context,
+            snapshot=snapshot,
+            surface=PROMQL_SURFACE,
+        )
+    except ValueError as exc:
+        raise CapabilityPreparationError(
+            "capability parameters are outside the allowed range"
+        ) from exc
+    return PreparedCapability(target=target, plan=plan)
+def _plan_asset_inventory(
+    *,
+    candidate: Candidate,
+    params: AssetLookupParams,
+    context: RequestContext,
+    snapshot: CapabilitySnapshot,
+) -> PreparedCapability:
+    try:
+        target = resolve_asset_target(context=context, params=params)
+        plan = compile_asset_plan(
+            candidate=candidate,
+            params=params,
+            target=target,
+            context=context,
+            snapshot=snapshot,
+        )
+    except ValueError as exc:
+        raise CapabilityPreparationError(
+            "capability parameters are outside the allowed range"
+        ) from exc
+    return PreparedCapability(target=target, plan=plan)
 
 def _build_slow_query_evidence(
     *,
@@ -189,7 +221,14 @@ SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
     capability_id=CAPABILITY_ID,
     capability_version=CAPABILITY_VERSION,
     entry_operation=OP_LIST,
-    planner=_prepare_slow_query,
+    input_binding=bind_capability_input(
+        params_type=SlowQueryParams,
+        input_schema_ref=INPUT_SCHEMA_REF,
+        allowed_clarification_fields=SLOW_QUERY_CLARIFICATION_FIELDS,
+        slot_verifier=verify_slow_query_slots,
+        planner=_plan_slow_query,
+        confirmed_slot_projector=project_slow_query_confirmed_slots,
+    ),
     assessor=assess,
     renderer=render,
     execution=CapabilityExecutionBinding(
@@ -202,52 +241,6 @@ SLOW_QUERY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBinding(
     ),
     advisory_projector=project_slow_query_advisory_request,
 )
-
-
-def _prepare_prometheus_alert(
-    *,
-    candidate: Candidate,
-    draft: IntentDraft,
-    context: RequestContext,
-    as_of: dt.datetime,
-    snapshot: CapabilitySnapshot,
-) -> PreparedCapability:
-    if draft.missing or not {"alert_name", "instance"} <= set(draft.slots):
-        raise CapabilityPreparationError(
-            "capability parameters are outside the allowed range"
-        )
-    try:
-        raw_window = draft.slots.get("window_minutes")
-        window_minutes = (
-            int(raw_window)
-            if raw_window is not None and raw_window.isdigit()
-            else DEFAULT_PROMETHEUS_WINDOW_MINUTES
-        )
-        start, end = normalise_prometheus_window(
-            as_of=as_of, window_minutes=window_minutes
-        )
-        params = PrometheusAlertParams(
-            alert_name=draft.slots["alert_name"],
-            instance=draft.slots["instance"],
-            fingerprint=draft.slots.get("fingerprint"),
-            window_start=start,
-            window_end=end,
-        )
-        target = resolve_prometheus_alert_target(context=context, params=params)
-        plan = compile_alert_plan(
-            candidate=candidate,
-            params=params,
-            target=target,
-            context=context,
-            snapshot=snapshot,
-            surface=PROMQL_SURFACE,
-        )
-    except (KeyError, ValueError) as exc:
-        raise CapabilityPreparationError(
-            "capability parameters are outside the allowed range"
-        ) from exc
-    return PreparedCapability(target=target, plan=plan)
-
 
 def _build_prometheus_alert_evidence(
     *,
@@ -313,7 +306,14 @@ PROMETHEUS_ALERT_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBin
     capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
     capability_version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
     entry_operation=OP_GET_ACTIVE_ALERTS,
-    planner=_prepare_prometheus_alert,
+    input_binding=bind_capability_input(
+        params_type=PrometheusAlertParams,
+        input_schema_ref=PROMETHEUS_ALERT_INPUT_SCHEMA_REF,
+        allowed_clarification_fields=PROMETHEUS_ALERT_CLARIFICATION_FIELDS,
+        slot_verifier=verify_prometheus_alert_slots,
+        planner=_plan_prometheus_alert,
+        confirmed_slot_projector=project_prometheus_alert_confirmed_slots,
+    ),
     assessor=assess_prometheus_alert,
     renderer=render_prometheus_alert,
     execution=CapabilityExecutionBinding(
@@ -325,40 +325,6 @@ PROMETHEUS_ALERT_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBin
         evidence_builder=_build_prometheus_alert_evidence,
     ),
 )
-
-
-def _prepare_asset_inventory(
-    *,
-    candidate: Candidate,
-    draft: IntentDraft,
-    context: RequestContext,
-    as_of: dt.datetime,
-    snapshot: CapabilitySnapshot,
-) -> PreparedCapability:
-    if draft.missing:
-        raise CapabilityPreparationError(
-            "capability parameters are outside the allowed range"
-        )
-    try:
-        params = AssetLookupParams(
-            asset_id=draft.slots.get("asset_id"),
-            hostname=draft.slots.get("hostname"),
-            ip=draft.slots.get("ip"),
-        )
-        target = resolve_asset_target(context=context, params=params)
-        plan = compile_asset_plan(
-            candidate=candidate,
-            params=params,
-            target=target,
-            context=context,
-            snapshot=snapshot,
-        )
-    except ValueError as exc:
-        raise CapabilityPreparationError(
-            "capability parameters are outside the allowed range"
-        ) from exc
-    return PreparedCapability(target=target, plan=plan)
-
 
 def _build_asset_inventory_evidence(
     *,
@@ -383,7 +349,14 @@ ASSET_INVENTORY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBind
     capability_id=ASSET_INVENTORY_CAPABILITY_ID,
     capability_version=ASSET_INVENTORY_CAPABILITY_VERSION,
     entry_operation=OP_LOOKUP_ASSET,
-    planner=_prepare_asset_inventory,
+    input_binding=bind_capability_input(
+        params_type=AssetLookupParams,
+        input_schema_ref=ASSET_INVENTORY_INPUT_SCHEMA_REF,
+        allowed_clarification_fields=ASSET_CLARIFICATION_FIELDS,
+        slot_verifier=verify_asset_lookup_slots,
+        planner=_plan_asset_inventory,
+        confirmed_slot_projector=project_asset_lookup_confirmed_slots,
+    ),
     assessor=assess_asset_inventory,
     renderer=render_asset_inventory,
     execution=CapabilityExecutionBinding(
