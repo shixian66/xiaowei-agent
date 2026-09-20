@@ -140,6 +140,7 @@ from xiaowei_agent.persistence.store import (
     TaskStore,
     TransitionCommand,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionError
 from xiaowei_agent.planning.slot_verification import (
     SlotVerificationError,
     require_confirmed_projection,
@@ -421,6 +422,9 @@ class XiaoweiRuntime:
                 raise _ClarificationTerminalizedError
             plan = prepared.plan
             target = prepared.target
+            parent_confirmed_slots = (
+                None if clarification is None else clarification.confirmed_slots
+            )
             if _plan_contains_restricted_read(plan):
                 terminal = _task_outcome(
                     task_id=grant.task_id,
@@ -429,11 +433,19 @@ class XiaoweiRuntime:
                 )
             elif record.status is TaskStatus.CREATED:
                 terminal = await self._runner.start(
-                    grant, plan=plan, target=target, context=context
+                    grant,
+                    plan=plan,
+                    target=target,
+                    context=context,
+                    parent_confirmed_slots=parent_confirmed_slots,
                 )
             elif record.status in {TaskStatus.PLANNING, TaskStatus.RUNNING}:
                 terminal = await self._runner.resume(
-                    grant, plan=plan, context=context, target=target
+                    grant,
+                    plan=plan,
+                    context=context,
+                    target=target,
+                    parent_confirmed_slots=parent_confirmed_slots,
                 )
             else:
                 raise LifecycleError("task status cannot be executed")
@@ -442,6 +454,12 @@ class XiaoweiRuntime:
         except (PersistenceUnavailableError, PersistenceIntegrityError):
             raise
         except PlanSchemaVersionUnsupportedError as exc:
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.REJECTED,
+                terminal_reason=exc.reason_code,
+            )
+        except DisclosureProjectionError as exc:
             terminal = _task_outcome(
                 task_id=grant.task_id,
                 status=TaskStatus.REJECTED,

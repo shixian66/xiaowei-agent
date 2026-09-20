@@ -18,9 +18,14 @@ from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationPayload,
     ClarificationReasonCode,
+    EffectClass,
     EvidenceEnvelope,
+    ExecutionDisclosure,
+    ExecutionDisclosureDisposition,
+    ExecutionDisclosureStep,
     ModelAdvisory,
     ModelInvocationProfile,
+    ReadClass,
     RenderPayload,
     TaskRecord,
     TaskStatus,
@@ -141,6 +146,55 @@ def test_task_view_uses_clarification_payload_for_clarification_terminal() -> No
 
     assert view.render is None
     assert view.clarification == payload
+
+
+def test_task_view_allows_disclosure_independent_of_terminal_projection() -> None:
+    disclosure = ExecutionDisclosure(
+        capability_id="starrocks.slow_query.diagnose",
+        capability_version="1.0.0",
+        environment_id="dev",
+        provider="starrocks",
+        resource_kind="cluster",
+        resource_ids=("starrocks-dev-1",),
+        pure_read_only=True,
+        plan_disposition=ExecutionDisclosureDisposition.BOUNDED_READ,
+        read_classes=(ReadClass.BOUNDED,),
+        has_side_effect=False,
+        steps=(
+            ExecutionDisclosureStep(
+                step_id="s1",
+                operation="list_slow_queries",
+                effect_class=EffectClass.READ,
+                read_class=ReadClass.BOUNDED,
+                side_effect=False,
+            ),
+        ),
+        external_target_access=True,
+    )
+
+    view = task_view_module.TaskView(
+        task_id="task-running",
+        status=TaskStatus.RUNNING,
+        disclosure=disclosure,
+        query_path="/v1/tasks/task-running",
+    )
+
+    assert view.render is None
+    assert view.clarification is None
+    assert view.disclosure == disclosure
+
+
+async def test_terminal_task_view_includes_disclosure_from_stored_plan() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    await harness.handle("最近30分钟有哪些慢查询")
+
+    view = await harness.runtime.query_task(lookup=harness.lookup)
+
+    assert view.disclosure is not None
+    assert view.disclosure.capability_id == "starrocks.slow_query.diagnose"
+    assert view.disclosure.environment_id == harness.context.environment_id
+    assert view.disclosure.provider == "starrocks"
+    assert view.disclosure.plan_disposition is ExecutionDisclosureDisposition.BOUNDED_READ
 
 
 def test_task_view_rejects_mismatched_render_and_clarification_shapes() -> None:

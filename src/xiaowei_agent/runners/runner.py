@@ -4,6 +4,7 @@ from typing import Protocol
 
 from xiaowei_agent.contracts import (
     ApprovalRequest,
+    ConfirmedSlot,
     ExecutionPlan,
     ExternalInput,
     RequestContext,
@@ -70,6 +71,7 @@ class WorkflowRunner(Protocol):
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome: ...
 
     async def resume(
@@ -81,4 +83,5 @@ class WorkflowRunner(Protocol):
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome: ...

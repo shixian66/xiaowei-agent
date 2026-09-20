@@ -14,6 +14,7 @@ from xiaowei_agent.contracts import (
     SqlSurface,
     ToolResult,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionBinding
 
 
 class StepEvidenceBuilder(Protocol):
@@ -37,6 +38,7 @@ class CapabilityExecutionBinding:
 
     capability_id: str
     capability_version: str
+    disclosure: DisclosureProjectionBinding
     policy_profile: PolicyProfile
     sql_surface: SqlSurface | None
     promql_surface: PromqlSurface | None

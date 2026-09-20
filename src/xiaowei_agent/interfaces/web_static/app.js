@@ -53,6 +53,8 @@ const elements = Object.freeze({
   progress: document.querySelector("#progress-card"),
   result: document.querySelector("#result-card"),
   answer: document.querySelector("#result-answer"),
+  disclosureBlock: document.querySelector("#disclosure-block"),
+  disclosure: document.querySelector("#result-disclosure"),
   sections: document.querySelector("#result-sections"),
   nextBlock: document.querySelector("#next-steps-block"),
   nextSteps: document.querySelector("#result-next-steps"),
@@ -241,12 +243,34 @@ async function loadTasks({ append = false } = {}) {
 
 function clearResult() {
   elements.answer.textContent = "";
+  elements.disclosure.replaceChildren();
   elements.sections.replaceChildren();
   elements.nextSteps.replaceChildren();
   elements.refs.replaceChildren();
   setVisible(elements.nextBlock, false);
   setVisible(elements.refsBlock, false);
+  setVisible(elements.disclosureBlock, false);
   setVisible(elements.result, false);
+}
+
+function renderDisclosure(disclosure) {
+  if (!disclosure || typeof disclosure !== "object") {
+    return;
+  }
+  const resourceIds = Array.isArray(disclosure.resource_ids) ? disclosure.resource_ids.join(",") : "—";
+  const rows = [
+    ["能力", `${text(disclosure.capability_id)}@${text(disclosure.capability_version)}`],
+    ["环境", text(disclosure.environment_id)],
+    ["目标", `${text(disclosure.provider)}/${text(disclosure.resource_kind)}/${resourceIds}`],
+    ["计划分类", text(disclosure.plan_disposition)],
+    ["外部目标访问", disclosure.external_target_access === true ? "true" : "false"],
+  ];
+  for (const [label, value] of rows) {
+    const item = document.createElement("li");
+    item.textContent = `${label}：${value}`;
+    elements.disclosure.append(item);
+  }
+  setVisible(elements.disclosureBlock, true);
 }
 
 function appendReferences(parent, references) {
@@ -321,6 +345,7 @@ function renderTaskDetail(task) {
   if (terminal) {
     elements.pollingState.textContent = "已停止轮询";
     renderSafeResult(task.render);
+    renderDisclosure(task.disclosure);
     if (canContinue && requestedParentTaskId === task.task_id) {
       setParentContext(task.task_id);
       requestedParentTaskId = null;

@@ -4,7 +4,7 @@
 要求的错误分析闭环的机器可验收部分。没有它，"阅读 trace → 归因到具体阶段"就只是
 一句文档要求。
 
-十个阶段中，Runner 覆盖 ADMISSION / GATEWAY / EVIDENCE / LIFECYCLE 四个；
+十一个阶段中，Runner 覆盖 DISCLOSURE / ADMISSION / GATEWAY / EVIDENCE / LIFECYCLE 五个；
 MODEL / INTENT / RESOLVER / PLANNER / REFLECTION / RENDERING 由 Runtime 发射，
 在 T12 与本文件的用例合并成端到端断言。
 """
@@ -142,6 +142,7 @@ async def test_a_successful_run_emits_the_runner_stages_in_order() -> None:
     assert stages == [
         PipelineStage.LIFECYCLE,
         PipelineStage.LIFECYCLE,
+        PipelineStage.DISCLOSURE,
         PipelineStage.ADMISSION,
         PipelineStage.GATEWAY,
         PipelineStage.EVIDENCE,
@@ -181,6 +182,7 @@ async def test_successful_run_routes_each_event_exactly_once() -> None:
     ]
     assert len({event.event_id for event in stored}) == len(stored)
     assert logs.deliveries == [
+        Delivery.COMMAND_COMMITTED,
         Delivery.COMMAND_COMMITTED,
         Delivery.COMMAND_COMMITTED,
         Delivery.COMMAND_COMMITTED,

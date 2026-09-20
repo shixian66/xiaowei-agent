@@ -79,6 +79,22 @@ def test_continue_controls_are_limited_to_clarification_required_tasks() -> None
     assert "setVisible(elements.continueTask, terminal)" not in detail_script
 
 
+def test_execution_disclosure_is_rendered_as_text_only() -> None:
+    index = (_STATIC / "index.html").read_text(encoding="utf-8")
+    detail = (_STATIC / "detail.html").read_text(encoding="utf-8")
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+    detail_script = (_STATIC / "detail.js").read_text(encoding="utf-8")
+
+    assert 'id="disclosure-block"' in index
+    assert 'id="result-disclosure"' in index
+    assert 'id="detail-disclosure-block"' in detail
+    assert 'id="detail-disclosure"' in detail
+    assert "function renderDisclosure(disclosure)" in app_script
+    assert "function renderDisclosure(disclosure)" in detail_script
+    assert "item.textContent = `${label}：${value}`" in app_script
+    assert "item.textContent = `${label}：${value}`" in detail_script
+
+
 def test_no_script_sends_the_browser_to_an_oauth_only_entry() -> None:
     """飞书可能整个不装配，那时 ``/oauth/feishu/start`` 根本没有注册。
 

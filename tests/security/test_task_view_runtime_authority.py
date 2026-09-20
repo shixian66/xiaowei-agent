@@ -44,6 +44,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.contracts.capability
     xiaowei_agent.contracts.channel
     xiaowei_agent.contracts.clarification
+    xiaowei_agent.contracts.disclosure
     xiaowei_agent.contracts.enums
     xiaowei_agent.contracts.errors
     xiaowei_agent.contracts.evidence
@@ -110,6 +111,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.planning.assets.params
     xiaowei_agent.planning.assets.slots
     xiaowei_agent.planning.canonical
+    xiaowei_agent.planning.disclosure
     xiaowei_agent.planning.prometheus
     xiaowei_agent.planning.prometheus.compiler
     xiaowei_agent.planning.prometheus.params
@@ -216,6 +218,7 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
         "create_clarification_child",
         "create_task",
         "get",
+        "get_submission",
     }
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_plans") == {"load"}
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_ledger") == {"load"}

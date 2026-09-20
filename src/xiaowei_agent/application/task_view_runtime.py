@@ -16,7 +16,9 @@ from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     AnswerabilityVerdict,
     ClarificationPayload,
+    ConfirmedSlot,
     EvidenceEnvelope,
+    ExecutionDisclosure,
     ExecutionPlan,
     MissingItem,
     ModelAdvisory,
@@ -40,6 +42,10 @@ from xiaowei_agent.persistence.store import (
     IdempotencyConflictError,
     TaskNotFoundError,
     TaskStore,
+)
+from xiaowei_agent.planning.disclosure import (
+    DisclosureProjectionError,
+    project_execution_disclosure,
 )
 from xiaowei_agent.rendering.generic import (
     render_clarification_payload,
@@ -131,6 +137,7 @@ class TaskViewRuntime:
         """从已由调用方安全读取的任务 winner 生成同一任务投影。"""
         payload: RenderPayload | None = None
         clarification = None
+        disclosure = await self.project_disclosure(record=record)
         if record.status in TERMINAL_STATUSES:
             if record.status is TaskStatus.CLARIFICATION_REQUIRED:
                 clarification = await self.project_clarification(record=record)
@@ -141,8 +148,46 @@ class TaskViewRuntime:
             status=record.status,
             render=payload,
             clarification=clarification,
+            disclosure=disclosure,
             query_path=task_query_path(record.task_id),
         )
+
+    async def project_disclosure(self, *, record: TaskRecord) -> ExecutionDisclosure | None:
+        """Rebuild the disclosure from the stored plan/target, if one exists."""
+        try:
+            stored = await self._plans.load(task_id=record.task_id)
+        except PlanNotFoundError:
+            return None
+        try:
+            binding = self._bindings.runtime_for_plan(plan=stored.plan)
+            return project_execution_disclosure(
+                plan=stored.plan,
+                target=stored.target,
+                binding=binding.execution.disclosure,
+                parent_confirmed_slots=await self._parent_confirmed_slots(record=record),
+            )
+        except (CapabilityBindingError, DisclosureProjectionError):
+            return None
+
+    async def _parent_confirmed_slots(
+        self, *, record: TaskRecord
+    ) -> tuple[ConfirmedSlot, ...]:
+        if self._clarification_records is None:
+            return ()
+        submission = await self._tasks.get_submission(
+            lookup=TaskLookup(
+                task_id=record.task_id,
+                tenant_id=record.tenant_id,
+                environment_id=record.environment_id,
+            )
+        )
+        parent_id = submission.clarification_parent_task_id
+        if parent_id is None:
+            return ()
+        parent = await self._clarification_records.load(task_id=parent_id)
+        if parent is None:
+            return ()
+        return parent.confirmed_slots
 
     async def project_clarification(self, *, record: TaskRecord) -> ClarificationPayload:
         """从 ClarificationRecord 重建澄清投影；缺失即 fail-closed。"""

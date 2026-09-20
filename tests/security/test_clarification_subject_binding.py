@@ -258,6 +258,13 @@ async def test_runtime_rejects_projector_that_drops_confirmed_slots_before_gatew
                 PROMETHEUS_ALERT_BINDING.input_binding,
                 confirmed_slot_projector=dropping_projector,
             ),
+            execution=replace(
+                PROMETHEUS_ALERT_BINDING.execution,
+                disclosure=replace(
+                    PROMETHEUS_ALERT_BINDING.execution.disclosure,
+                    confirmed_slot_projector=dropping_projector,
+                ),
+            ),
         ),
     )
     parent = await harness.runtime.submit_task(

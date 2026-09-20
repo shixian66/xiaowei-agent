@@ -324,6 +324,14 @@ def test_runner_implementation_keeps_the_protocol_keyword_arguments() -> None:
         ), method
 
 
+def test_runner_protocol_declares_optional_parent_snapshot_keyword() -> None:
+    for method in ("start", "resume"):
+        params = inspect.signature(getattr(WorkflowRunner, method)).parameters
+        assert "parent_confirmed_slots" in params
+        assert params["parent_confirmed_slots"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["parent_confirmed_slots"].default is None
+
+
 def test_the_real_runner_keeps_the_protocol_signature() -> None:
     """**真实** Runner 必须与契约逐参数一致，不只是 fake。
 

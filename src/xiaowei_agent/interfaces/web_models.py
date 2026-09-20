@@ -19,6 +19,7 @@ from xiaowei_agent.contracts import (
     AwareDatetime,
     ChannelPermission,
     ClarificationPayload,
+    ExecutionDisclosure,
     NonEmptyText,
     ProviderName,
     RenderPayload,
@@ -297,6 +298,7 @@ class WebTaskDetail(_WebModel):
     detail_path: StrictStr
     render: RenderPayload | None = None
     clarification: ClarificationPayload | None = None
+    disclosure: ExecutionDisclosure | None = None
     clarification_parent_task_id: TaskId | None = None
 
     @model_validator(mode="after")
@@ -317,6 +319,7 @@ class WebTaskDetail(_WebModel):
             detail_path=web_task_detail_path(view.task_id),
             render=view.render,
             clarification=view.clarification,
+            disclosure=view.disclosure,
             clarification_parent_task_id=accessible.clarification_parent_task_id,
         )
 

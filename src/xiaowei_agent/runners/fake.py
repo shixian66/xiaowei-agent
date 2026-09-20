@@ -10,6 +10,7 @@ from typing import Final
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ApprovalRequest,
+    ConfirmedSlot,
     ExecutionPlan,
     ExternalInput,
     RequestContext,
@@ -59,6 +60,7 @@ class ScriptedRunner:
         plan: ExecutionPlan,
         target: ResolvedTarget,
         context: RequestContext,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome:
         """按脚本走到终态。
 
@@ -68,6 +70,7 @@ class ScriptedRunner:
         与之相对，真实 Runner 消费它们全部；下面 ``resume`` 的 ``external_input``
         同理由 ``DeterministicStepRunner`` 承担实际校验。
         """
+        _ = parent_confirmed_slots
         return await self._drive(
             grant,
             path=(TaskStatus.PLANNING, TaskStatus.RUNNING),
@@ -83,7 +86,9 @@ class ScriptedRunner:
         context: RequestContext,
         target: ResolvedTarget,
         approval: ApprovalRequest | None = None,
+        parent_confirmed_slots: tuple[ConfirmedSlot, ...] | None = None,
     ) -> TaskOutcome:
+        _ = parent_confirmed_slots
         return await self._drive(grant, path=(TaskStatus.RUNNING,), context=context)
 
     async def _drive(
