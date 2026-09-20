@@ -16,6 +16,13 @@ import pytest
 from scripts import compose_smoke
 from scripts.compose_smoke import ComposeSession, SmokeError, project_name, run_smoke
 
+_I1_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "evals"
+    / "fixtures"
+    / "i1_interaction_cases.json"
+)
+
 
 class RecordingRunner:
     def __init__(self, *, collision_at: int | None = None) -> None:
@@ -383,6 +390,28 @@ def test_project_names_have_a_full_random_uuid_suffix() -> None:
     second = project_name()
     assert first != second
     assert re.fullmatch(r"xiaowei_m5_smoke_[0-9a-f]{32}", first)
+
+
+def test_compose_smoke_uses_only_i1_executable_fake_recording_cases() -> None:
+    data = json.loads(_I1_FIXTURE.read_text(encoding="utf-8"))
+    executable = {
+        case["text"]
+        for case in data["cases"]
+        if case["category"] == "l1_runtime_success"
+    }
+    unsupported = {
+        "".join(case.get("text_parts", (case.get("text", ""),)))
+        for case in data["cases"]
+        if case["category"] == "l0_unsupported_runtime"
+    }
+
+    smoke_texts = {
+        compose_smoke._TEXT,
+        compose_smoke._PROMETHEUS_TEXT,
+        compose_smoke._ASSET_TEXT,
+    }
+    assert smoke_texts <= executable
+    assert smoke_texts.isdisjoint(unsupported)
 
 
 def test_compose_session_uses_one_resolved_command_for_derived_sessions() -> None:

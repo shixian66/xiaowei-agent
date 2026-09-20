@@ -26,6 +26,12 @@ from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthServic
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 
 _SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
+_I1_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "evals"
+    / "fixtures"
+    / "i1_interaction_cases.json"
+)
 
 
 class _Messages:
@@ -140,22 +146,38 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _group_event() -> FeishuMessageEvent:
+def _group_event(
+    *,
+    text: str = "@_user_1 检查最近三十分钟慢查询",
+    event_id: str = "event-group-1",
+    message_id: str = "incoming-message-1",
+) -> FeishuMessageEvent:
     return FeishuMessageEvent(
         schema="2.0",
-        event_id="event-group-1",
+        event_id=event_id,
         event_type="im.message.receive_v1",
         app_id="offline_test_app",
         tenant_key="offline-tenant",
         sender_type="user",
         sender_subject_ref="subject-alice",
-        message_id="incoming-message-1",
+        message_id=message_id,
         chat_id="chat-operations",
         chat_type="group",
         message_type="text",
-        text="@_user_1 检查最近三十分钟慢查询",
+        text=text,
         mentions=(FeishuMention(key="@_user_1", subject_ref="bot-open-id"),),
     )
+
+
+def _i1_rejected_text() -> str:
+    data = json.loads(_I1_FIXTURE.read_text(encoding="utf-8"))
+    case = next(
+        item
+        for item in data["cases"]
+        if item["category"] == "l0_unsupported_runtime"
+        and "restricted_select" in item["tags"]
+    )
+    return str(case["text"])
 
 
 async def _web_session(auth: WebAuthService, *, code: str) -> str:
@@ -317,3 +339,110 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     assert await worker.poll_once() == 1
     assert await projection.service.poll_once() == 0
     assert [item[0] for item in messages.user_sends] == ["subject-alice"]
+
+
+async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
+    clean_database: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clock,
+) -> None:
+    settings = _settings(tmp_path)
+    membership = _Membership()
+    monkeypatch.setattr(
+        local_stack_module,
+        "create_database_engine",
+        lambda _: clean_database,
+    )
+    full = await build_postgres_local_stack(
+        settings=settings,
+        clock=clock,
+        monotonic=lambda: 0.0,
+    )
+    listener = await build_postgres_feishu_listener_stack(
+        settings=settings,
+        clock=clock,
+        transport=RecordingFeishuInboundTransport(),
+        credentials=ProviderCredentials(
+            feishu_app_id="offline_test_app",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
+    )
+    web = await build_postgres_web_stack(
+        settings=settings,
+        oauth=_OAuth(),
+        membership=membership,
+        clock=clock,
+    )
+    worker = WorkerLoop(
+        runtime=full.runtime,
+        task_store=full.task_store,
+        clock=clock,
+        monotonic=lambda: 0.0,
+        settings=settings,
+        sleep=asyncio.sleep,
+    )
+    web_app = create_app(
+        auth=web.auth,
+        local_admin_auth=web.local_admin_auth,
+        oauth_available=web.oauth_available,
+        provider_state=web.provider_state,
+        settings=settings,
+        readiness=web.readiness,
+        task_access=web.task_access_service,
+        submissions=web.submission_service,
+        clock=clock,
+        policy_revision=web.policy_revision,
+    )
+    rejected_text = _i1_rejected_text()
+
+    assert await listener.listener.handle_event(
+        event=_group_event(
+            text=f"@_user_1 {rejected_text}",
+            event_id="event-rejected-feishu",
+            message_id="incoming-rejected-feishu",
+        )
+    ) is True
+    group_page = await listener.task_store.list_tasks_for_actor(
+        query=ActorTaskPageQuery(
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+            actor="alice",
+            limit=10,
+        )
+    )
+    feishu_task_id = group_page.items[0].record.task_id
+    assert await worker.poll_once() == 1
+
+    alice_cookie = await _web_session(web.auth, code="alice-code")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
+        base_url="https://ops.example.test",
+        cookies={_SESSION_COOKIE_NAME: alice_cookie},
+    ) as alice_client:
+        feishu_detail = await alice_client.get(f"/app/api/tasks/{feishu_task_id}")
+        me = await alice_client.get("/app/api/me")
+        web_submit = await alice_client.post(
+            "/app/api/tasks",
+            json={
+                "text": rejected_text,
+                "client_submission_id": "web-i1-rejected-case",
+            },
+            headers={
+                "origin": "https://ops.example.test",
+                "x-csrf-token": me.json()["csrf_token"],
+            },
+        )
+        assert web_submit.status_code == 202
+        web_task_id = web_submit.json()["task_id"]
+        assert await worker.poll_once() == 1
+        web_detail = await alice_client.get(f"/app/api/tasks/{web_task_id}")
+
+    assert feishu_detail.status_code == 200
+    assert web_detail.status_code == 200
+    feishu_json = feishu_detail.json()
+    web_json = web_detail.json()
+    assert feishu_json["status"] == web_json["status"] == TaskStatus.REJECTED.value
+    assert feishu_json["render"] == web_json["render"]
+    assert feishu_json.get("disclosure") is None
+    assert web_json.get("disclosure") is None
