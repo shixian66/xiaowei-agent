@@ -140,6 +140,7 @@ from xiaowei_agent.persistence.store import (
     TaskStore,
     TransitionCommand,
 )
+from xiaowei_agent.planning.disclosure import DisclosureProjectionError
 from xiaowei_agent.planning.slot_verification import (
     SlotVerificationError,
     require_confirmed_projection,
@@ -453,6 +454,12 @@ class XiaoweiRuntime:
         except (PersistenceUnavailableError, PersistenceIntegrityError):
             raise
         except PlanSchemaVersionUnsupportedError as exc:
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.REJECTED,
+                terminal_reason=exc.reason_code,
+            )
+        except DisclosureProjectionError as exc:
             terminal = _task_outcome(
                 task_id=grant.task_id,
                 status=TaskStatus.REJECTED,

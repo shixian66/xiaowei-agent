@@ -81,10 +81,7 @@ from xiaowei_agent.persistence.store import (
     TransitionCommand,
 )
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
-from xiaowei_agent.planning.disclosure import (
-    DisclosureProjectionError,
-    project_execution_disclosure,
-)
+from xiaowei_agent.planning.disclosure import project_execution_disclosure
 from xiaowei_agent.runners.binding import ExecutionBindingProvider
 from xiaowei_agent.runners.runner import WorkflowPaused
 from xiaowei_agent.tools.gateway import MalformedAdapterResponseError
@@ -738,7 +735,7 @@ class DeterministicStepRunner:
                 binding=execution.disclosure,
                 parent_confirmed_slots=parent_confirmed_slots or (),
             )
-        except Exception as exc:
+        except Exception:
             await self._emit(
                 stage=PipelineStage.DISCLOSURE,
                 outcome=StageOutcome.FAILED,
@@ -748,9 +745,7 @@ class DeterministicStepRunner:
                 attempt_number=grant.attempt_number,
                 delivery=Delivery.LOG_AND_DURABLE,
             )
-            if isinstance(exc, DisclosureProjectionError):
-                raise
-            raise DisclosureProjectionError from None
+            raise
         await self._emit(
             stage=PipelineStage.DISCLOSURE,
             outcome=StageOutcome.OK,

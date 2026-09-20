@@ -17,6 +17,7 @@ from tests.fakes.recordings import (
 )
 from tests.fakes.runner import RunnerHarness
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingError
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST
 from xiaowei_agent.contracts import (
     AttemptIntent,
@@ -976,7 +977,7 @@ def test_step_arguments_cannot_override_the_declared_gateway() -> None:
 async def test_unknown_capability_key_is_rejected_before_gateway(field: str) -> None:
     harness = RunnerHarness(GOLDEN)
     harness.plan = harness.plan.model_copy(update={field: "unknown"})
-    with pytest.raises(DisclosureProjectionError):
+    with pytest.raises(CapabilityBindingError):
         await harness.start()
     assert harness.sink.events[-1].stage is PipelineStage.DISCLOSURE
     assert harness.sink.events[-1].outcome is StageOutcome.FAILED

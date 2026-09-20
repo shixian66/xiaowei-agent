@@ -52,6 +52,8 @@ from xiaowei_agent.persistence import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.store import TaskAttemptCommand, TransitionCommand
+from xiaowei_agent.planning.disclosure import DisclosureProjectionError
+from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 from xiaowei_agent.runners.deterministic import DriftError, LifecycleError
 from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
 
@@ -692,6 +694,50 @@ async def _execute_with_failure(failure: Exception) -> tuple[RuntimeHarness, _Ra
     return harness, runner
 
 
+async def _begin_runtime_dispatch(harness: RuntimeHarness) -> Any:
+    submission = harness.submission("最近30分钟有哪些慢查询")
+    view = await harness.runtime.submit_task(submission=submission)
+    harness.task_id = view.task_id
+    attempt = await harness.store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=view.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-1",
+            ttl_seconds=60,
+            trace_id=submission.context.trace_id,
+        )
+    )
+    assert attempt.grant is not None and attempt.submission is not None
+    return attempt
+
+
+class _RuntimeDisclosureBindingDrift:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+
+    def execution_for(self, *, plan: object) -> CapabilityExecutionBinding:
+        raise self.failure
+
+
+class _RuntimeProjectionFailureBindings:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def execution_for(self, *, plan: object) -> CapabilityExecutionBinding:
+        execution = self._inner.execution_for(plan=plan)  # type: ignore[attr-defined]
+
+        def _raise(**_: object) -> tuple[object, ...]:
+            raise RuntimeError("projection internals must not leak")
+
+        return replace(
+            execution,
+            disclosure=replace(
+                execution.disclosure,
+                confirmed_slot_projector=_raise,
+            ),
+        )
+
+
 @pytest.mark.parametrize("failure", [PermissionError(), SpecResolutionError("constant")])
 async def test_deterministic_execution_rejection_is_terminal_once(
     failure: Exception,
@@ -701,6 +747,46 @@ async def test_deterministic_execution_rejection_is_terminal_once(
     assert runner.calls == 1
     assert record.status is TaskStatus.REJECTED
     assert record.task_failure_count == 0
+
+
+async def test_runtime_rejects_disclosure_binding_drift_before_gateway() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    attempt = await _begin_runtime_dispatch(harness)
+    harness.runtime._runner._bindings = _RuntimeDisclosureBindingDrift(
+        CapabilityBindingError("plan has no exact binding")
+    )
+
+    outcome = await harness.runtime.execute_task(
+        grant=attempt.grant,
+        submission=attempt.submission,
+    )
+
+    record = await harness.store.get(lookup=harness.lookup)
+    assert outcome.status is TaskStatus.REJECTED
+    assert record.status is TaskStatus.REJECTED
+    assert record.task_failure_count == 0
+    assert harness.gateway.invocations == 0
+
+
+async def test_runtime_rejects_disclosure_projection_failure_with_reason() -> None:
+    harness = RuntimeHarness(GOLDEN)
+    attempt = await _begin_runtime_dispatch(harness)
+    harness.runtime._runner._bindings = _RuntimeProjectionFailureBindings(
+        harness.runtime._runner._bindings
+    )
+
+    outcome = await harness.runtime.execute_task(
+        grant=attempt.grant,
+        submission=attempt.submission,
+    )
+
+    record = await harness.store.get(lookup=harness.lookup)
+    assert outcome.status is TaskStatus.REJECTED
+    assert outcome.terminal_reason == DisclosureProjectionError.reason_code
+    assert record.status is TaskStatus.REJECTED
+    assert record.terminal_reason == DisclosureProjectionError.reason_code
+    assert record.task_failure_count == 0
+    assert harness.gateway.invocations == 0
 
 
 @pytest.mark.parametrize(
