@@ -192,8 +192,8 @@ _I0_TRUTH_DOC_TERMS = {
     ),
     "README.md": (
         "智能交互入口 I0-DOC 已绑定",
-        "I1-A–I1-D 已合入 `main`",
-        "正在开发 I2-A 限定领域普通对话通道",
+        "I1-A–I1-D 与 I2-A 已合入 `main`",
+        "正在开发 I2-B 能力目录对话",
         "`knowledge_lookup` 与 `log_analysis` 仍保持拒绝",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
@@ -255,10 +255,14 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     readme_i0_status = (
         "> 智能交互入口 I0-DOC 已绑定 "
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> I1-A–I1-D 已合入 `main`；当前工作树正在开发 I2-A 限定领域普通对话通道。该切片只把\n"
-        "> `conversation` 从 Router 的 pre-plan rejection 改为固定、无工具、无来源引用的"
-        "确定性回复；\n"
-        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-A "
+        "> I1-A–I1-D 与 I2-A 已合入 `main`；当前工作树正在开发 I2-B 能力目录对话。"
+        "该切片把普通对话的\n"
+        "> 回答从一句固定文案改为**由当前 `CapabilitySnapshot` 确定性投影出来的能力目录**："
+        "逐条列出\n"
+        "> 已注册能力、操作、`read_class` 与所经 gateway，并带上快照标识作为来源；"
+        "回答只由声明决定，\n"
+        "> 与用户文本无关，仍不调用工具、不访问外部系统、不读取历史。\n"
+        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-B "
         "写成真实模型、\n"
         "> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
     )
@@ -268,7 +272,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "正在开发 I2-A 限定领域普通对话通道" in readme_missing["README.md"]
+    assert "正在开发 I2-B 能力目录对话" in readme_missing["README.md"]
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -301,9 +305,12 @@ def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
 
 _I1D_TRUTH_DOC_TERMS = {
     "README.md": (
-        "I1-A–I1-D 已合入 `main`",
-        "正在开发 I2-A 限定领域普通对话通道",
-        "不能把 I2-A 写成真实模型",
+        "I1-A–I1-D 与 I2-A 已合入 `main`",
+        "正在开发 I2-B 能力目录对话",
+        "不能把 I2-B 写成真实模型",
+        # 能力目录是**投影**出来的，不是模型答的；README 必须说清这一点，
+        # 否则"小维会介绍自己的能力"很容易被读成模型自由问答已经开放。
+        "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
     ),
     "AGENT_HANDOFF.md": (
         "I1-D Eval/closure",
@@ -346,3 +353,65 @@ def test_i1d_truth_docs_do_not_revive_stale_i1c_scope() -> None:
         if phrase in (_ROOT / name).read_text(encoding="utf-8")
     ]
     assert not found, f"I1-D 真相文档仍含旧范围口径：{found}"
+
+
+_I2B_TRUTH_DOC_TERMS = {
+    # README 的"目标能力"段和顶部状态块是**两处独立叙述**，只钉住顶部时下面那段可以
+    # 长期停在旧口径上——I2-B 就是这么漏的。两段各自钉一条。
+    "README.md": (
+        "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
+        "I2 的普通对话只返回由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
+    ),
+    "ARCHITECTURE.md": (
+        "conversation: deterministic capability-catalog response",
+        "回答与用户文本无关",
+    ),
+    "docs/adr/ADR-017-intelligent-interaction-and-clarification.md": (
+        "回答只由快照决定，不接受用户文本",
+        "投影的是当前快照，不是任务创建时的快照",
+        "空快照必须明说",
+    ),
+    "AGENT_HANDOFF.md": (
+        "I2-B 能力目录对话",
+        "投影函数签名里没有用户文本入参",
+    ),
+}
+
+_STALE_I2_CONVERSATION_PHRASES = (
+    "I2-A 的普通对话只返回限定领域固定回复",
+    "只返回固定、限定领域的确定性回复",
+    "TaskView 从已落库\n  `TaskSubmission` 重建固定回复",
+    "普通对话只返回固定回复",
+    # `respond` 的定义句本身也曾停在"固定回复"上；枚举定义是最容易被当成
+    # "只是术语说明"而漏掉的一处，所以单列。
+    "仅用于限定领域普通对话的\n无工具固定回复",
+)
+
+
+def test_i2b_truth_docs_describe_the_capability_catalog_answer() -> None:
+    missing = {
+        name: [
+            term
+            for term in terms
+            if term not in (_ROOT / name).read_text(encoding="utf-8")
+        ]
+        for name, terms in _I2B_TRUTH_DOC_TERMS.items()
+    }
+    missing = {name: terms for name, terms in missing.items() if terms}
+    assert not missing, f"I2-B 真相文档未同步能力目录口径：{missing}"
+
+
+def test_i2b_truth_docs_do_not_revive_the_fixed_answer_scope() -> None:
+    """旧口径不能回潮。
+
+    "固定回复"和"能力目录"是两个**不同的产品承诺**：前者读起来像"小维只会说一句
+    客套话"，后者是"小维会把自己的声明摊开给你看"。文档停在前者，读者就会低估已经
+    交付的东西，也看不出这条通道现在有来源引用。
+    """
+    found = [
+        (name, phrase)
+        for name in _I2B_TRUTH_DOC_TERMS
+        for phrase in _STALE_I2_CONVERSATION_PHRASES
+        if phrase in (_ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not found, f"真相文档仍含 I2-A 固定回复口径：{found}"

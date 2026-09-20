@@ -737,13 +737,14 @@ async def build_postgres_task_view_stack(
         clarification_records = PostgresClarificationRecordStore(
             engine=engine, clock=clock
         )
-        _, bindings = _build_capability_bindings()
+        snapshot, bindings = _build_capability_bindings()
         return TaskViewStack(
             runtime=TaskViewRuntime(
                 task_store=task_store,
                 plan_store=plan_store,
                 ledger=ledger,
                 bindings=bindings,
+                snapshot=snapshot,
                 clarification_records=clarification_records,
                 model_artifacts=model_artifacts,
                 model_profile=ModelInvocationProfile(),
@@ -801,12 +802,13 @@ async def build_postgres_feishu_listener_stack(
             engine=engine, clock=clock
         )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
-        _, bindings = _build_capability_bindings()
+        snapshot, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
@@ -890,12 +892,13 @@ async def build_postgres_channel_worker_stack(
             engine=engine, clock=clock
         )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
-        _, bindings = _build_capability_bindings()
+        snapshot, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
@@ -997,12 +1000,13 @@ async def build_postgres_web_stack(
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
         provider_state = PostgresProviderStateStore(engine=engine, clock=clock)
-        _, bindings = _build_capability_bindings()
+        snapshot, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),

@@ -16,6 +16,7 @@ from xiaowei_agent.application.channel_access import (
     TaskListQuery,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelKind,
@@ -72,6 +73,7 @@ def _service(store: Any, channel_store: Any, memory_state: Any, membership: Any)
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     return TaskAccessService(
         runtime=runtime,
@@ -513,6 +515,7 @@ async def test_detail_reuses_the_authorized_record_for_projection(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     service = TaskAccessService(
         runtime=runtime,
@@ -539,6 +542,7 @@ async def test_detail_retries_when_status_changes_during_runtime_projection(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
 
     class AdvanceOnceRuntime:
@@ -591,6 +595,7 @@ async def test_detail_fails_closed_when_no_consistent_snapshot_can_be_formed(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
 
     class ContinuouslyChangingReads:

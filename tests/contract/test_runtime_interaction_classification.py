@@ -187,11 +187,29 @@ async def test_conversation_route_returns_bounded_answer_without_gateway_or_plan
     assert record.status is TaskStatus.SUCCEEDED
     assert queried.render == payload
     assert repeated == payload
-    assert "不会调用工具" in payload.answer
-    assert payload.refs == ()
+    assert "不调用工具" in payload.answer
     assert queried.disclosure is None
     assert harness.calls == []
     assert harness.approval_gate.calls == 0
     assert await harness.ledger.load(task_id=harness.task_id) == ()
     with pytest.raises(PlanNotFoundError):
         await harness.plan_store.load(task_id=harness.task_id)
+
+    # I2-B：回答就是当前能力快照，每条已注册能力各占一节，并带得回声明的 ref。
+    snapshot = harness.runtime._snapshot
+    assert payload.refs == (f"capability-snapshot:{snapshot.snapshot_id}",)
+    assert [section.title for section in payload.sections] == [
+        spec.capability_id for spec in snapshot.specs
+    ]
+    assert [section.refs for section in payload.sections] == [
+        (f"capability:{spec.capability_id}@{spec.version}",)
+        for spec in snapshot.specs
+    ]
+    # 每条能力的每个操作与它的 read_class 都必须出现：能力目录漏掉 read_class，
+    # 读者就无法从这份回答分辨"允许的读"和"会被 Admission 拒绝的读"。
+    for spec, section in zip(snapshot.specs, payload.sections, strict=True):
+        for operation in spec.operations:
+            assert operation.operation in section.body
+            assert operation.gateway in section.body
+            if operation.read_class is not None:
+                assert operation.read_class.value in section.body

@@ -14,6 +14,7 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionService,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import ChannelKind, ChannelPermission
 from xiaowei_agent.persistence.channel import BindTaskCommand
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
@@ -120,6 +121,7 @@ async def test_view_only_user_gets_real_route_403_without_submission(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     submissions = ChannelSubmissionService(
         runtime=runtime,
@@ -195,6 +197,7 @@ async def test_web_route_reuses_scoped_idempotency_and_conflict_semantics(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     channel_store = InMemoryChannelStore(clock=clock, state=memory_state)
     submissions = ChannelSubmissionService(
@@ -271,6 +274,7 @@ async def test_group_membership_is_rechecked_and_revocation_becomes_404(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     access = TaskAccessService(
         runtime=runtime,

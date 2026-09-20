@@ -18,6 +18,7 @@ from xiaowei_agent.application.channel_submission import (
     derive_channel_submission_references,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelKind,
@@ -112,6 +113,7 @@ def service(store, channel_store, memory_state):
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     class NeverMembership:
         async def is_current_group_member(self, **_: object) -> bool:
@@ -607,6 +609,7 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     service = ChannelSubmissionService(
         runtime=runtime,

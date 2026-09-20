@@ -15,6 +15,7 @@ from xiaowei_agent.application.model_advisory import (
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     AnswerabilityVerdict,
+    CapabilitySnapshot,
     ClarificationPayload,
     ConfirmedSlot,
     EvidenceEnvelope,
@@ -96,6 +97,7 @@ class TaskViewRuntime:
         plan_store: PlanStore,
         ledger: EvidenceLedger,
         bindings: CapabilityBindingRegistry,
+        snapshot: CapabilitySnapshot,
         clarification_records: ClarificationRecordStore | None = None,
         model_artifacts: ModelArtifactStore | None = None,
         model_profile: ModelInvocationProfile | None = None,
@@ -108,6 +110,9 @@ class TaskViewRuntime:
         self._plans = plan_store
         self._ledger = ledger
         self._bindings = bindings
+        # 必填而不是可选：I2-B 的普通对话回答**就是**这份快照。做成可选就会多出一条
+        # "装配漏了快照 → 对话任务投影不出内容"的静默路径。
+        self._snapshot = snapshot
         self._clarification_records = clarification_records
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
@@ -213,14 +218,9 @@ class TaskViewRuntime:
                 and record.terminal_reason == CONVERSATION_TERMINAL_REASON
                 and not evidences
             ):
-                submission = await self._tasks.get_submission(
-                    lookup=TaskLookup(
-                        task_id=record.task_id,
-                        tenant_id=record.tenant_id,
-                        environment_id=record.environment_id,
-                    )
-                )
-                return render_conversation_response(submission=submission)
+                # 不读 submission：回答只由能力快照决定，读一份不参与投影的用户文本
+                # 只会凭空多出一个失败面，并让"回答是否受用户文本影响"变得可疑。
+                return render_conversation_response(snapshot=self._snapshot)
             raise
         binding = self._bindings.runtime_for_plan(plan=stored.plan)
         verdict = assess_evidence(binding=binding, evidences=evidences)
