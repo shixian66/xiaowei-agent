@@ -19,8 +19,9 @@ _HEADER: Final[str] = """# 能力地图
 """
 
 _TABLE_HEAD: Final[str] = (
-    "| capability | version | domain | operation | gateway | effect_class | side_effect |\n"
-    "| --- | --- | --- | --- | --- | --- | --- |"
+    "| capability | version | domain | operation | gateway | effect_class "
+    "| read_class | side_effect |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- |"
 )
 
 
@@ -33,6 +34,9 @@ def render_capabilities_doc(snapshot: CapabilitySnapshot) -> str:
                 f"| `{spec.capability_id}` | `{spec.version}` | `{spec.domain}` "
                 f"| `{operation.operation}` | `{operation.gateway}` "
                 f"| `{operation.effect_class.value}` "
+                # read_class 决定一次读取是否被 Admission 放行（ADR-017 / I1-C）。
+                # 能力地图漏掉它，读者就无法从这份表分辨 BOUNDED 与 RESTRICTED。
+                f"| `{'-' if operation.read_class is None else operation.read_class.value}` "
                 f"| `{str(operation.side_effect).lower()}` |"
             )
     lines.extend(

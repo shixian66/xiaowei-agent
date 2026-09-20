@@ -192,8 +192,8 @@ _I0_TRUTH_DOC_TERMS = {
     ),
     "README.md": (
         "智能交互入口 I0-DOC 已绑定",
-        "I1-A–I1-D 已合入 `main`",
-        "正在开发 I2-A 限定领域普通对话通道",
+        "I1-A–I1-D 与 I2-A 已合入 `main`",
+        "正在开发 I2-B 能力目录对话",
         "`knowledge_lookup` 与 `log_analysis` 仍保持拒绝",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
@@ -255,10 +255,14 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     readme_i0_status = (
         "> 智能交互入口 I0-DOC 已绑定 "
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> I1-A–I1-D 已合入 `main`；当前工作树正在开发 I2-A 限定领域普通对话通道。该切片只把\n"
-        "> `conversation` 从 Router 的 pre-plan rejection 改为固定、无工具、无来源引用的"
-        "确定性回复；\n"
-        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-A "
+        "> I1-A–I1-D 与 I2-A 已合入 `main`；当前工作树正在开发 I2-B 能力目录对话。"
+        "该切片把普通对话的\n"
+        "> 回答从一句固定文案改为**由当前 `CapabilitySnapshot` 确定性投影出来的能力目录**："
+        "逐条列出\n"
+        "> 已注册能力、操作、`read_class` 与所经 gateway，并带上快照标识作为来源；"
+        "回答只由声明决定，\n"
+        "> 与用户文本无关，仍不调用工具、不访问外部系统、不读取历史。\n"
+        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-B "
         "写成真实模型、\n"
         "> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
     )
@@ -268,7 +272,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "正在开发 I2-A 限定领域普通对话通道" in readme_missing["README.md"]
+    assert "正在开发 I2-B 能力目录对话" in readme_missing["README.md"]
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -301,9 +305,12 @@ def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
 
 _I1D_TRUTH_DOC_TERMS = {
     "README.md": (
-        "I1-A–I1-D 已合入 `main`",
-        "正在开发 I2-A 限定领域普通对话通道",
-        "不能把 I2-A 写成真实模型",
+        "I1-A–I1-D 与 I2-A 已合入 `main`",
+        "正在开发 I2-B 能力目录对话",
+        "不能把 I2-B 写成真实模型",
+        # 能力目录是**投影**出来的，不是模型答的；README 必须说清这一点，
+        # 否则"小维会介绍自己的能力"很容易被读成模型自由问答已经开放。
+        "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
     ),
     "AGENT_HANDOFF.md": (
         "I1-D Eval/closure",

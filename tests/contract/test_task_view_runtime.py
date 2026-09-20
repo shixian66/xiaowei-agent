@@ -13,6 +13,7 @@ from xiaowei_agent.application.task_view_runtime import (
     TaskViewRuntime,
     assess_evidence,
 )
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     ClarificationField,
@@ -38,6 +39,7 @@ def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
         plan_store=harness.plan_store,
         ledger=harness.ledger,
         bindings=harness.runtime._bindings,
+        snapshot=StaticCapabilityRegistry().snapshot(),
         model_artifacts=harness.model_artifacts,
         model_profile=ModelInvocationProfile(),
     )

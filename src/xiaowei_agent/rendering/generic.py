@@ -3,23 +3,32 @@
 from typing import Final
 
 from xiaowei_agent.contracts import (
+    CapabilitySnapshot,
+    CapabilitySpec,
     ClarificationPayload,
     ClarificationReasonCode,
     ClarificationRecord,
     RenderPayload,
+    RenderSection,
     TaskStatus,
-    TaskSubmission,
 )
 
 _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何工具。"
 CONVERSATION_TERMINAL_REASON: Final[str] = "interaction.conversation_responded"
 _CONVERSATION_ANSWER: Final[str] = (
-    "我可以回答小维能力边界和受治理运维流程相关的问题；这个普通对话通道不会调用工具、"
-    "不会访问外部系统，也不会把聊天内容当成澄清父链或审批。"
+    "我能做的事就是下面这份能力清单，它直接来自当前能力快照，不是我总结出来的。"
+    "这个普通对话通道本身不调用工具、不访问外部系统、不读取历史，也不会把聊天内容"
+    "当成澄清父链或审批。"
+)
+_CONVERSATION_EMPTY_ANSWER: Final[str] = (
+    "当前能力快照里没有任何已注册能力，所以我现在无法执行任何运维动作。"
+    "这个普通对话通道本身不调用工具、不访问外部系统、不读取历史。"
 )
 _CONVERSATION_NEXT_STEPS: Final[tuple[str, ...]] = (
     "如果需要执行诊断，请提交明确的运维目标、环境和时间范围。",
 )
+_SNAPSHOT_REF_PREFIX: Final[str] = "capability-snapshot:"
+_CAPABILITY_REF_PREFIX: Final[str] = "capability:"
 
 
 def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
@@ -35,15 +44,44 @@ def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
     )
 
 
-def render_conversation_response(*, submission: TaskSubmission) -> RenderPayload:
-    """I2 限定普通对话的确定性投影；不读取历史、不调用工具。"""
-    del submission
+def _capability_section(spec: CapabilitySpec) -> RenderSection:
+    """把一条能力声明投影成一节；只重排声明字段，不加任何解释性断言。"""
+    operations = "；".join(
+        f"{operation.operation}（{operation.effect_class.value}"
+        + (
+            ""
+            if operation.read_class is None
+            else f"/{operation.read_class.value}"
+        )
+        + f"，经 {operation.gateway}）"
+        for operation in spec.operations
+    )
+    return RenderSection(
+        title=spec.capability_id,
+        body=f"领域 {spec.domain}，版本 {spec.version}。可用操作：{operations}。",
+        refs=(f"{_CAPABILITY_REF_PREFIX}{spec.capability_id}@{spec.version}",),
+    )
+
+
+def render_conversation_response(*, snapshot: CapabilitySnapshot) -> RenderPayload:
+    """I2-B 限定普通对话的确定性投影：回答就是当前能力快照本身。
+
+    **答案只由 ``snapshot`` 决定**，与用户文本无关。这既是"限定领域"的含义，也是
+    这条通道唯一安全的形状：任何让用户文本参与生成的做法，都会把一个不调用工具的
+    通道变成可被注入的自由问答口。
+
+    投影的是**当前**快照而不是任务创建时的快照——"你能做什么"问的就是此刻的事实，
+    这与证据投影必须钉死在已读到的东西上正好相反。``refs`` 带上 ``snapshot_id``，
+    所以读者永远能分辨这份回答出自哪一份声明。
+    """
     return RenderPayload(
-        answer=_CONVERSATION_ANSWER,
-        sections=(),
+        answer=(
+            _CONVERSATION_ANSWER if snapshot.specs else _CONVERSATION_EMPTY_ANSWER
+        ),
+        sections=tuple(_capability_section(spec) for spec in snapshot.specs),
         next_steps=_CONVERSATION_NEXT_STEPS,
         status=TaskStatus.SUCCEEDED,
-        refs=(),
+        refs=(f"{_SNAPSHOT_REF_PREFIX}{snapshot.snapshot_id}",),
     )
 
 

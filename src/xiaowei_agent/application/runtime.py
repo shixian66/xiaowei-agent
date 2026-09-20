@@ -258,6 +258,7 @@ class XiaoweiRuntime:
             plan_store=plan_store,
             ledger=ledger,
             bindings=bindings,
+            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=model_profile,

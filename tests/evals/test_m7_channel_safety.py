@@ -20,6 +20,7 @@ from xiaowei_agent.application.channel_projection import (
     ChannelProjectionService,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelKind,
@@ -275,6 +276,7 @@ async def test_unauthorized_task_reads_are_indistinguishable(
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
         bindings=object(),
+        snapshot=StaticCapabilityRegistry().snapshot(),
     )
     access = TaskAccessService(
         runtime=runtime,

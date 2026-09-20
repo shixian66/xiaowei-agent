@@ -105,7 +105,7 @@ RequestEnvelope
        → XiaoweiRuntime
             → load-or-create AcceptedInteractionArtifact
             → DeterministicInteractionRouter
-                 → conversation: deterministic bounded response（I2-A）
+                 → conversation: deterministic capability-catalog response（I2-A/I2-B）
                  → knowledge_lookup / log_analysis: REJECTED
                  → unclear route: ClarificationRecord → CLARIFICATION_REQUIRED（I1 后续切片）
                  → capability_request + proceed: continue
@@ -242,9 +242,12 @@ attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
 ### 5.3 Interaction Context / Clarification
 
-I1/I2-A 目标是淘汰通用父任务历史与 `ContextAssembler` 目标语义。TaskStore 不保存普通 conversation
-history，provider chat/session 也不是任务事实源。I2-A 的普通对话只返回固定、限定领域的确定性回复：
-不读取历史、不保存长期记忆、不调用工具、不进入 Resolver/Planner/Gateway。连续补槽只通过
+I1/I2 目标是淘汰通用父任务历史与 `ContextAssembler` 目标语义。TaskStore 不保存普通 conversation
+history，provider chat/session 也不是任务事实源。I2 的普通对话只返回由当前 `CapabilitySnapshot`
+投影出来的能力目录：回答与用户文本无关，不读取历史、不保存长期记忆、不调用工具、不进入
+Resolver/Planner/Gateway。带 `clarification_parent_task_id` 的子任务不能走这条通道，否则一次性
+澄清父链会被一句"成功"悄悄烧掉——它收成
+`REJECTED / interaction.clarification_subject_incompatible`。连续补槽只通过
 `clarification_parent_task_id` 显式消费一个 `CLARIFICATION_REQUIRED` 父任务；每个子任务都重新鉴权、
 重新分类、重新 Resolver，并由 `SlotVerifier` 从本轮文本与父 `ClarificationRecord.confirmed_slots`
 中确定性生成可信 Params。
@@ -293,8 +296,8 @@ Registry 是声明和版本索引，不是“关键词总表”，也不是执�
 `IntentDraft + RequestContext + CapabilitySnapshot`，只从当前注册快照生成一个 `CandidateSet`，并解释
 每个候选的必要上下文、拒绝原因和匹配证据。I1 后只有
 `InteractionKind.CAPABILITY_REQUEST + RoutingDisposition.PROCEED` 才能进入 Resolver；非执行通道只能
-稳定拒绝、进入澄清终态，或在 I2-A 的 conversation 情况下返回 `RoutingDisposition.RESPOND` 的固定
-普通对话投影；它仍不能在入口层自造候选或调用工具。
+稳定拒绝、进入澄清终态，或在 I2 的 conversation 情况下返回 `RoutingDisposition.RESPOND` 的能力
+目录投影；它仍不能在入口层自造候选或调用工具。
 
 所有 active 路由和 shadow 观测必须使用这份 `CandidateSet`。shadow 不得再次计算候选；漂移时以 Resolver 的输出为准，shadow 只记录 `observed_disagreement`。
 

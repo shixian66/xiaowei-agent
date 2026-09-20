@@ -25,6 +25,7 @@ RequestEnvelope
        ├─ conversation / knowledge_lookup / log_analysis
        │    → I1 初始：REJECTED(interaction.route_not_available)
        │    → I2-A 修订：conversation → RESPOND / SUCCEEDED；knowledge_lookup、log_analysis 仍拒绝
+       │    → I2-B 修订：该回复的内容是 CapabilitySnapshot 的确定性投影（能力目录），不是固定文案
        ├─ unknown / route unclear
        │    → ClarificationRecordStore.save
        │    → CLARIFICATION_REQUIRED
@@ -265,9 +266,24 @@ pre-plan rejection 使用独立拒绝域：
 - `capability.fields_invalid`
 
 I2-A 的普通对话不是 pre-plan rejection：它使用 `RoutingDisposition.RESPOND`，任务以
-`SUCCEEDED / interaction.conversation_responded` 终结，但 Plan、Disclosure、Admission、Gateway、
-Evidence 与来源引用均为零。该结果只说明系统返回了限定领域普通回复，不表示资料查询、日志分析、
+`SUCCEEDED / interaction.conversation_responded` 终结，但 Plan、Disclosure、Admission、Gateway 与
+Evidence 均为零。该结果只说明系统返回了限定领域普通回复，不表示资料查询、日志分析、
 真实模型、真实渠道、真实目标、部署、canary 或用户验收已经开放。
+
+I2-B 把这条回复的**内容**定死为 `CapabilitySnapshot` 的确定性投影：逐条列出已注册能力、
+它们的操作、`read_class`、`effect_class` 与所经 gateway，`refs` 带 `capability-snapshot:<id>` 与
+`capability:<id>@<version>`。三条约束不可放宽：
+
+1. **回答只由快照决定，不接受用户文本。** 投影函数的签名里没有用户文本这个入参——这是签名
+   层面的保证，不是"我们检查过输出里没有"。一个不调用工具但让用户文本参与生成的通道，就是
+   一个可被注入的自由问答口。
+2. **投影的是当前快照，不是任务创建时的快照。** "你能做什么"问的是此刻的事实；这与证据投影
+   必须钉死在已读到的东西上正好相反。`refs` 里的 `snapshot_id` 让读者永远能分辨这份回答出自
+   哪一份声明，所以快照演进不会产生"看不出来变过"的旧回答。
+3. **只复述声明，不加解释性断言。** 目录不得声称能力已部署、已验收或可写；能力状态仍最强为
+   `tests`。空快照必须明说"没有任何已注册能力"，不得只渲染一个空列表。
+
+能力目录与 `docs/CAPABILITIES.md` 同源于 Registry 快照，因此两者不会互相漂移。
 
 Store/Policy/Plan/Disclosure 继续使用各自封闭错误域，例如 `clarification.parent_already_consumed`、
 `clarification.record_conflict`、`clarification.integrity_error`、

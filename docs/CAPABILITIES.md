@@ -9,13 +9,13 @@
 
 快照标识：`snapshot.m6a.starrocks-prometheus-asset.v1`
 
-| capability | version | domain | operation | gateway | effect_class | side_effect |
-| --- | --- | --- | --- | --- | --- | --- |
-| `starrocks.slow_query.diagnose` | `1.0.0` | `starrocks` | `list_slow_queries` | `starrocks` | `read` | `false` |
-| `starrocks.slow_query.diagnose` | `1.0.0` | `starrocks` | `count_queries_in_window` | `starrocks` | `read` | `false` |
-| `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `get_active_alerts` | `alertmanager` | `read` | `false` |
-| `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `query_metric_range` | `prometheus` | `read` | `false` |
-| `asset.inventory.lookup` | `1.0.0` | `asset` | `lookup_asset` | `asset_inventory` | `read` | `false` |
+| capability | version | domain | operation | gateway | effect_class | read_class | side_effect |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `starrocks.slow_query.diagnose` | `1.0.0` | `starrocks` | `list_slow_queries` | `starrocks` | `read` | `bounded` | `false` |
+| `starrocks.slow_query.diagnose` | `1.0.0` | `starrocks` | `count_queries_in_window` | `starrocks` | `read` | `bounded` | `false` |
+| `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `get_active_alerts` | `alertmanager` | `read` | `bounded` | `false` |
+| `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `query_metric_range` | `prometheus` | `read` | `bounded` | `false` |
+| `asset.inventory.lookup` | `1.0.0` | `asset` | `lookup_asset` | `asset_inventory` | `read` | `bounded` | `false` |
 
 ## 契约引用
 
