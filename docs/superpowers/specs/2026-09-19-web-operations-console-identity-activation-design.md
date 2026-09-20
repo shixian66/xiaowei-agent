@@ -1,7 +1,7 @@
 # 小维 Web 运维工作台、身份激活与未来结果访问边界总体设计
 
-- 状态：Review Draft V0.2；已按首轮技术审核修订，待书面复核，未授权实现
-- 规划基线：`origin/main@25c2a6e2c243efb6fd319a97cf494c2e7017fc03`
+- 状态：Review Draft V0.3；已按二轮技术审核修复 ADR 影响闭集与跨阶段审计顺序，待书面复核，未授权实现
+- 规划基线：`origin/main@cc617f5e2d18c53b4a92528663edb1bd16aab557`
 - 证据等级：当前源码事实 + 已确认产品决策 + 只读架构设计；没有本修订对应的源码、运行、部署、真实外部调用或用户验收证据
 - 日期：2026-09-20
 
@@ -45,6 +45,9 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
   目标用户名表单误写成当前已经存在的源码能力。
 - 项目负责人明确接受受信局域网首次改密前默认口令可达的风险；不改成随机安装令牌，但正式公网发布前
   仍必须完成改密、HTTPS 和边缘防滥用。
+- 这是对已接受 `ADR-014` §RI5 R2“首次强制改密必须在 loopback 阶段完成”的明示替代，
+  不是对旧条款的解释。W0 必须把负责人批准、风险和补偿措施单独写入 ADR；W0 合入前，
+  现行 Compose/运行手册的 loopback 要求仍是生效真源。
 - Web 的主要用户是 Admin 和运维人员。
 - 普通用户不提供工作台、任务列表、Admin 配置或“我的结果”；当前只允许经具体安全任务链接进入。
 - 手机端只保证登录、激活状态和单任务只读详情可读；不建设手机版运维工作台、任务发起、任务列表或
@@ -63,7 +66,8 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
 
 ### 2.3 权限和数据库结果
 
-- DBA、值班人员、查询人、审批人不是第四到第七个全局角色，而是资源或流程范围内的职责绑定。
+- DBA、值班人员不是第四、第五个全局角色，而是资源范围内的职责绑定。查询人/
+  审批人同样不是全局角色，但它们只在未来 R1 结果域有消费者，因此不在 W0–W5 建表或开放管理入口。
 - 既有 `ChannelPermission` 三成员闭集保持不变；Admin 管理能力使用独立 `AdminCapability`，不把配置、
   审计等权限硬塞进渠道权限。
 - 群成员可查看该群任务的完整**安全证据摘要**和“还有更多证据”提示；数据库真实结果行不进入群卡片。
@@ -86,7 +90,7 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
 
 ## 3. 当前基线事实与问题根因
 
-以下是 `origin/main@25c2a6e` 的源码/文档事实，不是对目标状态的声称：
+以下是 `origin/main@cc617f5` 的源码/文档事实，不是对目标状态的声称：
 
 1. 当前本地 Admin 登录是 password-only，页面不是成熟登录壳；源码已实现固定初始密码 `admin`、强制
    首次改密、Session 摘要存储、Origin/CSRF/CSP/HSTS 等安全边界。目标用户名字段是新产品能力。
@@ -114,8 +118,9 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
     边缘/反向代理提供限流证据。
 14. `task_audit_events` 是任务生命周期审计，不适合记录登录、用户管理、配置或敏感查看。当前没有
     `AdminAuditStore`。
-15. 当前五份真源对 I2 进度、Gemini Secret 来源和 RI5 配置状态存在少量漂移。W0 必须先按当前源码和
-    精确 SHA 修正文档，不允许本规格静默选择其中一份。
+15. I2 已在 `main` 完成收口，但 README/handoff 仍有“正在开发 I2-B/当前分支做 I2 收口”的旧口径；
+    Gemini Secret 来源在五份真源间也存在漂移。W0 必须先按当前源码和精确 SHA 修正文档，
+    不允许本规格静默选择其中一份。
 
 ## 4. 方案比较
 
@@ -214,10 +219,14 @@ LocalCredential
 `admin` 在当前固定开发作用域内是 `ADMIN`；它可以继续用本地密码登录，也可以由现有 Admin 通过独立受保护
 流程绑定飞书身份。飞书身份不会因为首次 OAuth 成功而自动获得 Admin。
 
-本地认证和飞书认证不互相升级：飞书登录的 `ADMIN` 可以管理用户、激活、职责和审计，也可以查看不含
-Secret 的集成状态；保存/清除 Secret、修改资源连接参数、运行任何连接测试的接口只接受
-`IdentitySource.LOCAL_ADMIN`。需要这些动作时，用户必须完成本地 Admin 登录；系统不签发“飞书会话临时
-变成本地会话”的混合凭证。
+本地认证和飞书认证不互相升级：飞书登录的 `ADMIN` 可以管理用户、激活、职责和审计，也可以查看
+独立的脱敏集成状态投影。该投影只含域名、`configured`、`restart_required`、加载闭集状态和最近
+闭集测试结果；不含 Secret、host/endpoint、账号、资源列表、原始配置 DTO 或 Provider 正文。保存/清除
+Secret、修改资源连接参数、运行任何连接测试的接口只接受 `IdentitySource.LOCAL_ADMIN`。需要这些
+动作时，用户必须完成本地 Admin 登录；系统不签发“飞书会话临时变成本地会话”的混合凭证。
+
+这是对 `ADR-014` §RI5 R1 和 `ADR-007` D5 配置读边界的窄例外，不是把飞书 Admin 变成配置读者。
+W0 必须先同步两份 ADR；W0 合入前，现行“飞书 principal 不得读取配置状态”仍然生效。
 
 ### 6.2 现有渠道权限保持闭集
 
@@ -251,6 +260,7 @@ RUN_CONNECTION_TESTS
 - `MANAGE_INTEGRATIONS` 只有 `LOCAL_ADMIN` principal 可实际使用；
 - `RUN_CONNECTION_TESTS` 只有 `LOCAL_ADMIN` principal 可实际使用，且每类真实网络调用还要满足自己的
   ADR-007 现场 GO。
+- `VIEW_INTEGRATION_STATUS` 只返回第 6.1 节的脱敏状态投影，不得复用配置读 DTO 后在前端遮字段。
 
 “Admin 是最高权限”指产品管理面能力最完整，不代表能绕过认证来源、数据库结果 ACL、SQLGuard、
 ToolPolicy、ApprovalGate 或 `ToolGateway`。
@@ -274,12 +284,13 @@ ToolPolicy、ApprovalGate 或 `ToolGateway`。
 
 ### 6.5 职责名单不是全局角色
 
-下列信息使用独立、封闭的范围绑定，不能继续膨胀全局角色枚举：
+当前 W0–W5 只交付有当前消费者的独立、封闭范围绑定：
 
-- 数据库查询人名单：谁可以对哪个数据库/环境提出查询；
-- 数据库审批人名单：谁可以审批哪个数据库/环境的查询，并据此查看该次结果；
 - DBA/值班名单：用于通知、运营职责和已定义的 capability policy；
 - 群管理员/激活通知人：用于通知，不自动授予查询或结果权限。
+
+数据库查询人和审批人必须等 R1 同结果 artifact、requester/approver ACL 真源一起设计和交付；
+W0–W5 不先存一张没有消费者的“授权名单”，也不得把 DBA/值班绑定误当作结果 ACL。
 
 这些绑定只能引用已激活的 `UserAccount` 和受信资源 ID；不能携带任意 SQL、工具名或自定义策略表达式。
 
@@ -289,7 +300,7 @@ ToolPolicy、ApprovalGate 或 `ToolGateway`。
 | --- | --- | --- |
 | `admin` | `ADMIN` | 保留必要的资源职责绑定 |
 | `operator` / `dba` / `oncall` | `OPERATOR` | DBA/值班身份迁入范围名单 |
-| `viewer` / `approver` | `USER` | 查看/审批能力迁入具体资源或流程绑定 |
+| `viewer` / `approver` | `USER` | 只迁移产品角色；旧 approver 标签列入迁移报告，等 R1 有 ACL 真源后再决定映射，当前不生效授权 |
 
 迁移必须可重复、可审计，并在同一 `tenant_id/environment_id` 内拒绝 actor、subject 或本地账号冲突。
 静态 JSON 在迁移成功后只读保留一个发布周期，不能和数据库身份目录长期双写。
@@ -311,6 +322,13 @@ ToolPolicy、ApprovalGate 或 `ToolGateway`。
 当前 `return intent` 只能是 `WORKBENCH`、`SAFE_TASK_DETAIL(task_id)`、`ADMIN_CENTER` 或
 `ACTIVATION_STATUS(request_id)`，由服务端保存并和一次性 state 绑定；不接受任意 URL，避免 open
 redirect。未来结果域若获批，才通过版本化契约新增 `DATABASE_RESULT(result_ref)`，不能提前预留任意 path。
+
+落地介质固定为登录域专用的 state-scoped 表 `web_oauth_login_contexts`，而不向登录/连接测试
+共用的 `web_oauth_states` 塞可空业务列。新表以 `state_digest` 作为唯一主键和指向
+`web_oauth_states` 的外键，只保存闭集 intent kind 与有上界的 `task_id/request_id`；不保存 URL/path。
+登录 state 与 context 必须同事务签发，回调必须在同一次 state 消费中读取 context；缺失、多行或不匹配
+一律按无效 state fail-closed，不提供独立更新/复用 API。连接测试 state 不建 context 行，现有回落顺序不变。
+该新表命中 `ADR-014` §RI5 R3 的 schema 变更门；W0 必须先显式放开这一个精确表，实现不得自行加列/加表。
 
 ### 7.2 未登记用户从 Web 或任务深链进入
 
@@ -443,7 +461,8 @@ digest domain 互不相认：
 左侧一级导航固定为：
 
 1. **概览与系统状态**：服务可用性、待激活数、已保存/待重启配置、加载回执和脱敏诊断；
-2. **用户与权限**：用户、角色、状态、飞书绑定、查询人/审批人/DBA/值班范围；
+2. **用户与权限**：用户、角色、状态、飞书绑定、DBA/值班范围和激活通知人；查询人/
+   审批人等 R1 有真实消费者后再进入管理中心；
 3. **资源配置**：数据库与 Prometheus；
 4. **AI 与飞书**：AI API、飞书应用、OAuth 回调、连接测试；
 5. **审计**：配置变化、激活审批、权限变化和敏感内容查看记录。
@@ -508,8 +527,9 @@ TLS 模式               关闭 / 校验证书等受支持闭集
 ```
 
 页面不能编辑 SQL 模板、SQLGuard、capability、工具类、任意驱动模块、任意连接参数字典或网络代理。
-保存时只做类型、长度、host/port 和 TLS 组合的本地校验，不做 DNS、socket、登录或 SQL。查询人/审批人
+保存时只做类型、长度、host/port 和 TLS 组合的本地校验，不做 DNS、socket、登录或 SQL。DBA/值班职责
 由数据库内 `RoleAndDutyService` 按系统生成的 `resource_id` 维护，不写入含 Secret 的资源文件。
+查询人/审批人不在 W4b 预存，随 R1 的结果 ACL 真源一起实现。
 
 ### 10.3 Prometheus 资源
 
@@ -571,6 +591,8 @@ OAuth 回调测试        明确标注“不登录、不绑定用户”
 - 三个宿主目录均 Git-ignored、Docker-build-ignored、`0700`，文件由非 root Web 进程以固定绝对路径原子写；
 - consumer 只得到只读 bind mount，不得通过共享父目录看见其他域；
 - Secret 不进入数据库、环境变量、Compose 渲染、日志、trace、异常、DOM、审计或加载回执；
+- Web 在解析和原子写入时只短暂持有资源 Secret；写入完成后不驻留、不缓存、不放入任何回执或后续响应，
+  也不得为了页面“已填写”状态保留明文副本；
 - getter、`repr=False`、序列化排除和 secret-shaped literal 扫描沿用当前双重防线；
 - 每个域独立 generation/digest，加载回执只记录 service/domain/generation/status，不记录值；
 - 当前 `.config/integrations.json` 只作为 W4a 一次性迁移输入。迁移期间停止消费者；转换、校验和 fsync
@@ -658,7 +680,7 @@ result_ref
 | `ActivationStore` | 待激活事实、CAS 审批、去重/过期 | 自动决定角色、保存原始请求 |
 | `IdentityActivationService` | 创建申请、审批、绑定、撤权 | 飞书网络、Task/Tool 调用 |
 | `WebAuthService` | OAuth state、Session、认证来源 | 自动注册或提权 |
-| `RoleAndDutyService` | 作用域角色与查询人/审批人/DBA/值班绑定 | 自定义策略表达式、结果 ACL 猜测 |
+| `RoleAndDutyService` | 当前交付作用域角色、DBA/值班与激活通知绑定；R1 才扩展 requester/approver | 自定义策略表达式、结果 ACL 猜测 |
 | `IntegrationConfigService` | 三域类型化配置、Secret 保留/清除、加载状态 | capability/Policy/SQL 编辑、目标网络调用 |
 | `AdminAuditStore` | append-only Admin 操作事件与查询 | 任务生命周期事件、Secret、正文、结果行 |
 | Web/飞书 interfaces | 协议解析、认证上下文、页面/卡片投影 | 业务路由、审批和工具执行 |
@@ -684,6 +706,8 @@ Admin 审计和未来结果五类事实不互相复制。未来 `ResultAccessSer
 - 第一次登录只能改密、退出，改密撤销旧 Session；
 - 项目负责人接受受信局域网地址在改密前即可访问的风险，不强制 loopback 首启；部署文档必须醒目标注
   默认凭据和“部署后立即改密”；
+- 上一条明示替代 `ADR-014` §RI5 R2 的 loopback 首次改密硬门；只有 W0 在 ADR 中单独记录负责人批准后，
+  release override 才可在改密前暴露于受信 LAN。这不改变应用内“改密前只放行改密/退出”的路由闭集；
 - 当前应用没有 HTTP rate limiter，本文不能写“速率限制继续生效”。OAuth state/ActivationStore 容量只是
   存储边界，不是防滥用；
 - 正式 release/canary 必须在受信反向代理或 WAF 上对本地登录、OAuth start/callback 和激活入口配置限流，
@@ -695,6 +719,8 @@ Admin 审计和未来结果五类事实不互相复制。未来 `ResultAccessSer
 ### 13.3 服务可用性
 
 - Web 核心 readiness 只依赖数据库、migration、认证存储和自身装配；第三方 Provider 故障不让管理页不可用；
+- 数据库/AdminAuditStore 不可用时，只读页面可显示统一的“服务暂不可用”，但用户/职责/配置/
+  Secret 的任何保存和激活审批都必须阻断；不能为了“配置文件仍能写”而绕过 fail-closed 审计。
 - listener/worker 在功能已启用但配置缺失时进入可观测的 `waiting_for_config`，不忙循环、不反复刷外部请求；
 - 任务 Worker 是唯一拥有完整 Runtime/Runner/Gateway/目标 adapter 的进程；Web、飞书 listener、渠道 worker
   继续使用窄装配；
@@ -725,7 +751,7 @@ Admin 审计和未来结果五类事实不互相复制。未来 `ResultAccessSer
 下列动作写入结构化审计：
 
 - 激活批准/拒绝、角色改变、账号禁用/启用；
-- 查询人/审批人/DBA/值班范围改变；
+- DBA/值班/激活通知范围改变；未来 R1 再纳入 requester/approver 范围改变；
 - 配置保存、Secret 替换/清除、连接测试开始与闭集结果；
 - 查看私人聊天或敏感任务正文；
 - 新增 Admin、飞书身份绑定/解绑；
@@ -749,9 +775,14 @@ created_at
 响应。首版不提供更新/删除 API，也不自动清理；如未来需要保留周期或合规清理，必须另修 ADR 并提供独立
 运维证据，不能在 Admin 页面加“清空审计”。
 
-授权改变、配置改变和敏感内容查看都以 AdminAuditStore 可用为前置：审计不可写时操作 fail-closed。文件
-配置与数据库审计无法处于同一事务，因此配置操作先追加 `STARTED`，完成后追加 `SUCCEEDED/FAILED`；只看到
-`STARTED` 就表示结果未知，不能伪装成功。
+登录成功/失败、改密和登出是认证生命周期事件，不是 Admin 对业务对象的操作。它们走闭集、脱敏的
+结构化安全日志，不进 `AdminAuditStore`；日志不记密码、Cookie/state、Secret、异常正文或未验证的用户输入。
+本规格不顺带新增第二套认证审计表；如未来合规要求持久化，另立边界。
+
+授权改变、配置改变和敏感内容查看都以 `AdminAuditStore` 可用为前置：审计不可写时操作 fail-closed。
+用户/角色/职责/激活都是同库事实，它们的状态迁移与成功审计必须在同一数据库事务提交；审计写入失败
+就回滚授权改变。文件配置与数据库审计无法处于同一事务，因此配置操作先追加 `STARTED`，完成后追加
+`SUCCEEDED/FAILED`；只看到 `STARTED` 就表示结果未知，不能伪装成功。
 
 ## 15. 安全不变量
 
@@ -783,16 +814,19 @@ created_at
 - 旧标签迁移、重复 actor/open_id、跨租户/环境冲突；
 - 激活申请去重、24 小时过期、1024 容量、过期清理、容量失败、拒绝、并发审批、重放和半事务失败；
 - 群事件 sender 与 OAuth 返回 open_id 不一致时拒绝；
-- `return intent` 闭集与外部 URL/路径穿越反例；
+- `web_oauth_login_contexts` 与登录 state 同事务签发/消费、`return intent` 闭集、外部 URL/路径穿越反例，
+  以及连接测试 state 无 context 行的对照；
 - callback 登录域优先、测试域安全回落，以及身份未知不会误入测试域；
 - 飞书连接测试不访问身份目录、不签 Session、不创建激活申请；
 - 本地 Admin 首次改密前的路由闭集；
 - 所有新增 JSON 写路由已进入 body limit、Origin/CSRF 和错误闭集注册表；
-- 三域配置字段、Secret 保留/替换/清除、跨环境、原子写失败、旧文件迁移冲突；
+- 三域配置字段、Secret 保留/替换/清除、跨环境、原子写失败、旧文件迁移冲突，以及写入后不驻留/
+  不缓存/不进回执的反证；
 - 数据库/Prometheus 保存路径在 DNS/socket/adapter 全部设反证时仍为 0 调用；
 - saved generation、restart_required、loaded receipt 的确定性状态；
 - Admin/运维/普通用户得到正确 HTML shell，每个 shell 只加载自己的 JS；静态资源公开不改变 API 授权；
-- `AdminAuditStore` append-only、闭集 action/outcome、敏感字段拒绝，以及审计失败时敏感操作 fail-closed；
+- `AdminAuditStore` append-only、闭集 action/outcome、敏感字段拒绝，以及审计失败时激活/角色/配置/
+  敏感查看 fail-closed；登录/改密/登出只进结构化安全日志的正反例；
 - 禁用/撤权后清除页面内容，错误不泄露任务、用户或资源存在性。
 
 ### 16.2 安全测试
@@ -802,7 +836,8 @@ created_at
 - 角色前端篡改、隐藏按钮直调 API、飞书 Admin 直调配置/测试接口；
 - 外部文本 XSS、CSP、无 `innerHTML`/内联脚本；
 - Secret-shaped literal、日志/异常/审计脱敏；
-- 三类配置文件的进程挂载集合相等，API/listener/channel-worker 看不见数据库/Prometheus Secret；
+- 渲染后的 Compose 挂载单元格与 §10.6 矩阵逐格相等，API/listener/channel-worker 看不见数据库/
+  Prometheus Secret；
 - 数据库/Prometheus 参数中的控制字符、任意 scheme、代理、路径和驱动扩展 fail-closed；
 - 正式 release 缺边缘限流配置时部署检查失败；ActivationStore 达容量时无存在性泄露；
 - Web/飞书进程继续不加载完整 Runtime/Gateway/目标 adapter。
@@ -832,29 +867,36 @@ fake 结果页提前勾掉该验收项。
 
 本规格是一个产品目标，但实现必须拆成可独立评审、可回滚的阶段；不能以一个巨型 PR 落地：
 
+### 17.1 当前可交付序列
+
 1. **W0 文档与 ADR**：修订 ADR-007/013/014/015、ARCHITECTURE、DEVELOPMENT_PLAN、README 和
-   handoff；消除当前 I2/RI5/Secret 真源漂移；不写源码。
-2. **W1a 用户与权限内核**：`UserAccount`、作用域 `UserRoleAssignment`、`ExternalIdentity`、
-   `LocalCredential`、`AdminCapability`、旧标签迁移和 PostgreSQL/fake 共享套件。
-3. **W1b 激活内核**：`ActivationRequest/ActivationStore/IdentityActivationService`、24 小时过期、全局
-   容量、CAS 审批、群事件绑定、通知 Port；不改页面。
+   handoff；消除当前 I2/RI5/Secret 真源漂移；把 §19.2 的四条已接受条款变更逐条写入 ADR；不写源码。
+2. **W1a 用户、权限与审计写内核**：`UserAccount`、作用域 `UserRoleAssignment`、
+   `ExternalIdentity`、`LocalCredential`、`AdminCapability`、旧标签迁移，以及 `AdminAuditStore` 持久化与
+   append-only 写入契约；用 PostgreSQL/fake 共享套件证明角色/账号改变与审计同事务、审计失败时回滚。
+3. **W1b 激活内核**：`ActivationRequest/ActivationStore/IdentityActivationService`、
+   `web_oauth_login_contexts`、24 小时过期、全局容量、CAS 审批、群事件绑定和通知 Port；审批必须复用 W1a 的
+   审计写契约并 fail-closed；不改页面。
 4. **W2 登录与页面壳**：成熟登录/改密/激活状态，拆分工作台和 Admin shell，并把当前 I2 统一
    Runtime/RenderPayload 接进新工作台；不新增聊天路由。
-5. **W3 用户、职责与审计**：Admin 用户/激活/角色/职责管理、`AdminAuditStore`、敏感查看审计；
-   Secret 和资源配置仍保持当前边界。
+5. **W3 用户、职责与审计界面**：Admin 用户/激活/角色、DBA/值班/激活通知管理，
+   `AdminAuditStore` 查询 API/UI 与敏感查看审计；不在此阶段才补审计写底座，也不提前建 requester/approver 名单。
 6. **W4a AI/飞书配置迁移**：把当前 RI5 Gemini/飞书配置迁入 Admin shell，拆分 AI/飞书文件与挂载；
    固定 model/origin 只读，保留现有探针语义和现场 GO。
-7. **W4b 数据库/Prometheus 参数登记**：新增资源 DTO、职责引用、resources 文件与 task-worker-only 挂载；
-   只做本地校验，真实目标网络调用次数为 0。
-8. **W4c 数据库/Prometheus 真实探针（独立阻塞阶段）**：不属于当前可直接实施范围。先修 ADR-007、
-   指定环境/目标/Secret/窗口/数据处置、审核唯一 task-worker 调用路径并取得现场 GO；Web 永不直接连接目标。
-9. **W5 产品部署**：release override、listener/channel-worker 可审计开关、边缘限流、配置目录预检、
-   明确重启、加载回执、浏览器视觉和分级运行证据。
-10. **R1 未来数据库结果访问**：只有第 11 节六项前置全部满足后另立规格；不属于 W0–W5，也不由本规格
-    审核自动授权。
+7. **W4b 数据库/Prometheus 参数登记**：新增资源 DTO、DBA/值班引用、resources 文件与
+   task-worker-only 挂载；只做本地校验，真实目标网络调用次数为 0，不建 requester/approver 数据。
+8. **W5 产品部署**：release override、listener/channel-worker 可审计开关、边缘限流、配置目录预检、
+   明确重启、加载回执、浏览器视觉和分级运行证据。W5 只依赖 W2–W4b，不以 W4c 或 R1 为必经前置。
 
-每个阶段都从最新 `main` 开独立分支，先写详细计划并审核，再按 TDD 实现。W0 合入前不得启动 W1；W4c、
-W5 的真实网络/部署和 R1 各自需要新的明确口令。任何阶段都不得为了 UI 完整度伪造数据库结果页面。
+### 17.2 独立阻塞门
+
+- **W4c 数据库/Prometheus 真实探针**：不在上述交付序列内。先修 `ADR-007`、指定环境/目标/
+  Secret/窗口/数据处置、审核唯一 task-worker 调用路径并取得现场 GO；Web 永不直接连接目标。
+- **R1 未来数据库结果访问**：只有第 11 节六项前置全部满足后另立规格；不属于 W0–W5，也不由本规格
+  审核自动授权。requester/approver 职责与结果 ACL 真源必须在 R1 同步交付。
+
+每个阶段都从最新 `main` 开独立分支，先写详细计划并审核，再按 TDD 实现。W0 合入前不得启动 W1；
+W4c、W5 的真实部署/验证和 R1 各自需要新的明确口令。任何阶段都不得为了 UI 完整度伪造数据库结果页面。
 
 ## 18. 明确非目标
 
@@ -874,42 +916,68 @@ W5 的真实网络/部署和 R1 各自需要新的明确口令。任何阶段都
 
 ## 19. 对既有规范的影响
 
-规格获批后、写实施计划前，至少需要成套修订：
+规格获批后、写实施计划前，W0 必须同时处理“新增能力”和“取消/收窄已接受条款”。后者不能再混在
+功能列表里靠评审者自己推导。
+
+### 19.1 新增能力同步
 
 - `ADR-007`：明确本地 Admin 可登记数据库/Prometheus 参数但 W4b 不能联网；资源 Secret 只挂 task-worker；
-  飞书 Admin 可管理用户/审计但配置 mutation/probe 仍只接受 `LOCAL_ADMIN`；W4c 真实探针是独立授权面，
-  不能由 W4b 或配置开关解锁。
+  飞书 Admin 只能读第 6.1 节的脱敏状态投影，原始配置读取、mutation 和 probe 仍只接受 `LOCAL_ADMIN`；
+  W4c 真实探针是独立授权面，不能由 W4b 或配置开关解锁。
 - `ADR-013`：增加持久身份目录、独立 `AdminCapability` 和 Admin audit 边界；保持现有三项
-  `ChannelPermission`、薄渠道、TaskStore/ChannelStore 真源和进程隔离不变。数据库结果深链只记录为
-  R1 未来变更门，不提前创建结果契约。
+  `ChannelPermission`、薄渠道、TaskStore/ChannelStore 真源和进程隔离不变。数据库结果深链及
+  requester/approver 职责只记录为 R1 未来变更门，不提前创建契约或名单。
 - `ADR-014`：增加 `ActivationRequest` state/context、24 小时 TTL、1024 pending 容量、Admin 审批、
-  群 sender 绑定；明确登录/测试不同 domain、同一 callback 及当前 fallback 顺序。
+  群 sender 绑定；明确登录/测试不同 domain、同一 callback 及当前 fallback 顺序，并显式修订第 19.2 节的
+  R1/R2/R3 条款，不得一边保留旧文一边实现新口径。
 - `ADR-015`：把现有 AI/飞书单文件配置迁成按消费域拆分的挂载；Gemini provider/model/origin 继续固定，
   不借本规格开放动态 provider 或 Web 模型调用权。
-- `ARCHITECTURE.md`：统一用户/作用域角色/职责、Admin audit、配置文件可见性、未来结果门和 release 边界；
-- `DEVELOPMENT_PLAN.md`：把 W0–W5、独立阻塞 W4c 和未来 R1 建成可独立验收的顺序；
+
+### 19.2 本规格取消或收窄的既有条款
+
+| 规范条款 | 已接受口径 | V0.3 新口径 | W0 必做动作 |
+| --- | --- | --- | --- |
+| `ADR-014 RI5 R1` | 配置读取/保存/测试只接受 `LOCAL_ADMIN`，飞书 principal 不得读配置状态 | 只为飞书认证 `ADMIN` 增加第 6.1 节的脱敏状态投影；原始配置读取、保存和测试仍禁止 | 修订 R1，冻结状态 DTO 闭集和反例 |
+| `ADR-014 RI5 R2` | LAN override 只能在 loopback 首次强制改密完成后启用 | 项目负责人批准受信 LAN 在改密前可达；用“部署文档醒目警示 + 边缘限流 + 立即改密 + 改密前路由闭集”替代 loopback 先后硬门 | 在 R2 单独记录负责人批准、风险、补偿措施与回滚方式 |
+| `ADR-014 RI5 R3` | 本轮 schema 解冻不包含 `web_oauth_states`；新增 state 列或表必须先修 ADR | 允许且仅允许新增登录域 `web_oauth_login_contexts`，用 state digest 做唯一 PK/FK；连接测试 state 不产生 context | 在 R3 精确放开该表、事务/清理不变量和禁止任意 URL 字段 |
+| `ADR-007 D5` | 任何非 `LOCAL_ADMIN` 读写配置或发起探针都命中变更门 | 只放开飞书 `ADMIN` 读脱敏状态投影；配置读 DTO、写入、Secret 和 probe 不放开 | 修订 D5 的“读”半句并保留其余现场 GO/证据门 |
+
+项目负责人在 2026-09-20 本轮指令中批准按上表修订，包括 R2 的安全边界替换、R1/D5 的窄读例外，
+以及 R3 选择独立 state-scoped 表。该批准只允许 W0 修订文档，不授权源码、部署或真实调用；W0 合入前，
+现行 ADR/运行手册仍是生效真源。
+
+### 19.3 W0 同步文档
+
+- `ARCHITECTURE.md`：统一用户/作用域角色/当前职责、Admin audit、配置文件可见性、未来结果门和 release 边界；
+- `DEVELOPMENT_PLAN.md`：把 §17.1 的 W0–W5 建成可独立验收的交付序列，把 W4c/R1 单列为阻塞门；
 - `README.md`：更新登录、初始化、Admin 配置和产品部署路径；
-- `AGENT_HANDOFF.md`：修正 I2 当前已合入、RI5 配置真源等漂移，只记录实际合入、测试、部署与未覆盖证据。
+- `AGENT_HANDOFF.md`：修正 I2 已合入、RI5 配置真源等漂移，只记录实际合入、测试、部署与未覆盖证据。
 
 ADR-005 不在 W0 被臆造完成；它是 R1 requester/approver 审批语义的未来前置。上述文档修订必须先于
-源码，且必须明确哪些 RI5 规则被保留、哪些被替代：保留本地 Admin 配置 mutation/probe、固定 Gemini 和
-真实调用 GO；扩展的是持久用户/激活、飞书 Admin 的非配置管理能力、按域 Secret 文件和仅参数化资源登记。
-不允许一边保留旧限制，一边在源码里偷偷扩大权限。
+源码。保留的是本地 Admin 原始配置读取/mutation/probe、固定 Gemini 和真实调用 GO；窄扩展只有第 19.2 节显式列出的
+脱敏状态读取、首启顺序替换和登录 context 表。不允许一边保留旧限制，一边在源码里偷偷扩大权限。
 
 ## 20. 规格退出条件
 
 进入实施计划前必须满足：
 
-- 项目负责人和 Claude 对本 V0.2 书面规格复核并明确接受；
+- 项目负责人已批准第 19.2 节四条修订；技术复核对本 V0.3 书面规格明确接受；
 - 三角色、现有三项 `ChannelPermission`、`AdminCapability`、认证来源和职责名单没有歧义；
-- 接受“飞书 Admin 管用户/职责/审计，配置 mutation/probe 只接受本地 Admin”的边界；
-- 接受 `admin/admin` 首次暴露风险的决策在 ADR 中可追溯；
+- 接受“飞书 Admin 管用户/当前职责/审计并只读脱敏集成状态；原始配置读取、mutation/probe 只接受
+  本地 Admin”的边界，并在 `ADR-014` R1 / `ADR-007` D5 可追溯；
+- 接受 `admin/admin` 在受信 LAN 首次改密前可达，以“部署文档 + 边缘限流 + 立即改密 + 改密前路由闭集”
+  替代 loopback 首启硬门，且该安全边界替换在 `ADR-014` R2 单独可追溯；
 - 接受“登录/激活与连接测试不同 state domain、同一 callback，测试不登录/不绑定用户”的分离；
+- 接受登录 `return intent` 使用 `web_oauth_login_contexts` 与一次性 state 精确绑定，并先修 `ADR-014` R3
+  精确放开该表；
 - 接受三域 Secret 文件/进程挂载矩阵，以及旧 `integrations.json` 不长期双读；
 - 接受 W4b 数据库/Prometheus 只保存参数、网络调用为 0，W4c 另修 ADR-007 并单独授权；
 - 接受 `AdminAuditStore` 独立于任务审计、append-only 且敏感操作在审计不可写时 fail-closed；
+- 接受 `AdminAuditStore` 持久化/写契约在 W1a 先于 W1b 激活审批落地，W3 只增查询 UI 和敏感查看审计；
+- 接受 W0–W5 只交付 DBA/值班/激活通知职责，requester/approver 名单随 R1 一起交付；
 - 接受应用当前没有 HTTP rate limiter，正式 release 必须由边缘限流提供运行证据；
 - 接受数据库结果 ACL 规则保留但 R1 延后，当前不实现 `/results`、预览、导出或结果服务；
-- 接受 W0–W5、独立阻塞 W4c 和未来 R1 的拆分，不把设计稿记为已实现；
+- 接受 §17.1 的 W0–W5 是当前交付序列，§17.2 的 W4c/R1 是独立阻塞门，不把后者排成产品部署必经步骤，
+  也不把设计稿记为已实现；
 - W0 文档/ADR 计划先单独审核并合入，修正当前真源漂移；
 - 然后调用 `superpowers:writing-plans` 生成实施计划，计划再次审核通过后才能 TDD 写源码。
