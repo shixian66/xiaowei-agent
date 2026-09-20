@@ -2,12 +2,16 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前 I2 收口事实
+## 0. 当前事实：I2 已归档，I3 未开始
 
-- 当前开发分支：`claude/i2-closure-hygiene`，基于
-  `main@25c2a6e2c243efb6fd319a97cf494c2e7017fc03`。该基线已包含 PR #53（I2-A 限定领域
-  普通对话）、PR #54（澄清子任务不得被收成对话成功）与 PR #55（I2-B 能力目录对话）
-  合入结果。
+- **I2 限定领域普通对话已完成离线实施并归档**，归档基线
+  `main@cc617f5e2d18c53b4a92528663edb1bd16aab557`，详见
+  [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。
+  PR #53/#54/#55/#56 的受审 SHA、squash 提交、CI run、四门数字与全部隔离变异反证
+  都在该归档文里，不在本文件重复。
+- 当前工作树没有进行中的开发分支。下一件事是**另起 I3 受治理资料查询计划**，
+  它卡在一个尚未拍板的前提上：受治理资料的源是什么形态（仓库内文档 / 独立 store /
+  外部系统）。这个定了才能写计划。
 - I0-DOC 目标已完成并绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
   智能交互入口、终态澄清、`ReadClass` 与执行披露边界已写入项目真相文档。
 - `main` 已包含 I1-A Task 1.1–1.3 的 interaction classifier、insert-once
@@ -94,20 +98,13 @@
   落在 refs 里所以快照演进可见。同时给 `docs/CAPABILITIES.md` 的生成器补上此前缺的 `read_class`
   列，并去掉 TaskView 里那次读了却不参与投影的 `get_submission`。仍不调用工具、不访问外部系统、
   不读取历史、不保存长期记忆。
-- 当前分支做 I2 收口卫生，只修已知 P3，不新增 I3 功能：
-  - Router 已算出的闭集拒绝码现在落到任务 `terminal_reason` 上（`route_not_available`、
-    `environment_context_mismatch`、`capability_draft_forbidden`、`capability_draft_missing`）。
-    澄清仍保持 `None`——它的原因属于 `ClarificationRecord`，两个域不共用一个字段。
-  - 普通对话终态补发一条 `REFLECTION/OK`，与终态迁移同一条命令提交。至此**每条终态任务
-    恰好一条 REFLECTION**，对话不再是唯一例外。
-  - 补真实 PostgreSQL 对话集成（含崩溃后恢复）与四渠道 parity（含飞书 `truncated` 断言）；
-    此前这两条只有临时探针，仓库里没有固化用例。
-  - 补 TaskView conversation 投影守卫的负向用例（此前撤掉该守卫全量仍全绿）。
-- 已知未纳入本轮的存量：迁移不可变哈希登记 1/13 属 M/RI 系列存量，不在 I2 收口面上；
-  `_resolve`/`_prepare`/"clarification parent is missing" 三处拒绝仍无闭集码——给它们发码
-  属于新增设计，不是卫生。
-- I3-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
-  M8 与 M9 仍未在本分支实现。
+- I2 收口卫生（PR #56）已合入：Router 的闭集拒绝码落到任务 `terminal_reason`（澄清仍保持
+  `None`，其原因只属于 `ClarificationRecord`）；普通对话终态补发 `REFLECTION/OK` 并与终态迁移
+  同一条命令提交，至此**每条终态任务恰好一条 REFLECTION**；补齐真实 PostgreSQL 对话集成
+  （含崩溃恢复）、四渠道 parity（含飞书 `truncated` 断言）与 TaskView 投影守卫负向用例。
+- 已知未纳入 I2 收口的存量：迁移不可变哈希登记 1/13 属 M/RI 系列；`_resolve`/`_prepare`/
+  "clarification parent is missing" 三处拒绝仍无闭集码——给它们发码属于新增设计，不是卫生。
+- I3-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、M8 与 M9 仍未实现。
 - I2 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
   不改变 RI2/RI3/RI4/H 层生产只读、RI6 或 E1 的独立 GO 门。当前证据等级仍为 `tests`。
 - I2-B 的"能力目录"只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**：三条
@@ -117,9 +114,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i2-closure-hygiene` 基于 `main@25c2a6e2c243efb6fd319a97cf494c2e7017fc03` |
+| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，无进行中的开发分支；`main@cc617f5e2d18c53b4a92528663edb1bd16aab557` |
 | 截止时间 | 2026-09-20（Asia/Shanghai） |
-| 阶段 | **I2 三刀（PR #53/#54/#55）已全部合入 `main`；当前分支只做 I2 收口卫生：补齐已知 P3，不新增 I3 功能。资料查询、日志分析、真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
+| 阶段 | **I2 限定领域普通对话已完成离线实施并归档（PR #53/#54/#55/#56）。下一步是另起 I3 受治理资料查询计划，先定资料源形态。资料查询、日志分析、真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -169,9 +166,9 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | I2 收口卫生复审与合入后归档 I2，再另起 I3 受治理资料查询计划（需先定资料源形态）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | 另起 I3 受治理资料查询计划：先由项目负责人拍板受治理资料的源形态（仓库内文档 / 独立 store / 外部系统），再写计划。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure、I1-D Eval/closure（PR #52）、I2-A conversation respond（PR #53）、澄清子任务拒绝修复（PR #54）与 I2-B 能力目录对话（PR #55）；当前 worktree 正在做 I2 收口卫生。仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure、I1-D Eval/closure（PR #52）与完整 I2（PR #53/#54/#55/#56，已归档）。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 

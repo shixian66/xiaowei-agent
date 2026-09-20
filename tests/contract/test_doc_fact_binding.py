@@ -192,8 +192,7 @@ _I0_TRUTH_DOC_TERMS = {
     ),
     "README.md": (
         "智能交互入口 I0-DOC 已绑定",
-        "I1-A–I1-D 与 I2-A 已合入 `main`",
-        "正在开发 I2-B 能力目录对话",
+        "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档",
         "`knowledge_lookup` 与 `log_analysis` 仍保持拒绝",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
@@ -255,16 +254,16 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     readme_i0_status = (
         "> 智能交互入口 I0-DOC 已绑定 "
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> I1-A–I1-D 与 I2-A 已合入 `main`；当前工作树正在开发 I2-B 能力目录对话。"
-        "该切片把普通对话的\n"
-        "> 回答从一句固定文案改为**由当前 `CapabilitySnapshot` 确定性投影出来的能力目录**："
-        "逐条列出\n"
-        "> 已注册能力、操作、`read_class` 与所经 gateway，并带上快照标识作为来源；"
-        "回答只由声明决定，\n"
-        "> 与用户文本无关，仍不调用工具、不访问外部系统、不读取历史。\n"
-        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-B "
-        "写成真实模型、\n"
-        "> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
+        "> I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档。普通对话的回答是"
+        "**由当前 `CapabilitySnapshot`\n"
+        "> 确定性投影出来的能力目录**：逐条列出已注册能力、操作、`read_class` 与所经 "
+        "gateway，并带上\n"
+        "> 快照标识作为来源；回答只由声明决定，与用户文本无关，不调用工具、"
+        "不访问外部系统、不读取历史。\n"
+        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4；I3 尚未开始。\n"
+        "> 能力目录只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**"
+        "——不能把 I2\n"
+        "> 写成真实模型、资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
     )
     without_readme_status = {
         **docs,
@@ -272,7 +271,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "正在开发 I2-B 能力目录对话" in readme_missing["README.md"]
+    assert "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档" in readme_missing["README.md"]
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -305,9 +304,8 @@ def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
 
 _I1D_TRUTH_DOC_TERMS = {
     "README.md": (
-        "I1-A–I1-D 与 I2-A 已合入 `main`",
-        "正在开发 I2-B 能力目录对话",
-        "不能把 I2-B 写成真实模型",
+        "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档",
+        "不能把 I2\n> 写成真实模型",
         # 能力目录是**投影**出来的，不是模型答的；README 必须说清这一点，
         # 否则"小维会介绍自己的能力"很容易被读成模型自由问答已经开放。
         "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
@@ -355,6 +353,8 @@ def test_i1d_truth_docs_do_not_revive_stale_i1c_scope() -> None:
     assert not found, f"I1-D 真相文档仍含旧范围口径：{found}"
 
 
+_I2_ARCHIVE = "docs/handoff/archive/2026-09-20-I2-bounded-conversation.md"
+
 _I2B_TRUTH_DOC_TERMS = {
     # README 的"目标能力"段和顶部状态块是**两处独立叙述**，只钉住顶部时下面那段可以
     # 长期停在旧口径上——I2-B 就是这么漏的。两段各自钉一条。
@@ -371,9 +371,21 @@ _I2B_TRUTH_DOC_TERMS = {
         "投影的是当前快照，不是任务创建时的快照",
         "空快照必须明说",
     ),
+    # 归档后 I2 的细节真相面在归档文里，AGENT_HANDOFF 只负责指过去并声明范围。
+    # 绑定跟着真相走：把细节条目留在 handoff 上，会逼着以后每一轮都把已归档的内容
+    # 重新抄一遍，而那正是这份文件开头明说不做的事。
     "AGENT_HANDOFF.md": (
-        "I2-B 能力目录对话",
-        "投影函数签名里没有用户文本入参",
+        "I2 限定领域普通对话已完成离线实施并归档",
+        _I2_ARCHIVE,
+    ),
+    _I2_ARCHIVE: (
+        "`RoutingDisposition` 增加 `respond`",
+        "回答是当前 `CapabilitySnapshot` 的确定性投影",
+        "每条终态任务恰好一条 `REFLECTION`",
+        "把用户文本回显进对话回答（模拟注入面）",
+        "当前不可达",
+        "没有部署、canary 或产品",
+        "`tests`",
     ),
 }
 
@@ -415,3 +427,23 @@ def test_i2b_truth_docs_do_not_revive_the_fixed_answer_scope() -> None:
         if phrase in (_ROOT / name).read_text(encoding="utf-8")
     ]
     assert not found, f"真相文档仍含 I2-A 固定回复口径：{found}"
+
+
+def test_i2_archive_does_not_overstate_the_evidence_level() -> None:
+    """归档文最容易被当成"这件事已经上线了"来读。
+
+    它记录的是**离线实施范围**验收：证据等级仍是 `tests`，三条能力都没有连接真实系统。
+    归档一旦写成肯定式的部署/验收声称，后面每一个读它的人都会据此高估当前能力。
+    """
+    text = (_ROOT / _I2_ARCHIVE).read_text(encoding="utf-8")
+    for claim in (
+        "已部署",
+        "已上线",
+        "已 canary",
+        "已用户验收",
+        "已连接真实",
+        "deployed SHA",
+    ):
+        assert claim not in text
+    assert "没有部署、canary 或产品" in text
+    assert "只关闭 I2 的**离线实施范围**" in text
