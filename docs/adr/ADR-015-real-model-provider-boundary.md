@@ -443,6 +443,54 @@ Secret 永不回显：查询接口只返回"已配置/未配置"，保存请求�
 以及该节列出的全部前置证据。探针开关默认关闭；未获 GO 时页面与接口只返回本地禁用状态，
 外部调用数必须为零。
 
+## Web 产品修订（2026-09-20）
+
+- 状态: Accepted
+- 决策人: shixian66（项目负责人）
+- 决策日期: 2026-09-20
+- 批准出处: https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268
+
+本修订冻结 **W4a 的未来三域配置目标**。它取代的是 RI5 单配置文件的**目标形态**，
+**不是当前运行事实**。规格真源见
+[Web 运维工作台总体设计](../superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)。
+
+### 当前事实（W4a 之前不变）
+
+当前运行代码的 Provider 明文唯一真源仍是宿主 `.config/integrations.json`
+（容器内 `/run/xiaowei-config/integrations.json`）。在 W4a 实施并合入之前，它就是当前实现，
+本修订不改变任何现有挂载、代码或启动步骤。
+
+### W4a 未来目标：三域配置文件与进程挂载矩阵
+
+| 配置文件 | 可见消费者与可见性 |
+| --- | --- |
+| `.config/ai/config.json` | `web-app`=读写、`task-worker`=只读 |
+| `.config/feishu/config.json` | `web-app`=读写、`feishu-listener`=只读、`channel-worker`=只读 |
+| `.config/resources/config.json` | `web-app`=读写、`task-worker`=只读 |
+
+**未列出的消费者一律不可见。** 特别地，`api`、`migrate` 与 `postgres` 对上述三个文件
+**均不可见**，不得以"方便排查"为由增加任何一格可见性。
+
+### 迁移与回滚边界
+
+旧 `.config/integrations.json` 只作为**一次性迁移输入**，迁移完成后不再读取；
+**不长期双读**。新旧文件同时存在时 fail-closed 为 `migration_required`，由人工确认后再继续，
+不猜测哪一份更新。回滚为恢复单文件形态并重建服务，不需要回退数据库。
+
+### 不因配置形态变化而放开的边界
+
+- Gemini 的 provider、model、API version 与 canonical origin **继续固定**；不建立 provider
+  registry，不放开 endpoint；
+- **Web 不取得任务模型 port**，也不参与任务模型调用；
+- Secret 不进入数据库、环境变量、日志、trace、异常、DOM、审计或回执；Web 只在保存请求处理
+  期间短暂持有，不回显；
+- **本修订不授权**真实 Gemini、飞书、数据库或 Prometheus 网络调用；PR 3E 的现场 GO 不因本
+  修订放宽。
+
+### 本修订不提供的证据
+
+本修订是文档口径变更，没有对应的源码、迁移、运行、部署、canary 或用户验收证据。
+
 ## 后果
 
 ### 正面
@@ -502,6 +550,13 @@ RI5 修订接受后，以下任一变化同样必须先修订本 ADR：让 Web �
 让控制面探针创建 Task/Evidence 或进入数据面 `ToolGateway`、扩大探针输入超出固定最小 synthetic
 文本、为凭据恢复双读或回退路径、把单配置文件的信任范围推广到公网或多租户，或新增第三个
 Provider 字段族。
+
+**2026-09-20 窄替代（见本文 Web 产品修订（2026-09-20））**：上列"把单配置文件的信任范围推广"
+一项中，**只有**"单文件改为 W4a 三域配置文件与进程挂载矩阵"这一形态变化被该修订窄替代；
+"推广到公网或多租户"继续完整命中本变更门。同段其余各项——让 Web 取得模型端口或参与任务模型
+调用、让控制面探针创建 Task/Evidence 或进入数据面 `ToolGateway`、扩大探针输入、为凭据恢复
+双读或回退路径、**新增第三个 Provider 字段族**——以及本节前面的全部列举项，**继续完整生效**。
+把配置文件形态的替代读成供应商边界的替代，属于违反本变更门。
 
 ## 参考资料
 

@@ -831,3 +831,131 @@ def test_w0_auth_adr_bindings_are_discriminating() -> None:
     amendment_014 = _web_product_amendment(_ADR_014)
     without_intent = _replace_once(amendment_014, "`ACTIVATION_STATUS(request_id)`", "任意 URL")
     assert "`ACTIVATION_STATUS(request_id)`" not in without_intent
+
+
+# --- W0 身份/审计与三域配置门 ----------------------------------------------
+#
+# 三域挂载矩阵是这一组的重点。散文里写「API 不挂载配置」很容易看起来对，
+# 但真正要防的是**表格里多出一格可见性**。所以这里从 Markdown 表解析出
+# 每个文件的消费者集合，按集合相等断言——未列出的消费者一律不可见。
+
+_W0_ADMIN_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        "MANAGE_USERS",
+        "MANAGE_DUTY_BINDINGS",
+        "VIEW_ADMIN_AUDIT",
+        "VIEW_PRIVATE_TASK_CONTENT",
+        "VIEW_INTEGRATION_STATUS",
+        "MANAGE_INTEGRATIONS",
+        "RUN_CONNECTION_TESTS",
+    }
+)
+_W0_CHANNEL_PERMISSIONS: Final[frozenset[str]] = frozenset(
+    {"VIEW_SAFE_TASK", "SUBMIT_READONLY_TASK", "ADMIN_ALL_SAFE_TASKS"}
+)
+_W0_CONFIG_DOMAIN_MATRIX: Final[dict[str, dict[str, str]]] = {
+    ".config/ai/config.json": {"web-app": "读写", "task-worker": "只读"},
+    ".config/feishu/config.json": {
+        "web-app": "读写",
+        "feishu-listener": "只读",
+        "channel-worker": "只读",
+    },
+    ".config/resources/config.json": {"web-app": "读写", "task-worker": "只读"},
+}
+
+
+def _config_domain_matrix(text: str) -> dict[str, dict[str, str]]:
+    """从 amendment 的挂载表解析 {配置文件: {消费者: 可见性}}。"""
+    matrix: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("| `.config/"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        path = cells[0].strip("`")
+        consumers: dict[str, str] = {}
+        for entry in cells[1].split("、"):
+            consumer, _, visibility = entry.partition("=")
+            if visibility:
+                consumers[consumer.strip().strip("`")] = visibility.strip()
+        matrix[path] = consumers
+    return matrix
+
+
+def test_w0_adr_013_keeps_channel_permissions_closed_and_adds_admin_boundaries() -> None:
+    amendment = _web_product_amendment(_ADR_013)
+    assert _has_accepted_owner_approval(_ADR_013)
+    for role in ("ADMIN", "OPERATOR", "USER"):
+        assert f"`{role}`" in amendment
+    # 核心权限枚举不因管理面需求膨胀。
+    assert "`ChannelPermission` 仍精确三成员" in amendment
+    for permission in _W0_CHANNEL_PERMISSIONS:
+        assert f"`{permission}`" in amendment
+    for capability in _W0_ADMIN_CAPABILITIES:
+        assert f"`{capability}`" in amendment
+    assert "`MANAGE_INTEGRATIONS`" in amendment and "`RUN_CONNECTION_TESTS`" in amendment
+    # Admin 审计与任务审计是两张表，且写不进去就必须拒绝执行。
+    assert "`task_audit_events`" in amendment
+    assert "append-only" in amendment
+    assert "fail-closed" in amendment
+    assert "W1a" in amendment and "W1b" in amendment and "W3" in amendment
+    # 结果 ACL 不提前。
+    assert "requester/approver" in amendment and "R1" in amendment
+    assert "不绕过" in amendment
+
+
+def test_w0_adr_015_freezes_the_future_three_domain_mount_matrix() -> None:
+    amendment = _web_product_amendment(_ADR_015)
+    assert _has_accepted_owner_approval(_ADR_015)
+    assert _config_domain_matrix(amendment) == _W0_CONFIG_DOMAIN_MATRIX
+    # 未列出的消费者一律不可见，这三个必须被显式点名。
+    for invisible in ("api", "migrate", "postgres"):
+        assert f"`{invisible}`" in amendment
+    # 未来目标与当前事实必须分开写。
+    assert "W4a" in amendment
+    assert "`.config/integrations.json`" in amendment
+    assert "当前实现" in amendment
+    assert "不长期双读" in amendment
+    assert "`migration_required`" in amendment
+    assert "Web 不取得任务模型 port" in amendment
+    assert "本修订不授权" in amendment
+
+
+def test_w0_adr_015_change_gate_points_to_the_effective_replacement() -> None:
+    gate = _change_gate(_ADR_015)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate
+    assert "单配置文件的信任范围" in gate
+    # 替换配置文件形态不等于放开供应商边界。
+    assert "新增第三个\nProvider 字段族" in gate or "新增第三个 Provider 字段族" in gate
+    assert "继续完整生效" in gate
+
+
+def test_w0_channel_and_config_bindings_are_discriminating() -> None:
+    """反例：矩阵多一格可见性、抽掉 fail-closed、或旧门复活时必须转红。"""
+    amendment_015 = _web_product_amendment(_ADR_015)
+
+    leaked_to_api = _replace_once(
+        amendment_015,
+        "| `.config/ai/config.json` | `web-app`=读写、`task-worker`=只读 |",
+        "| `.config/ai/config.json` | `web-app`=读写、`task-worker`=只读、`api`=只读 |",
+    )
+    assert _config_domain_matrix(leaked_to_api) != _W0_CONFIG_DOMAIN_MATRIX
+
+    resources_to_listener = _replace_once(
+        amendment_015,
+        "| `.config/resources/config.json` | `web-app`=读写、`task-worker`=只读 |",
+        "| `.config/resources/config.json` | `web-app`=读写、`feishu-listener`=只读 |",
+    )
+    assert _config_domain_matrix(resources_to_listener) != _W0_CONFIG_DOMAIN_MATRIX
+
+    amendment_013 = _web_product_amendment(_ADR_013)
+    without_fail_closed = _replace_once(amendment_013, "fail-closed", "记录告警后继续")
+    assert "fail-closed" not in without_fail_closed
+
+    early_acl = _replace_once(amendment_013, "requester/approver", "（无名单）")
+    assert "requester/approver" not in early_acl
+
+    gate_015 = _change_gate(_ADR_015)
+    revived = _replace_once(
+        gate_015, _W0_AMENDMENT_HEADING.removeprefix("## "), "（无）"
+    )
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") not in revived
