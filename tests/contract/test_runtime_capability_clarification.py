@@ -14,6 +14,14 @@ from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationReasonCode,
     ConfirmedTextValue,
+    InteractionDraft,
+    InteractionKind,
+    InteractionModelResult,
+    InteractionRejectionReasonCode,
+    InteractionSource,
+    ModelUsage,
+    PipelineStage,
+    StageOutcome,
     TaskStatus,
     TaskSubmission,
 )
@@ -47,6 +55,23 @@ def _asset_harness() -> RuntimeHarness:
         },
         as_of=AT,
     )
+
+
+class _ConversationPort:
+    calls: int = 0
+
+    async def classify(self, request: object) -> InteractionModelResult:
+        del request
+        self.calls += 1
+        return InteractionModelResult(
+            draft=InteractionDraft(
+                proposed_kind=InteractionKind.CONVERSATION,
+                capability_draft=None,
+                confidence=0.8,
+                source=InteractionSource.MODEL,
+            ),
+            usage=ModelUsage(input_tokens=4, output_tokens=3),
+        )
 
 
 async def _execute_submission(
@@ -177,6 +202,60 @@ async def test_prometheus_capability_child_reply_shapes_are_stable(
     expected_calls = 1 if expected_status is TaskStatus.SUCCEEDED else 0
     assert harness.adapters["alertmanager"].call_count == expected_calls
     assert harness.adapters["prometheus"].call_count == expected_calls
+
+
+async def test_conversation_child_reply_rejects_instead_of_consuming_parent_as_success() -> None:
+    harness = _prometheus_harness()
+    parent_submission = harness.submission(
+        "查告警 HostHighCpu 的证据",
+        idempotency_key="conversation-parent",
+    )
+    parent = await harness.runtime.submit_task(submission=parent_submission)
+    harness.task_id = parent.task_id
+    parent_outcome = await _execute_submission(
+        harness, parent_submission, owner="worker-conversation-parent"
+    )
+    assert parent_outcome.status is TaskStatus.CLARIFICATION_REQUIRED
+
+    port = _ConversationPort()
+    harness.runtime._interaction_classifier = port
+    child_submission = harness.submission(
+        "你能做什么？",
+        idempotency_key="conversation-child",
+    ).model_copy(update={"clarification_parent_task_id": parent.task_id})
+    child = await harness.store.create_clarification_child(
+        submission=child_submission,
+        authenticated_channel_owner=harness.context.actor,
+    )
+    harness.task_id = child.task_id
+
+    child_outcome = await _execute_submission(
+        harness, child_submission, owner="worker-conversation-child"
+    )
+    projected = await harness.runtime.query_task(lookup=harness.lookup)
+
+    assert child_outcome.status is TaskStatus.REJECTED
+    assert (
+        child_outcome.terminal_reason
+        == InteractionRejectionReasonCode.CLARIFICATION_SUBJECT_INCOMPATIBLE.value
+    )
+    assert projected.render is not None
+    assert projected.render.status is TaskStatus.REJECTED
+    assert "普通对话通道" not in projected.render.answer
+    assert port.calls == 1
+    assert harness.gateway.invocations == 0
+    assert harness.adapters["alertmanager"].call_count == 0
+    assert harness.adapters["prometheus"].call_count == 0
+
+    # 归因：被拒绝的任务必须恰好有一个非 OK 阶段，且落在 INTENT 上。少了这条断言，
+    # INTENT 可以照常记 OK 而任务仍收成 REJECTED——trace 会说这条链路一切正常，
+    # 于是这次拒绝在错误归因里找不到任何落点。
+    failed_stages = [
+        (event.stage, event.outcome)
+        for event in harness.sink.events
+        if event.task_id == child.task_id and event.outcome is not StageOutcome.OK
+    ]
+    assert failed_stages == [(PipelineStage.INTENT, StageOutcome.REJECTED)]
 
 
 async def test_runtime_passes_parent_confirmed_slots_to_runner_disclosure() -> None:
