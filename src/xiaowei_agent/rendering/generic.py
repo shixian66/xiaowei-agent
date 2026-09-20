@@ -8,9 +8,18 @@ from xiaowei_agent.contracts import (
     ClarificationRecord,
     RenderPayload,
     TaskStatus,
+    TaskSubmission,
 )
 
 _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何工具。"
+CONVERSATION_TERMINAL_REASON: Final[str] = "interaction.conversation_responded"
+_CONVERSATION_ANSWER: Final[str] = (
+    "我可以回答小维能力边界和受治理运维流程相关的问题；这个普通对话通道不会调用工具、"
+    "不会访问外部系统，也不会把聊天内容当成澄清父链或审批。"
+)
+_CONVERSATION_NEXT_STEPS: Final[tuple[str, ...]] = (
+    "如果需要执行诊断，请提交明确的运维目标、环境和时间范围。",
+)
 
 
 def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
@@ -22,6 +31,18 @@ def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
         sections=(),
         next_steps=(),
         status=status,
+        refs=(),
+    )
+
+
+def render_conversation_response(*, submission: TaskSubmission) -> RenderPayload:
+    """I2 限定普通对话的确定性投影；不读取历史、不调用工具。"""
+    del submission
+    return RenderPayload(
+        answer=_CONVERSATION_ANSWER,
+        sections=(),
+        next_steps=_CONVERSATION_NEXT_STEPS,
+        status=TaskStatus.SUCCEEDED,
         refs=(),
     )
 

@@ -76,6 +76,7 @@ def test_interaction_closed_sets_are_exact() -> None:
     }
     assert {item.value for item in RoutingDisposition} == {
         "proceed",
+        "respond",
         "clarify",
         "refuse",
     }

@@ -2,11 +2,11 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前 I1-D 事实
+## 0. 当前 I2-A 事实
 
-- 当前开发分支：`claude/i1-d-eval-closure`，基于
-  `main@144b558f3fa428b754dae9d5155b7d1376554e2d`。该基线已包含 PR #51（I1-D
-  ExecutionDisclosure 执行披露屏障）合入结果。
+- 当前开发分支：`claude/i2-domain-conversation`，基于
+  `main@93eb024aec53344980ee5e2cf0f5d262c21e3e02`。该基线已包含 PR #52（I1-D
+  Eval/closure）合入结果。
 - I0-DOC 目标已完成并绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
   智能交互入口、终态澄清、`ReadClass` 与执行披露边界已写入项目真相文档。
 - `main` 已包含 I1-A Task 1.1–1.3 的 interaction classifier、insert-once
@@ -79,18 +79,23 @@
   容器跑通新增 I1/M7 integration 2 passed，以及 migration/clarification/I1 深档 26 passed。
   本机 Docker CLI 没有 `docker compose` 子命令，standalone `docker-compose config` 通过。隔离变异已证明
   slow-query SlotVerifier 若改为信任模型 `draft.slots`，新增 slot-pollution 测试会红；恢复后回绿。
-- I2-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
+- 当前分支正在开发 I2-A：限定领域普通对话通道只把 `InteractionKind.CONVERSATION` 路由为
+  `RoutingDisposition.RESPOND`，Runtime 在无 Plan、无 Evidence、无 Gateway、无 Approval、无
+  ExecutionDisclosure 的情况下按既有 TaskStore 状态机完成 `SUCCEEDED`，TaskView 从已落库
+  `TaskSubmission` 重建固定回复。`knowledge_lookup` 与 `log_analysis` 仍保持
+  `interaction.route_not_available`，分别留给 I3/I4。
+- I3-I5、RI2/RI3 真实现场 GO、RI4/RI5/RI6、
   M8 与 M9 仍未在本分支实现。
-- I1-D 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
+- I2-A 不读取真实 Gemini key，不调用真实飞书、Gemini、StarRocks 或任何运维目标，不部署、不 canary，
   不改变 RI2/RI3/RI4/H 层生产只读、RI6 或 E1 的独立 GO 门。当前证据等级仍为 `tests`。
 
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i1-d-eval-closure` 基于 `main@144b558f3fa428b754dae9d5155b7d1376554e2d` |
+| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，分支 `claude/i2-domain-conversation` 基于 `main@93eb024aec53344980ee5e2cf0f5d262c21e3e02` |
 | 截止时间 | 2026-09-20（Asia/Shanghai） |
-| 阶段 | **I1-D Eval/closure 开发中。PR #51 已合入 `main`；当前分支补齐 I1 版本化 eval、跨渠道 rejected parity 与最终收口文档。最强证据仍为 `tests`；没有读取真实 secret、发起 Gemini/飞书网络调用、部署、canary 或用户验收证据。** |
+| 阶段 | **I2-A 限定领域普通对话开发中。I1-D Eval/closure 已通过 PR #52 合入 `main`；当前分支只开放 conversation 的固定无工具回复，资料查询、日志分析、真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -140,9 +145,9 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | 完成 I1-D Eval/closure 复审与合入后，再继续 I2 限定领域普通对话通道。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | 完成 I2-A 限定领域普通对话复审与合入后，再评估 I2 的后续普通对话范围或进入 I3 受治理资料查询。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
-| 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2 与 I1-D ExecutionDisclosure（PR #51 已合入）；当前 worktree 正在补 I1-D Eval/closure。仍未连接任何真实运维目标或模型服务 |
+| 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure 与 I1-D Eval/closure（PR #52 已合入）；当前 worktree 正在开发 I2-A conversation respond。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
 | 能力闭环 | `starrocks.slow_query.diagnose`、`prometheus.alert.evidence`、`asset.inventory.lookup` 均已完成 fake/recording 闭环，证据等级均为 `tests`；三者均未连接对应真实运维系统 |
 

@@ -23,7 +23,8 @@ RequestEnvelope
   → load-or-create AcceptedInteractionArtifact
   → DeterministicInteractionRouter
        ├─ conversation / knowledge_lookup / log_analysis
-       │    → REJECTED(interaction.route_not_available)
+       │    → I1 初始：REJECTED(interaction.route_not_available)
+       │    → I2-A 修订：conversation → RESPOND / SUCCEEDED；knowledge_lookup、log_analysis 仍拒绝
        ├─ unknown / route unclear
        │    → ClarificationRecordStore.save
        │    → CLARIFICATION_REQUIRED
@@ -43,7 +44,8 @@ RequestEnvelope
 
 `InteractionKind` 回答“用户在做什么”，闭集为 `conversation`、`knowledge_lookup`、
 `log_analysis`、`capability_request`、`unknown`。`RoutingDisposition` 回答“本轮系统怎么办”，
-闭集为 `proceed`、`clarify`、`refuse`。两个维度不能合并成一个宽枚举。
+I1 初始闭集为 `proceed`、`clarify`、`refuse`；I2-A 增加 `respond`，仅用于限定领域普通对话的
+无工具固定回复。两个维度不能合并成一个宽枚举。
 
 LLM 只能产生 `InteractionDraft` 和可选 `IntentDraft` 候选。Provider、model、origin、usage、
 prompt/schema revision、input digest、result digest 与 fencing 信息均由 adapter/application 生成；
@@ -261,6 +263,11 @@ pre-plan rejection 使用独立拒绝域：
 - `interaction.capability_draft_missing`
 - `interaction.clarification_subject_incompatible`
 - `capability.fields_invalid`
+
+I2-A 的普通对话不是 pre-plan rejection：它使用 `RoutingDisposition.RESPOND`，任务以
+`SUCCEEDED / interaction.conversation_responded` 终结，但 Plan、Disclosure、Admission、Gateway、
+Evidence 与来源引用均为零。该结果只说明系统返回了限定领域普通回复，不表示资料查询、日志分析、
+真实模型、真实渠道、真实目标、部署、canary 或用户验收已经开放。
 
 Store/Policy/Plan/Disclosure 继续使用各自封闭错误域，例如 `clarification.parent_already_consumed`、
 `clarification.record_conflict`、`clarification.integrity_error`、
