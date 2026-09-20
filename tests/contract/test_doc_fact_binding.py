@@ -1017,7 +1017,7 @@ def test_w0_stable_docs_distinguish_current_runtime_from_future_targets() -> Non
     assert "W4a" in architecture and "W5" in architecture
 
 
-def test_development_plan_orders_every_web_product_stage_and_keeps_independent_gates_outside() -> None:
+def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
     plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
     positions = []
     for stage in _W0_WEB_STAGES:
