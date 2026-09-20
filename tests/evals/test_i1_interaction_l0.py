@@ -9,7 +9,14 @@ from tests.fakes.admission import CONTEXT
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
+from xiaowei_agent.application.default_capabilities import (
+    ASSET_INVENTORY_BINDING,
+    PROMETHEUS_ALERT_BINDING,
+    SLOW_QUERY_BINDING,
+)
 from xiaowei_agent.application.interaction_router import route_interaction
+from xiaowei_agent.capabilities.specs import OP_LIST
 from xiaowei_agent.contracts import (
     IntentDraft,
     IntentSource,
@@ -18,12 +25,14 @@ from xiaowei_agent.contracts import (
     InteractionModelResult,
     InteractionSource,
     ModelUsage,
+    ReadClass,
     TaskStatus,
 )
 
 pytestmark = pytest.mark.security
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "i1_interaction_cases.json"
+_CONTROL_TEXT = "asdfghjkl qwertyuiop"
 
 
 class _InteractionPort:
@@ -35,6 +44,24 @@ class _InteractionPort:
         del request
         self.calls += 1
         return InteractionModelResult(draft=self.draft, usage=ModelUsage())
+
+
+class _TextAwareInteractionPort:
+    def __init__(self, case: dict[str, Any]) -> None:
+        self.case = case
+        self.calls = 0
+        self.requests: list[Any] = []
+
+    async def classify(self, request: Any) -> InteractionModelResult:
+        self.calls += 1
+        self.requests.append(request)
+        text = str(request.user_text)
+        markers = self.case.get("classifier_text_markers", ())
+        if markers and all(marker in text for marker in markers):
+            return InteractionModelResult(
+                draft=_draft(self.case["draft"]), usage=ModelUsage()
+            )
+        return InteractionModelResult(draft=_unknown_model_draft(), usage=ModelUsage())
 
 
 def _load_cases() -> list[dict[str, Any]]:
@@ -74,6 +101,48 @@ def _draft(payload: dict[str, Any]) -> InteractionDraft:
     )
 
 
+def _unknown_model_draft() -> InteractionDraft:
+    return InteractionDraft(
+        proposed_kind=InteractionKind.UNKNOWN,
+        capability_draft=None,
+        confidence=0.0,
+        source=InteractionSource.MODEL,
+    )
+
+
+def _restrict_list_operations(harness: RuntimeHarness) -> None:
+    snapshot = harness.runtime._snapshot
+    restricted_specs = []
+    for spec in snapshot.specs:
+        operations = tuple(
+            operation.model_copy(update={"read_class": ReadClass.RESTRICTED})
+            if operation.operation == OP_LIST
+            else operation
+            for operation in spec.operations
+        )
+        restricted_specs.append(spec.model_copy(update={"operations": operations}))
+    restricted_snapshot = snapshot.model_copy(update={"specs": tuple(restricted_specs)})
+    harness.runtime._snapshot = restricted_snapshot
+    harness.runtime._bindings = CapabilityBindingRegistry(
+        snapshot=restricted_snapshot,
+        policy_snapshot=harness.runtime._runner._policy_snapshot,
+        bindings=(SLOW_QUERY_BINDING, PROMETHEUS_ALERT_BINDING, ASSET_INVENTORY_BINDING),
+    )
+
+
+def _unsupported_runtime(case: dict[str, Any]) -> tuple[RuntimeHarness, _TextAwareInteractionPort]:
+    port = _TextAwareInteractionPort(case)
+    tags = set(case.get("tags", ()))
+    harness = RuntimeHarness(
+        GOLDEN,
+        interaction_classifier=port,
+        synthetic_write="pseudo_readonly_write" in tags,
+    )
+    if "restricted_select" in tags:
+        _restrict_list_operations(harness)
+    return harness, port
+
+
 def test_fixture_covers_the_i1_l0_safety_matrix() -> None:
     tags = {tag for case in _load_cases() for tag in case.get("tags", [])}
     assert {
@@ -106,12 +175,56 @@ def test_router_safety_cases_have_closed_dispositions(case: dict[str, Any]) -> N
     "case", _by("l0_unsupported_runtime"), ids=lambda case: case["id"]
 )
 async def test_unsupported_i1_inputs_stop_before_gateway(case: dict[str, Any]) -> None:
-    harness = RuntimeHarness(GOLDEN)
+    harness, port = _unsupported_runtime(case)
 
     payload = await harness.handle(_text(case), idempotency_key=case["id"])
+    record = await harness.store.get(lookup=harness.lookup)
+    stages = [event.stage.value for event in harness.sink.events]
+    route_reason = case.get("expected_route_reason")
 
-    assert payload.status is TaskStatus.REJECTED
-    assert harness.gateway.invocations == 0
+    assert payload.status.value == case["expected_status"]
+    assert record.terminal_reason == case["expected_terminal_reason"]
+    if route_reason is not None:
+        decision = route_interaction(draft=_draft(case["draft"]), context=CONTEXT)
+        assert (
+            None if decision.reason_code is None else decision.reason_code.value
+        ) == route_reason
+    for stage in case.get("expected_stage_contains", ()):
+        assert stage in stages
+    for stage in case.get("expected_stage_excludes", ()):
+        assert stage not in stages
+    assert harness.gateway.invocations == case["expected_gateway_calls"]
+    assert harness.approval_gate.calls == case.get("expected_approval_calls", 0)
+    assert port.calls == 1
+    for parts in case.get("expected_model_text_excludes_parts", ()):
+        assert "".join(parts) not in str(port.requests[-1].user_text)
+
+
+@pytest.mark.parametrize(
+    "case", _by("l0_unsupported_runtime"), ids=lambda case: case["id"]
+)
+async def test_unsupported_i1_inputs_are_distinct_from_unknown_text(
+    case: dict[str, Any],
+) -> None:
+    case_harness, _ = _unsupported_runtime(case)
+    control_harness, _ = _unsupported_runtime(case)
+
+    await case_harness.handle(_text(case), idempotency_key=f"{case['id']}-case")
+    await control_harness.handle(
+        _CONTROL_TEXT, idempotency_key=f"{case['id']}-control"
+    )
+    case_record = await case_harness.store.get(lookup=case_harness.lookup)
+    control_record = await control_harness.store.get(lookup=control_harness.lookup)
+
+    assert (
+        case_record.status,
+        case_record.terminal_reason,
+        tuple(event.stage for event in case_harness.sink.events),
+    ) != (
+        control_record.status,
+        control_record.terminal_reason,
+        tuple(event.stage for event in control_harness.sink.events),
+    )
 
 
 @pytest.mark.parametrize(

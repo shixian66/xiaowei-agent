@@ -69,8 +69,12 @@
   M7 跨渠道 rejected parity、compose smoke 与 I1 executable fixture 绑定，以及 external content /
   intent pollution / no-network 安全门。当前 shell 默认没有 `PYTEST_POSTGRES_DSN`，不带 DSN 的普通
   pytest 运行会 skip PostgreSQL integration；真实 PostgreSQL 证据仅来自下条记录的隔离临时容器。
-- 本分支当前本机证据：`python -m pytest -q` 为 3909 passed / 267 skipped；
-  `python -m pytest -m security -q` 为 1435 passed / 83 skipped / 2658 deselected；
+- PR #52 复审核出 `l0_unsupported_runtime` 四条安全 eval 只被规则 fallback 拦截、与乱码控制串
+  不可区分；本分支已把这四条改为文本承重的 runtime 用例：伪只读写走合成 E1 审批暂停、
+  restricted SELECT 走 `policy.read_class_not_allowed`、日志/secret 输入走模型前置分类请求与 Router
+  拒绝，并新增控制串差异断言。隔离变异已证明把 restricted SELECT 文本替成控制串会转红；恢复后回绿。
+- 本分支当前本机证据：`python -m pytest -q` 为 3913 passed / 267 skipped；
+  `python -m pytest -m security -q` 为 1439 passed / 83 skipped / 2658 deselected；
   `ruff check .` 通过；`mypy src` 对 189 个 source files 通过。另用隔离临时 PostgreSQL
   容器跑通新增 I1/M7 integration 2 passed，以及 migration/clarification/I1 深档 26 passed。
   本机 Docker CLI 没有 `docker compose` 子命令，standalone `docker-compose config` 通过。隔离变异已证明
