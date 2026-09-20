@@ -2,7 +2,11 @@
 
 import pytest
 
-from xiaowei_agent.application.interaction_router import route_interaction
+from xiaowei_agent.application.interaction_router import (
+    InteractionRouteDecision,
+    route_interaction,
+)
+from xiaowei_agent.application.runtime import _route_rejection_reason
 from xiaowei_agent.contracts import (
     ClarificationReasonCode,
     IntentDraft,
@@ -168,3 +172,35 @@ def test_capability_route_refuses_environment_context_mismatch(context: object) 
         is InteractionRejectionReasonCode.ENVIRONMENT_CONTEXT_MISMATCH
     )
     assert decision.intent_draft is None
+
+
+def test_route_rejection_reason_never_leaks_a_clarification_code() -> None:
+    """澄清原因不得进入 `terminal_reason`，即使裁决里带着它。
+
+    今天这条走不到：CLARIFY 分支在到达拒绝语句之前就已终态化，所以 Runtime 只会
+    拿 REFUSE 裁决来问这个函数。**正因为走不到，才必须直接测函数本身**——否则这
+    层收窄就是一段没人验证的装饰，将来谁把两条分支合并了也不会有测试变红。
+
+    两个域共用一个字段的后果很具体：读任务记录的人无法只凭 `terminal_reason`
+    判断这是一次拒绝还是一次澄清，而澄清是可以继续对话的、拒绝不是。
+    """
+    clarify = InteractionRouteDecision(
+        disposition=RoutingDisposition.CLARIFY,
+        reason_code=ClarificationReasonCode.INTERACTION_KIND_AMBIGUOUS,
+        subject=RouteSubject(kind="route", proposed_kind=InteractionKind.UNKNOWN),
+    )
+    refuse = InteractionRouteDecision(
+        disposition=RoutingDisposition.REFUSE,
+        reason_code=InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE,
+    )
+
+    assert _route_rejection_reason(clarify) is None
+    assert (
+        _route_rejection_reason(refuse)
+        == InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE.value
+    )
+    assert _route_rejection_reason(
+        InteractionRouteDecision(
+            disposition=RoutingDisposition.RESPOND, reason_code=None
+        )
+    ) is None
