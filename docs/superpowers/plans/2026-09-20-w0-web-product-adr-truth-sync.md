@@ -172,7 +172,7 @@ Expected: 至少一个负责人评论/评审永久链接明确覆盖上述四点
 python -m pytest tests/contract/test_doc_fact_binding.py -q
 ```
 
-Expected RED: 现有头部仍是 `Review Draft V0.3`、基线仍是 `cc617f5…`，且没有负责人批准来源字段，新增状态契约失败；既有 Web 规格闭集测试保持通过。
+Expected RED（仅指 Task 1 Step 1 在修改规格前的首次运行）：现有头部仍是 `Review Draft V0.3`、基线仍是 `cc617f5…`，且没有负责人批准来源字段，新增状态契约失败；既有 Web 规格闭集测试保持通过。Task 1 Step 2 完成后以及后续任务重跑时应为 GREEN，不得继续把该历史基线当作预期失败。
 
 - [ ] **Step 2: 只修规格状态和证据口径**
 
@@ -199,7 +199,7 @@ git commit -m "docs(w0): accept Web product specification for ADR closure"
 
 **Files:**
 - Modify: `tests/contract/test_doc_fact_binding.py`
-- Modify: `docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md`（D5 与 RI5 Amendment 后）
+- Modify: `docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md`（`### D5 变更门` 与 RI5 Amendment 后）
 - Modify: `docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md`（RI5 R1/R2/R3 后、`## 后果` 前，以及 `## 回滚与变更门`）
 
 **Interfaces:**
@@ -216,13 +216,14 @@ git commit -m "docs(w0): accept Web product specification for ADR closure"
 
 在测试文件增加 `_web_product_amendment(path)`：只读取统一标题 `## Web 产品修订（2026-09-20）` 到后续 `## 后果` 的文本，不把历史 RI5 原文误当现行增补。每份 amendment 开头必须有可解析的 `状态: Accepted`、`决策人`、`决策日期`、`批准出处` 元数据；`批准出处` 必须是 PR #58 或 #59 的具体 comment/review 永久链接，不接受 PR 首页 URL。
 
-再增加 `_change_gate(path)`：ADR-014 读取 `## 回滚与变更门` 到 EOF，ADR-015 读取 `## 变更门` 到 `## 参考资料`。它专门验证 amendment 抽取窗口之外的现行规则，防止正文宣布替代而尾部旧门仍复活。
+再增加 `_change_gate(path)`：ADR-007 读取 `### D5 变更门` 到 `### D6 写权限的开放条件`；ADR-014 读取 `## 回滚与变更门` 到 EOF，并额外断言该节之后不存在新的 `## ` 二级标题；ADR-015 读取 `## 变更门` 到 `## 参考资料`。它专门验证 amendment 抽取窗口之外的现行规则，防止正文宣布替代而旧门仍复活，也防止 ADR-014 将来新增尾部章节时静默扩大抽取窗口。
 
 增加 `test_w0_adr_007_records_only_the_redacted_status_read_exception()`、
+`test_w0_adr_007_change_gate_points_to_the_effective_replacement()`、
 `test_w0_adr_014_replaces_r1_r2_r3_at_their_actual_security_boundaries()` 与
 `test_w0_adr_014_r2_cites_an_owner_approval_source()`、
 `test_w0_adr_014_change_gate_points_to_the_effective_replacements()`、
-`test_w0_auth_adr_bindings_are_discriminating()` 五条测试。
+`test_w0_auth_adr_bindings_are_discriminating()` 六条测试。
 
 `ADR-007` amendment 的必备事实：
 
@@ -231,6 +232,7 @@ git commit -m "docs(w0): accept Web product specification for ADR closure"
 - 原始配置 DTO、Secret、配置保存/清除、资源参数 mutation 与 probe 仍只接受 `LOCAL_ADMIN`；
 - W4b 数据库/Prometheus 只做本地校验、网络调用为 0，资源 Secret 只挂 task-worker；
 - W4c 必须另修 ADR-007、指定唯一 task-worker 路径并取得现场 GO；不授予 Web 目标客户端、E1 或真实调用。
+- ADR-007 的 `### D5 变更门` 必须为“飞书认证 `ADMIN` 只读脱敏状态投影”增加 amendment 指针；`LOCAL_ADMIN` 之外写配置或发起探针仍完整命中原变更门，不能随“读”半句一起被标成替代。
 
 `ADR-014` amendment 的必备事实：
 
@@ -248,11 +250,11 @@ git commit -m "docs(w0): accept Web product specification for ADR closure"
 python -m pytest tests/contract/test_doc_fact_binding.py -q
 ```
 
-Expected RED: 两份 ADR 还没有统一 Web 产品修订段与批准来源，ADR-014 尾部仍把被替代门写成未加限定的现行规则；失败原因不是旧 RI5 文字不同。
+Expected RED: 两份 ADR 还没有统一 Web 产品修订段与批准来源，ADR-007 D5 与 ADR-014 尾部仍把被替代门写成未加限定的现行规则；失败原因不是旧 RI5 文字不同。
 
 - [ ] **Step 2: 在 ADR-007 追加窄修订**
 
-在现有 RI5 Amendment 之后、`## 后果` 之前追加统一 amendment 和批准元数据。明确它只取代 D5 中“任何 `LOCAL_ADMIN` 之外 principal 读配置”的绝对表述；其余 D5、D6–D8、B2/F/H/E1/E2 与现场 GO 保持原样。不要删除或改写 2026-09-14 的历史接受文本。
+在现有 RI5 Amendment 之后、`## 后果` 之前追加统一 amendment 和批准元数据。明确它只取代 D5 中“任何 `LOCAL_ADMIN` 之外 principal 读配置”的绝对表述；其余 D5、D6–D8、B2/F/H/E1/E2 与现场 GO 保持原样。同步修改前部 `### D5 变更门` 的“读写配置”项：加 amendment 指针并明确只读脱敏状态投影已被窄替代，`LOCAL_ADMIN` 之外写配置与发起探针继续绝对生效。不要删除或改写 2026-09-14 的历史接受文本。
 
 - [ ] **Step 3: 在 ADR-014 追加 R1/R2/R3 修订**
 
@@ -268,7 +270,7 @@ git add tests/contract/test_doc_fact_binding.py docs/adr/ADR-007-first-capabilit
 git commit -m "docs(w0): amend Web authorization and activation boundaries"
 ```
 
-Expected: 测试全绿；扫描结果同时看得到历史 RI5、2026-09-20 替代段和尾部替代指针，但只有一个现行口径。反例测试删除 `LOCAL_ADMIN` 限制、删除批准出处、把出处换成 PR 首页、加入任意 URL return intent、让测试 state 建 context，或恢复尾部旧门任一项时必须转为 false。
+Expected: 测试全绿；扫描结果同时看得到历史 RI5、2026-09-20 替代段以及 ADR-007/014 的变更门指针，但只有一个现行口径。反例测试删除 `LOCAL_ADMIN` 限制、让 D5 指针连带放开写配置/探针、恢复 D5 的无限定旧表述、删除批准出处、把出处换成 PR 首页、加入任意 URL return intent、让测试 state 建 context、恢复 ADR-014 尾部旧门，或在 ADR-014 变更门之后追加未纳入边界的新 `## ` 标题时必须转为 false。
 
 ---
 
@@ -506,7 +508,7 @@ Expected: 只有 Task 0 allowlist 的 10 个文件；`src/`、migration、依赖
 逐项核对：
 
 - 四条被替代条款在 ADR amendment 内只有一个现行答案，历史原文有明确“被取代”关系；
-- ADR-014/015 文末回滚与变更门也指向相同替代规则，不会在 amendment 抽取窗口外复活旧门；
+- ADR-007 D5 与 ADR-014/015 的回滚/变更门也指向相同替代规则，不会在 amendment 抽取窗口外复活旧门；
 - 四份 amendment 与规格/handoff 使用同一负责人批准来源；R2 的来源是具体 comment/review 永久链接，不是 PR 首页或实现者转述；
 - `ChannelPermission`、`AdminCapability`、产品角色、认证来源、当前职责和 R1 结果 ACL 没有互相代替；
 - `.config/integrations.json` 是当前运行事实，三域文件是 W4a 未来目标；
@@ -560,7 +562,7 @@ W0 只有同时满足以下条件才可判定完成：
 - 规格状态、四份 ADR、Architecture、Development Plan、README 与 handoff 对同一边界无冲突；
 - §19.2 四条变更的完整四行/四列内容有机械闭集测试，W0–W5 顺序和当前/未来运行方式有反例测试；
 - 四条修订、R2 风险接受和 `I3 → W0/W1a` 优先级切换有负责人 comment/review 永久链接；没有该来源时 W0 不得开始，更不得通过退出门；
-- ADR-014/015 的文末回滚/变更门与 amendment 指向同一现行规则，旧门不会在抽取窗口外复活；
+- ADR-007 D5 与 ADR-014/015 的回滚/变更门与 amendment 指向同一现行规则，旧门不会在抽取窗口外复活；ADR-014 还机械保证当前变更门是最后一个二级章节；
 - 三份当前事实文档只使用 `.config/integrations.json` / `/run/xiaowei-config/integrations.json`，不再恢复已退休 Gemini Compose secret 路径；
 - diff 只含 allowlist 文档与文档契约测试；
 - 聚焦回归和 ADR-008 四门全绿；
