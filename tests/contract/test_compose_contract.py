@@ -229,6 +229,39 @@ def test_local_environment_exists_in_the_registered_target_directory() -> None:
     ).read_text(encoding="utf-8").splitlines()
 
 
+def test_readme_startup_step_names_every_published_host_port() -> None:
+    """README 的启动步骤必须点名基础文件发布的每一个宿主端口。
+
+    上面那条已经把 compose 侧钉死了，但**只钉一侧**：README 用手写句子重述同一组
+    端口，没有任何东西检查两边是否一致，于是它可以长期停在"只发布 8080"上——实际
+    api 还在 8000 上监听。对着这份文档做部署验收的人，验收记录里就会少一个监听面。
+
+    这条断言把两侧接起来：端口以 compose 为准，README 必须逐个提到。
+    """
+    services = _yaml("docker-compose.yml")["services"]
+    published = {
+        port.split(":")[1]
+        for service in services.values()
+        for port in service.get("ports", ())
+    }
+    assert published == {"8000", "8080"}
+
+    step = _readme_startup_step()
+    missing = [port for port in sorted(published) if f"127.0.0.1:{port}" not in step]
+    assert not missing, f"README 启动步骤未提到已发布端口：{missing}"
+
+
+def _readme_startup_step() -> str:
+    """取 README 首启流程里"启动"那一步的文本。
+
+    只取这一步而不是整份 README：全文搜索会被架构图、目录树里出现的端口号满足，
+    那样这条断言就永远为真。
+    """
+    text = (_ROOT / "README.md").read_text(encoding="utf-8")
+    start = text.index("5. 启动。")
+    return text[start : text.index("\n6. ", start)]
+
+
 def test_compose_exposes_only_http_apps_on_distinct_host_loopback_ports() -> None:
     services = _yaml("docker-compose.yml")["services"]
     assert services["api"]["ports"] == ["127.0.0.1:8000:8000"]
