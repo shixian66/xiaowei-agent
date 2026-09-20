@@ -97,6 +97,11 @@ RI5 Amendment 已接受，此后以下任一变化同样必须先修订本 ADR�
 `ToolGateway`、把 StarRocks 或任何运维目标纳入 Web Admin 配置或测试范围、让 `LOCAL_ADMIN`
 之外的 principal 读写配置或发起探针，以及为 RI5 新增任何执行进程或 dispatch lane。
 
+**2026-09-20 窄替代（见本文 Web 产品修订（2026-09-20））**：上列"读写配置"一项中，**只有**
+"飞书认证 `ADMIN` 读取脱敏状态投影"被该修订窄替代，不再命中本变更门。同一项里的
+"`LOCAL_ADMIN` 之外写配置"与"`LOCAL_ADMIN` 之外发起探针"**继续完整生效**，其余各项不变。
+把"读"的替代读成整项替代，属于违反本变更门。
+
 ### D6 写权限的开放条件
 
 E1 默认关闭。任何候选受控写里程碑（当前名称为 M8）要开放**唯一一条**低风险测试环境受控 E1
@@ -219,6 +224,55 @@ principal 即使持有 `ADMIN_ALL_SAFE_TASKS` 也不得访问。Web 不得由此
 
 本修订不授予 E1、不授予 E2、不改变 H 层生产只读的单独签认要求、不改变 D6 的写权限三项条件，
 也不改变 D8 的 CI 时点。RI5 的所有探针在 CI 中调用次数恒为 0。
+
+## Web 产品修订（2026-09-20）
+
+- 状态: Accepted
+- 决策人: shixian66（项目负责人）
+- 决策日期: 2026-09-20
+- 批准出处: https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268
+
+本修订只收窄 D5 变更门中"任何 `LOCAL_ADMIN` 之外的 principal 读配置"这一句的绝对表述，
+不改写 2026-09-14 已接受的 RI5 Amendment 原文，也不改动 D5 其余各项、D6–D8、B2/F/H/E1/E2
+或任何现场 GO。规格真源见
+[Web 运维工作台总体设计](../superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)。
+
+### 唯一放开：飞书 Admin 的脱敏状态窄读
+
+新增 `VIEW_INTEGRATION_STATUS` 只向**飞书认证的 `ADMIN`** 返回一个独立的脱敏状态投影。
+该投影是闭集，只含：
+
+- 集成域名（`ai` / `feishu` / `resources`）；
+- `configured`（是否已配置，布尔）；
+- `restart_required`（是否需要重启才生效，布尔）；
+- 服务加载结果的闭集状态码；
+- 最近一次连接测试结果的闭集状态码与时间。
+
+投影不含、也不得推导出任何凭据、原始配置值、文件路径、endpoint、账号标识或错误原文。
+
+### 未放开的部分（逐项点名，不写"其余不变"）
+
+- **原始配置 DTO** 的读取仍只接受 `LOCAL_ADMIN`；脱敏投影不是它的子集视图，两者是不同契约；
+- **Secret** 的任何形态（明文、掩码、长度、前后缀）都不进入本投影；
+- **配置保存/清除**与资源参数 mutation 仍只接受 `LOCAL_ADMIN`；
+- **probe**（Provider 连接测试）的发起仍只接受 `LOCAL_ADMIN`；飞书 `ADMIN` 只能读到既有测试
+  结果的闭集状态码，不能触发新的测试。
+
+配置面的判定继续按**签发来源**（`IdentitySource`）而不是权限集合，这一点不因本修订改变：
+`ADMIN_ALL_SAFE_TASKS` 是任务可见范围，不是配置面准入。
+
+### W4b / W4c 边界
+
+W4b 只登记数据库与 Prometheus 的连接参数并做本地格式校验，**网络调用为 0**；这些资源的
+Secret 只挂载给 task-worker，Web 不持有目标客户端。
+
+W4c（让运维目标进入 Web Admin 的测试范围）**必须另修 ADR-007**，指定唯一 task-worker 调用
+路径并取得**现场 GO**；本修订不授予 Web 目标客户端、不授予 E1、不授予任何真实调用许可。
+
+### 本修订不提供的证据
+
+本修订是文档口径变更。它没有对应的源码、迁移、运行、部署、canary 或用户验收证据；
+上述投影与边界在 W1a 及之后的阶段才有实现载体。
 
 ## 后果
 

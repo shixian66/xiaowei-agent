@@ -658,3 +658,176 @@ def test_web_product_spec_approval_gates_are_discriminating() -> None:
 
     back_to_draft = _replace_once(text, "Approved V0.3", "Review Draft V0.3")
     assert "Approved V0.3" not in _spec_header(back_to_draft)
+
+
+# --- W0 ADR 修订门 --------------------------------------------------------
+#
+# 这一组的根因和上面一组是同一个，但换了个藏身处：amendment 里写清楚
+# 「旧规则已被取代」，而 ADR 另一端的变更门仍以**未加限定的现行规则**
+# 出现。抽取窗口内外各有一套答案，两套都能被引用。所以除了 amendment
+# 本身，还要单独抽取窗口之外的变更门，逐条验证它指向同一个替代关系。
+
+_ADR_DIR = _ROOT / "docs/adr"
+_ADR_007 = (
+    _ADR_DIR
+    / "ADR-007-first-capabilities-execution-context-and-live-call-authorization.md"
+)
+_ADR_013 = _ADR_DIR / "ADR-013-m7-channel-boundary.md"
+_ADR_014 = _ADR_DIR / "ADR-014-real-feishu-oauth-and-web-activation.md"
+_ADR_015 = _ADR_DIR / "ADR-015-real-model-provider-boundary.md"
+
+_W0_AMENDMENT_HEADING = "## Web 产品修订（2026-09-20）"
+_W0_RETURN_INTENTS: Final[tuple[str, ...]] = (
+    "WORKBENCH",
+    "SAFE_TASK_DETAIL(task_id)",
+    "ADMIN_CENTER",
+    "ACTIVATION_STATUS(request_id)",
+)
+_CHANGE_GATE_BOUNDS: Final[dict[str, tuple[str, str | None]]] = {
+    _ADR_007.name: ("### D5 变更门", "### D6 写权限的开放条件"),
+    _ADR_013.name: ("## 回滚与变更门", None),
+    _ADR_014.name: ("## 回滚与变更门", None),
+    _ADR_015.name: ("## 变更门", "## 参考资料"),
+}
+
+
+def _web_product_amendment(path: Path) -> str:
+    """只取统一 Web 产品修订段，避免把历史 RI5 原文误当现行增补。"""
+    return _section_between(
+        path.read_text(encoding="utf-8"),
+        start=_W0_AMENDMENT_HEADING,
+        end="## 后果",
+    )
+
+
+def _amendment_metadata(path: Path) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in _web_product_amendment(path).splitlines():
+        matched = re.match(r"^- (状态|决策人|决策日期|批准出处): (.+)$", line.strip())
+        if matched:
+            fields[matched.group(1)] = matched.group(2).strip()
+    return fields
+
+
+def _change_gate(path: Path) -> str:
+    """抽取 amendment 窗口之外的现行变更门。"""
+    text = path.read_text(encoding="utf-8")
+    start, end = _CHANGE_GATE_BOUNDS[path.name]
+    start_at = text.find(start)
+    assert start_at >= 0, f"{path.name} 缺少变更门标题：{start}"
+    if end is None:
+        tail = text[start_at + len(start) :]
+        # 边界是 EOF 这件事本身必须被钉住：将来追加尾部章节会静默扩大窗口。
+        assert "\n## " not in tail, f"{path.name} 变更门之后出现了未纳入边界的二级章节"
+        return text[start_at:]
+    end_at = text.find(end, start_at + len(start))
+    assert end_at >= 0, f"{path.name} 缺少变更门边界：{end}"
+    return text[start_at:end_at]
+
+
+def _is_owner_approval_permalink(value: str) -> bool:
+    """PR 首页 URL 不是批准出处；必须精确到某条 comment 或 review。"""
+    return value.startswith(
+        "https://github.com/shixian66/xiaowei-agent/pull/"
+    ) and ("#issuecomment-" in value or "#pullrequestreview-" in value)
+
+
+def _has_accepted_owner_approval(path: Path) -> bool:
+    fields = _amendment_metadata(path)
+    return (
+        fields.get("状态") == "Accepted"
+        and bool(fields.get("决策人"))
+        and fields.get("决策日期") == "2026-09-20"
+        and _is_owner_approval_permalink(fields.get("批准出处", ""))
+    )
+
+
+def test_w0_adr_007_records_only_the_redacted_status_read_exception() -> None:
+    amendment = _web_product_amendment(_ADR_007)
+    assert _has_accepted_owner_approval(_ADR_007)
+    # 放开的是「读一个脱敏投影」，不是「读配置」。
+    assert "VIEW_INTEGRATION_STATUS" in amendment
+    for field in ("域名", "`configured`", "`restart_required`"):
+        assert field in amendment
+    # 未放开的四类必须逐个点名，不能只写一句「其余不变」。
+    for kept in ("原始配置 DTO", "Secret", "配置保存/清除", "probe"):
+        assert kept in amendment
+    assert "`LOCAL_ADMIN`" in amendment
+    assert "W4b" in amendment and "网络调用为 0" in amendment
+    assert "W4c" in amendment and "现场 GO" in amendment
+
+
+def test_w0_adr_007_change_gate_points_to_the_effective_replacement() -> None:
+    gate = _change_gate(_ADR_007)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate, (
+        "D5 变更门没有指向 2026-09-20 修订，窗口内外会各有一套现行规则"
+    )
+    # 关键的不对称：只有「读脱敏状态投影」被窄替代。
+    assert "脱敏状态投影" in gate
+    for still_absolute in ("写配置", "探针"):
+        assert still_absolute in gate
+    assert "继续完整生效" in gate
+
+
+def test_w0_adr_014_replaces_r1_r2_r3_at_their_actual_security_boundaries() -> None:
+    amendment = _web_product_amendment(_ADR_014)
+    assert _has_accepted_owner_approval(_ADR_014)
+    assert "取代 RI5 R1" in amendment
+    assert "取代 RI5 R2" in amendment
+    assert "取代 RI5 R3" in amendment
+    # R2：替代的是先后顺序，不是认证本身。
+    assert "loopback" in amendment
+    assert "改密前只允许改密和退出" in amendment
+    assert "边缘限流" in amendment
+    # 当前没有应用层限流这件事不能被「补偿控制」一词盖掉。
+    assert "应用层没有 HTTP rate limiter" in amendment
+    # R3：只解冻一张表，且 return intent 是闭集。
+    assert "`web_oauth_login_contexts`" in amendment
+    assert "`state_digest`" in amendment
+    for intent in _W0_RETURN_INTENTS:
+        assert f"`{intent}`" in amendment
+    assert "不保存任意 URL" in amendment
+    assert "连接测试 state 不产生" in amendment
+
+
+def test_w0_adr_014_r2_cites_an_owner_approval_source() -> None:
+    fields = _amendment_metadata(_ADR_014)
+    assert fields.get("状态") == "Accepted"
+    assert _is_owner_approval_permalink(fields.get("批准出处", ""))
+    assert fields["批准出处"] == _W0_OWNER_APPROVAL
+
+
+def test_w0_adr_014_change_gate_points_to_the_effective_replacements() -> None:
+    gate = _change_gate(_ADR_014)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate
+    # 三项被取代的门必须逐项带指针，而不是整段照旧。
+    for superseded in ("R1", "R2", "R3"):
+        assert f"由本修订 {superseded}" in gate
+    # 其余原门继续有效。
+    assert "新增第三个 Provider" in gate
+
+
+def test_w0_auth_adr_bindings_are_discriminating() -> None:
+    """反例：撤掉替代指针、改宽 D5、或把批准出处换成 PR 首页时必须转红。"""
+    gate_007 = _change_gate(_ADR_007)
+    widened_d5 = _replace_once(gate_007, "脱敏状态投影", "配置")
+    assert "脱敏状态投影" not in widened_d5
+
+    revived = _replace_once(
+        gate_007, _W0_AMENDMENT_HEADING.removeprefix("## "), "（无）"
+    )
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") not in revived
+
+    gate_014 = _change_gate(_ADR_014)
+    dropped_pointer = _replace_once(gate_014, "由本修订 R2", "由后续修订")
+    assert "由本修订 R2" not in dropped_pointer
+
+    assert not _is_owner_approval_permalink(
+        "https://github.com/shixian66/xiaowei-agent/pull/59"
+    )
+    assert not _is_owner_approval_permalink("实现者在 PR 描述中转述")
+    assert _is_owner_approval_permalink(_W0_OWNER_APPROVAL)
+
+    amendment_014 = _web_product_amendment(_ADR_014)
+    without_intent = _replace_once(amendment_014, "`ACTIVATION_STATUS(request_id)`", "任意 URL")
+    assert "`ACTIVATION_STATUS(request_id)`" not in without_intent
