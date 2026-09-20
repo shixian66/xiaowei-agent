@@ -42,6 +42,13 @@ def _clarify_route(kind: InteractionKind) -> InteractionRouteDecision:
     )
 
 
+def _respond() -> InteractionRouteDecision:
+    return InteractionRouteDecision(
+        disposition=RoutingDisposition.RESPOND,
+        reason_code=None,
+    )
+
+
 def _proceed(draft: IntentDraft) -> InteractionRouteDecision:
     return InteractionRouteDecision(
         disposition=RoutingDisposition.PROCEED,
@@ -70,6 +77,9 @@ def route_interaction(
         and draft.source is InteractionSource.MODEL
     ):
         return _clarify_route(draft.proposed_kind)
+
+    if draft.proposed_kind is InteractionKind.CONVERSATION:
+        return _respond()
 
     if draft.proposed_kind is not InteractionKind.CAPABILITY_REQUEST:
         return _refuse(InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE)

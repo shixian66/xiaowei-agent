@@ -48,7 +48,9 @@ from xiaowei_agent.planning.disclosure import (
     project_execution_disclosure,
 )
 from xiaowei_agent.rendering.generic import (
+    CONVERSATION_TERMINAL_REASON,
     render_clarification_payload,
+    render_conversation_response,
     render_preplan_rejection,
 )
 from xiaowei_agent.rendering.model_advisory import append_model_advisory
@@ -206,6 +208,19 @@ class TaskViewRuntime:
         except PlanNotFoundError:
             if record.status is TaskStatus.REJECTED and not evidences:
                 return render_preplan_rejection(status=record.status)
+            if (
+                record.status is TaskStatus.SUCCEEDED
+                and record.terminal_reason == CONVERSATION_TERMINAL_REASON
+                and not evidences
+            ):
+                submission = await self._tasks.get_submission(
+                    lookup=TaskLookup(
+                        task_id=record.task_id,
+                        tenant_id=record.tenant_id,
+                        environment_id=record.environment_id,
+                    )
+                )
+                return render_conversation_response(submission=submission)
             raise
         binding = self._bindings.runtime_for_plan(plan=stored.plan)
         verdict = assess_evidence(binding=binding, evidences=evidences)

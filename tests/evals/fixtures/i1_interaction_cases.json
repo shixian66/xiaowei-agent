@@ -6,8 +6,7 @@
       "category": "l0_router",
       "tags": ["kind_conversation"],
       "draft": {"kind": "conversation", "source": "model", "capability": null},
-      "expected_disposition": "refuse",
-      "expected_reason": "interaction.route_not_available"
+      "expected_disposition": "respond"
     },
     {
       "id": "I1-L0-ROUTE-002",
@@ -136,9 +135,8 @@
       "expected_model_text_excludes_parts": [
         ["token=", "sk_", "live_", "fixture"]
       ],
-      "expected_status": "rejected",
-      "expected_terminal_reason": null,
-      "expected_route_reason": "interaction.route_not_available",
+      "expected_status": "succeeded",
+      "expected_terminal_reason": "interaction.conversation_responded",
       "expected_gateway_calls": 0,
       "expected_stage_contains": ["intent"],
       "expected_stage_excludes": ["resolver", "planner", "gateway"]

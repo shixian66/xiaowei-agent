@@ -27,11 +27,10 @@
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
-> 当前工作树正在补齐 I1-D Eval/closure：已有 interaction classifier、insert-once interaction artifact、确定性
-> Router 与 Runtime 接入切片、终态澄清存储、澄清子任务一次性消费；可信槽位 / `SlotVerifier` 已完成离线实现；
-> ReadClass/Plan schema V2 与 ExecutionDisclosure 执行披露屏障已完成离线实现。当前分支新增 I1 版本化 eval
-> fixture、L0/L1 eval、PostgreSQL 生命周期用例、跨渠道 rejected parity 与安全/compose 绑定；不能把 I1 离线闭环写成
-> 真实模型、真实渠道、真实目标、部署或用户验收。
+> I1-A–I1-D 已合入 `main`；当前工作树正在开发 I2-A 限定领域普通对话通道。该切片只把
+> `conversation` 从 Router 的 pre-plan rejection 改为固定、无工具、无来源引用的确定性回复；
+> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-A 写成真实模型、
+> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现
@@ -54,8 +53,8 @@
 第一阶段不是追求“什么都能做”，而是先把一条可验证的只读闭环做扎实：
 
 1. 用户通过 API/CLI 发起自然语言运维问题。
-2. I1 先形成 `InteractionArtifact`，由确定性 Router 判断普通对话、资料查询、日志分析、需要澄清或 capability 请求。
-3. 只有明确的 capability 请求进入 Resolver；缺槽进入 `CLARIFICATION_REQUIRED` 终态澄清。
+2. I1/I2 先形成 `InteractionArtifact`，由确定性 Router 判断普通对话、资料查询、日志分析、需要澄清或 capability 请求。
+3. I2-A 的普通对话只返回限定领域固定回复；只有明确的 capability 请求进入 Resolver；缺槽进入 `CLARIFICATION_REQUIRED` 终态澄清。
 4. `SlotVerifier` 把本轮文本和澄清父记录中的可信槽位升级为专属 Params，Planner 生成受约束计划。
 5. Policy 和对应的 SQL AST / 固定模板 PromQL Guard 检查工具调用，并在首次 Gateway 前完成执行披露。
 6. ToolGateway 访问外部系统，生成带来源和限制的证据。

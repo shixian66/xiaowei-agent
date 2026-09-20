@@ -26,6 +26,7 @@ from xiaowei_agent.contracts import (
     TaskStatus,
 )
 from xiaowei_agent.persistence.model_artifacts import InteractionArtifactCandidate
+from xiaowei_agent.persistence.plans import PlanNotFoundError
 from xiaowei_agent.persistence.store import TaskAttemptCommand
 
 
@@ -154,24 +155,13 @@ async def test_retryable_provider_error_falls_back_to_rule_interaction_once() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "draft",
-    [
-        InteractionDraft(
-            proposed_kind=InteractionKind.CONVERSATION,
-            capability_draft=None,
-            confidence=0.8,
-            source=InteractionSource.MODEL,
-        ),
-        InteractionDraft(
-            proposed_kind=InteractionKind.CAPABILITY_REQUEST,
-            capability_draft=_capability(environment_id="prod"),
-            confidence=0.8,
-            source=InteractionSource.MODEL,
-        ),
-    ],
-)
-async def test_router_rejection_stops_before_gateway(draft: InteractionDraft) -> None:
+async def test_router_rejection_stops_before_gateway() -> None:
+    draft = InteractionDraft(
+        proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+        capability_draft=_capability(environment_id="prod"),
+        confidence=0.8,
+        source=InteractionSource.MODEL,
+    )
     port = _InteractionPort(InteractionModelResult(draft=draft, usage=ModelUsage()))
     harness = RuntimeHarness(GOLDEN, interaction_classifier=port)
 
@@ -181,3 +171,27 @@ async def test_router_rejection_stops_before_gateway(draft: InteractionDraft) ->
     assert outcome.status is TaskStatus.REJECTED
     assert port.calls == 1
     assert harness.calls == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_route_returns_bounded_answer_without_gateway_or_plan() -> None:
+    port = _InteractionPort(_result(InteractionKind.CONVERSATION))
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=port)
+
+    payload = await harness.handle("你能做什么？")
+    record = await harness.store.get(lookup=harness.lookup)
+    queried = await harness.runtime.query_task(lookup=harness.lookup)
+    repeated = await harness.handle("你能做什么？")
+
+    assert payload.status is TaskStatus.SUCCEEDED
+    assert record.status is TaskStatus.SUCCEEDED
+    assert queried.render == payload
+    assert repeated == payload
+    assert "不会调用工具" in payload.answer
+    assert payload.refs == ()
+    assert queried.disclosure is None
+    assert harness.calls == []
+    assert harness.approval_gate.calls == 0
+    assert await harness.ledger.load(task_id=harness.task_id) == ()
+    with pytest.raises(PlanNotFoundError):
+        await harness.plan_store.load(task_id=harness.task_id)

@@ -39,15 +39,28 @@ def _draft(
     )
 
 
+def test_conversation_route_responds_without_entering_capability_chain(
+    context: object,
+) -> None:
+    decision = route_interaction(
+        draft=_draft(InteractionKind.CONVERSATION),
+        context=context,
+    )
+
+    assert decision.disposition is RoutingDisposition.RESPOND
+    assert decision.reason_code is None
+    assert decision.intent_draft is None
+    assert decision.subject is None
+
+
 @pytest.mark.parametrize(
     "kind",
     [
-        InteractionKind.CONVERSATION,
         InteractionKind.KNOWLEDGE_LOOKUP,
         InteractionKind.LOG_ANALYSIS,
     ],
 )
-def test_non_capability_routes_are_refused_before_resolver(
+def test_non_i2_routes_are_refused_before_resolver(
     kind: InteractionKind, context: object
 ) -> None:
     decision = route_interaction(draft=_draft(kind), context=context)

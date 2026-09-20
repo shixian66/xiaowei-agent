@@ -146,7 +146,10 @@ from xiaowei_agent.planning.slot_verification import (
     require_confirmed_projection,
 )
 from xiaowei_agent.reflection.status import terminal_status_for
-from xiaowei_agent.rendering.generic import render_clarification_as_payload
+from xiaowei_agent.rendering.generic import (
+    CONVERSATION_TERMINAL_REASON,
+    render_clarification_as_payload,
+)
 from xiaowei_agent.rendering.pending import render_pending
 from xiaowei_agent.runners.deterministic import (
     RECOVERY_DRIFT_REASON,
@@ -370,7 +373,8 @@ class XiaoweiRuntime:
                 stage=PipelineStage.INTENT,
                 outcome=(
                     StageOutcome.OK
-                    if route.disposition is RoutingDisposition.PROCEED
+                    if route.disposition
+                    in {RoutingDisposition.PROCEED, RoutingDisposition.RESPOND}
                     else StageOutcome.REJECTED
                 ),
                 context=context,
@@ -379,6 +383,12 @@ class XiaoweiRuntime:
                 delivery=Delivery.LOG_AND_DURABLE,
             )
             if route.intent_draft is None:
+                if route.disposition is RoutingDisposition.RESPOND:
+                    return await self._complete_conversation(
+                        record=record,
+                        grant=grant,
+                        context=context,
+                    )
                 if route.disposition is RoutingDisposition.CLARIFY:
                     await self._save_route_clarification(
                         grant=grant,
@@ -701,6 +711,77 @@ class XiaoweiRuntime:
                 confirmed_slots=(),
             ),
         )
+
+    async def _complete_conversation(
+        self,
+        *,
+        record: TaskRecord,
+        grant: TaskAttemptGrant,
+        context: RequestContext,
+    ) -> TaskOutcome:
+        """完成 I2 普通对话；无计划、无证据、无 Gateway。"""
+        current = record
+        for status in _conversation_transition_path(current.status):
+            current = await self._advance_without_plan(
+                record=current,
+                status=status,
+                grant=grant,
+                context=context,
+                terminal_reason=(
+                    CONVERSATION_TERMINAL_REASON
+                    if status is TaskStatus.SUCCEEDED
+                    else None
+                ),
+            )
+        return TaskOutcome(
+            task_id=current.task_id,
+            status=current.status,
+            terminal_reason=current.terminal_reason,
+            evidence_refs=(),
+            render_ref=None,
+        )
+
+    async def _advance_without_plan(
+        self,
+        *,
+        record: TaskRecord,
+        status: TaskStatus,
+        grant: TaskAttemptGrant,
+        context: RequestContext,
+        terminal_reason: str | None,
+    ) -> TaskRecord:
+        event = self._event(
+            stage=PipelineStage.LIFECYCLE,
+            outcome=StageOutcome.OK,
+            context=context,
+            task_id=grant.task_id,
+            attempt_number=grant.attempt_number,
+        )
+        try:
+            result = await self._tasks.transition(
+                command=TransitionCommand(
+                    task_id=grant.task_id,
+                    expected_version=record.version,
+                    to_status=status,
+                    fencing_token=grant.fencing_token,
+                    terminal_reason=terminal_reason,
+                    audit_events=(event,),
+                )
+            )
+        except Exception as exc:
+            await self._sink.emit(
+                event, delivery=delivery_for_write_exception(exc)
+            )
+            raise
+        await self._sink.emit(
+            event,
+            delivery=Delivery.COMMAND_COMMITTED
+            if result.applied
+            else Delivery.COMMAND_ROLLED_BACK,
+        )
+        if not result.applied:
+            raise LifecycleError("transition rejected", rejection=result.rejection)
+        return result.winner
 
     async def _resolve(
         self,
@@ -1091,6 +1172,16 @@ def _task_outcome(
         evidence_refs=(),
         render_ref=None,
     )
+
+
+def _conversation_transition_path(status: TaskStatus) -> tuple[TaskStatus, ...]:
+    if status is TaskStatus.CREATED:
+        return (TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.SUCCEEDED)
+    if status is TaskStatus.PLANNING:
+        return (TaskStatus.RUNNING, TaskStatus.SUCCEEDED)
+    if status is TaskStatus.RUNNING:
+        return (TaskStatus.SUCCEEDED,)
+    raise LifecycleError("task status cannot complete a conversation")
 
 
 def _plan_contains_restricted_read(plan: ExecutionPlan) -> bool:

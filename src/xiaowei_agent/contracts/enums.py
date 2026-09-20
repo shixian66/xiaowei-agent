@@ -139,6 +139,7 @@ class InteractionKind(StrEnum):
 
 class RoutingDisposition(StrEnum):
     PROCEED = "proceed"
+    RESPOND = "respond"
     CLARIFY = "clarify"
     REFUSE = "refuse"
 

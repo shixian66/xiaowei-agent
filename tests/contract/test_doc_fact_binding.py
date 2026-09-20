@@ -192,7 +192,9 @@ _I0_TRUTH_DOC_TERMS = {
     ),
     "README.md": (
         "智能交互入口 I0-DOC 已绑定",
-        "不能把 I1 离线闭环写成",
+        "I1-A–I1-D 已合入 `main`",
+        "正在开发 I2-A 限定领域普通对话通道",
+        "`knowledge_lookup` 与 `log_analysis` 仍保持拒绝",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
     "AGENT_HANDOFF.md": (
@@ -253,15 +255,12 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     readme_i0_status = (
         "> 智能交互入口 I0-DOC 已绑定 "
         "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> 当前工作树正在补齐 I1-D Eval/closure：已有 interaction classifier、insert-once "
-        "interaction artifact、确定性\n"
-        "> Router 与 Runtime 接入切片、终态澄清存储、澄清子任务一次性消费；可信槽位 / "
-        "`SlotVerifier` 已完成离线实现；\n"
-        "> ReadClass/Plan schema V2 与 ExecutionDisclosure 执行披露屏障已完成离线实现。"
-        "当前分支新增 I1 版本化 eval\n"
-        "> fixture、L0/L1 eval、PostgreSQL 生命周期用例、跨渠道 rejected parity 与安全/compose "
-        "绑定；不能把 I1 离线闭环写成\n"
-        "> 真实模型、真实渠道、真实目标、部署或用户验收。\n"
+        "> I1-A–I1-D 已合入 `main`；当前工作树正在开发 I2-A 限定领域普通对话通道。该切片只把\n"
+        "> `conversation` 从 Router 的 pre-plan rejection 改为固定、无工具、无来源引用的"
+        "确定性回复；\n"
+        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-A "
+        "写成真实模型、\n"
+        "> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
     )
     without_readme_status = {
         **docs,
@@ -269,7 +268,7 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     }
     readme_missing = _missing_i0_truth_terms(without_readme_status)
     assert "README.md" in readme_missing
-    assert "不能把 I1 离线闭环写成" in readme_missing["README.md"]
+    assert "正在开发 I2-A 限定领域普通对话通道" in readme_missing["README.md"]
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -302,10 +301,9 @@ def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
 
 _I1D_TRUTH_DOC_TERMS = {
     "README.md": (
-        "可信槽位 / `SlotVerifier` 已完成离线实现",
-        "ReadClass/Plan schema V2 与 ExecutionDisclosure 执行披露屏障已完成离线实现",
-        "当前分支新增 I1 版本化 eval",
-        "不能把 I1 离线闭环写成",
+        "I1-A–I1-D 已合入 `main`",
+        "正在开发 I2-A 限定领域普通对话通道",
+        "不能把 I2-A 写成真实模型",
     ),
     "AGENT_HANDOFF.md": (
         "I1-D Eval/closure",
