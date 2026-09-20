@@ -189,8 +189,9 @@
   审计精确 wheel，身份或元数据不匹配就停下复审。
   不建通用 provider registry，不启用 provider chat/session、tools、function calling、搜索、代码执行、
   文件或 MCP。意图与慢查询解释走两个窄 port。
-- **RI3 已批准的精简生命周期设计**：Gemini key 只由固定宿主 Git-ignored 文件
-  `.secrets/gemini_api_key` 经 file-backed Compose secret 挂给 task worker；`.env` 不保存 key 或路径。
+- **RI3 已批准的精简生命周期设计**：Gemini key 的唯一明文真源是宿主 Git-ignored 的
+  `.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`），由 Web 管理面
+  写入、task worker 只读挂载；Provider 凭据不再走 Compose secret，`.env` 不保存 key 或路径。
   意图 low/60 秒/最多两次 request，解释 high/180 秒/一次 request，分别限制 2048/4000 output tokens；
   RI3 adds no whole-task deadline and preserves the current StarRocks 25-second
   query-timeout upper bound/30-second read-only policy cap; future 180/190/195/200-second layers belong
@@ -510,7 +511,7 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   只有实际非 null 的负数/溢出拒绝。Python 3.11 实测表明单次取消并不会必然跳过 finally 中的 close；
   真正缺口是重复取消会中断清理、close 自身 `CancelledError` 会遮蔽主异常，现以单一 tracked task、
   共同 deadline、shield、取消后收口和主异常优先修复；自审又发现任意 close `BaseException` 原文可越过
-  拒绝边界，已归一为固定本地错误码。Gemini 宿主 key 固定为 `.secrets/gemini_api_key`，ambient
+  拒绝边界，已归一为固定本地错误码。Gemini 宿主 key 现固定在 `.config/integrations.json`，ambient
   `GEMINI_API_KEY_FILE` 不能改变渲染结果；smoke 用最后一层私有 JSON override 注入自己的 fake 文件，
   不读取宿主环境。与模型无关的 shared secret reader/StarRocks 行为及 245 行测试已从 PR diff 完整移除，
   相对 `origin/main` 四个路径零差异。

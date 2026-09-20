@@ -50,6 +50,12 @@
 
 授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)，M7 Web/飞书薄渠道边界见 [ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)，真实飞书 OAuth/Web 激活见 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)，已接受的 Gemini 窄端口与数据边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。智能交互入口、澄清链、`ReadClass` 与执行披露屏障见 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)；它是 I1 的实施门，不是当前运行证据。
 
+已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
+[总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
+交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
+**这些是未来目标，不是当前启动步骤**——当前可照做的首启流程见下文，仍是单一
+`.config/integrations.json` 与 loopback 发布。
+
 ## 目标能力
 
 第一阶段不是追求“什么都能做”，而是先把一条可验证的只读闭环做扎实：

@@ -688,22 +688,19 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 
 Secrets are mounted only through fixed file references resolved by a trusted composition
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
-worker, listener and channel worker publish no host ports. Gemini plaintext originates
-only from the Git-ignored host file `.secrets/gemini_api_key`. The model override defines
-a file-backed top-level `gemini_api_key` secret and appends that secret only to task
-worker while retaining its existing `postgres_password` mount. All other
-services keep their current secret lists. Worker sees a fixed
-`/run/secrets/gemini_api_key` path.
-The override declares `XIAOWEI_GEMINI_ENABLED=true` only under
-`services.worker.environment`; the shared `x-app-environment` anchor and all non-worker
-services remain free of both the flag and the Gemini secret.
+worker, listener and channel worker publish no host ports.
 
-The host source path is fixed to `./.secrets/gemini_api_key`; an environment variable
-cannot replace it, so rendered Compose evidence is stable across ambient host settings.
+**当前已实现口径（RI5，证据等级 `tests`，未部署）**：Provider 凭据不再走 Docker secret。
+Gemini 与飞书的明文唯一真源是宿主 Git-ignored 的 `.config/integrations.json`，容器内以
+`/run/xiaowei-config/integrations.json` 出现：`web-app` 读写挂载该目录，实际需要凭据的进程
+只读挂载，`api` 不挂载。模型 override 只剩装配开关，在 `services.worker.environment` 下声明
+`XIAOWEI_GEMINI_ENABLED=true`；共享的 `x-app-environment` anchor 与所有非 worker 服务都不带
+该 flag。
+
 Neither `GEMINI_API_KEY_FILE` nor `GEMINI_API_KEY` is a Settings/`_FIELD_TO_ENV` key,
 container environment value or `.env.example` entry; the only
 application setting is default-false
-`XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits/secret path are versioned constants;
+`XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits are versioned constants;
 RI3 fixes Developer API `v1beta` and canonical origin
 `https://generativelanguage.googleapis.com`.
 README/runbook alone explain host-side key setup. This path requires Docker
@@ -717,14 +714,22 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-**已接受但尚未实现的 RI5 修订**：上述 Gemini secret 段落描述的是当前已实现口径
-（`./.secrets/gemini_api_key` → file-backed Compose secret → `/run/secrets/gemini_api_key`）。
-[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R1 提议由本地配置文件
-`.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`）取代该路径与飞书
-App Secret 文件，并把镜像内 `xiaowei` 用户固定为 UID/GID `10001:10001`。该修订已于 2026-09-14
-被接受，但**尚未实现**；本节在 RI5 实现 PR 落地时才随真实代码更新，在此之前以上述已实现口径为准。
-同理，基础 Compose 继续只发布 loopback 端口；RI5 的局域网发布只能由独立 override 打开，
-且首次强制改密必须在 loopback 阶段完成。
+**RI5 修订的实现状态**：[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
+§RI5 修订 R1 用 `.config/integrations.json` 取代原 Gemini/飞书 Secret 文件，并把镜像内
+`xiaowei` 用户固定为 UID/GID `10001:10001`。该修订于 2026-09-14 被接受，**已离线实现**，
+上一段就是当前口径；证据等级到 `tests` 为止，没有部署、canary 或真机验收证据。
+
+基础 Compose 继续只发布 loopback 端口，局域网发布只能由独立 override 打开。
+**2026-09-20 修订**：`ADR-014` Web 产品修订 R2 取消了"首次强制改密必须在 loopback 阶段完成"
+的先后硬门；`WebMode.LAN_HTTP` 只接受 loopback/RFC1918 Host 的形态约束不在替代范围内，
+继续生效。
+
+**W0 接受的未来产品目标（尚无实现载体）**：持久用户目录（`UserAccount` / `UserRoleAssignment` /
+`ExternalIdentity` / `LocalCredential`）、独立 `AdminCapability` 与 `AdminAuditStore`、
+**W4a** 的三域配置文件与进程挂载矩阵、**W5** 的 release override 与边缘限流。字段级定义见
+[Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
+与修订后的 ADR-007/013/014/015，本节不复制。这些目标当前**没有**源码、迁移、运行、部署或
+用户验收证据。
 
 `.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏

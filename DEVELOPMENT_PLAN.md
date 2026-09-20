@@ -1,6 +1,10 @@
 # 小维 Agent 2.0 总体开发计划
 
-> 状态：Approved V2.4；项目负责人已于 2026-09-10 明确批准本修订与 RI1 默认关闭、无真实调用的离线开工。
+> 状态：Approved V2.5；项目负责人已于 2026-09-10 明确批准 V2.4 与 RI1 默认关闭、无真实调用的离线开工。
+> V2.5 于 2026-09-20 增加 Web 产品线 `W0 → W5` 交付序列，并把当前优先级从 I3 切换为 `W0 → W1a`
+> （I3 延期但不取消）。批准来源：项目负责人决策记录
+> <https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268>。
+> **该批准只授权 W0 文档/ADR 收口**，不授权 W1a 源码、迁移、真实调用、部署或用户验收。
 > V2 于 2026-09-01 由项目负责人批准；V2.1 于 2026-09-07 为 M7 PR 1–3
 > 增加离线窄例外；V2.2 于 2026-09-08 将该例外扩至 M7 PR 1–8，同时把真实应用、凭据、网络、
 > 部署与 canary 保留为独立硬门；V2.3 于 2026-09-09 固化“离线范围可单独验收归档，但不满足
@@ -132,7 +136,7 @@ I2–I4 不是 M8 前置。主动连接 Loki、ELK、Kubernetes、服务器或�
 | Python 工具链 | Python 3.11（首个且唯一强制验证版本）；pytest；Ruff（唯一 linter）；mypy | M0 已拍板（ADR-008） | 不同时引入第二套 runner/linter/type checker |
 | 证据保留 | M0-M6a 只保存脱敏 fixture/recording；真实保留周期和大对象后端在 M6b 前决定 | M6b | 不落真实原始 rows 或 secret |
 | 审批语义 | 到 M8 前确定主体、渠道、有效期、拒绝/过期/冲突语义 | M8 | 不开放 E1 |
-| 模型供应商 | 核心测试继续使用 fake interpreter；RI3 固定 Google Gemini Developer API `v1beta`、canonical origin `https://generativelanguage.googleapis.com`、`gemini-3-flash-preview` 和官方 `google-genai==2.23.0` 的异步 `models.generate_content`；实现 PR 必须独立审计精确 wheel，任何身份或元数据不匹配都停下复审。`GEMINI_API_KEY` 只存在于固定宿主 Git-ignored 文件 `.secrets/gemini_api_key`，经 file-backed Compose secret 只挂给 worker；不把 key 或宿主路径放进 `.env`。不设本地费用硬封顶，但保留调用次数、输入/输出边界和 usage 观测；实现权不等于真实调用权，现场调用另需 RI3 GO | ADR-015/V7.1 计划已批准离线实现；真实调用现场门未开放 | 无现场 GO 不读取真实 key、不联网 |
+| 模型供应商 | 核心测试继续使用 fake interpreter；RI3 固定 Google Gemini Developer API `v1beta`、canonical origin `https://generativelanguage.googleapis.com`、`gemini-3-flash-preview` 和官方 `google-genai==2.23.0` 的异步 `models.generate_content`；实现 PR 必须独立审计精确 wheel，任何身份或元数据不匹配都停下复审。Gemini 明文唯一真源是宿主 Git-ignored 的 `.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`），由 Web 管理面写入、需要凭据的进程只读挂载；不把 key 或宿主路径放进 `.env`。不设本地费用硬封顶，但保留调用次数、输入/输出边界和 usage 观测；实现权不等于真实调用权，现场调用另需 RI3 GO | ADR-015/V7.1 计划已批准离线实现；真实调用现场门未开放 | 无现场 GO 不读取真实 key、不联网 |
 | 通用 capability DSL | V1 明确延期；M6a 只采集复用、改动文件、工时（如有可靠记录）和返工数据 | M9 后的新立项 | 继续使用显式 CapabilitySpec，不建 DSL 框架 |
 | 多证据源自适应诊断 | V1 非目标；先验证三个有界、单能力闭环 | M9 后的新立项 | 不允许无界反思或跨能力自动扩张计划 |
 
@@ -165,6 +169,31 @@ I2–I4 不是 M8 前置。主动连接 Loki、ELK、Kubernetes、服务器或�
 | I5 真实模型 Eval / 灰度 / UAT | Intelligent Interaction | 基于真实样本校准分类质量、灰度和用户验收；不替代 RI3 首次 Gemini GO |
 | M8 受控写闭环 | Phase 5 | 测试环境中一条低风险写能力完成审批、恢复、readback 和故障注入验收 |
 | M9 Runner 准入评估 | Phase 6 | 用量化证据决定继续 DeterministicRunner 或新增 LangGraph adapter；**不授予 Multi-Agent 权限** |
+
+### Web 产品线交付序列（V2.5 新增）
+
+下列八个阶段是**必经顺序**，每一阶段都需独立详细计划、TDD 实现与独立复审：
+
+- **W0 文档与 ADR 真源收口**：只改 Markdown 与文档契约测试，不动 `src/`、迁移或 Compose。
+- **W1a 用户、权限与 Admin 审计写内核**：`UserAccount`、`UserRoleAssignment`、`ExternalIdentity`、
+  `LocalCredential`、`AdminCapability` 与 `AdminAuditStore` 的持久化与 append-only 写契约。
+- **W1b 激活内核**：`ActivationRequest` / `ActivationStore` 与 CAS 审批，复用 W1a 的审计写入且
+  审计不可写时 fail-closed。
+- **W2 登录与多 shell**：登录入口、`web_oauth_login_contexts` 与闭集 return intent。
+- **W3 用户 / 职责 / 审计 UI**：只增查询 UI 与敏感查看审计，不新增写路径。
+- **W4a AI / 飞书配置迁移**：迁移到三域配置文件与进程挂载矩阵，新旧并存时 fail-closed 为
+  `migration_required`。
+- **W4b 数据库 / Prometheus 参数登记**：只保存参数并做本地校验，**网络调用为 0**。
+- **W5 产品部署**：release override、可审计开关、边缘限流、配置目录预检与分级运行证据。
+
+### 独立阻塞门（不在上述必经序列内）
+
+- **W4c 运维目标纳入 Web Admin 测试范围**：必须另修 ADR-007、指定唯一 task-worker 路径并取得
+  现场 GO。
+- **R1 数据库真实结果访问**：`/results/{result_ref}`、预览与导出，只对该次查询的申请人和审批人
+  开放；Admin 不自动越权。R1 未获独立授权前，W0–W5 不创建结果 artifact 或结果服务。
+
+**I3 受治理资料查询**为**延期**路线，未取消；它与 Web 产品线不并行修改同一真源。
 
 原只读 V1 的候选发布点要求 M6a、M6b 和 M7 各自通过退出门；在 V2.4 真实接入路线中，RI2
 完成 M7 现场门、RI4 完成 M6b 现场门，RI6 才允许形成正式部署/canary/UAT 证据。受控写仍是
@@ -477,8 +506,9 @@ Feishu context waits for RI2 evidence.
 RI3 Web parent context does not depend on RI2 live OAuth evidence and does not rewrite
 the existing channel aggregation transaction.
 
-**凭证与配置**：唯一明文来源是固定宿主 Git-ignored 文件 `.secrets/gemini_api_key`，经
-file-backed Compose secret 只挂载给 worker。不提供宿主路径环境变量覆盖，渲染后的 Compose
+**凭证与配置**：唯一明文来源是宿主 Git-ignored 的 `.config/integrations.json`
+（容器内 `/run/xiaowei-config/integrations.json`），由 Web 管理面写入，需要凭据的进程只读挂载，
+`api` 不挂载。Provider 凭据不再走 Docker secret。不提供宿主路径环境变量覆盖，渲染后的 Compose
 证据不随环境漂移；`GEMINI_API_KEY` 与 `GEMINI_API_KEY_FILE` 都不是 Settings、容器环境或
 `.env.example` 字段，后者继续与 `_FIELD_TO_ENV` 精确一致。
 The only new application setting is default-false `XIAOWEI_GEMINI_ENABLED`; provider,

@@ -959,3 +959,115 @@ def test_w0_channel_and_config_bindings_are_discriminating() -> None:
         gate_015, _W0_AMENDMENT_HEADING.removeprefix("## "), "（无）"
     )
     assert _W0_AMENDMENT_HEADING.removeprefix("## ") not in revived
+
+
+# --- W0 稳定文档门 --------------------------------------------------------
+#
+# RI5 早就把 Provider 凭据从 Compose secret 换成了 .config/integrations.json
+# （见 docker-compose.yml「Provider 凭据不再走 Docker secret」），但三份当前
+# 事实文档里还留着 8 处旧路径。这类漂移的特征是：每一处单独看都像历史描述，
+# 合起来却让读者按已退休的方式准备凭据。所以这里按**精确字面量计数为 0**
+# 断言，并只扫描当前事实文档——保留历史的 ADR 和测试夹具不在其内。
+
+_RETIRED_GEMINI_SECRET_PATHS: Final[tuple[str, ...]] = (
+    ".secrets/gemini_api_key",
+    "/run/secrets/gemini_api_key",
+)
+_STALE_ARCHITECTURE_CLAIMS: Final[tuple[str, ...]] = (
+    "已接受但尚未实现的 RI5 修订",
+    "被接受，但**尚未实现**",
+)
+_CURRENT_TRUTH_DOCS: Final[tuple[str, ...]] = (
+    "ARCHITECTURE.md",
+    "DEVELOPMENT_PLAN.md",
+    "AGENT_HANDOFF.md",
+)
+_W0_WEB_STAGES: Final[tuple[str, ...]] = (
+    "W0",
+    "W1a",
+    "W1b",
+    "W2",
+    "W3",
+    "W4a",
+    "W4b",
+    "W5",
+)
+
+
+def _truth_doc_text(name: str) -> str:
+    return (_ROOT / name).read_text(encoding="utf-8")
+
+
+def test_truth_docs_do_not_revive_the_retired_gemini_secret_path() -> None:
+    for name in _CURRENT_TRUTH_DOCS:
+        text = _truth_doc_text(name)
+        for retired in _RETIRED_GEMINI_SECRET_PATHS:
+            assert text.count(retired) == 0, (
+                f"{name} 仍把已退休的 {retired} 写成当前 Provider 凭据真源"
+            )
+        assert "`.config/integrations.json`" in text
+
+
+def test_w0_stable_docs_distinguish_current_runtime_from_future_targets() -> None:
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    for stale in _STALE_ARCHITECTURE_CLAIMS:
+        assert architecture.count(stale) == 0, f"ARCHITECTURE.md 仍含过期声称：{stale}"
+    # 当前事实：RI5 已离线实现，证据等级到 tests 为止。
+    assert "/run/xiaowei-config/integrations.json" in architecture
+    assert "W4a" in architecture and "W5" in architecture
+
+
+def test_development_plan_orders_every_web_product_stage_and_keeps_independent_gates_outside() -> None:
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    positions = []
+    for stage in _W0_WEB_STAGES:
+        at = plan.find(f"**{stage} ")
+        assert at >= 0, f"DEVELOPMENT_PLAN.md 缺少 Web 产品阶段 {stage}"
+        positions.append(at)
+    assert positions == sorted(positions), "W0–W5 顺序不是文档中的实际先后"
+    # W4c 与 R1 是独立阻塞门，不得混进必经序列。
+    sequence_start = positions[0]
+    sequence_end = plan.find("### 独立阻塞门", sequence_start)
+    assert sequence_end > sequence_start, "DEVELOPMENT_PLAN.md 缺少独立阻塞门小节"
+    sequence = plan[sequence_start:sequence_end]
+    assert "**W4c " not in sequence and "**R1 " not in sequence
+    gates = plan[sequence_end:]
+    assert "W4c" in gates and "R1" in gates
+    assert "Approved V2.5" in plan
+    assert _W0_OWNER_APPROVAL in plan
+    # I3 延期不等于取消。
+    assert "I3" in plan and "延期" in plan
+
+
+def test_readme_does_not_present_w4a_or_w5_as_current_runbook() -> None:
+    readme = _truth_doc_text("README.md")
+    runbook_at = readme.find("Compose 启动前只需要准备一个已被 Git 忽略的本地文件")
+    assert runbook_at >= 0
+    runbook = readme[runbook_at : runbook_at + 4000]
+    # 当前 runbook 只能出现单文件形态。
+    assert "`.config/integrations.json`" in runbook
+    for future_file in (
+        "`.config/ai/config.json`",
+        "`.config/feishu/config.json`",
+        "`.config/resources/config.json`",
+    ):
+        assert future_file not in runbook, "W4a 未来三域文件被写进了当前首启步骤"
+    # 已批准的产品演进要能从 README 导航到，但只作为未来目标出现。
+    assert "2026-09-19-web-operations-console-identity-activation-design.md" in readme
+    assert "W0" in readme and "W1a" in readme
+
+
+def test_w0_stable_doc_bindings_are_discriminating() -> None:
+    """反例：恢复旧 Secret 路径、换阶段顺序、或把 W4c 插进必经序列必须转红。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    revived = architecture + "\n宿主 key 固定为 `.secrets/gemini_api_key`。\n"
+    assert any(revived.count(path) > 0 for path in _RETIRED_GEMINI_SECRET_PATHS)
+
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    swapped = _replace_once(plan, "**W1a ", "«W1a-moved» ")
+    assert swapped.find("**W1a ") < 0
+
+    with_gate_inline = _replace_once(plan, "**W4b ", "**W4c 独立门** 与 **W4b ")
+    sequence_start = with_gate_inline.find("**W0 ")
+    sequence_end = with_gate_inline.find("### 独立阻塞门", sequence_start)
+    assert "**W4c " in with_gate_inline[sequence_start:sequence_end]
