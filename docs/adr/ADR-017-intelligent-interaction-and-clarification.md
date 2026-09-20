@@ -46,7 +46,7 @@ RequestEnvelope
 `InteractionKind` 回答“用户在做什么”，闭集为 `conversation`、`knowledge_lookup`、
 `log_analysis`、`capability_request`、`unknown`。`RoutingDisposition` 回答“本轮系统怎么办”，
 I1 初始闭集为 `proceed`、`clarify`、`refuse`；I2-A 增加 `respond`，仅用于限定领域普通对话的
-无工具固定回复。两个维度不能合并成一个宽枚举。
+无工具回复；I2-B 把该回复的内容定死为能力目录投影。两个维度不能合并成一个宽枚举。
 
 LLM 只能产生 `InteractionDraft` 和可选 `IntentDraft` 候选。Provider、model、origin、usage、
 prompt/schema revision、input digest、result digest 与 fencing 信息均由 adapter/application 生成；

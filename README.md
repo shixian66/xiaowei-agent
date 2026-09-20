@@ -56,7 +56,7 @@
 
 1. 用户通过 API/CLI 发起自然语言运维问题。
 2. I1/I2 先形成 `InteractionArtifact`，由确定性 Router 判断普通对话、资料查询、日志分析、需要澄清或 capability 请求。
-3. I2-A 的普通对话只返回限定领域固定回复；只有明确的 capability 请求进入 Resolver；缺槽进入 `CLARIFICATION_REQUIRED` 终态澄清。
+3. I2 的普通对话只返回由当前 `CapabilitySnapshot` 确定性投影出来的能力目录，不调用工具、与用户文本无关；只有明确的 capability 请求进入 Resolver；缺槽进入 `CLARIFICATION_REQUIRED` 终态澄清。
 4. `SlotVerifier` 把本轮文本和澄清父记录中的可信槽位升级为专属 Params，Planner 生成受约束计划。
 5. Policy 和对应的 SQL AST / 固定模板 PromQL Guard 检查工具调用，并在首次 Gateway 前完成执行披露。
 6. ToolGateway 访问外部系统，生成带来源和限制的证据。
