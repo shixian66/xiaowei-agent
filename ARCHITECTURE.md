@@ -105,7 +105,7 @@ RequestEnvelope
        → XiaoweiRuntime
             → load-or-create AcceptedInteractionArtifact
             → DeterministicInteractionRouter
-                 → conversation: deterministic capability-catalog response（I2-A/I2-B）
+                 → conversation: deterministic capability-catalog response（I2，已归档）
                  → knowledge_lookup / log_analysis: REJECTED
                  → unclear route: ClarificationRecord → CLARIFICATION_REQUIRED（I1 后续切片）
                  → capability_request + proceed: continue

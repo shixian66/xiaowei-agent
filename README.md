@@ -27,12 +27,12 @@
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
-> I1-A–I1-D 与 I2-A 已合入 `main`；当前工作树正在开发 I2-B 能力目录对话。该切片把普通对话的
-> 回答从一句固定文案改为**由当前 `CapabilitySnapshot` 确定性投影出来的能力目录**：逐条列出
-> 已注册能力、操作、`read_class` 与所经 gateway，并带上快照标识作为来源；回答只由声明决定，
-> 与用户文本无关，仍不调用工具、不访问外部系统、不读取历史。
-> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4。不能把 I2-B 写成真实模型、
-> 资料查询、日志分析、真实渠道、真实目标、部署或用户验收。
+> I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档。普通对话的回答是**由当前 `CapabilitySnapshot`
+> 确定性投影出来的能力目录**：逐条列出已注册能力、操作、`read_class` 与所经 gateway，并带上
+> 快照标识作为来源；回答只由声明决定，与用户文本无关，不调用工具、不访问外部系统、不读取历史。
+> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4；I3 尚未开始。
+> 能力目录只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**——不能把 I2
+> 写成真实模型、资料查询、日志分析、真实渠道、真实目标、部署或用户验收。
 > 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现
