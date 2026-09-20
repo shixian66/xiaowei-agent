@@ -76,6 +76,7 @@ from xiaowei_agent.contracts import (
     EvidenceEnvelope,
     ExecutionPlan,
     IntentDraft,
+    InteractionRejectionReasonCode,
     ModelAdvisory,
     ModelCallObservation,
     ModelFallbackCode,
@@ -174,9 +175,16 @@ class RequestRejectedError(RuntimeError):
     ``stage`` 放结构化属性：它是错误归因的落点，不是给人读的文本。
     """
 
-    def __init__(self, message: str, *, stage: PipelineStage) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: PipelineStage,
+        reason_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.stage = stage
+        self.reason_code = reason_code
 
 
 class TaskInProgressError(TaskIdCarryingError, RuntimeError):
@@ -384,6 +392,16 @@ class XiaoweiRuntime:
             )
             if route.intent_draft is None:
                 if route.disposition is RoutingDisposition.RESPOND:
+                    if clarification is not None:
+                        raise RequestRejectedError(
+                            "conversation route cannot satisfy clarification parent",
+                            stage=PipelineStage.INTENT,
+                            reason_code=(
+                                InteractionRejectionReasonCode
+                                .CLARIFICATION_SUBJECT_INCOMPATIBLE
+                                .value
+                            ),
+                        )
                     return await self._complete_conversation(
                         record=record,
                         grant=grant,
@@ -526,7 +544,6 @@ class XiaoweiRuntime:
         except _ClarificationTerminalizedError:
             pass
         except (
-            RequestRejectedError,
             PolicyDeniedError,
             SqlGuardError,
             BindingError,
@@ -538,6 +555,12 @@ class XiaoweiRuntime:
                 task_id=grant.task_id,
                 status=TaskStatus.REJECTED,
                 terminal_reason=None,
+            )
+        except RequestRejectedError as exc:
+            terminal = _task_outcome(
+                task_id=grant.task_id,
+                status=TaskStatus.REJECTED,
+                terminal_reason=exc.reason_code,
             )
         except Exception:
             retryable = True
