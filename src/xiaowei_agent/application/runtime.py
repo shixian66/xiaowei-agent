@@ -377,14 +377,22 @@ class XiaoweiRuntime:
                     delivery=Delivery.LOG_AND_DURABLE,
                 )
             route = route_interaction(draft=accepted.artifact.draft, context=context)
+            # 普通对话不能替澄清父链作答：父链是一次性终态，用固定回复把它收成
+            # SUCCEEDED 会悄悄烧掉它。这个判定**只算一次**，由 INTENT 归因与下面的拒绝
+            # 共用：算两次迟早漂移成"trace 记 ok、任务却是 rejected"，那条任务就没有
+            # 任何非 OK 阶段可归因了。
+            conversation_blocks_clarification = (
+                route.disposition is RoutingDisposition.RESPOND
+                and clarification is not None
+            )
+            routed_forward = (
+                route.disposition
+                in {RoutingDisposition.PROCEED, RoutingDisposition.RESPOND}
+                and not conversation_blocks_clarification
+            )
             await self._emit(
                 stage=PipelineStage.INTENT,
-                outcome=(
-                    StageOutcome.OK
-                    if route.disposition
-                    in {RoutingDisposition.PROCEED, RoutingDisposition.RESPOND}
-                    else StageOutcome.REJECTED
-                ),
+                outcome=StageOutcome.OK if routed_forward else StageOutcome.REJECTED,
                 context=context,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
@@ -392,7 +400,7 @@ class XiaoweiRuntime:
             )
             if route.intent_draft is None:
                 if route.disposition is RoutingDisposition.RESPOND:
-                    if clarification is not None:
+                    if conversation_blocks_clarification:
                         raise RequestRejectedError(
                             "conversation route cannot satisfy clarification parent",
                             stage=PipelineStage.INTENT,

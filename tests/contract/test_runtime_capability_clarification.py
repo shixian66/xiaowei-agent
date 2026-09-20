@@ -20,6 +20,8 @@ from xiaowei_agent.contracts import (
     InteractionRejectionReasonCode,
     InteractionSource,
     ModelUsage,
+    PipelineStage,
+    StageOutcome,
     TaskStatus,
     TaskSubmission,
 )
@@ -244,6 +246,16 @@ async def test_conversation_child_reply_rejects_instead_of_consuming_parent_as_s
     assert harness.gateway.invocations == 0
     assert harness.adapters["alertmanager"].call_count == 0
     assert harness.adapters["prometheus"].call_count == 0
+
+    # 归因：被拒绝的任务必须恰好有一个非 OK 阶段，且落在 INTENT 上。少了这条断言，
+    # INTENT 可以照常记 OK 而任务仍收成 REJECTED——trace 会说这条链路一切正常，
+    # 于是这次拒绝在错误归因里找不到任何落点。
+    failed_stages = [
+        (event.stage, event.outcome)
+        for event in harness.sink.events
+        if event.task_id == child.task_id and event.outcome is not StageOutcome.OK
+    ]
+    assert failed_stages == [(PipelineStage.INTENT, StageOutcome.REJECTED)]
 
 
 async def test_runtime_passes_parent_confirmed_slots_to_runner_disclosure() -> None:
