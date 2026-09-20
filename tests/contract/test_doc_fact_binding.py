@@ -1071,3 +1071,63 @@ def test_w0_stable_doc_bindings_are_discriminating() -> None:
     sequence_start = with_gate_inline.find("**W0 ")
     sequence_end = with_gate_inline.find("### 独立阻塞门", sequence_start)
     assert "**W4c " in with_gate_inline[sequence_start:sequence_end]
+
+
+# --- W0 交接门 ------------------------------------------------------------
+#
+# handoff 最容易出的错不是写少，而是**把批准写成实现**：设计合入了、CI 绿了、
+# 计划批了，读起来就像 W1a 已经在跑。这里把「有什么证据」和「下一步只许做
+# 什么」分开钉死，并要求批准来源是评论永久链接而不是 merge 事实本身。
+
+_W0_FORBIDDEN_HANDOFF_CLAIMS: Final[tuple[str, ...]] = (
+    "W1a 已实现",
+    "W1a 已开始",
+    "真实飞书已可用",
+    "Web 产品已部署",
+    "已用户验收",
+    "已 canary",
+)
+
+
+def test_w0_handoff_records_design_merge_and_keeps_implementation_claims_closed() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    # 设计合入事实必须精确到 PR 与 merge SHA。
+    assert "PR #58" in handoff
+    assert "4e5a844620b700e25d6a29e43687c1a4c876db16" in handoff
+    # 批准来源是评论永久链接，不是「已合入」这件事。
+    assert _W0_OWNER_APPROVAL in handoff
+    assert "2026-09-20" in handoff
+    for claim in _W0_FORBIDDEN_HANDOFF_CLAIMS:
+        assert claim not in handoff, f"handoff 出现越级声称：{claim}"
+    # RI5 的实现状态必须是当前口径。
+    assert "未来 Admin 配置治理无源码" not in handoff
+    # 独立真实调用门保持关闭。
+    for gate in ("RI2", "RI3", "RI4", "RI6", "E1"):
+        assert gate in handoff
+
+
+def test_w0_handoff_names_w1a_plan_as_the_only_post_merge_next_step() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert "下一件事是**另起 I3 受治理资料查询计划**" not in handoff
+    assert "W1a" in handoff and "计划" in handoff
+    assert "I3" in handoff and "延期" in handoff
+    # W0 自身的证据等级：只有文档与测试。
+    assert "W0" in handoff
+    assert "没有产品源码" in handoff or "未产生产品源码" in handoff
+
+
+def test_w0_handoff_binding_is_discriminating() -> None:
+    """反例：加入任一越级声称、删除批准来源或恢复 I3 唯一下一步都必须转红。"""
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    for claim in _W0_FORBIDDEN_HANDOFF_CLAIMS:
+        polluted = f"{handoff}\n- {claim}。\n"
+        assert claim in polluted
+
+    without_source = _replace_once(handoff, _W0_OWNER_APPROVAL, "见 PR #58 已合入")
+    assert _W0_OWNER_APPROVAL not in without_source
+
+    revived_i3 = handoff + "\n- 下一件事是**另起 I3 受治理资料查询计划**。\n"
+    assert "下一件事是**另起 I3 受治理资料查询计划**" in revived_i3
+
+    for retired in _RETIRED_GEMINI_SECRET_PATHS:
+        assert handoff.count(retired) == 0
