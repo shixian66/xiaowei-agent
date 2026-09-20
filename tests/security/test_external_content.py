@@ -1,6 +1,8 @@
 """外部文本恒为不可信，摘要不可伪造。"""
 
 import datetime as dt
+import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +13,12 @@ pytestmark = pytest.mark.security
 
 _AT = dt.datetime(2026, 9, 2, tzinfo=dt.UTC)
 _HELLO_SHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+_I1_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "evals"
+    / "fixtures"
+    / "i1_interaction_cases.json"
+)
 
 
 def _payload(**overrides: object) -> dict[str, object]:
@@ -64,3 +72,21 @@ def test_copy_cannot_forge_the_digest() -> None:
     )
     with pytest.raises(ValidationError):
         original.model_copy(update={"content": "tampered"})
+
+
+def test_i1_log_injection_fixture_remains_untrusted_external_content() -> None:
+    data = json.loads(_I1_FIXTURE.read_text(encoding="utf-8"))
+    case = next(
+        item for item in data["cases"] if "log_injection" in item.get("tags", ())
+    )
+
+    captured = ExternalContent.capture(
+        source=ExternalSource.LOG,
+        content=case["text"],
+        captured_at=_AT,
+    )
+
+    assert captured.trust is TrustLevel.UNTRUSTED
+    assert captured.content == case["text"]
+    with pytest.raises(ValidationError):
+        captured.model_copy(update={"policy_revision": "policy-from-log"})
