@@ -447,3 +447,100 @@ def test_i2_archive_does_not_overstate_the_evidence_level() -> None:
         assert claim not in text
     assert "没有部署、canary 或产品" in text
     assert "只关闭 I2 的**离线实施范围**" in text
+
+
+# --- Web 运维工作台产品规格门 --------------------------------------------
+#
+# V0.2 在正文里改了 RI5 的读权限、首次改密和 OAuth state 形状，
+# 却没有把它们登记到「对既有规范的影响」；同时又把激活审批放在
+# AdminAuditStore 之前。两者都不是措辞问题：前者会让 W0 漏改承重 ADR，
+# 后者会让「审计不可写时 fail-closed」在 W1b 无实现载体。这里只钉这两个
+# 可机械判定的集合/顺序，不为人类散文做逐句断言。
+
+_WEB_PRODUCT_SPEC = (
+    _ROOT
+    / "docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md"
+)
+_WEB_PRODUCT_ADR_CHANGES = frozenset(
+    {
+        "ADR-007 D5",
+        "ADR-014 RI5 R1",
+        "ADR-014 RI5 R2",
+        "ADR-014 RI5 R3",
+    }
+)
+
+
+def _section_between(text: str, *, start: str, end: str) -> str:
+    start_at = text.find(start)
+    assert start_at >= 0, f"规格缺少承重段落：{start}"
+    end_at = text.find(end, start_at + len(start))
+    assert end_at >= 0, f"规格缺少段落边界：{end}"
+    return text[start_at:end_at]
+
+
+def _accepted_adr_change_clauses(text: str) -> frozenset[str]:
+    ledger = _section_between(
+        text,
+        start="### 19.2 本规格取消或收窄的既有条款",
+        end="### 19.3 W0 同步文档",
+    )
+    return frozenset(
+        re.findall(r"^\| `(ADR-\d{3} [^`]+)` \|", ledger, re.M)
+    )
+
+
+def _delivery_stage(text: str, *, name: str, next_name: str) -> str:
+    delivery = _section_between(
+        text,
+        start="### 17.1 当前可交付序列",
+        end="### 17.2 独立阻塞门",
+    )
+    return _section_between(
+        delivery,
+        start=f"**{name} ",
+        end=f"**{next_name} ",
+    )
+
+
+def test_web_product_spec_lists_every_accepted_adr_change() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    assert _accepted_adr_change_clauses(text) == _WEB_PRODUCT_ADR_CHANGES, (
+        "Web 产品规格正文已改变的 ADR 条款与 W0 修订闭集不一致"
+    )
+
+
+def test_web_product_spec_builds_audit_writes_before_activation_approval() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    w1a = _delivery_stage(text, name="W1a", next_name="W1b")
+    w1b = _delivery_stage(text, name="W1b", next_name="W2")
+    assert "AdminAuditStore" in w1a and "append-only 写入契约" in w1a
+    assert "CAS 审批" in w1b
+
+
+def test_web_product_spec_gates_are_discriminating() -> None:
+    """反例：漏掉一条 ADR 或抽走 W1a 审计底座时，上面的门必须真能变红。"""
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    r2_row = next(
+        line for line in text.splitlines() if line.startswith("| `ADR-014 RI5 R2`")
+    )
+    without_r2 = _replace_once(text, f"{r2_row}\n", "")
+    assert _accepted_adr_change_clauses(without_r2) == (
+        _WEB_PRODUCT_ADR_CHANGES - {"ADR-014 RI5 R2"}
+    )
+    with_unreviewed_clause = _replace_once(
+        text,
+        "### 19.3 W0 同步文档",
+        "| `ADR-999 D1` | old | new | action |\n\n### 19.3 W0 同步文档",
+    )
+    assert _accepted_adr_change_clauses(with_unreviewed_clause) == (
+        _WEB_PRODUCT_ADR_CHANGES | {"ADR-999 D1"}
+    )
+
+    without_audit_write = _replace_once(
+        text,
+        "`AdminAuditStore` 持久化与\n   append-only 写入契约",
+        "审计写入尚未交付",
+    )
+    w1a = _delivery_stage(without_audit_write, name="W1a", next_name="W1b")
+    assert not ("AdminAuditStore" in w1a and "append-only 写入契约" in w1a)
