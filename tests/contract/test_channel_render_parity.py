@@ -8,6 +8,7 @@ from email.message import Message
 import httpx
 
 from xiaowei_agent.application.channel_access import AccessibleTask
+from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     ClarificationField,
@@ -30,6 +31,7 @@ from xiaowei_agent.interfaces.api import create_app as create_internal_app
 from xiaowei_agent.interfaces.cli import run_cli
 from xiaowei_agent.interfaces.web_models import WebTaskDetail
 from xiaowei_agent.rendering.feishu import render_feishu_card
+from xiaowei_agent.rendering.generic import render_conversation_response
 
 _NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
 
@@ -333,3 +335,83 @@ async def test_channels_preserve_clarification_projection() -> None:
     assert "任务状态：需要补充信息" in card_text
     assert view.clarification is not None
     assert view.clarification.prompt in card_text
+
+
+async def test_conversation_capability_catalog_survives_every_thin_channel() -> None:
+    """I2-B 的回答比之前长一截：一段结论 + 每条能力一节 + 来源引用。
+
+    之前那句固定文案短到任何渠道都装得下，所以"对话回答能不能完整送达"从来没被
+    验证过。能力目录会随 Registry 增长，飞书卡片有大小上限——`truncated` 一旦为真，
+    用户看到的就是一份**被截断的能力清单**，那比不回答更糟：他会以为小维只有前几项
+    能力。这条把四个渠道和截断标志一起钉住。
+    """
+    snapshot = StaticCapabilityRegistry().snapshot()
+    payload = render_conversation_response(snapshot=snapshot)
+    task_id = "task-channel-conversation"
+    view = TaskView(
+        task_id=task_id,
+        status=TaskStatus.SUCCEEDED,
+        render=payload,
+        clarification=None,
+        disclosure=None,
+        query_path=task_query_path(task_id),
+    )
+    settings = Settings(environment_id="dev")
+    app = create_internal_app(
+        runtime=_Runtime(view),
+        settings=settings,
+        readiness=_Probe(),
+        clock=lambda: _NOW,
+        policy_revision="policy-2026-09-01",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://testserver",
+    ) as client:
+        api_response = await client.get(view.query_path)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    cli_code = run_cli(
+        ["task", "get", task_id],
+        opener=lambda *_args, **_kwargs: _Response(api_response.content),
+        stdout=stdout,
+        stderr=stderr,
+    )
+    web = WebTaskDetail.from_accessible(
+        AccessibleTask(
+            task_view=view,
+            request_preview="你能做什么？",
+            submitted_at=_NOW,
+            task_version=1,
+        )
+    )
+    feishu = render_feishu_card(
+        FeishuProjectionInput(
+            task_view=view,
+            request_preview="你能做什么？",
+            task_version=1,
+            detail_url=f"https://ops.example.test/app/tasks/{task_id}",
+        )
+    )
+
+    canonical = view.model_dump(mode="json")
+    assert api_response.status_code == 200
+    assert api_response.json() == canonical
+    assert cli_code == 0
+    assert stderr.getvalue() == ""
+    assert json.loads(stdout.getvalue()) == canonical
+    assert web.status is TaskStatus.SUCCEEDED
+    assert web.render == payload
+    # 没有计划就没有执行披露；卡片不得凭空长出一个披露段落。
+    assert web.disclosure is None
+
+    assert feishu.truncated is False
+    card_text = _plain_card_text(json.loads(feishu.content_json))
+    assert "任务状态：已完成" in card_text
+    assert "执行披露" not in card_text
+    for spec in snapshot.specs:
+        assert spec.capability_id in card_text
+    assert payload.answer in card_text
+    for section in payload.sections:
+        assert section.body in card_text

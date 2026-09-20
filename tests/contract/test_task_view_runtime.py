@@ -31,6 +31,8 @@ from xiaowei_agent.contracts import (
     TaskRecord,
     TaskStatus,
 )
+from xiaowei_agent.persistence.plans import PlanNotFoundError
+from xiaowei_agent.persistence.store import TransitionCommand
 
 
 def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
@@ -235,3 +237,49 @@ def test_task_view_rejects_mismatched_render_and_clarification_shapes() -> None:
             status=TaskStatus.SUCCEEDED,
             query_path="/v1/tasks/task-3",
         )
+
+
+async def test_conversation_projection_requires_the_conversation_terminal_reason() -> (
+    None
+):
+    """只有 `interaction.conversation_responded` 才配拿到能力目录。
+
+    这条守卫此前**不承重**：去掉 `terminal_reason` 判断后全量仍然全绿，因为当前
+    没有别的路径会产出"SUCCEEDED 且无 plan 无 evidence"的任务。但那只是今天的
+    巧合——真正的风险是将来某条新路径这样收口，然后毫无征兆地拿到一份"我能做的
+    事就是下面这份能力清单"，而它其实根本没做能力目录这件事。
+    """
+    harness = RuntimeHarness(GOLDEN)
+    views = _task_views(harness)
+    record = await harness.store.create_task(
+        submission=harness.submission("你能做什么？")
+    )
+    grant = await harness.store.acquire_lease(
+        task_id=record.task_id, owner="probe", ttl_seconds=60
+    )
+    assert grant is not None
+    current = record
+    for status in (
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.SUCCEEDED,
+    ):
+        result = await harness.store.transition(
+            command=TransitionCommand(
+                task_id=record.task_id,
+                expected_version=current.version,
+                to_status=status,
+                fencing_token=grant.fencing_token,
+                # 终态原因是别的东西，不是对话。
+                terminal_reason=(
+                    "some.other.terminal.reason"
+                    if status is TaskStatus.SUCCEEDED
+                    else None
+                ),
+            )
+        )
+        assert result.applied, result.rejection
+        current = result.winner
+
+    with pytest.raises(PlanNotFoundError):
+        await views.project_recorded(record=current)

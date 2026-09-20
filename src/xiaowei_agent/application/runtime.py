@@ -427,9 +427,14 @@ class XiaoweiRuntime:
                         terminal_reason=None,
                     )
                     raise _ClarificationTerminalizedError
+                # Router 已经算出闭集里的拒绝码（route_not_available /
+                # environment_context_mismatch / capability_draft_forbidden /
+                # capability_draft_missing）。以前这里把它丢掉、统一写 None，于是
+                # 四种成因完全不同的拒绝在任务记录上长得一模一样，只能回去翻 trace。
                 raise RequestRejectedError(
                     "interaction route rejected",
                     stage=PipelineStage.INTENT,
+                    reason_code=_route_rejection_reason(route),
                 )
             draft = route.intent_draft
             candidate, binding = await self._resolve(
@@ -751,18 +756,38 @@ class XiaoweiRuntime:
         grant: TaskAttemptGrant,
         context: RequestContext,
     ) -> TaskOutcome:
-        """完成 I2 普通对话；无计划、无证据、无 Gateway。"""
+        """完成 I2 普通对话；无计划、无证据、无 Gateway。
+
+        这条路径**绕过 ``_finalize``** 是有意的：``assess_evidence(binding=None,
+        evidences=())`` 会把一个没有证据可评的任务降级成 REJECTED。但绕过不等于
+        可以不发 REFLECTION——终态任务恰好一条 REFLECTION 是全链的审计不变量，
+        少这一条就意味着"这个任务有没有被评过可答性"在 trace 上没有答案。
+        对话没有证据要评，所以它按构造就是 OK，但事件必须存在。
+        """
         current = record
         for status in _conversation_transition_path(current.status):
+            terminal = status is TaskStatus.SUCCEEDED
             current = await self._advance_without_plan(
                 record=current,
                 status=status,
                 grant=grant,
                 context=context,
                 terminal_reason=(
-                    CONVERSATION_TERMINAL_REASON
-                    if status is TaskStatus.SUCCEEDED
-                    else None
+                    CONVERSATION_TERMINAL_REASON if terminal else None
+                ),
+                # 与 ``_finalize`` 同序：REFLECTION 在 LIFECYCLE 之前。
+                leading_events=(
+                    (
+                        self._event(
+                            stage=PipelineStage.REFLECTION,
+                            outcome=StageOutcome.OK,
+                            context=context,
+                            task_id=grant.task_id,
+                            attempt_number=grant.attempt_number,
+                        ),
+                    )
+                    if terminal
+                    else ()
                 ),
             )
         return TaskOutcome(
@@ -781,14 +806,18 @@ class XiaoweiRuntime:
         grant: TaskAttemptGrant,
         context: RequestContext,
         terminal_reason: str | None,
+        leading_events: tuple[TraceEvent, ...] = (),
     ) -> TaskRecord:
-        event = self._event(
+        lifecycle_event = self._event(
             stage=PipelineStage.LIFECYCLE,
             outcome=StageOutcome.OK,
             context=context,
             task_id=grant.task_id,
             attempt_number=grant.attempt_number,
         )
+        # 与迁移同一条命令提交：审计事件和状态事实必须同生共死，分开写就会出现
+        # "状态迁移了但审计没落" 或者反过来。
+        events = (*leading_events, lifecycle_event)
         try:
             result = await self._tasks.transition(
                 command=TransitionCommand(
@@ -797,20 +826,21 @@ class XiaoweiRuntime:
                     to_status=status,
                     fencing_token=grant.fencing_token,
                     terminal_reason=terminal_reason,
-                    audit_events=(event,),
+                    audit_events=events,
                 )
             )
         except Exception as exc:
-            await self._sink.emit(
-                event, delivery=delivery_for_write_exception(exc)
-            )
+            delivery = delivery_for_write_exception(exc)
+            for event in events:
+                await self._sink.emit(event, delivery=delivery)
             raise
-        await self._sink.emit(
-            event,
-            delivery=Delivery.COMMAND_COMMITTED
+        delivery = (
+            Delivery.COMMAND_COMMITTED
             if result.applied
-            else Delivery.COMMAND_ROLLED_BACK,
+            else Delivery.COMMAND_ROLLED_BACK
         )
+        for event in events:
+            await self._sink.emit(event, delivery=delivery)
         if not result.applied:
             raise LifecycleError("transition rejected", rejection=result.rejection)
         return result.winner
@@ -1204,6 +1234,19 @@ def _task_outcome(
         evidence_refs=(),
         render_ref=None,
     )
+
+
+def _route_rejection_reason(route: InteractionRouteDecision) -> str | None:
+    """把 Router 的拒绝码搬到任务终态上。
+
+    只接受 ``InteractionRejectionReasonCode``：``reason_code`` 的静态类型里还有
+    ``ClarificationReasonCode``，而澄清的原因属于 ``ClarificationRecord``，不是
+    pre-plan rejection 闭集。把两个域混进同一个字段，读任务记录的人就无法只凭
+    ``terminal_reason`` 判断这是拒绝还是澄清。
+    """
+    if isinstance(route.reason_code, InteractionRejectionReasonCode):
+        return route.reason_code.value
+    return None
 
 
 def _conversation_transition_path(status: TaskStatus) -> tuple[TaskStatus, ...]:

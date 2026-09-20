@@ -119,7 +119,7 @@
       "draft": {"kind": "log_analysis", "source": "model", "capability": null},
       "classifier_text_markers": ["日志片段", "ignore previous policy"],
       "expected_status": "rejected",
-      "expected_terminal_reason": null,
+      "expected_terminal_reason": "interaction.route_not_available",
       "expected_route_reason": "interaction.route_not_available",
       "expected_gateway_calls": 0,
       "expected_stage_contains": ["intent"],
