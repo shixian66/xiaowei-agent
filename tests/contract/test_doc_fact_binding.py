@@ -11,6 +11,7 @@ Codex 第二轮复审打回的第 2 项：验收报告写着「计划 V1.4」而
 
 import re
 from pathlib import Path
+from typing import Final
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PLAN = _ROOT / "docs/plans/M4-postgres-taskstore.md"
@@ -544,3 +545,116 @@ def test_web_product_spec_gates_are_discriminating() -> None:
     )
     w1a = _delivery_stage(without_audit_write, name="W1a", next_name="W1b")
     assert not ("AdminAuditStore" in w1a and "append-only 写入契约" in w1a)
+
+
+# --- W0 规格收口门 --------------------------------------------------------
+#
+# 上面的闭集只保证「四条 ADR 的名字还在」。W0 真正的风险是另一种：
+# 名字一个不少，却把某一行的旧口径、新口径或必做动作悄悄改宽，于是
+# W0 照着一份已被改写的授权去修 ADR。因此这里按**单元格**钉死四行，
+# 并把「谁批准的、批准到哪一步」一起变成可机械判定的事实。
+
+_W0_OWNER_APPROVAL = (
+    "https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268"
+)
+_WEB_PRODUCT_ADR_CHANGE_ROWS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    (
+        "ADR-014 RI5 R1",
+        "配置读取/保存/测试只接受 `LOCAL_ADMIN`，飞书 principal 不得读配置状态",
+        "只为飞书认证 `ADMIN` 增加第 6.1 节的脱敏状态投影；原始配置读取、保存和测试仍禁止",
+        "修订 R1，冻结状态 DTO 闭集和反例",
+    ),
+    (
+        "ADR-014 RI5 R2",
+        "LAN override 只能在 loopback 首次强制改密完成后启用",
+        "项目负责人批准受信 LAN 在改密前可达；用“部署文档醒目警示 + 边缘限流 + 立即改密 + "
+        "改密前路由闭集”替代 loopback 先后硬门",
+        "在 R2 单独记录负责人批准、风险、补偿措施与回滚方式",
+    ),
+    (
+        "ADR-014 RI5 R3",
+        "本轮 schema 解冻不包含 `web_oauth_states`；新增 state 列或表必须先修 ADR",
+        "允许且仅允许新增登录域 `web_oauth_login_contexts`，用 state digest 做唯一 PK/FK；"
+        "连接测试 state 不产生 context",
+        "在 R3 精确放开该表、事务/清理不变量和禁止任意 URL 字段",
+    ),
+    (
+        "ADR-007 D5",
+        "任何非 `LOCAL_ADMIN` 读写配置或发起探针都命中变更门",
+        "只放开飞书 `ADMIN` 读脱敏状态投影；配置读 DTO、写入、Secret 和 probe 不放开",
+        "修订 D5 的“读”半句并保留其余现场 GO/证据门",
+    ),
+)
+
+
+def _accepted_adr_change_rows(text: str) -> tuple[tuple[str, ...], ...]:
+    """按文档顺序返回 §19.2 四行的完整四元组（条款、旧口径、新口径、必做动作）。"""
+    ledger = _section_between(
+        text,
+        start="### 19.2 本规格取消或收窄的既有条款",
+        end="### 19.3 W0 同步文档",
+    )
+    rows: list[tuple[str, ...]] = []
+    for line in ledger.splitlines():
+        if not line.startswith("| `ADR-"):
+            continue
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        rows.append((cells[0].strip("`"), *cells[1:]))
+    return tuple(rows)
+
+
+def _spec_header(text: str) -> str:
+    return _section_between(text, start="# 小维 Web 运维工作台", end="## 1. 大白话结论")
+
+
+def test_web_product_spec_records_approval_without_claiming_implementation() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    header = _spec_header(text)
+    assert "Approved V0.3" in header
+    assert "Review Draft" not in header
+    assert "只授权 W0" in header
+    # 批准来源必须是负责人评论永久链接，而不是「已合入」这个事实本身。
+    assert _W0_OWNER_APPROVAL in header
+    assert "4e5a844620b700e25d6a29e43687c1a4c876db16" in header
+    # 批准状态不等于实现状态：证据等级一栏必须继续否认这五类证据。
+    assert "没有本修订对应的源码、运行、部署、真实外部调用或用户验收证据" in header
+    assert _accepted_adr_change_rows(text) == _WEB_PRODUCT_ADR_CHANGE_ROWS, (
+        "§19.2 四行内容已偏离负责人批准的授权范围"
+    )
+
+
+def test_web_product_spec_keeps_w1a_and_live_use_outside_w0_authority() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    header = _spec_header(text)
+    assert "W0 合入后才可" in header
+    assert "计划获批后才可" in header
+    for overclaim in (
+        "W0 已完成",
+        "W1a 已开始",
+        "已实现",
+        "已部署",
+        "已 canary",
+        "已用户验收",
+    ):
+        assert overclaim not in header
+
+
+def test_web_product_spec_approval_gates_are_discriminating() -> None:
+    """反例：改任一单元格、撤掉批准来源或把状态写回草稿，门必须真能变红。"""
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+
+    widened = _replace_once(
+        text,
+        "只放开飞书 `ADMIN` 读脱敏状态投影；配置读 DTO、写入、Secret 和 probe 不放开",
+        "放开飞书 `ADMIN` 读写配置与 probe",
+    )
+    assert _accepted_adr_change_rows(widened) != _WEB_PRODUCT_ADR_CHANGE_ROWS
+
+    reordered = _replace_once(text, "| `ADR-007 D5` |", "| `ADR-007 D5 ` |")
+    assert _accepted_adr_change_rows(reordered) != _WEB_PRODUCT_ADR_CHANGE_ROWS
+
+    without_source = _replace_once(text, _W0_OWNER_APPROVAL, "https://example.invalid/pr/59")
+    assert _W0_OWNER_APPROVAL not in _spec_header(without_source)
+
+    back_to_draft = _replace_once(text, "Approved V0.3", "Review Draft V0.3")
+    assert "Approved V0.3" not in _spec_header(back_to_draft)
