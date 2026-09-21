@@ -200,6 +200,77 @@ ADR-007 D5 规定放宽任一层调用许可必须先修订 ADR-007，因此两�
 
 ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
 
+## Web 产品修订（2026-09-20）
+
+- 状态: Accepted
+- 决策人: shixian66（项目负责人）
+- 决策日期: 2026-09-20
+- 批准出处: https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268
+
+本修订按 Web 产品规格 §19.2 逐条收窄 RI5 的 R1/R2/R3。2026-09-14 已接受的 RI5 原文**保留为
+当时事实**，不删除、不改写；下面三节是此后的现行口径。规格真源见
+[Web 运维工作台总体设计](../superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)。
+
+### R1 窄替代：飞书 Admin 只读脱敏状态投影
+
+本修订**取代 RI5 R1** 中"飞书 principal 即使持有 `ADMIN_ALL_SAFE_TASKS` 也不得读取配置状态"
+这一句的绝对表述，且只取代这一句。
+
+飞书认证的 `ADMIN` 获得 `VIEW_INTEGRATION_STATUS`，只能读取 ADR-007 同日修订所定义的脱敏
+状态投影闭集。原始配置读取、配置保存/清除与 Provider 连接测试**仍只接受 `LOCAL_ADMIN`**；
+本修订不新增配置 RBAC，配置面准入继续按 `IdentitySource` 判定。
+
+### R2 明示替代：取消 loopback 先后硬门
+
+本修订**取代 RI5 R2** 结尾"局域网发布只能由独立 override 打开，且首次强制改密必须在
+loopback 阶段完成"中的先后硬门。项目负责人接受：受信局域网在首次强制改密完成前即可达。
+
+**登录准入不以网络位置为条件。** 应用层从未实现登录 IP 白名单，本修订也不新增。
+`WebMode.LAN_HTTP` 仍按 D2 与 RI5 R2 只接受 canonical loopback/RFC1918 IPv4 字面量 Host——
+那是**明文 HTTP 模式的形态约束**，用于阻止明文暴露到公网，不是登录准入条件，本修订不放开它。
+非本机对外部署继续使用 HTTPS 模式；公网明文 HTTP 不得被描述为安全部署。
+
+固定的补偿控制：
+
+- 部署文档对默认管理员凭据做醒目警示；
+- 首次登录后立即强制改密；
+- **改密前只允许改密和退出**（既有 `must_change_password` 路由闭集，已在 RI5 实现）；
+- 正式 release / canary 必须提供**边缘限流**的配置与运行证据。
+
+**风险与事实边界**：从服务启动到完成改密期间，同网段可用文档所载默认凭据登录，负责人已
+接受该风险。此处不得写成"速率限制继续生效"——**应用层没有 HTTP rate limiter**，OAuth state
+与 ActivationStore 的容量上限只是数据库无界增长保护，不冒充 HTTP 防滥用。CSRF、Session 绑定
+与改密后 Session 轮换继续有效。
+
+回滚方式：移除局域网 override、回到基础 Compose 的 loopback 发布，并撤销全部本地管理员
+Session。回滚不需要回退数据库。
+
+### R3 精确解冻：只放开 `web_oauth_login_contexts`
+
+本修订**取代 RI5 R3** 中"该解除不包含 `web_oauth_states`"对登录域的绝对封锁，且只放开一张
+新表：`web_oauth_login_contexts`。
+
+- `state_digest` 是唯一 PK，并作为指向登录 state 的唯一 FK；
+- return intent 是闭集，只允许 `WORKBENCH`、`SAFE_TASK_DETAIL(task_id)`、`ADMIN_CENTER`、
+  `ACTIVATION_STATUS(request_id)` 四种；
+- **不保存任意 URL 或 path**；深链由闭集 intent 在服务端重新构造；
+- 登录 state 与其 context 同事务签发、同一次消费；缺失、多行或不匹配一律 fail-closed；
+- **连接测试 state 不产生 context**，且继续不签发 Session、不解析身份目录、不绑定用户、
+  不创建激活申请。
+
+`web_oauth_states` 自身的列不变。登录与连接测试继续使用不同 digest domain
+（`oauth-state:v1` 与 `oauth-conn-test:v1`）、同一备案 callback。除本表外，为 OAuth state
+新增任何列或表仍须先修订本 ADR。
+
+### 仅为后续阶段的契约，W0 不落表
+
+激活申请 24 小时过期、全局 1024 `PENDING` 上限、同 scope/subject 单一有效申请、CAS 状态机、
+不自动授予 Admin——这些是 W1b 的实现契约，**本修订不创建任何表、列或 migration**。
+
+### 本修订不提供的证据
+
+本修订是文档口径变更，没有对应的源码、迁移、运行、部署、canary 或用户验收证据。
+
 ## 后果
 
 - 并发 Web 进程共享同一个数据库容量裁决，不会各自越过 state 上限。
@@ -227,6 +298,18 @@ RI5 修订接受后，以下任一变化同样必须先修订本 ADR：放开 `l
 放开扩散到 provider 授权或 token URL、为 OAuth state 新增列或表、让 `LOCAL_ADMIN` 之外的
 principal 读写配置或发起连接测试、让连接测试创建 Task/Evidence 或进入数据面 `ToolGateway`、
 让测试分支签发 Session，或新增第三个 Provider、第二个本地账号与任何配置 RBAC。
+
+**2026-09-20 窄替代（见本文 Web 产品修订（2026-09-20））**：上列三项已被逐项窄替代，其替代
+范围就是该修订写明的范围，不得外推：
+
+- "让 `LOCAL_ADMIN` 之外的 principal 读配置状态"——在"飞书认证 `ADMIN` 读脱敏状态投影闭集"
+  这一点上，已**由本修订 R1** 取代；同项中的写配置与发起连接测试继续完整命中本变更门。
+- "为 OAuth state 新增列或表"——仅"新增 `web_oauth_login_contexts` 一张表"已**由本修订 R3**
+  取代；其余新增列或表继续完整命中本变更门。
+- "局域网发布必须在 loopback 首次强制改密之后"——已**由本修订 R2** 取代；`lan_http` 的
+  loopback/RFC1918 Host 形态约束不在替代范围内，继续生效。
+
+本节其余各项，以及"再次变更仍须先修订本 ADR"的要求，全部原样继续有效。
 
 RI5 的功能回滚不需要回退数据库：关闭 Compose 中的 LAN 端口发布与相关 feature flag 并重建服务，
 即回到 loopback + 默认关闭状态；本地管理员表与 Provider 状态表保留只读兼容。

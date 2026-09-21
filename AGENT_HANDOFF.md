@@ -2,16 +2,28 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前事实：I2 已归档，I3 未开始
+## 0. 当前事实：Web 产品设计已合入，正在做 W0 文档收口
 
 - **I2 限定领域普通对话已完成离线实施并归档**，归档基线
   `main@cc617f5e2d18c53b4a92528663edb1bd16aab557`，详见
   [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。
   PR #53/#54/#55/#56 的受审 SHA、squash 提交、CI run、四门数字与全部隔离变异反证
   都在该归档文里，不在本文件重复。
-- 当前工作树没有进行中的开发分支。下一件事是**另起 I3 受治理资料查询计划**，
-  它卡在一个尚未拍板的前提上：受治理资料的源是什么形态（仓库内文档 / 独立 store /
-  外部系统）。这个定了才能写计划。
+- **Web 运维工作台总体设计已经 PR #58 squash 合入**
+  `main@4e5a844620b700e25d6a29e43687c1a4c876db16`；W0 实施计划已经 PR #59 合入
+  `main@b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed`。两者都只是**文档**，不是实现。
+- **负责人批准来源**：决策人 shixian66，日期 2026-09-20，永久链接
+  <https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268>。
+  该记录逐条批准 `ADR-007 D5`、`ADR-014 RI5 R1/R2/R3` 四项修订、R2 的风险接受，
+  以及优先级从 I3 切换为 `W0 → W1a`。**合入事实本身不是批准来源**，引用时用这条链接。
+- **当前阶段：W0 文档与 ADR 真源收口。** 本轮只改 Markdown 与
+  `tests/contract/test_doc_fact_binding.py`，**没有产品源码**、没有 migration、
+  没有运行配置、没有部署、没有真实网络调用、没有用户验收。
+- **W0 合入后唯一获准的下一步是编写 W1a 详细计划并送审**，不是实现 W1a。
+  W1a 计划未获批前，不得写它的测试、migration 或源码。
+- **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理
+  资料的源是什么形态（仓库内文档 / 独立 store / 外部系统）。恢复 I3 时另起计划，
+  不与 Web 产品线并行修改同一真源。
 - I0-DOC 目标已完成并绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)：
   智能交互入口、终态澄清、`ReadClass` 与执行披露边界已写入项目真相文档。
 - `main` 已包含 I1-A Task 1.1–1.3 的 interaction classifier、insert-once
@@ -114,10 +126,10 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前在 worktree `/Users/kloenguyen/.codex/worktrees/6ba6/agent`，无进行中的开发分支；`main@cc617f5e2d18c53b4a92528663edb1bd16aab557` |
+| 项目目录 | 当前开发分支 `claude/w0-web-product-adr-truth-sync`（W0 文档收口，PR #61 待复审），基线 `main@b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed`。不记录机器专属 worktree 路径——它对下一位实现者没有意义且必然过期 |
 | 截止时间 | 2026-09-20（Asia/Shanghai） |
-| 阶段 | **I2 限定领域普通对话已完成离线实施并归档（PR #53/#54/#55/#56）。下一步是另起 I3 受治理资料查询计划，先定资料源形态。资料查询、日志分析、真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
-| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.4；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
+| 阶段 | **Web 产品设计（PR #58）与 W0 实施计划（PR #59）已合入；当前在做 W0 文档/ADR 真源收口，未产生产品源码。下一步是 W0 合入后编写 W1a 详细计划并送审。I3 延期未取消。真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5（2026-09-20 增加 `W0 → W5` 序列与优先级切换）；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
 | M0 合入基线 SHA | `a1a8c888010abb8bbe1af28d792e760e3b229e5d`（与验收对象同一提交）。**`main` 的当前 HEAD 请用 `git rev-parse main` 查询——本文件不维护会随后续合并漂移的 HEAD** |
@@ -166,7 +178,7 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | 另起 I3 受治理资料查询计划：先由项目负责人拍板受治理资料的源形态（仓库内文档 / 独立 store / 外部系统），再写计划。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | W0（PR #61）合入后，唯一获准动作是编写 **W1a 详细计划**并送审；W1a 计划获批前不得写其测试、migration 或源码。I3 受治理资料查询延期但未取消，恢复时仍需先拍板资料源形态（仓库内文档 / 独立 store / 外部系统）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure、I1-D Eval/closure（PR #52）与完整 I2（PR #53/#54/#55/#56，已归档）。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -189,8 +201,9 @@
   审计精确 wheel，身份或元数据不匹配就停下复审。
   不建通用 provider registry，不启用 provider chat/session、tools、function calling、搜索、代码执行、
   文件或 MCP。意图与慢查询解释走两个窄 port。
-- **RI3 已批准的精简生命周期设计**：Gemini key 只由固定宿主 Git-ignored 文件
-  `.secrets/gemini_api_key` 经 file-backed Compose secret 挂给 task worker；`.env` 不保存 key 或路径。
+- **RI3 已批准的精简生命周期设计**：Gemini key 的唯一明文真源是宿主 Git-ignored 的
+  `.config/integrations.json`（容器内 `/run/xiaowei-config/integrations.json`），由 Web 管理面
+  写入、task worker 只读挂载；Provider 凭据不再走 Compose secret，`.env` 不保存 key 或路径。
   意图 low/60 秒/最多两次 request，解释 high/180 秒/一次 request，分别限制 2048/4000 output tokens；
   RI3 adds no whole-task deadline and preserves the current StarRocks 25-second
   query-timeout upper bound/30-second read-only policy cap; future 180/190/195/200-second layers belong
@@ -303,6 +316,11 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 
 ## 5. 下一步顺序
 
+> **当前唯一在途项**：W0 文档/ADR 真源收口。W0 合入后唯一获准动作是编写
+> **W1a 详细计划**并送审；W1a 计划获批前不得写其测试、migration 或源码。
+> 下面的历史清单只作为已完成里程碑索引，不代表当前待办。
+
+
 1. ~~M0 验收~~ **已完成**（验收对象 `a1a8c888`，已合入 `main`）。
 2. ~~M1 实现与验收~~ **已完成**：技术审查通过、六个 CI gate 全绿、项目负责人批准退出标准修订，PR #1 已合入 `main`。
 3. ~~M2 详细计划编写与审批~~ **已完成**：经多轮 Codex 审核（V1 → V2 → V2.1 → V2.2 → V2.3）后获批开工。
@@ -326,8 +344,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     验收或 M8。
 14. **RI3 Gemini 的离线 PR 3A–3D 已顺序合入，PR 3E 等待独立现场 GO**：项目负责人已批准 ADR-015/V7.1 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
-    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
-    文件到 worker-only Compose secret、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
+    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、凭据真源为
+    `.config/integrations.json`（Web 为配置管理与管理员显式连接测试读取 Secret；两个窄模型调用 port
+    仍只由 task worker 装配，Web 不获得）、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
     advisory、Web 显式父任务和逐列定型的 20 行 StarRocks 投影。计划由 9 PR/4 migration 收缩为
     5 PR/2 migration；不新增任务总 deadline、调用预约平台、统一终态表、进度状态机、全项目凭证
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
@@ -413,6 +432,17 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - **不要用 `type: ignore` 或 `getattr(obj, "attr", default)` 处理模块边界上的类型不匹配。** 两者都会把"契约与实现矛盾"静音成全绿，由 `tests/security/test_contract_edges.py` 承重。类型对不上时改契约或改实现，不要改静音手段。
 
 ## 8. 验证记录
+
+### W0 文档收口（本轮）
+
+- 分支 `claude/w0-web-product-adr-truth-sync`，基线
+  `origin/main@b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed`（PR #59 的 squash 合并提交）。
+- 开工基线四门（本地 Python 3.11.16 / pytest 9.1.1）：`3950 passed, 269 skipped`；
+  security gate `1447 passed, 83 skipped, 2689 deselected`；Ruff 通过；mypy 189 个源文件通过。
+- 改动范围：规格 1 份、ADR 4 份、`ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`README.md`、
+  `AGENT_HANDOFF.md`、`tests/contract/test_doc_fact_binding.py`，共 10 个文件。
+  **`src/`、migration、`pyproject.toml`、`uv.lock`、Compose 与运行配置零改动。**
+- 证据等级：文档 + 离线契约测试。**没有**运行、部署、canary、真实外部调用或用户验收证据。
 
 ### 已验证
 
@@ -510,7 +540,7 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   只有实际非 null 的负数/溢出拒绝。Python 3.11 实测表明单次取消并不会必然跳过 finally 中的 close；
   真正缺口是重复取消会中断清理、close 自身 `CancelledError` 会遮蔽主异常，现以单一 tracked task、
   共同 deadline、shield、取消后收口和主异常优先修复；自审又发现任意 close `BaseException` 原文可越过
-  拒绝边界，已归一为固定本地错误码。Gemini 宿主 key 固定为 `.secrets/gemini_api_key`，ambient
+  拒绝边界，已归一为固定本地错误码。Gemini 宿主 key 现固定在 `.config/integrations.json`，ambient
   `GEMINI_API_KEY_FILE` 不能改变渲染结果；smoke 用最后一层私有 JSON override 注入自己的 fake 文件，
   不读取宿主环境。与模型无关的 shared secret reader/StarRocks 行为及 245 行测试已从 PR diff 完整移除，
   相对 `origin/main` 四个路径零差异。
@@ -531,7 +561,8 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   Compose v2/legacy 解析；`compose-smoke` 失败则不是测试环境偶发问题。实际 Compose create/start
   证明 environment-backed secret 虽出现在渲染配置中，却不能为现有 `read_only` worker 建立 mount，
   启动会拒绝非 file 来源。修复复用既有 Compose command resolver，并把 Gemini 改为宿主
-  Git-ignored key 文件到 worker-only file-backed secret；没有取消 worker 只读根文件系统，也没有把
+  Git-ignored key 文件到 worker-only file-backed secret（该拓扑**已由 RI5 取代**，当前真源是
+  `.config/integrations.json`）；没有取消 worker 只读根文件系统，也没有把
   key 放进容器环境。新增反例覆盖错误宿主 source、两类宿主输入名进入容器环境、非 worker 泄漏、
   全部五个临时输入创建点的 `RuntimeError`/`KeyboardInterrupt` 清理；受控本机 model-only
   create/inspect 已证明 worker mount 的
@@ -641,6 +672,13 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
 - README 架构图保持既有执行顺序，只把 `SQLGuard` 标签扩为同时涵盖 SQL/PromQL 的 `QueryGuard`；没有改变 `StepAdmission` 从属关系或 `ApprovalGate` 触发条件。
 
 ### 未覆盖
+
+- **W0 只改文档与文档契约测试**：Web 产品的用户目录、`AdminCapability`、`AdminAuditStore`、
+  激活审批、三域配置与结果访问**都还没有任何实现载体**；W0 全绿不代表这些功能存在。
+- **真机浏览器、部署、canary 与用户验收仍未覆盖**：RI5 本地 Web Admin 已离线实现，
+  但从未在真实浏览器、真实部署或真实用户手上验证过。
+- **ADR-014 R2 的补偿控制只有文档口径**：边缘限流是 release/canary 的证据要求，
+  应用层至今没有 HTTP rate limiter，本轮没有改变这一点。
 
 - **I1-D 仍只是本地离线 `tests` 证据**：没有读取真实 Gemini key，没有 Gemini/飞书/
   StarRocks 网络调用，没有部署、canary、测试环境验证或用户验收。`CLARIFICATION_REQUIRED` 终态澄清、

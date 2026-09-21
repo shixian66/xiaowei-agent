@@ -11,6 +11,7 @@ Codex 第二轮复审打回的第 2 项：验收报告写着「计划 V1.4」而
 
 import re
 from pathlib import Path
+from typing import Final
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PLAN = _ROOT / "docs/plans/M4-postgres-taskstore.md"
@@ -544,3 +545,782 @@ def test_web_product_spec_gates_are_discriminating() -> None:
     )
     w1a = _delivery_stage(without_audit_write, name="W1a", next_name="W1b")
     assert not ("AdminAuditStore" in w1a and "append-only 写入契约" in w1a)
+
+
+# --- W0 规格收口门 --------------------------------------------------------
+#
+# 上面的闭集只保证「四条 ADR 的名字还在」。W0 真正的风险是另一种：
+# 名字一个不少，却把某一行的旧口径、新口径或必做动作悄悄改宽，于是
+# W0 照着一份已被改写的授权去修 ADR。因此这里按**单元格**钉死四行，
+# 并把「谁批准的、批准到哪一步」一起变成可机械判定的事实。
+
+_W0_OWNER_APPROVAL = (
+    "https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268"
+)
+_WEB_PRODUCT_ADR_CHANGE_ROWS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    (
+        "ADR-014 RI5 R1",
+        "配置读取/保存/测试只接受 `LOCAL_ADMIN`，飞书 principal 不得读配置状态",
+        "只为飞书认证 `ADMIN` 增加第 6.1 节的脱敏状态投影；原始配置读取、保存和测试仍禁止",
+        "修订 R1，冻结状态 DTO 闭集和反例",
+    ),
+    (
+        "ADR-014 RI5 R2",
+        "LAN override 只能在 loopback 首次强制改密完成后启用",
+        "项目负责人批准受信 LAN 在改密前可达；用“部署文档醒目警示 + 边缘限流 + 立即改密 + "
+        "改密前路由闭集”替代 loopback 先后硬门",
+        "在 R2 单独记录负责人批准、风险、补偿措施与回滚方式",
+    ),
+    (
+        "ADR-014 RI5 R3",
+        "本轮 schema 解冻不包含 `web_oauth_states`；新增 state 列或表必须先修 ADR",
+        "允许且仅允许新增登录域 `web_oauth_login_contexts`，用 state digest 做唯一 PK/FK；"
+        "连接测试 state 不产生 context",
+        "在 R3 精确放开该表、事务/清理不变量和禁止任意 URL 字段",
+    ),
+    (
+        "ADR-007 D5",
+        "任何非 `LOCAL_ADMIN` 读写配置或发起探针都命中变更门",
+        "只放开飞书 `ADMIN` 读脱敏状态投影；配置读 DTO、写入、Secret 和 probe 不放开",
+        "修订 D5 的“读”半句并保留其余现场 GO/证据门",
+    ),
+)
+
+
+def _accepted_adr_change_rows(text: str) -> tuple[tuple[str, ...], ...]:
+    """按文档顺序返回 §19.2 四行的完整四元组（条款、旧口径、新口径、必做动作）。"""
+    ledger = _section_between(
+        text,
+        start="### 19.2 本规格取消或收窄的既有条款",
+        end="### 19.3 W0 同步文档",
+    )
+    rows: list[tuple[str, ...]] = []
+    for line in ledger.splitlines():
+        if not line.startswith("| `ADR-"):
+            continue
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        rows.append((cells[0].strip("`"), *cells[1:]))
+    return tuple(rows)
+
+
+def _spec_header(text: str) -> str:
+    return _section_between(text, start="# 小维 Web 运维工作台", end="## 1. 大白话结论")
+
+
+def test_web_product_spec_records_approval_without_claiming_implementation() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    header = _spec_header(text)
+    assert "Approved V0.3" in header
+    assert "Review Draft" not in header
+    assert "只授权 W0" in header
+    # 批准来源必须是负责人评论永久链接，而不是「已合入」这个事实本身。
+    assert _W0_OWNER_APPROVAL in header
+    assert "4e5a844620b700e25d6a29e43687c1a4c876db16" in header
+    # 批准状态不等于实现状态：证据等级一栏必须继续否认这五类证据。
+    assert "没有本修订对应的源码、运行、部署、真实外部调用或用户验收证据" in header
+    assert _accepted_adr_change_rows(text) == _WEB_PRODUCT_ADR_CHANGE_ROWS, (
+        "§19.2 四行内容已偏离负责人批准的授权范围"
+    )
+
+
+def test_web_product_spec_keeps_w1a_and_live_use_outside_w0_authority() -> None:
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    header = _spec_header(text)
+    assert "W0 合入后才可" in header
+    assert "计划获批后才可" in header
+    for overclaim in (
+        "W0 已完成",
+        "W1a 已开始",
+        "已实现",
+        "已部署",
+        "已 canary",
+        "已用户验收",
+    ):
+        assert overclaim not in header
+
+
+def test_web_product_spec_approval_gates_are_discriminating() -> None:
+    """反例：改任一单元格、撤掉批准来源或把状态写回草稿，门必须真能变红。"""
+    text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+
+    widened = _replace_once(
+        text,
+        "只放开飞书 `ADMIN` 读脱敏状态投影；配置读 DTO、写入、Secret 和 probe 不放开",
+        "放开飞书 `ADMIN` 读写配置与 probe",
+    )
+    assert _accepted_adr_change_rows(widened) != _WEB_PRODUCT_ADR_CHANGE_ROWS
+
+    reordered = _replace_once(text, "| `ADR-007 D5` |", "| `ADR-007 D5 ` |")
+    assert _accepted_adr_change_rows(reordered) != _WEB_PRODUCT_ADR_CHANGE_ROWS
+
+    without_source = _replace_once(text, _W0_OWNER_APPROVAL, "https://example.invalid/pr/59")
+    assert _W0_OWNER_APPROVAL not in _spec_header(without_source)
+
+    back_to_draft = _replace_once(text, "Approved V0.3", "Review Draft V0.3")
+    assert "Approved V0.3" not in _spec_header(back_to_draft)
+
+
+# --- W0 ADR 修订门 --------------------------------------------------------
+#
+# 这一组的根因和上面一组是同一个，但换了个藏身处：amendment 里写清楚
+# 「旧规则已被取代」，而 ADR 另一端的变更门仍以**未加限定的现行规则**
+# 出现。抽取窗口内外各有一套答案，两套都能被引用。所以除了 amendment
+# 本身，还要单独抽取窗口之外的变更门，逐条验证它指向同一个替代关系。
+
+_ADR_DIR = _ROOT / "docs/adr"
+_ADR_007 = (
+    _ADR_DIR
+    / "ADR-007-first-capabilities-execution-context-and-live-call-authorization.md"
+)
+_ADR_013 = _ADR_DIR / "ADR-013-m7-channel-boundary.md"
+_ADR_014 = _ADR_DIR / "ADR-014-real-feishu-oauth-and-web-activation.md"
+_ADR_015 = _ADR_DIR / "ADR-015-real-model-provider-boundary.md"
+
+_W0_AMENDMENT_HEADING = "## Web 产品修订（2026-09-20）"
+_W0_RETURN_INTENTS: Final[tuple[str, ...]] = (
+    "WORKBENCH",
+    "SAFE_TASK_DETAIL(task_id)",
+    "ADMIN_CENTER",
+    "ACTIVATION_STATUS(request_id)",
+)
+_CHANGE_GATE_BOUNDS: Final[dict[str, tuple[str, str | None]]] = {
+    _ADR_007.name: ("### D5 变更门", "### D6 写权限的开放条件"),
+    _ADR_013.name: ("## 回滚与变更门", None),
+    _ADR_014.name: ("## 回滚与变更门", None),
+    _ADR_015.name: ("## 变更门", "## 参考资料"),
+}
+
+
+def _web_product_amendment(path: Path) -> str:
+    """只取统一 Web 产品修订段，避免把历史 RI5 原文误当现行增补。"""
+    return _section_between(
+        path.read_text(encoding="utf-8"),
+        start=_W0_AMENDMENT_HEADING,
+        end="## 后果",
+    )
+
+
+def _amendment_metadata(path: Path) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in _web_product_amendment(path).splitlines():
+        matched = re.match(r"^- (状态|决策人|决策日期|批准出处): (.+)$", line.strip())
+        if matched:
+            fields[matched.group(1)] = matched.group(2).strip()
+    return fields
+
+
+def _change_gate(path: Path) -> str:
+    """抽取 amendment 窗口之外的现行变更门。"""
+    text = path.read_text(encoding="utf-8")
+    start, end = _CHANGE_GATE_BOUNDS[path.name]
+    start_at = text.find(start)
+    assert start_at >= 0, f"{path.name} 缺少变更门标题：{start}"
+    if end is None:
+        tail = text[start_at + len(start) :]
+        # 边界是 EOF 这件事本身必须被钉住：将来追加尾部章节会静默扩大窗口。
+        assert "\n## " not in tail, f"{path.name} 变更门之后出现了未纳入边界的二级章节"
+        return text[start_at:]
+    end_at = text.find(end, start_at + len(start))
+    assert end_at >= 0, f"{path.name} 缺少变更门边界：{end}"
+    return text[start_at:end_at]
+
+
+def _is_owner_approval_permalink(value: str) -> bool:
+    """PR 首页 URL 不是批准出处；必须精确到某条 comment 或 review。"""
+    return value.startswith(
+        "https://github.com/shixian66/xiaowei-agent/pull/"
+    ) and ("#issuecomment-" in value or "#pullrequestreview-" in value)
+
+
+def _has_accepted_owner_approval(path: Path) -> bool:
+    fields = _amendment_metadata(path)
+    return (
+        fields.get("状态") == "Accepted"
+        and bool(fields.get("决策人"))
+        and fields.get("决策日期") == "2026-09-20"
+        and _is_owner_approval_permalink(fields.get("批准出处", ""))
+    )
+
+
+def test_w0_adr_007_records_only_the_redacted_status_read_exception() -> None:
+    amendment = _web_product_amendment(_ADR_007)
+    assert _has_accepted_owner_approval(_ADR_007)
+    # 放开的是「读一个脱敏投影」，不是「读配置」。
+    assert "VIEW_INTEGRATION_STATUS" in amendment
+    for field in ("域名", "`configured`", "`restart_required`"):
+        assert field in amendment
+    # 未放开的四类必须逐个点名，不能只写一句「其余不变」。
+    for kept in ("原始配置 DTO", "Secret", "配置保存/清除", "probe"):
+        assert kept in amendment
+    assert "`LOCAL_ADMIN`" in amendment
+    assert "W4b" in amendment and "网络调用为 0" in amendment
+    assert "W4c" in amendment and "现场 GO" in amendment
+
+
+def test_w0_adr_007_change_gate_points_to_the_effective_replacement() -> None:
+    gate = _change_gate(_ADR_007)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate, (
+        "D5 变更门没有指向 2026-09-20 修订，窗口内外会各有一套现行规则"
+    )
+    # 关键的不对称：只有「读脱敏状态投影」被窄替代。
+    assert "脱敏状态投影" in gate
+    for still_absolute in ("写配置", "探针"):
+        assert still_absolute in gate
+    assert "继续完整生效" in gate
+
+
+def test_w0_adr_014_replaces_r1_r2_r3_at_their_actual_security_boundaries() -> None:
+    amendment = _web_product_amendment(_ADR_014)
+    assert _has_accepted_owner_approval(_ADR_014)
+    assert "取代 RI5 R1" in amendment
+    assert "取代 RI5 R2" in amendment
+    assert "取代 RI5 R3" in amendment
+    # R2：替代的是先后顺序，不是认证本身。
+    assert "loopback" in amendment
+    assert "改密前只允许改密和退出" in amendment
+    assert "边缘限流" in amendment
+    # 当前没有应用层限流这件事不能被「补偿控制」一词盖掉。
+    assert "应用层没有 HTTP rate limiter" in amendment
+    # R3：只解冻一张表，且 return intent 是闭集。
+    assert "`web_oauth_login_contexts`" in amendment
+    assert "`state_digest`" in amendment
+    for intent in _W0_RETURN_INTENTS:
+        assert f"`{intent}`" in amendment
+    assert "不保存任意 URL" in amendment
+    assert "连接测试 state 不产生" in amendment
+
+
+def test_w0_adr_014_r2_cites_an_owner_approval_source() -> None:
+    fields = _amendment_metadata(_ADR_014)
+    assert fields.get("状态") == "Accepted"
+    assert _is_owner_approval_permalink(fields.get("批准出处", ""))
+    assert fields["批准出处"] == _W0_OWNER_APPROVAL
+
+
+def test_w0_adr_014_change_gate_points_to_the_effective_replacements() -> None:
+    gate = _change_gate(_ADR_014)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate
+    # 三项被取代的门必须逐项带指针，而不是整段照旧。
+    for superseded in ("R1", "R2", "R3"):
+        assert f"由本修订 {superseded}" in gate
+    # 其余原门继续有效。
+    assert "新增第三个 Provider" in gate
+
+
+def test_w0_auth_adr_bindings_are_discriminating() -> None:
+    """反例：撤掉替代指针、改宽 D5、或把批准出处换成 PR 首页时必须转红。"""
+    gate_007 = _change_gate(_ADR_007)
+    widened_d5 = _replace_once(gate_007, "脱敏状态投影", "配置")
+    assert "脱敏状态投影" not in widened_d5
+
+    revived = _replace_once(
+        gate_007, _W0_AMENDMENT_HEADING.removeprefix("## "), "（无）"
+    )
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") not in revived
+
+    gate_014 = _change_gate(_ADR_014)
+    dropped_pointer = _replace_once(gate_014, "由本修订 R2", "由后续修订")
+    assert "由本修订 R2" not in dropped_pointer
+
+    assert not _is_owner_approval_permalink(
+        "https://github.com/shixian66/xiaowei-agent/pull/59"
+    )
+    assert not _is_owner_approval_permalink("实现者在 PR 描述中转述")
+    assert _is_owner_approval_permalink(_W0_OWNER_APPROVAL)
+
+    amendment_014 = _web_product_amendment(_ADR_014)
+    without_intent = _replace_once(amendment_014, "`ACTIVATION_STATUS(request_id)`", "任意 URL")
+    assert "`ACTIVATION_STATUS(request_id)`" not in without_intent
+
+
+# --- W0 身份/审计与三域配置门 ----------------------------------------------
+#
+# 三域挂载矩阵是这一组的重点。散文里写「API 不挂载配置」很容易看起来对，
+# 但真正要防的是**表格里多出一格可见性**。所以这里从 Markdown 表解析出
+# 每个文件的消费者集合，按集合相等断言——未列出的消费者一律不可见。
+
+_W0_ADMIN_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        "MANAGE_USERS",
+        "MANAGE_DUTY_BINDINGS",
+        "VIEW_ADMIN_AUDIT",
+        "VIEW_PRIVATE_TASK_CONTENT",
+        "VIEW_INTEGRATION_STATUS",
+        "MANAGE_INTEGRATIONS",
+        "RUN_CONNECTION_TESTS",
+    }
+)
+_W0_CHANNEL_PERMISSIONS: Final[frozenset[str]] = frozenset(
+    {"VIEW_SAFE_TASK", "SUBMIT_READONLY_TASK", "ADMIN_ALL_SAFE_TASKS"}
+)
+_W0_CONFIG_DOMAIN_MATRIX: Final[dict[str, dict[str, str]]] = {
+    ".config/ai/config.json": {"web-app": "读写", "task-worker": "只读"},
+    ".config/feishu/config.json": {
+        "web-app": "读写",
+        "feishu-listener": "只读",
+        "channel-worker": "只读",
+    },
+    ".config/resources/config.json": {"web-app": "读写", "task-worker": "只读"},
+}
+
+
+def _config_domain_matrix(text: str) -> dict[str, dict[str, str]]:
+    """从 amendment 的挂载表解析 {配置文件: {消费者: 可见性}}。"""
+    matrix: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("| `.config/"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        path = cells[0].strip("`")
+        consumers: dict[str, str] = {}
+        for entry in cells[1].split("、"):
+            consumer, _, visibility = entry.partition("=")
+            if visibility:
+                consumers[consumer.strip().strip("`")] = visibility.strip()
+        matrix[path] = consumers
+    return matrix
+
+
+def test_w0_adr_013_keeps_channel_permissions_closed_and_adds_admin_boundaries() -> None:
+    amendment = _web_product_amendment(_ADR_013)
+    assert _has_accepted_owner_approval(_ADR_013)
+    for role in ("ADMIN", "OPERATOR", "USER"):
+        assert f"`{role}`" in amendment
+    # 核心权限枚举不因管理面需求膨胀。
+    assert "`ChannelPermission` 仍精确三成员" in amendment
+    for permission in _W0_CHANNEL_PERMISSIONS:
+        assert f"`{permission}`" in amendment
+    for capability in _W0_ADMIN_CAPABILITIES:
+        assert f"`{capability}`" in amendment
+    assert "`MANAGE_INTEGRATIONS`" in amendment and "`RUN_CONNECTION_TESTS`" in amendment
+    # Admin 审计与任务审计是两张表，且写不进去就必须拒绝执行。
+    assert "`task_audit_events`" in amendment
+    assert "append-only" in amendment
+    assert "fail-closed" in amendment
+    assert "W1a" in amendment and "W1b" in amendment and "W3" in amendment
+    # 结果 ACL 不提前。
+    assert "requester/approver" in amendment and "R1" in amendment
+    assert "不绕过" in amendment
+
+
+def test_w0_adr_015_freezes_the_future_three_domain_mount_matrix() -> None:
+    amendment = _web_product_amendment(_ADR_015)
+    assert _has_accepted_owner_approval(_ADR_015)
+    assert _config_domain_matrix(amendment) == _W0_CONFIG_DOMAIN_MATRIX
+    # 未列出的消费者一律不可见，这三个必须被显式点名。
+    for invisible in ("api", "migrate", "postgres"):
+        assert f"`{invisible}`" in amendment
+    # 未来目标与当前事实必须分开写。
+    assert "W4a" in amendment
+    assert "`.config/integrations.json`" in amendment
+    assert "当前实现" in amendment
+    assert "不长期双读" in amendment
+    assert "`migration_required`" in amendment
+    assert "Web 不取得任务模型 port" in amendment
+    assert "本修订不授权" in amendment
+
+
+def test_w0_adr_015_change_gate_points_to_the_effective_replacement() -> None:
+    gate = _change_gate(_ADR_015)
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") in gate
+    assert "单配置文件的信任范围" in gate
+    # 替换配置文件形态不等于放开供应商边界。
+    assert "新增第三个\nProvider 字段族" in gate or "新增第三个 Provider 字段族" in gate
+    assert "继续完整生效" in gate
+
+
+def test_w0_channel_and_config_bindings_are_discriminating() -> None:
+    """反例：矩阵多一格可见性、抽掉 fail-closed、或旧门复活时必须转红。"""
+    amendment_015 = _web_product_amendment(_ADR_015)
+
+    leaked_to_api = _replace_once(
+        amendment_015,
+        "| `.config/ai/config.json` | `web-app`=读写、`task-worker`=只读 |",
+        "| `.config/ai/config.json` | `web-app`=读写、`task-worker`=只读、`api`=只读 |",
+    )
+    assert _config_domain_matrix(leaked_to_api) != _W0_CONFIG_DOMAIN_MATRIX
+
+    resources_to_listener = _replace_once(
+        amendment_015,
+        "| `.config/resources/config.json` | `web-app`=读写、`task-worker`=只读 |",
+        "| `.config/resources/config.json` | `web-app`=读写、`feishu-listener`=只读 |",
+    )
+    assert _config_domain_matrix(resources_to_listener) != _W0_CONFIG_DOMAIN_MATRIX
+
+    amendment_013 = _web_product_amendment(_ADR_013)
+    without_fail_closed = _replace_once(amendment_013, "fail-closed", "记录告警后继续")
+    assert "fail-closed" not in without_fail_closed
+
+    early_acl = _replace_once(amendment_013, "requester/approver", "（无名单）")
+    assert "requester/approver" not in early_acl
+
+    gate_015 = _change_gate(_ADR_015)
+    revived = _replace_once(
+        gate_015, _W0_AMENDMENT_HEADING.removeprefix("## "), "（无）"
+    )
+    assert _W0_AMENDMENT_HEADING.removeprefix("## ") not in revived
+
+
+# --- W0 稳定文档门 --------------------------------------------------------
+#
+# RI5 早就把 Provider 凭据从 Compose secret 换成了 .config/integrations.json
+# （见 docker-compose.yml「Provider 凭据不再走 Docker secret」），但三份当前
+# 事实文档里还留着 8 处旧路径。这类漂移的特征是：每一处单独看都像历史描述，
+# 合起来却让读者按已退休的方式准备凭据。所以这里按**精确字面量计数为 0**
+# 断言，并只扫描当前事实文档——保留历史的 ADR 和测试夹具不在其内。
+
+# 同一事实在这些文档里有多种拼写：精确路径字面量、以及英文短语
+# "worker-only / file-backed Compose secret"。只封堵路径字面量时，README 顶部
+# 和 handoff 的「已批准边界固定」段照旧全绿——这正是本轮复审打回的那两处。
+# 保留 `Compose secret` 本身不入闭集：`postgres_password` 仍然是合法的 Compose
+# secret，而 handoff 的历史事故记录（过去时）也应当留得住。
+_RETIRED_GEMINI_SECRET_PATHS: Final[tuple[str, ...]] = (
+    ".secrets/gemini_api_key",
+    "/run/secrets/gemini_api_key",
+    "worker-only Compose secret",
+    "file-backed Compose secret",
+)
+_STALE_ARCHITECTURE_CLAIMS: Final[tuple[str, ...]] = (
+    "已接受但尚未实现的 RI5 修订",
+    "被接受，但**尚未实现**",
+)
+_CURRENT_TRUTH_DOCS: Final[tuple[str, ...]] = (
+    "ARCHITECTURE.md",
+    "DEVELOPMENT_PLAN.md",
+    "AGENT_HANDOFF.md",
+    "README.md",
+)
+_W0_BASELINE: Final[str] = "b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed"
+_W0_WEB_STAGES: Final[tuple[str, ...]] = (
+    "W0",
+    "W1a",
+    "W1b",
+    "W2",
+    "W3",
+    "W4a",
+    "W4b",
+    "W5",
+)
+
+
+def _truth_doc_text(name: str) -> str:
+    return (_ROOT / name).read_text(encoding="utf-8")
+
+
+def test_truth_docs_do_not_revive_the_retired_gemini_secret_path() -> None:
+    for name in _CURRENT_TRUTH_DOCS:
+        text = _truth_doc_text(name)
+        for retired in _RETIRED_GEMINI_SECRET_PATHS:
+            assert text.count(retired) == 0, (
+                f"{name} 仍把已退休的 {retired} 写成当前 Provider 凭据真源"
+            )
+        assert "`.config/integrations.json`" in text
+
+
+def test_w0_stable_docs_distinguish_current_runtime_from_future_targets() -> None:
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    for stale in _STALE_ARCHITECTURE_CLAIMS:
+        assert architecture.count(stale) == 0, f"ARCHITECTURE.md 仍含过期声称：{stale}"
+    # 当前事实：RI5 已离线实现，证据等级到 tests 为止。
+    assert "/run/xiaowei-config/integrations.json" in architecture
+    assert "W4a" in architecture and "W5" in architecture
+
+
+def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    positions = []
+    for stage in _W0_WEB_STAGES:
+        at = plan.find(f"**{stage} ")
+        assert at >= 0, f"DEVELOPMENT_PLAN.md 缺少 Web 产品阶段 {stage}"
+        positions.append(at)
+    assert positions == sorted(positions), "W0–W5 顺序不是文档中的实际先后"
+    # W4c 与 R1 是独立阻塞门，不得混进必经序列。
+    sequence_start = positions[0]
+    sequence_end = plan.find("### 独立阻塞门", sequence_start)
+    assert sequence_end > sequence_start, "DEVELOPMENT_PLAN.md 缺少独立阻塞门小节"
+    sequence = plan[sequence_start:sequence_end]
+    assert "**W4c " not in sequence and "**R1 " not in sequence
+    gates = plan[sequence_end:]
+    assert "W4c" in gates and "R1" in gates
+    assert "Approved V2.5" in plan
+    assert _W0_OWNER_APPROVAL in plan
+    # I3 延期不等于取消。
+    assert "I3" in plan and "延期" in plan
+
+
+def test_readme_does_not_present_w4a_or_w5_as_current_runbook() -> None:
+    readme = _truth_doc_text("README.md")
+    runbook_at = readme.find("Compose 启动前只需要准备一个已被 Git 忽略的本地文件")
+    assert runbook_at >= 0
+    runbook = readme[runbook_at : runbook_at + 4000]
+    # 当前 runbook 只能出现单文件形态。
+    assert "`.config/integrations.json`" in runbook
+    for future_file in (
+        "`.config/ai/config.json`",
+        "`.config/feishu/config.json`",
+        "`.config/resources/config.json`",
+    ):
+        assert future_file not in runbook, "W4a 未来三域文件被写进了当前首启步骤"
+    # 已批准的产品演进要能从 README 导航到，但只作为未来目标出现。
+    assert "2026-09-19-web-operations-console-identity-activation-design.md" in readme
+    assert "W0" in readme and "W1a" in readme
+
+
+def test_w0_stable_doc_bindings_are_discriminating() -> None:
+    """反例：恢复旧 Secret 路径、换阶段顺序、或把 W4c 插进必经序列必须转红。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    revived = architecture + "\n宿主 key 固定为 `.secrets/gemini_api_key`。\n"
+    assert any(revived.count(path) > 0 for path in _RETIRED_GEMINI_SECRET_PATHS)
+
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    swapped = _replace_once(plan, "**W1a ", "«W1a-moved» ")
+    assert swapped.find("**W1a ") < 0
+
+    with_gate_inline = _replace_once(plan, "**W4b ", "**W4c 独立门** 与 **W4b ")
+    sequence_start = with_gate_inline.find("**W0 ")
+    sequence_end = with_gate_inline.find("### 独立阻塞门", sequence_start)
+    assert "**W4c " in with_gate_inline[sequence_start:sequence_end]
+
+
+# --- W0 交接门 ------------------------------------------------------------
+#
+# handoff 最容易出的错不是写少，而是**把批准写成实现**：设计合入了、CI 绿了、
+# 计划批了，读起来就像 W1a 已经在跑。这里把「有什么证据」和「下一步只许做
+# 什么」分开钉死，并要求批准来源是评论永久链接而不是 merge 事实本身。
+
+_W0_FORBIDDEN_HANDOFF_CLAIMS: Final[tuple[str, ...]] = (
+    "W1a 已实现",
+    "W1a 已开始",
+    "真实飞书已可用",
+    "Web 产品已部署",
+    "已用户验收",
+    "已 canary",
+)
+
+
+def test_w0_handoff_records_design_merge_and_keeps_implementation_claims_closed() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    # 设计合入事实必须精确到 PR 与 merge SHA。
+    assert "PR #58" in handoff
+    assert "4e5a844620b700e25d6a29e43687c1a4c876db16" in handoff
+    # 批准来源是评论永久链接，不是「已合入」这件事。
+    assert _W0_OWNER_APPROVAL in handoff
+    assert "2026-09-20" in handoff
+    for claim in _W0_FORBIDDEN_HANDOFF_CLAIMS:
+        assert claim not in handoff, f"handoff 出现越级声称：{claim}"
+    # RI5 的实现状态必须是当前口径。
+    assert "未来 Admin 配置治理无源码" not in handoff
+    # 独立真实调用门保持关闭。
+    for gate in ("RI2", "RI3", "RI4", "RI6", "E1"):
+        assert gate in handoff
+
+
+def _handoff_baseline_field(text: str, name: str) -> str:
+    """按字段名取第 1 节基线表的值。
+
+    旧断言只排除一句带粗体的散文，于是同一事实换成表格字段就能漏过去。
+    """
+    section = _section_between(
+        text, start="## 1. 当前基线", end="## 2. 已确认的设计口径"
+    )
+    for line in section.splitlines():
+        row = re.match(rf"^\| *{re.escape(name)} *\| *(.+?) *\|$", line)
+        if row:
+            return row.group(1)
+    raise AssertionError(f"AGENT_HANDOFF.md 第 1 节缺少字段：{name}")
+
+
+def _next_step_statements(text: str) -> list[str]:
+    """收集全文每一处「下一步」声明——表格字段和散文句都算。
+
+    只认 `下一步是` / `下一件事是` 这种**声明式**句子；归档规则里把「下一步」
+    当字段名列举的那类句子和小节标题不在其内。
+    """
+    statements: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        row = re.match(r"^\| *(下一步|阶段) *\| *(.+?) *\|$", line)
+        if row:
+            statements.append(row.group(2))
+            continue
+        if re.search(r"(下一步|下一件事)是", line):
+            statements.append(line)
+    return statements
+
+
+def test_w0_handoff_names_w1a_plan_as_the_only_post_merge_next_step() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    statements = _next_step_statements(handoff)
+    assert statements, "handoff 没有任何可解析的下一步声明"
+    for statement in statements:
+        assert "W1a" in statement or "W0" in statement, (
+            f"下一步声明没有指向 W0/W1a：{statement}"
+        )
+        if "I3" in statement:
+            assert "延期" in statement or "未取消" in statement, (
+                f"下一步仍把 I3 写成当前动作：{statement}"
+            )
+    assert "W1a" in handoff and "计划" in handoff
+    assert "没有产品源码" in handoff or "未产生产品源码" in handoff
+
+
+def test_w0_handoff_baseline_fields_match_the_recorded_w0_branch() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    project_dir = _handoff_baseline_field(handoff, "项目目录")
+    # 机器专属绝对路径对下一位实现者毫无意义，且必然过期。
+    assert "/Users/" not in project_dir, f"handoff 固化了机器专属路径：{project_dir}"
+    assert _W0_BASELINE in project_dir, (
+        f"第 1 节基线与第 8 节记录的 W0 基线不一致：{project_dir}"
+    )
+
+
+def test_readme_current_status_records_the_w0_stage() -> None:
+    readme = _truth_doc_text("README.md")
+    status = _section_between(readme, start="> 当前状态：", end="## 先看什么")
+    assert "W0" in status and "W1a" in status
+    assert "I3" in status and ("延期" in status or "暂缓" in status)
+
+
+def test_w0_handoff_binding_is_discriminating() -> None:
+    """反例：加入任一越级声称、删除批准来源或恢复 I3 唯一下一步都必须转红。"""
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    for claim in _W0_FORBIDDEN_HANDOFF_CLAIMS:
+        polluted = f"{handoff}\n- {claim}。\n"
+        assert claim in polluted
+
+    without_source = _replace_once(handoff, _W0_OWNER_APPROVAL, "见 PR #58 已合入")
+    assert _W0_OWNER_APPROVAL not in without_source
+
+    # 反例必须走真正的解析器，而不是断言自己刚拼上去的字符串。
+    # 本轮复审打回的就是这一点：旧断言只排除一句散文，换成表格字段就漏过去。
+    revived_i3 = _replace_once(
+        handoff,
+        _handoff_baseline_field(handoff, "下一步"),
+        "另起 I3 受治理资料查询计划，先拍板资料源形态",
+    )
+    reverted = [
+        statement
+        for statement in _next_step_statements(revived_i3)
+        if "I3" in statement and "延期" not in statement and "未取消" not in statement
+    ]
+    assert reverted, "把下一步表格字段改回 I3 之后，结构化解析必须能看见它"
+
+    machine_path = _replace_once(
+        handoff,
+        "| 项目目录 | 当前开发分支",
+        "| 项目目录 | 当前在 worktree `/Users/someone/agent`，当前开发分支",
+    )
+    assert "/Users/" in _handoff_baseline_field(machine_path, "项目目录")
+
+    for retired in _RETIRED_GEMINI_SECRET_PATHS:
+        assert handoff.count(retired) == 0
+    readme = _truth_doc_text("README.md")
+    assert "worker-only Compose secret" not in readme
+    revived_topology = _replace_once(
+        readme, "模型调用端口只在 task worker 装配", "worker-only Compose secret"
+    )
+    assert any(
+        revived_topology.count(retired) > 0 for retired in _RETIRED_GEMINI_SECRET_PATHS
+    )
+
+
+# --- 凭据可见性 vs 模型调用范围：角色不变量 --------------------------------
+#
+# 上一轮把守卫做成了「禁止短语闭集」。黑名单只能挡住已知的错法，挡不住
+# 新造的错法——修复时写出的 `worker-only 凭据可见性` 就是第五种错误表述，
+# 95 passed 全绿放行。这里改成绑定**角色不变量**本身：
+#
+#   凭据/配置文件：web-app 读写，worker/feishu-listener/channel-worker 只读，
+#                  api/migrate/postgres 不挂载；Web 为配置管理和显式连接测试读 Secret。
+#   模型调用端口：`IntentModelPort` / `SlowQueryAdvisoryPort` 才是 task-worker-only。
+#
+# 因此「worker 独占」这个说法只允许修饰模型调用端口，不允许修饰凭据或配置
+# 文件。Compose 侧的挂载矩阵已由 tests/security/test_ri5_compose_boundary.py
+# 承重，这里不重复校验，只管文档有没有把两个角色说混。
+
+_WORKER_EXCLUSIVITY_MARKERS: Final[tuple[str, ...]] = (
+    "worker-only",
+    "只对 task worker",
+    "只挂给 worker",
+    "只挂载给 worker",
+    "只挂给 task worker",
+    "仅 task worker",
+    "只由 task worker",
+    "只给 worker",
+)
+_CREDENTIAL_NOUNS: Final[tuple[str, ...]] = (
+    "Secret",
+    "凭据",
+    "key",
+    "Key",
+    "integrations.json",
+    "config.json",
+    "gemini_api_key",
+)
+_MODEL_PORT_NOUNS: Final[tuple[str, ...]] = (
+    "IntentModelPort",
+    "SlowQueryAdvisoryPort",
+    "模型调用",
+    "模型端口",
+)
+# 历史事故/交付记录可以留着原文，但必须自带替代指针——与四份 ADR 的
+# 「历史原文保留 + 替代指针」同一套办法，不为文档好看而改写历史。
+_SUPERSEDED_MARKER: Final[str] = "已由 RI5 取代"
+
+
+def _credential_scope_conflations(text: str) -> list[str]:
+    """找出把 worker 独占安到凭据/配置文件头上的句子。"""
+    conflations: list[str] = []
+    for line in text.splitlines():
+        if not any(marker in line for marker in _WORKER_EXCLUSIVITY_MARKERS):
+            continue
+        if not any(noun in line for noun in _CREDENTIAL_NOUNS):
+            continue
+        if any(noun in line for noun in _MODEL_PORT_NOUNS):
+            continue  # 修饰的是模型调用端口，正确用法
+        if _SUPERSEDED_MARKER in line:
+            continue  # 历史记录且已标注被取代
+        conflations.append(line.strip())
+    return conflations
+
+
+def test_truth_docs_scope_worker_exclusivity_to_model_ports_only() -> None:
+    for name in _CURRENT_TRUTH_DOCS:
+        conflations = _credential_scope_conflations(_truth_doc_text(name))
+        assert not conflations, (
+            f"{name} 把 worker 独占安在了凭据/配置文件上；"
+            f"RI5 起 Web 也读 Secret（配置管理与显式连接测试），"
+            f"只有模型调用端口是 task-worker-only：{conflations}"
+        )
+
+
+def test_truth_docs_state_that_the_web_plane_also_reads_the_credential() -> None:
+    """正向不变量：光靠否定句挡不住漏写，得要求真源把 web-app 的角色写出来。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    assert "`web-app` 读写挂载该目录" in architecture
+    assert "`api` 不挂载" in architecture
+
+
+def test_credential_scope_binding_is_discriminating() -> None:
+    """反例：任何新造的「凭据 worker 独占」说法都要被抓住，不只是已知那几种。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+
+    # 第五种表述——上一轮正是它全绿溜过去的。
+    invented = "Gemini 凭据采用 worker-only 可见性。"
+    assert _credential_scope_conflations(invented)
+
+    # 第六种，换个词照样抓。
+    another = "宿主 key 文件只挂给 worker。"
+    assert _credential_scope_conflations(another)
+
+    # 正确用法不误伤：worker 独占修饰的是模型调用端口。
+    correct = "Gemini 模型调用端口只由 task worker 装配，Web 不获得该端口。"
+    assert not _credential_scope_conflations(correct)
+
+    # 带替代指针的历史记录不误伤。
+    historical = f"当时改为宿主 key 文件到 worker-only file-backed secret（{_SUPERSEDED_MARKER}）。"
+    assert not _credential_scope_conflations(historical)
+
+    without_web_role = _replace_once(architecture, "`web-app` 读写挂载该目录", "该目录只读挂载")
+    assert "`web-app` 读写挂载该目录" not in without_web_role

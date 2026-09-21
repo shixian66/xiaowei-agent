@@ -84,6 +84,70 @@ M7 PR 1–8 可以使用 fake/recording 和本地隔离基础设施离线实现�
 secret reference、发起任何飞书网络请求、部署或 canary 仍需 M7 计划的独立真实渠道门和项目
 负责人明确口令。离线测试、Compose 或卡片截图不得表述为真实渠道可用。
 
+## Web 产品修订（2026-09-20）
+
+- 状态: Accepted
+- 决策人: shixian66（项目负责人）
+- 决策日期: 2026-09-20
+- 批准出处: https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268
+
+本修订为 Web 产品线补充身份、管理能力与 Admin 审计的责任边界。D1–D6 的薄渠道、进程隔离与
+唯一 task-worker 执行权结论**不变**；本修订不改写它们。规格真源见
+[Web 运维工作台总体设计](../superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)。
+
+### 产品角色与认证来源分离
+
+产品角色固定三个：`ADMIN`、`OPERATOR`、`USER`。角色回答"能做什么"，认证来源
+（`IdentitySource`：`FEISHU` / `LOCAL_ADMIN`）回答"这个 principal 从哪来"。两者**不互相推导**：
+配置面准入按来源判定，任务可见范围按权限判定，任何一方都不能替代另一方。
+
+### `ChannelPermission` 不扩展
+
+`ChannelPermission` 仍精确三成员：`VIEW_SAFE_TASK`、`SUBMIT_READONLY_TASK`、
+`ADMIN_ALL_SAFE_TASKS`。管理面与审计需求**不得**加入这个枚举——它是任务面的权限闭集，
+扩展它会让渠道投影的既有断言全部失去意义。
+
+### 未来独立的 `AdminCapability` 闭集
+
+管理面能力由**独立**的 `AdminCapability` 承担，七成员闭集：
+
+- `MANAGE_USERS`
+- `MANAGE_DUTY_BINDINGS`
+- `VIEW_ADMIN_AUDIT`
+- `VIEW_PRIVATE_TASK_CONTENT`
+- `VIEW_INTEGRATION_STATUS`
+- `MANAGE_INTEGRATIONS`
+- `RUN_CONNECTION_TESTS`
+
+其中 `MANAGE_INTEGRATIONS` 与 `RUN_CONNECTION_TESTS` **只允许 `LOCAL_ADMIN`**；
+`VIEW_INTEGRATION_STATUS` 受 ADR-007 同日修订的窄 DTO 约束，只返回脱敏状态投影闭集。
+该枚举在 W1a 才有实现载体，本修订不创建任何 Python/SQL 承载。
+
+### `AdminAuditStore` 独立于任务审计
+
+`AdminAuditStore` 与 `task_audit_events` 是**两张表**。后者主键为 `(task_id, seq)`，
+结构上无法承载不属于任何任务的管理面事件。
+
+`AdminAuditStore` 为 append-only，不含 Secret、用户正文或数据库真实结果行。授权改变与敏感
+查看在审计**不可写时 fail-closed**：拒绝执行该操作，而不是记录告警后继续。非事务性的配置面
+动作使用 `STARTED → SUCCEEDED/FAILED` 两阶段写。
+
+交付顺序固定：**W1a** 先提供持久化与 append-only 写契约，**W1b** 才作为消费者复用它，
+**W3** 只增加查询 UI 与敏感查看审计。
+
+### W0–W5 的职责范围
+
+W0–W5 只交付 DBA、值班、激活通知三类职责绑定。**requester/approver** 名单与数据库结果 ACL
+只属于未来 **R1**，不在 W0–W5 内交付。
+
+`TaskStore` 仍是任务事实真源，`ChannelStore` 只保存绑定。Admin 角色**不绕过**未来 R1 的结果
+访问控制——`ADMIN_ALL_SAFE_TASKS` 是安全任务可见范围，不是结果行的准入。
+
+### 未来 R1 的变更门
+
+开放数据库真实结果 artifact、`/results/{result_ref}`、预览或导出，仍须先修订本 ADR 并单独
+授权；本修订不放开其中任何一项，也不提供对应的源码、运行、部署或验收证据。
+
 ## 后果
 
 - Web、飞书、内部 API 与 CLI 可以共享同一安全任务投影，不复制业务判断。

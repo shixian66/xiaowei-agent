@@ -11,19 +11,23 @@
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
+> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。**当前阶段是 W0 文档与 ADR 真源
+> 收口**，只改文档，未产生产品源码；W0 合入后才编写 W1a 详细计划并送审。I3 受治理资料查询
+> **延期但未取消**。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
 > 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
-> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only Compose secret、
+> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、模型调用端口只在 task worker 装配、
 > durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
 > PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host
-> Gemini key stays outside Settings and `.env.example`; it lives in a Git-ignored host
-> file and is exposed only as a worker-only Compose secret when the explicit model
-> override is used.
+> Gemini key stays outside Settings and `.env.example`. Since RI5 it lives in the
+> Git-ignored host file `.config/integrations.json` (mounted as
+> `/run/xiaowei-config/integrations.json`), written by the Web admin plane and mounted
+> read-only into the processes that need it; `api` does not mount it.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
@@ -49,6 +53,12 @@
 5. [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 
 授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)，M7 Web/飞书薄渠道边界见 [ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)，真实飞书 OAuth/Web 激活见 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)，已接受的 Gemini 窄端口与数据边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。智能交互入口、澄清链、`ReadClass` 与执行披露屏障见 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)；它是 I1 的实施门，不是当前运行证据。
+
+已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
+[总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
+交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
+**这些是未来目标，不是当前启动步骤**——当前可照做的首启流程见下文，仍是单一
+`.config/integrations.json` 与 loopback 发布。
 
 ## 目标能力
 
