@@ -38,12 +38,34 @@ def _fixed_credentials(
     return credentials, {}
 
 
-class _Connection:
-    async def execute(self, *_: object, **__: object) -> object:
+class _Result:
+    """``execute()`` 的结果替身：读什么都读不到行。"""
+
+    def mappings(self) -> "_Result":
+        return self
+
+    def first(self) -> object:
         return None
 
+    def all(self) -> list[object]:
+        return []
+
+
+class _Connection:
+    """连接替身。
+
+    W1a 之后，本地管理员装配是一次**完整的 bootstrap**：凭据行、目录账号、
+    ADMIN 角色、凭据链接与一条审计事件在同一个事务里落库。因此读（``execute``）
+    要返回空——目录里还没有这个账号；写（``scalar``）要返回非空——
+    ``ON CONFLICT ... RETURNING`` 拿到了行，即"确实插进去了"。两者返回同一个值
+    时，装配会被判成一次主键冲突。
+    """
+
+    async def execute(self, *_: object, **__: object) -> object:
+        return _Result()
+
     async def scalar(self, *_: object, **__: object) -> object:
-        return None
+        return "inserted"
 
 
 class _Engine:

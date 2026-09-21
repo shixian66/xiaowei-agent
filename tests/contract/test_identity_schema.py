@@ -13,9 +13,16 @@
    来测**自己的 helper**。
 """
 
+import datetime as dt
+
+import pytest
 import sqlalchemy as sa
 
-from xiaowei_agent.contracts.admin_audit import DIRECTORY_ACTIONS
+from xiaowei_agent.contracts.admin_audit import (
+    DIRECTORY_ACTIONS,
+    AdminAuditEffect,
+    AdminAuditEvent,
+)
 from xiaowei_agent.contracts.enums import (
     AdminAuditAction,
     AdminAuditOutcome,
@@ -24,6 +31,21 @@ from xiaowei_agent.contracts.enums import (
     IdentitySource,
     ProductRole,
     UserStatus,
+)
+from xiaowei_agent.persistence.admin_audit import (
+    AdminAuditConflictError,
+    AdminAuditMissingStartError,
+)
+from xiaowei_agent.persistence.errors import classify_persistence_exception
+from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
+    UserDirectoryConflictError,
+    UserDirectoryNotFoundError,
+)
+from xiaowei_agent.persistence.postgres import _persistence_boundary
+from xiaowei_agent.persistence.rows import (
+    admin_audit_event_to_row,
+    row_to_admin_audit_event,
 )
 from xiaowei_agent.persistence.schema import (
     ADMIN_AUDIT_EVENTS,
@@ -325,3 +347,192 @@ def test_user_status_and_role_are_checked_at_the_database_level() -> None:
     )
     for member in ProductRole:
         assert f"'{member.value}'" in role_text
+
+
+_CONFLICT_PROBED_TABLES = (USER_ACCOUNTS, EXTERNAL_IDENTITIES, ADMIN_AUDIT_EVENTS)
+"""走 ``ON CONFLICT DO NOTHING ...  RETURNING`` 探测的三张表。
+
+``user_role_assignments`` 不在这里：它走的是 ``DO UPDATE``，带明确的推断目标。
+"""
+
+_DECLARED_CONFLICT_TARGETS: dict[str, frozenset[tuple[frozenset[str], str | None]]] = {
+    "user_accounts": frozenset(
+        {
+            (frozenset({"user_id"}), None),
+            (frozenset({"actor"}), None),
+        }
+    ),
+    "external_identities": frozenset(
+        {
+            (
+                frozenset(
+                    {"provider", "tenant_id", "environment_id", "subject_ref_digest"}
+                ),
+                None,
+            ),
+            (
+                frozenset({"provider", "tenant_id", "environment_id", "user_id"}),
+                None,
+            ),
+        }
+    ),
+    "admin_audit_events": frozenset(
+        {
+            (frozenset({"event_id"}), None),
+            (
+                frozenset({"operation_id"}),
+                "admin_audit_events.outcome = 'started'",
+            ),
+            (
+                frozenset({"operation_id"}),
+                "admin_audit_events.outcome IN ('denied', 'failed', 'succeeded')",
+            ),
+        }
+    ),
+}
+"""这三张表上**每一条可被 ``ON CONFLICT`` 吞掉的约束**，逐格写死。
+
+``ON CONFLICT DO NOTHING`` 不带推断目标，因此它吞掉的是该表**任意**一条唯一/主键/
+偏唯一冲突，而调用方拿到空结果之后统一抛一个业务冲突错误。这意味着：新加一条唯一
+约束 = 新增一种"会被翻译成业务冲突"的失败。这条用例的作用不是防止加约束，而是逼
+加约束的人先来这里回答"它撞了意味着什么"。
+
+按**列集合 + 谓词**判定而不是按名字：``METADATA`` 没有命名约定，主键在 metadata 里
+``name is None``；而两条偏唯一索引的列集合完全相同，只有谓词能把它们分开——只记列
+集合时，删掉其中一条不会让这条用例变红。
+"""
+
+
+def _conflict_targets(
+    table: sa.Table,
+) -> frozenset[tuple[frozenset[str], str | None]]:
+    """一张表上全部可被 ``ON CONFLICT`` 推断到的目标：主键 ∪ 唯一约束 ∪ 偏唯一索引。
+
+    两种唯一性住在 SQLAlchemy 的两个地方（``constraints`` 与 ``indexes``），少看
+    一处就会漏掉一整类目标。
+    """
+    targets: set[tuple[frozenset[str], str | None]] = set()
+    for constraint in table.constraints:
+        if isinstance(constraint, sa.PrimaryKeyConstraint | sa.UniqueConstraint):
+            targets.add((frozenset(column.name for column in constraint.columns), None))
+    for index in table.indexes:
+        if not index.unique:
+            continue
+        predicate = index.dialect_options["postgresql"].get("where")
+        targets.add(
+            (
+                frozenset(column.name for column in index.columns),
+                None
+                if predicate is None
+                else str(predicate.compile(compile_kwargs={"literal_binds": True})),
+            )
+        )
+    return frozenset(targets)
+
+
+def test_the_conflict_probed_tables_have_exactly_the_declared_targets() -> None:
+    for table in _CONFLICT_PROBED_TABLES:
+        assert _conflict_targets(table) == _DECLARED_CONFLICT_TARGETS[table.name], (
+            table.name
+        )
+
+
+def test_the_conflict_target_helper_sees_both_kinds_of_unique_index() -> None:
+    """helper 的自证：两种唯一性它都认得，而且分得开。
+
+    只认 ``constraints`` 时，``admin_audit_events`` 会只剩主键一个目标，于是上一条
+    用例会在一张漏掉两条偏唯一索引的表上照样全绿。
+    """
+    audit_targets = _conflict_targets(ADMIN_AUDIT_EVENTS)
+    predicates = {predicate for _, predicate in audit_targets}
+    assert None in predicates, "没认出无谓词的主键"
+    assert len([p for p in predicates if p is not None]) == 2, "没认出两条偏唯一索引"
+    account_targets = _conflict_targets(USER_ACCOUNTS)
+    assert all(predicate is None for _, predicate in account_targets)
+    assert len(account_targets) == 2, "没认出 UniqueConstraint"
+
+
+_DOMAIN_ERRORS = (
+    UserDirectoryConflictError("conflict"),
+    UserDirectoryNotFoundError("missing"),
+    AdminAuditUnwritableError(),
+    AdminAuditConflictError(),
+    AdminAuditMissingStartError(),
+)
+
+
+@pytest.mark.parametrize("error", _DOMAIN_ERRORS, ids=lambda e: type(e).__name__)
+async def test_domain_errors_pass_through_the_persistence_boundary(
+    error: Exception,
+) -> None:
+    """闭集领域错误必须**原样**穿过两层收敛，不被改写成 ``PersistenceIntegrityError``。
+
+    它们都是 ``RuntimeError`` 子类，因此 ``classify_persistence_exception`` 返回
+    ``None``，两层都走 ``raise`` 重抛。改成继承 ``Exception`` 就会在这里被翻译成
+    一个笼统的持久化错误——调用方于是分不清"这个人已经存在"和"数据库出问题了"。
+    """
+    assert classify_persistence_exception(error, write_outcome=None) is None
+
+    @_persistence_boundary(write=True)
+    async def boom() -> None:
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        await boom()
+    assert raised.value is error
+
+
+def _sample_event() -> AdminAuditEvent:
+    return AdminAuditEvent(
+        event_id="e" * 64,
+        operation_id="op-1",
+        tenant_id="tenant-a",
+        environment_id="env-a",
+        actor_user_id="operator-1",
+        actor="carol@example.com",
+        auth_source=IdentitySource.LOCAL_ADMIN,
+        action=AdminAuditAction.USER_CREATED,
+        target_kind=AdminAuditTargetKind.USER,
+        target_ref_digest="a" * 64,
+        outcome=AdminAuditOutcome.SUCCEEDED,
+        reason_code=None,
+        effect=AdminAuditEffect(role=ProductRole.USER, status=UserStatus.ACTIVE),
+        created_at=dt.datetime(2026, 9, 21, 12, tzinfo=dt.UTC),
+    )
+
+
+def test_an_audit_event_survives_a_round_trip_through_its_row() -> None:
+    """往返无损，且行的键**恰好**是表的列。
+
+    多一个键：``sa.insert`` 会在真库上炸；少一个键：那一列会静默变成 ``NULL``，
+    而 ``reason_code`` / ``effect_*`` 都可空，静默之后没有任何东西会报错。
+    """
+    event = _sample_event()
+    row = admin_audit_event_to_row(event)
+
+    assert set(row) == set(ADMIN_AUDIT_EVENTS.columns.keys())
+    assert row_to_admin_audit_event(row) == event
+
+
+def test_the_row_uses_plain_strings_so_the_database_sees_its_own_types() -> None:
+    """行里是 ``str``，不是 ``StrEnum`` 成员。
+
+    ``StrEnum`` 是 ``str`` 的子类，驱动照样写得进去——所以这条差别**在真库上也不会
+    报错**，只会让"存进去的到底是哪个值"取决于枚举的 ``__str__``。一旦某个枚举将来
+    换成非 ``str`` 的基类，写入会在那一刻才炸，而那时表里已经有一批旧值。
+    """
+    row = admin_audit_event_to_row(_sample_event())
+
+    for column in ("auth_source", "action", "target_kind", "outcome"):
+        assert type(row[column]) is str, column
+    denied = _sample_event().model_copy(
+        update={
+            "outcome": AdminAuditOutcome.DENIED,
+            "reason_code": AdminAuditReasonCode.CONFLICT,
+            "effect": AdminAuditEffect(),
+        }
+    )
+    denied_row = admin_audit_event_to_row(denied)
+    assert type(denied_row["reason_code"]) is str
+    assert denied_row["effect_role"] is None
+    assert denied_row["effect_status"] is None

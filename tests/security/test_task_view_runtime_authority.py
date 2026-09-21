@@ -89,6 +89,8 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.log
     xiaowei_agent.persistence
     xiaowei_agent.persistence.local_admin
+    xiaowei_agent.persistence.admin_audit
+    xiaowei_agent.persistence.identity
     xiaowei_agent.persistence.channel
     xiaowei_agent.persistence.clarification_records
     xiaowei_agent.persistence.database

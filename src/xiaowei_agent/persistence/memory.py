@@ -13,6 +13,13 @@ from xiaowei_agent.contracts import (
 
 if TYPE_CHECKING:
     from xiaowei_agent.contracts import LoadReceipt, TestResult
+    from xiaowei_agent.contracts.admin_audit import AdminAuditEvent
+    from xiaowei_agent.contracts.identity import (
+        ExternalIdentity,
+        UserAccount,
+        UserRoleAssignment,
+    )
+    from xiaowei_agent.persistence.admin_audit import AuditStage
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
@@ -44,6 +51,16 @@ class InMemoryPersistenceState:
         self.oauth_states: dict[str, OAuthState] = {}
         self.web_sessions: dict[str, WebSession] = {}
         self.local_admin: Any | None = None
+        self.user_accounts: dict[str, UserAccount] = {}
+        self.user_role_assignments: dict[tuple[str, str, str], UserRoleAssignment] = {}
+        # 键与 ``external_identities`` 的主键**逐列相同**。键形状不一致时，共享
+        # 套件会在两个实现上测出不同的冲突语义，而套件正是为了排除这种分叉。
+        self.external_identities: dict[
+            tuple[str, str, str, str], ExternalIdentity
+        ] = {}
+        self.admin_audit_events: dict[str, AdminAuditEvent] = {}
+        # 两条偏唯一索引在内存里的对应物：一次操作每个阶段最多一条事件。
+        self.admin_audit_stage_keys: dict[tuple[str, AuditStage], str] = {}
         self.load_receipts: dict[tuple[str, str], LoadReceipt] = {}
         self.provider_tests: dict[str, TestResult] = {}
         self.next_fencing_token = 1

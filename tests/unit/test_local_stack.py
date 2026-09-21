@@ -673,18 +673,34 @@ def _web_settings(identity_file: Path) -> Settings:
     )
 
 
-class _FakeWebConnection:
-    """只吞下语句、不返回行的连接替身。
+class _FakeWebResult:
+    """``execute()`` 的结果替身：读什么都读不到行。"""
 
-    Web 装配现在会在这里 seed 本地管理员——那是一次真实写入，因此假 engine
-    必须支持 ``begin()``。返回 ``None`` 即"这行还不存在"，seed 视为已写入。
+    def mappings(self) -> "_FakeWebResult":
+        return self
+
+    def first(self) -> object:
+        return None
+
+    def all(self) -> list[object]:
+        return []
+
+
+class _FakeWebConnection:
+    """连接替身。
+
+    Web 装配会在这里 seed 本地管理员，而 W1a 之后那是一次**完整的 bootstrap**：
+    凭据行、目录账号、ADMIN 角色、凭据链接与一条审计事件在同一个事务里落库。
+    因此替身要分别回答两类调用——``execute()`` 的读返回空（目录里还没有这个
+    账号），``scalar()`` 返回一个非空值（``ON CONFLICT ... RETURNING`` 拿到了行，
+    即"确实插进去了"）。两者返回同一个值时，装配会被判成一次主键冲突。
     """
 
     async def execute(self, *_: object, **__: object) -> object:
-        return None
+        return _FakeWebResult()
 
     async def scalar(self, *_: object, **__: object) -> object:
-        return None
+        return "inserted"
 
 
 class _FakeWebEngine:
