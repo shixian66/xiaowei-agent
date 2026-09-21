@@ -18,7 +18,7 @@
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
 > 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
-> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only 凭据可见性、
+> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、模型调用端口只在 task worker 装配、
 > durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
 > PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,

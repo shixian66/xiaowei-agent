@@ -344,8 +344,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
     验收或 M8。
 14. **RI3 Gemini 的离线 PR 3A–3D 已顺序合入，PR 3E 等待独立现场 GO**：项目负责人已批准 ADR-015/V7.1 计划并于
     2026-09-12 下达“开始 RI3”。已批准边界固定
-    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、宿主 key
-    文件只对 task worker 可见（RI5 起真源为 `.config/integrations.json`）、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
+    Google Gemini Developer API、`gemini-3-flash-preview`、官方 SDK、两个窄模型 port、凭据真源为
+    `.config/integrations.json`（Web 为配置管理与管理员显式连接测试读取 Secret；两个窄模型调用 port
+    仍只由 task worker 装配，Web 不获得）、意图 60 秒/解释 180 秒阶段 timeout、insert-once accepted intent/
     advisory、Web 显式父任务和逐列定型的 20 行 StarRocks 投影。计划由 9 PR/4 migration 收缩为
     5 PR/2 migration；不新增任务总 deadline、调用预约平台、统一终态表、进度状态机、全项目凭证
     重构或渠道聚合事务。Web parent 的离线契约不依赖尚未完成的 RI2 OAuth；飞书 reply/thread 上下文
@@ -560,7 +561,8 @@ M7 的产品范围也已拍板：主工作台只适配桌面端；窄屏仅保�
   Compose v2/legacy 解析；`compose-smoke` 失败则不是测试环境偶发问题。实际 Compose create/start
   证明 environment-backed secret 虽出现在渲染配置中，却不能为现有 `read_only` worker 建立 mount，
   启动会拒绝非 file 来源。修复复用既有 Compose command resolver，并把 Gemini 改为宿主
-  Git-ignored key 文件到 worker-only file-backed secret；没有取消 worker 只读根文件系统，也没有把
+  Git-ignored key 文件到 worker-only file-backed secret（该拓扑**已由 RI5 取代**，当前真源是
+  `.config/integrations.json`）；没有取消 worker 只读根文件系统，也没有把
   key 放进容器环境。新增反例覆盖错误宿主 source、两类宿主输入名进入容器环境、非 worker 泄漏、
   全部五个临时输入创建点的 `RuntimeError`/`KeyboardInterrupt` 清理；受控本机 model-only
   create/inspect 已证明 worker mount 的

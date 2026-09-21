@@ -1218,8 +1218,109 @@ def test_w0_handoff_binding_is_discriminating() -> None:
     readme = _truth_doc_text("README.md")
     assert "worker-only Compose secret" not in readme
     revived_topology = _replace_once(
-        readme, "worker-only 凭据可见性", "worker-only Compose secret"
+        readme, "模型调用端口只在 task worker 装配", "worker-only Compose secret"
     )
     assert any(
         revived_topology.count(retired) > 0 for retired in _RETIRED_GEMINI_SECRET_PATHS
     )
+
+
+# --- 凭据可见性 vs 模型调用范围：角色不变量 --------------------------------
+#
+# 上一轮把守卫做成了「禁止短语闭集」。黑名单只能挡住已知的错法，挡不住
+# 新造的错法——修复时写出的 `worker-only 凭据可见性` 就是第五种错误表述，
+# 95 passed 全绿放行。这里改成绑定**角色不变量**本身：
+#
+#   凭据/配置文件：web-app 读写，worker/feishu-listener/channel-worker 只读，
+#                  api/migrate/postgres 不挂载；Web 为配置管理和显式连接测试读 Secret。
+#   模型调用端口：`IntentModelPort` / `SlowQueryAdvisoryPort` 才是 task-worker-only。
+#
+# 因此「worker 独占」这个说法只允许修饰模型调用端口，不允许修饰凭据或配置
+# 文件。Compose 侧的挂载矩阵已由 tests/security/test_ri5_compose_boundary.py
+# 承重，这里不重复校验，只管文档有没有把两个角色说混。
+
+_WORKER_EXCLUSIVITY_MARKERS: Final[tuple[str, ...]] = (
+    "worker-only",
+    "只对 task worker",
+    "只挂给 worker",
+    "只挂载给 worker",
+    "只挂给 task worker",
+    "仅 task worker",
+    "只由 task worker",
+    "只给 worker",
+)
+_CREDENTIAL_NOUNS: Final[tuple[str, ...]] = (
+    "Secret",
+    "凭据",
+    "key",
+    "Key",
+    "integrations.json",
+    "config.json",
+    "gemini_api_key",
+)
+_MODEL_PORT_NOUNS: Final[tuple[str, ...]] = (
+    "IntentModelPort",
+    "SlowQueryAdvisoryPort",
+    "模型调用",
+    "模型端口",
+)
+# 历史事故/交付记录可以留着原文，但必须自带替代指针——与四份 ADR 的
+# 「历史原文保留 + 替代指针」同一套办法，不为文档好看而改写历史。
+_SUPERSEDED_MARKER: Final[str] = "已由 RI5 取代"
+
+
+def _credential_scope_conflations(text: str) -> list[str]:
+    """找出把 worker 独占安到凭据/配置文件头上的句子。"""
+    conflations: list[str] = []
+    for line in text.splitlines():
+        if not any(marker in line for marker in _WORKER_EXCLUSIVITY_MARKERS):
+            continue
+        if not any(noun in line for noun in _CREDENTIAL_NOUNS):
+            continue
+        if any(noun in line for noun in _MODEL_PORT_NOUNS):
+            continue  # 修饰的是模型调用端口，正确用法
+        if _SUPERSEDED_MARKER in line:
+            continue  # 历史记录且已标注被取代
+        conflations.append(line.strip())
+    return conflations
+
+
+def test_truth_docs_scope_worker_exclusivity_to_model_ports_only() -> None:
+    for name in _CURRENT_TRUTH_DOCS:
+        conflations = _credential_scope_conflations(_truth_doc_text(name))
+        assert not conflations, (
+            f"{name} 把 worker 独占安在了凭据/配置文件上；"
+            f"RI5 起 Web 也读 Secret（配置管理与显式连接测试），"
+            f"只有模型调用端口是 task-worker-only：{conflations}"
+        )
+
+
+def test_truth_docs_state_that_the_web_plane_also_reads_the_credential() -> None:
+    """正向不变量：光靠否定句挡不住漏写，得要求真源把 web-app 的角色写出来。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    assert "`web-app` 读写挂载该目录" in architecture
+    assert "`api` 不挂载" in architecture
+
+
+def test_credential_scope_binding_is_discriminating() -> None:
+    """反例：任何新造的「凭据 worker 独占」说法都要被抓住，不只是已知那几种。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+
+    # 第五种表述——上一轮正是它全绿溜过去的。
+    invented = "Gemini 凭据采用 worker-only 可见性。"
+    assert _credential_scope_conflations(invented)
+
+    # 第六种，换个词照样抓。
+    another = "宿主 key 文件只挂给 worker。"
+    assert _credential_scope_conflations(another)
+
+    # 正确用法不误伤：worker 独占修饰的是模型调用端口。
+    correct = "Gemini 模型调用端口只由 task worker 装配，Web 不获得该端口。"
+    assert not _credential_scope_conflations(correct)
+
+    # 带替代指针的历史记录不误伤。
+    historical = f"当时改为宿主 key 文件到 worker-only file-backed secret（{_SUPERSEDED_MARKER}）。"
+    assert not _credential_scope_conflations(historical)
+
+    without_web_role = _replace_once(architecture, "`web-app` 读写挂载该目录", "该目录只读挂载")
+    assert "`web-app` 读写挂载该目录" not in without_web_role
