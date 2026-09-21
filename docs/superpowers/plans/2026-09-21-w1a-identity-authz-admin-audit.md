@@ -53,16 +53,18 @@
 
 ## Review Focus
 
-审核者应优先核对以下八点：
+审核者应优先核对以下十点：
 
-1. `apply(command, context)` 是否真的**不给调用方任何机会**指定 action、target 或 outcome：签名上有没有 override、可选覆盖字段或 hook；`AdminAuditCandidate` 是否只出现在"什么都没改"的独立 `append` 路径上。
+1. `apply(command, context)` 是否真的**不给调用方任何机会**指定 action、target 或 outcome：签名上有没有 override、可选覆盖字段或 hook；`AdminAuditStore` 上是否确实**一个写方法都没有**（V2 曾留下一个接受完整候选的公开 `append()`，那等于把派生保证降级成调用方自觉）。
 2. 四张授权表的写入是否**全部**发生在 `apply()` 的那一个 `begin()` 内。`grep` 一遍 `persistence/` 里对这四张表的 INSERT/UPDATE，看有没有第二处；特别核对 `seed_if_absent` 与旧身份迁移。
 3. 审计失败回滚是否由**真实数据库约束**触发并在**真 PostgreSQL** 上验证；集成测试的 `user_directory` fixture 是否确实是 `PostgresUserDirectoryStore`（Task 6 有一条显式类型断言钉住它）。
-4. `operation_id` 是否允许同一操作写 `STARTED` + 一条终态，且第二条 STARTED 与第二条终态都被拒绝。
+4. `operation_id` 是否**不是**全局唯一（否则堵死规格 §14.2 的两阶段配置审计），两条 partial unique index 的 WHERE 是否正确，以及结构用例的 helper 有没有把 partial index 误算成全局唯一。
 5. `role_assigned` / `user_status_changed` / `user_created` 事件能否回答"改成了什么"，且 effect 是闭集列而不是自由文本或 JSON。
 6. 旧标签迁移是否是**一个命令、一个事务**：中途任何一步失败后，两张目录表与审计表是否零部分落库；测试制造的冲突是不是**数据库既有冲突**，而不是被 `_IdentityDocument` 解析期就挡掉的同文件重复 actor。
 7. 由外部输入派生的 `user_id` / `operation_id` 是否有界，最大长度 actor 是否有用例。
-8. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
+8. bootstrap 的幂等判定读的是**目录链接是否完整**，还是『凭据行是否存在』：一个已经跑过 RI5、`local_admins` 早有行的库，升级到 `rev_0014` 后能否补齐账号、ADMIN 角色与链接，且**不覆盖**已改过的密码。Task 6 有一条真实降级—插入—升级的用例。
+9. 两条承重守卫是否绑在它们声称的事实上：写路径守卫按**精确相对路径 + 所在类/方法**判定（不是文件名），文档守卫按**行**判定（不是整篇豁免）。两者都带自证反例。
+10. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
 
 ---
 
@@ -91,7 +93,7 @@ git status --short --branch
 
 依次读 `AGENTS.md`、`ARCHITECTURE.md`、`AGENT_HANDOFF.md`、`README.md`、`DEVELOPMENT_PLAN.md`。
 
-`AGENT_HANDOFF.md` 第 0 节应当已经写明 **W0 已合入、下一步是 W1a**（该更新随本计划 PR 一起合入，见 Task 10）。若它仍写着"正在做 W0 文档收口"，说明本计划 PR 的 handoff 修订没有合进来，**停止并报告**，不要自行推断。
+`AGENT_HANDOFF.md` 第 0 节应当已经写明 **W0 已合入、下一步是 W1a**（该更新随本计划 PR 一起合入，见 Task 9）。若它仍写着"正在做 W0 文档收口"，说明本计划 PR 的 handoff 修订没有合进来，**停止并报告**，不要自行推断。
 
 - [ ] **Step 3: 确认 W1a 计划已获批**
 
@@ -1362,9 +1364,13 @@ class AdminAuditEffect(Contract):
 class AdminAuditCandidate(Contract):
     """一条待持久化的审计事实；不含 event_id 与时间。
 
-    **由 store 构造，不由业务调用方构造。** 唯一的例外是"什么都没改"的
-    路径——拒绝（``DENIED``）与配置面的 ``STARTED``——那里没有命令可派生，
-    由 ``AdminAuditStore.append()`` 直接写。
+    **只由 store 从命令派生，没有例外。** W1a 里构造它的只有 ``derive_audit()``，
+    调用它的只有 ``UserDirectoryStore.apply()``。``AdminAuditStore`` 上没有任何
+    写方法，所以这个类型不构成一条"绕过改动直接写事实"的路径——上一版留了一个
+    接受完整候选的公开 ``append()``，那等于把派生保证降级成了调用方自觉。
+
+    ``DENIED`` 与 ``STARTED`` 两个 outcome 留在闭集里是给 W1b/W4a 用的；W1a
+    没有产生它们的命令，数据库 ``CHECK`` 也不允许目录动作写 ``STARTED``。
 
     这个契约**故意没有任何自由文本字段**。审计表是唯一一处既要长期保留、
     又天然贴着 Secret、聊天正文和异常堆栈的存储；只要留一个 ``str`` 通道，
@@ -1455,7 +1461,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `src/xiaowei_agent/persistence/schema.py`
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_directory_and_admin_audit.py`
-- Modify: `tests/contract/test_schema_matches_migration.py`（只加新 revision 的发布哈希登记）
+- Modify: `tests/contract/test_schema_matches_migration.py`（发布哈希登记 + `rev_0014` chain + head 锚点）
+- Modify: `tests/unit/test_readiness.py`（head 锚点改为从 Alembic 取，不再写死 revision 字面量）
 - Test: `tests/contract/test_identity_schema.py`
 
 **Interfaces:**
@@ -1491,22 +1498,34 @@ def _check_names(table: sa.Table) -> set[str]:
     }
 
 
+def _partial_where(index: sa.Index) -> str | None:
+    """partial unique index 的 WHERE；``None`` 表示这条 index 是全局唯一的。"""
+    where = index.dialect_options["postgresql"].get("where")
+    return None if where is None else str(where)
+
+
 def _unique_column_sets(table: sa.Table) -> set[frozenset[str]]:
+    """**全局**唯一的列组合。
+
+    带 ``postgresql_where`` 的 index 只在满足条件的行之间唯一，不是全局唯一。
+    把它算进来，下面"``operation_id`` 不全局唯一"那条断言就恒假——区分这两者
+    正是本文件要钉的事实，所以这里必须按 WHERE 判断，不能只看 ``index.unique``。
+    """
     sets: set[frozenset[str]] = set()
     for constraint in table.constraints:
         if isinstance(constraint, sa.UniqueConstraint):
             sets.add(frozenset(column.name for column in constraint.columns))
     for index in table.indexes:
-        if index.unique:
+        if index.unique and _partial_where(index) is None:
             sets.add(frozenset(column.name for column in index.columns))
     return sets
 
 
 def _partial_unique_indexes(table: sa.Table) -> dict[str, str]:
     return {
-        index.name: str(index.dialect_options["postgresql"]["where"])
+        index.name: where
         for index in table.indexes
-        if index.unique and index.dialect_options["postgresql"].get("where") is not None
+        if index.unique and (where := _partial_where(index)) is not None
     }
 
 
@@ -1577,6 +1596,32 @@ def test_one_started_and_one_terminal_event_per_operation() -> None:
     assert all(word in terminal for word in ("succeeded", "denied", "failed"))
 
 
+def test_the_unique_helper_tells_partial_indexes_apart_from_global_ones() -> None:
+    """helper 自证。
+
+    这条用例存在的理由是：上一版的 ``_unique_column_sets`` 只看 ``index.unique``，
+    把两条 ``operation_id`` partial unique index 也算成全局唯一，于是
+    ``test_operation_id_is_not_globally_unique`` 恒假——Task 4 按计划执行必然红灯。
+    不区分这两者，上面那两条断言就一条恒假、一条恒真，两条都不再证明任何事。
+    """
+    probe = sa.Table(
+        "probe",
+        sa.MetaData(),
+        sa.Column("scoped", sa.Text, primary_key=True),
+        sa.Column("whole", sa.Text, nullable=False),
+        sa.Column("outcome", sa.Text, nullable=False),
+        sa.Index(
+            "uq_probe_partial",
+            "scoped",
+            unique=True,
+            postgresql_where=sa.text("outcome = 'started'"),
+        ),
+        sa.Index("uq_probe_global", "whole", unique=True),
+    )
+    assert _unique_column_sets(probe) == {frozenset({"whole"})}
+    assert set(_partial_unique_indexes(probe)) == {"uq_probe_partial"}
+
+
 def test_audit_closed_sets_are_expressed_as_database_checks() -> None:
     """枚举闭集在数据库层独立再表达一次。
 
@@ -1592,6 +1637,7 @@ def test_audit_closed_sets_are_expressed_as_database_checks() -> None:
         "ck_admin_audit_events_effect_only_on_success",
         "ck_admin_audit_events_role_effect_required",
         "ck_admin_audit_events_status_effect_required",
+        "ck_admin_audit_events_directory_actions_are_single_phase",
     } <= names
 
 
@@ -1781,6 +1827,13 @@ ADMIN_AUDIT_EVENTS: Final = sa.Table(
         "'user_status_changed', 'local_admin_bootstrapped', "
         "'legacy_identity_migrated')) = (effect_status IS NOT NULL)",
         name="ck_admin_audit_events_status_effect_required",
+    ),
+    sa.CheckConstraint(
+        "NOT (outcome = 'started' AND action IN ('user_created', "
+        "'user_status_changed', 'role_assigned', 'role_revoked', "
+        "'external_identity_bound', 'external_identity_unbound', "
+        "'local_admin_bootstrapped', 'legacy_identity_migrated'))",
+        name="ck_admin_audit_events_directory_actions_are_single_phase",
     ),
     sa.Index(
         "uq_admin_audit_one_started_per_operation",
@@ -1985,6 +2038,13 @@ def upgrade() -> None:
             "'legacy_identity_migrated')) = (effect_status IS NOT NULL)",
             name="ck_admin_audit_events_status_effect_required",
         ),
+        sa.CheckConstraint(
+            "NOT (outcome = 'started' AND action IN ('user_created', "
+            "'user_status_changed', 'role_assigned', 'role_revoked', "
+            "'external_identity_bound', 'external_identity_unbound', "
+            "'local_admin_bootstrapped', 'legacy_identity_migrated'))",
+            name="ck_admin_audit_events_directory_actions_are_single_phase",
+        ),
     )
     op.create_index(
         "uq_admin_audit_one_started_per_operation",
@@ -2053,7 +2113,84 @@ def downgrade() -> None:
 
 先读 `src/xiaowei_agent/persistence/migrations/guards.py` 确认 `require_destructive_authorization` 的确切签名，按它的既有形状调用，**不要**改它。
 
-- [ ] **Step 5: 登记发布哈希并跑离线一致性**
+- [ ] **Step 5: 同步随新 revision 断裂的既有锚点**
+
+新增一条 revision 会让三处既有断言转红。它们**不是**被新功能破坏的，而是本来就按
+"当前最新 revision"写的锚点；漏掉任何一处，Task 4 按计划执行就是红灯。先跑一次
+确认它们确实红，再改：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+  tests/contract/test_schema_matches_migration.py tests/unit/test_readiness.py -q 2>&1 | tail -15
+```
+
+预期 RED 两条：`test_latest_declared_revision_is_the_alembic_head`（声明的是 `0013`，
+真实 head 已是 `0014`）与 `test_readiness_requires_database_head_and_assembly`
+（写死 `"0013_clarification_parent"`，与真实 head 不等，`revision_matches_head` 变成
+`False`）。
+
+**锚点一——新增 chain 测试**，与既有 `rev_0012` / `rev_0013` 同形，加在
+`tests/contract/test_schema_matches_migration.py` 里 `rev_0013` 那条之后：
+
+```python
+def test_rev_0014_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0014_identity_directory_and_admin_audit as revision,
+    )
+
+    assert revision.revision == "0014_identity_directory_and_admin_audit"
+    assert revision.down_revision == "0013_clarification_parent"
+```
+
+**锚点二——head 锚点前移到 `rev_0014`**，同一文件：
+
+```python
+def test_latest_declared_revision_is_the_alembic_head() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0014_identity_directory_and_admin_audit as revision,
+    )
+
+    assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
+        revision.revision
+    )
+```
+
+这一处**保留**写死 revision：它要钉的正是"最新声明的 revision 就是 head"，把两边
+都改成从 Alembic 取就成了 `head == head` 的同义反复。
+
+**锚点三——`tests/unit/test_readiness.py` 改成从 Alembic 取 head。** 这一处与上一处
+相反，必须做根因修复：它要钉的事实是"当前 revision 等于 head 时探针报 `True`"，与
+具体是哪个 revision 无关。写死字面量把它变成了每加一次迁移就静默转红的锚点——而这种
+锚点最终会被人随手改数字，改到某天数字对了、事实错了也看不出来。
+
+```python
+from alembic.script import ScriptDirectory
+
+from xiaowei_agent.persistence.migrations.runner import alembic_config
+
+
+@pytest.mark.asyncio
+async def test_readiness_requires_database_head_and_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    monkeypatch.setattr(database, "_current_revision", lambda _: head)
+    connection = _Connection(revision=head)
+    probe = PostgresReadinessProbe(engine=_Engine(connection), assembled=True)
+    report = await probe.check()
+    assert report.database_ok is True
+    assert report.revision_matches_head is True
+    assert report.assembled is True
+    assert connection.statements == ["SELECT 1"]
+```
+
+改完重跑上面那条命令，预期全绿。
+
+**隔离变异（确认锚点三仍然有效）：** 把 `_Connection(revision=head)` 改成
+`_Connection(revision=head + "-stale")`，该用例必须转红；确认后还原。不做这一步，
+就分不清"从 Alembic 取 head"是修好了断言，还是把断言变成了恒真。
+
+- [ ] **Step 6: 登记发布哈希并跑离线一致性**
 
 ```bash
 python - <<'HASH'
@@ -2075,13 +2212,14 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_identity_schema.p
 
 预期：全绿。若 `test_schema_matches_migration.py` 报 DDL 不一致（partial index 的 `WHERE` 子句最容易在这里对不上），说明 `schema.py` 与迁移写的不是同一套 DDL——**改到两边一致，不要改断言**。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/xiaowei_agent/persistence/schema.py \
         src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_directory_and_admin_audit.py \
         tests/contract/test_schema_matches_migration.py \
-        tests/contract/test_identity_schema.py
+        tests/contract/test_identity_schema.py \
+        tests/unit/test_readiness.py
 git commit -m "feat(w1a): add identity directory and admin audit tables in rev_0014
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
@@ -2124,7 +2262,7 @@ async def apply(
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 from tests.suites.task_store import bind
@@ -2153,13 +2291,35 @@ from xiaowei_agent.persistence.identity import (
     UserDirectoryNotFoundError,
 )
 
-__all__ = ["IDENTITY_DIRECTORY_CASES", "bind"]
+__all__ = ["IDENTITY_DIRECTORY_CASES", "LocalAdminProbe", "bind"]
 
 _TENANT = "dev-local"
 _ENV = "dev"
 _OPEN_ID_A = "ou_" + "aaaa11112222"
 _OPEN_ID_B = "ou_" + "bbbb33334444"
 _FAKE_HASH = "argon2id$" + "v=19$m=65536,t=3,p=4$c29tZXNhbHQ"
+_ROTATED_HASH = "argon2id$" + "v=19$m=65536,t=3,p=4$cm90YXRlZHNhbHQ"
+"""代表『管理员已经改过密码』的那个哈希；backfill 不得把它覆盖掉。"""
+
+
+class LocalAdminProbe(Protocol):
+    """直接读写 ``local_admins`` 的**测试专用**探针。
+
+    为什么需要它：bootstrap 的四态里有三态的前置条件是『数据库里已经有一行
+    旧形状的凭据』。生产代码没有、也不该有制造这种状态的方法——那会是第二条
+    写路径。所以它由 fixture 提供，两个绑定各给一份实现（内存版写
+    ``state.local_admin``，PostgreSQL 版直接发 SQL），都住在测试代码里，不进
+    ``src/``，因此不受 Task 7 写路径守卫的约束。
+    """
+
+    async def seed_legacy_credential(
+        self, *, password_hash: str, user_id: str | None = None
+    ) -> None:
+        """写一行 ``rev_0014`` 之前形状的凭据（``user_id`` 默认为 ``NULL``）。"""
+
+    async def linked_user_id(self) -> str | None: ...
+
+    async def stored_password_hash(self) -> str: ...
 
 
 def _context(operation_id: str) -> AdminOperationContext:
@@ -2470,15 +2630,8 @@ async def test_bootstrap_creates_account_role_and_credential_together(
     assert facts is not None and facts.assignment.role is ProductRole.ADMIN
 
 
-async def test_bootstrap_is_idempotent_and_writes_no_audit_when_nothing_changed(
-    user_directory: Any,
-) -> None:
-    """什么都没改，就不该有审计。
-
-    第二次 bootstrap 返回空元组而不是抛错，保留了 ``seed_if_absent`` 现有的
-    "已 seed 返回 False"语义；也不会撞上终态唯一索引。
-    """
-    command = BootstrapLocalAdminCommand(
+def _bootstrap_command() -> BootstrapLocalAdminCommand:
+    return BootstrapLocalAdminCommand(
         user_id="usr-local-admin",
         actor="admin",
         display_name="Local Admin",
@@ -2486,8 +2639,101 @@ async def test_bootstrap_is_idempotent_and_writes_no_audit_when_nothing_changed(
         environment_id=_ENV,
         password_hash=_FAKE_HASH,
     )
+
+
+async def test_bootstrap_is_idempotent_and_writes_no_audit_when_nothing_changed(
+    user_directory: Any,
+) -> None:
+    """链接完整时什么都没改，就不该有审计。
+
+    第二次 bootstrap 返回空元组而不是抛错，保留了 ``seed_if_absent`` 现有的
+    『已 seed 返回 False』语义；也不会撞上终态唯一索引。
+    """
+    command = _bootstrap_command()
     assert len(await user_directory.apply(command=command, context=_context("b1"))) == 1
     assert await user_directory.apply(command=command, context=_context("b2")) == ()
+
+
+async def test_bootstrap_backfills_a_credential_that_has_no_directory_account(
+    user_directory: Any, local_admins: Any
+) -> None:
+    """已有凭据行但没有目录链接 → 补齐，**不动原密码**。
+
+    这条用例存在的理由是：上一版的规则是『``local_admins`` 已有行就返回空元组』。
+    任何跑过 RI5 的数据库都已经有这一行（``local_stack.py:1031`` 每次装配都调
+    ``seed_if_absent``），于是升级到 ``rev_0014`` 之后 ``user_id`` 永远为空、
+    账号与 ADMIN 角色永远不出现，而全新安装的用例照样全绿。
+    """
+    await local_admins.seed_legacy_credential(password_hash=_ROTATED_HASH)
+
+    events = await user_directory.apply(
+        command=_bootstrap_command(), context=_context("b-backfill")
+    )
+
+    assert len(events) == 1
+    assert events[0].action is AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED
+    assert events[0].effect.role is ProductRole.ADMIN
+    facts = await user_directory.load_account(
+        user_id="usr-local-admin", tenant_id=_TENANT, environment_id=_ENV
+    )
+    assert facts is not None and facts.assignment.role is ProductRole.ADMIN
+    assert await local_admins.linked_user_id() == "usr-local-admin"
+    # 管理员可能早就改过密码；backfill 拿初始口令覆盖回去是一次静默凭据回滚。
+    assert await local_admins.stored_password_hash() == _ROTATED_HASH
+
+
+async def test_bootstrap_backfill_is_itself_idempotent(
+    user_directory: Any, local_admins: Any
+) -> None:
+    """补齐之后再来一次就是第三行：no-op，不写第二条审计。"""
+    await local_admins.seed_legacy_credential(password_hash=_ROTATED_HASH)
+    await user_directory.apply(
+        command=_bootstrap_command(), context=_context("b-first")
+    )
+    assert (
+        await user_directory.apply(
+            command=_bootstrap_command(), context=_context("b-second")
+        )
+        == ()
+    )
+
+
+async def test_bootstrap_fails_closed_when_the_link_points_at_nothing(
+    user_directory: Any, local_admins: Any
+) -> None:
+    """第四行：链接存在但指向的账号不存在 → 不猜、不重建，直接拒绝。
+
+    这里**不能**退回 backfill：``user_id`` 非空说明某一次 bootstrap 自认为
+    成功过，账号却不在了。这种状态下重建一个 ADMIN 账号，等于用一次静默修复
+    掩盖一次没人知道的数据丢失。
+    """
+    await local_admins.seed_legacy_credential(
+        password_hash=_ROTATED_HASH, user_id="usr-vanished"
+    )
+    with pytest.raises(UserDirectoryConflictError):
+        await user_directory.apply(
+            command=_bootstrap_command(), context=_context("b-broken")
+        )
+
+
+async def test_bootstrap_fails_closed_when_the_linked_account_lost_admin(
+    user_directory: Any, local_admins: Any
+) -> None:
+    """第四行的另一半：账号在，但在本作用域没有 ADMIN 角色。"""
+    await _seed(user_directory, "usr-local-admin", actor="admin")
+    await local_admins.seed_legacy_credential(
+        password_hash=_ROTATED_HASH, user_id="usr-local-admin"
+    )
+    await user_directory.apply(
+        command=RevokeRoleCommand(
+            tenant_id=_TENANT, environment_id=_ENV, user_id="usr-local-admin"
+        ),
+        context=_context("b-revoke"),
+    )
+    with pytest.raises(UserDirectoryConflictError):
+        await user_directory.apply(
+            command=_bootstrap_command(), context=_context("b-noadmin")
+        )
 
 
 async def test_legacy_migration_writes_the_whole_batch_or_nothing(
@@ -2564,87 +2810,40 @@ async def test_legacy_migration_emits_one_audit_event_per_entry(
         assert await admin_audit.load(event_id=event.event_id) is not None
 
 
-async def test_a_started_event_and_its_terminal_event_share_one_operation(
-    admin_audit: Any,
-) -> None:
-    """规格 §14.2 的两阶段配置审计必须写得出来。
+async def test_reusing_an_operation_id_is_rejected(user_directory: Any) -> None:
+    """一次 operation 至多留下一条终态事件。
 
-    这条用例存在的理由是：``operation_id`` 曾经被设计成全局唯一，那会让
-    第二条终态事件必然撞约束，W4a 的配置审计从第一天起就无法落地。
+    这是目录回滚证明所依赖的那条约束的正面用例：第二次用同一个 ``operation_id``
+    会撞终态 partial unique index。它只走 ``apply()``——W1a 没有第二个写入口，
+    也没有任何公开方法能直接写一条审计事实。
+
+    上一版这里放的是两条直接调用 ``AdminAuditStore.append()`` 的两阶段用例，
+    而它们恰好在演示当时那个旁路：写一条 ``ROLE_ASSIGNED + SUCCEEDED``，却没有
+    改动任何角色。规格 §14.2 的两阶段能力现在由 Task 4 的离线结构用例与 Task 6
+    的数据库用例证明，不再需要一个能凭空写成功授权事实的公开方法。
     """
-    from xiaowei_agent.contracts.admin_audit import (
-        AdminAuditCandidate,
-        admin_audit_target_digest,
-    )
-    from xiaowei_agent.contracts.enums import AdminAuditTargetKind
-
-    def _candidate(outcome: AdminAuditOutcome, **extra: Any) -> AdminAuditCandidate:
-        return AdminAuditCandidate(
-            operation_id="cfg-1",
-            tenant_id=_TENANT,
-            environment_id=_ENV,
-            actor_user_id="usr-admin",
-            actor="admin",
-            auth_source=IdentitySource.LOCAL_ADMIN,
-            action=AdminAuditAction.ROLE_ASSIGNED,
-            target_kind=AdminAuditTargetKind.USER,
-            target_ref_digest=admin_audit_target_digest(
-                target_kind=AdminAuditTargetKind.USER, target_ref="usr-1"
-            ),
-            outcome=outcome,
-            **extra,
-        )
-
-    started = await admin_audit.append(
-        candidate=_candidate(AdminAuditOutcome.STARTED)
-    )
-    terminal = await admin_audit.append(
-        candidate=_candidate(
-            AdminAuditOutcome.SUCCEEDED, effect=_role_effect()
-        )
-    )
-    assert started.operation_id == terminal.operation_id
-    assert started.event_id != terminal.event_id
-
-
-async def test_a_second_started_or_second_terminal_event_is_rejected(
-    admin_audit: Any,
-) -> None:
-    """两阶段允许两条，不允许三条。"""
-    from xiaowei_agent.contracts.admin_audit import (
-        AdminAuditCandidate,
-        admin_audit_target_digest,
-    )
-    from xiaowei_agent.contracts.enums import AdminAuditReasonCode, AdminAuditTargetKind
     from xiaowei_agent.persistence.admin_audit import AdminAuditConflictError
 
-    def _candidate(outcome: AdminAuditOutcome, **extra: Any) -> AdminAuditCandidate:
-        return AdminAuditCandidate(
-            operation_id="cfg-2",
+    await user_directory.apply(
+        command=CreateUserCommand(
             tenant_id=_TENANT,
             environment_id=_ENV,
-            actor_user_id="usr-admin",
-            actor="admin",
-            auth_source=IdentitySource.LOCAL_ADMIN,
-            action=AdminAuditAction.ROLE_REVOKED,
-            target_kind=AdminAuditTargetKind.USER,
-            target_ref_digest=admin_audit_target_digest(
-                target_kind=AdminAuditTargetKind.USER, target_ref="usr-1"
+            user_id="usr-a",
+            actor="alice",
+            display_name="Alice",
+        ),
+        context=_context("op-reused"),
+    )
+    with pytest.raises(AdminAuditConflictError):
+        await user_directory.apply(
+            command=CreateUserCommand(
+                tenant_id=_TENANT,
+                environment_id=_ENV,
+                user_id="usr-b",
+                actor="bob",
+                display_name="Bob",
             ),
-            outcome=outcome,
-            **extra,
-        )
-
-    await admin_audit.append(candidate=_candidate(AdminAuditOutcome.STARTED))
-    with pytest.raises(AdminAuditConflictError):
-        await admin_audit.append(candidate=_candidate(AdminAuditOutcome.STARTED))
-    await admin_audit.append(candidate=_candidate(AdminAuditOutcome.SUCCEEDED))
-    with pytest.raises(AdminAuditConflictError):
-        await admin_audit.append(
-            candidate=_candidate(
-                AdminAuditOutcome.FAILED,
-                reason_code=AdminAuditReasonCode.CONFLICT,
-            )
+            context=_context("op-reused"),
         )
 
 
@@ -2669,10 +2868,13 @@ IDENTITY_DIRECTORY_CASES = (
     test_unknown_subject_resolves_to_nothing,
     test_bootstrap_creates_account_role_and_credential_together,
     test_bootstrap_is_idempotent_and_writes_no_audit_when_nothing_changed,
+    test_bootstrap_backfills_a_credential_that_has_no_directory_account,
+    test_bootstrap_backfill_is_itself_idempotent,
+    test_bootstrap_fails_closed_when_the_link_points_at_nothing,
+    test_bootstrap_fails_closed_when_the_linked_account_lost_admin,
     test_legacy_migration_writes_the_whole_batch_or_nothing,
     test_legacy_migration_emits_one_audit_event_per_entry,
-    test_a_started_event_and_its_terminal_event_share_one_operation,
-    test_a_second_started_or_second_terminal_event_is_rejected,
+    test_reusing_an_operation_id_is_rejected,
 )
 
 ALL_GROUPS = {"identity_directory": IDENTITY_DIRECTORY_CASES}
@@ -2773,18 +2975,8 @@ import uuid
 from typing import Final, Protocol
 
 from xiaowei_agent.contracts.admin_audit import AdminAuditCandidate, AdminAuditEvent
-from xiaowei_agent.contracts.enums import AdminAuditOutcome
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.store import Clock
-
-TERMINAL_OUTCOMES: Final[frozenset[AdminAuditOutcome]] = frozenset(
-    {
-        AdminAuditOutcome.SUCCEEDED,
-        AdminAuditOutcome.DENIED,
-        AdminAuditOutcome.FAILED,
-    }
-)
-
 
 class AdminAuditError(RuntimeError):
     """审计存储错误；不把异常正文、Secret 或 PII 放进消息。"""
@@ -2799,21 +2991,26 @@ class AdminAuditConflictError(AdminAuditError):
 
 
 class AdminAuditStore(Protocol):
-    """只有追加与读取。
+    """**只读。** 没有 append、没有 update、没有 delete、没有清理。
 
-    **没有 update、没有 delete、没有清理。** 规格 §14.2 明确要求首版不提供
-    更新/删除 API；能删的审计在事后争议里等于没有审计。
+    没有 update/delete 是规格 §14.2 的明文要求：能删的审计在事后争议里等于
+    没有审计。
+
+    没有 ``append`` 是上一轮复审的直接结果。上一版这里有一个
+    ``append(candidate: AdminAuditCandidate)``，接受完整的候选事实——于是任何
+    调用方都可以写一条 ``ROLE_ASSIGNED + SUCCEEDED``，而不必真的改动过任何
+    角色。上一版计划自己的两阶段用例就在这么做。把审计事实从命令**派生**
+    出来，却同时留一个能凭空构造同类事实的公开方法，等于没有派生：
+    保证退回成了"调用方自觉不要这么用"。
+
+    W1a 里唯一写审计的地方是 ``UserDirectoryStore.apply()``，它在改动所在的
+    同一个事务里写，写的是从命令派生的事实。W4a 需要规格 §14.2 的两阶段配置
+    审计时，再加一对**窄**方法：``append_started`` 只能写 ``STARTED``，
+    ``append_terminal`` 只收 ``operation_id`` 与终态字段、其余从已存的
+    ``STARTED`` 行读回。现在没有那样的调用方，就不提前造那个接口。
     """
 
-    async def append(self, *, candidate: AdminAuditCandidate) -> AdminAuditEvent: ...
-
     async def load(self, *, event_id: str) -> AdminAuditEvent | None: ...
-
-
-def audit_stage_key(candidate: AdminAuditCandidate) -> tuple[str, str]:
-    """(operation_id, 阶段)；内存实现用它表达两条 partial unique index。"""
-    stage = "terminal" if candidate.outcome in TERMINAL_OUTCOMES else "started"
-    return (candidate.operation_id, stage)
 
 
 class InMemoryAdminAuditStore:
@@ -2823,25 +3020,26 @@ class InMemoryAdminAuditStore:
         self._state = state
         self._clock = clock
 
-    async def append(self, *, candidate: AdminAuditCandidate) -> AdminAuditEvent:
-        async with self._state.lock:
-            return self.append_locked(candidate)
-
     def append_locked(self, candidate: AdminAuditCandidate) -> AdminAuditEvent:
-        """已持锁时的追加；``InMemoryUserDirectoryStore`` 在自己的临界区内复用它。
+        """已持锁时的追加。**没有公开的异步包装。**
 
-        复用而不是复制：两份追加逻辑会在"什么算冲突"上分叉，而这正是
-        目录回滚证明所依赖的那条约束。
+        ``InMemoryUserDirectoryStore`` 在自己的临界区内调用它，因此它必须是
+        可见的；但它不在 ``AdminAuditStore`` 协议上，也不是 ``async``，任何
+        把它当成通用写接口的调用方都得先自己拿到 ``state.lock``——那本身就是
+        一个显眼的越界信号，而不是一个看起来正常的 ``await store.append(...)``。
+
+        冲突键只用 ``operation_id``：W1a 写出来的事件全部是终态（见下面的
+        ``CHECK``），所以内存侧只需表达终态那条 partial unique index。W4a 引入
+        配置动作时，这里和数据库一样要再区分 STARTED 与终态两个阶段。
         """
-        key = audit_stage_key(candidate)
-        if key in self._state.admin_audit_stage_keys:
-            raise AdminAuditConflictError("operation already has an event at this stage")
+        if candidate.operation_id in self._state.admin_audit_terminal_operations:
+            raise AdminAuditConflictError("operation already has a terminal event")
         event = AdminAuditEvent(
             **candidate.model_dump(mode="python"),
             event_id=uuid.uuid4().hex,
             created_at=self._clock(),
         )
-        self._state.admin_audit_stage_keys.add(key)
+        self._state.admin_audit_terminal_operations.add(candidate.operation_id)
         self._state.admin_audit_events[event.event_id] = event
         return event
 
@@ -2851,12 +3049,10 @@ class InMemoryAdminAuditStore:
 
 
 __all__ = [
-    "TERMINAL_OUTCOMES",
     "AdminAuditConflictError",
     "AdminAuditError",
     "AdminAuditStore",
     "InMemoryAdminAuditStore",
-    "audit_stage_key",
 ]
 ```
 
@@ -3012,8 +3208,9 @@ def derive_audit(
     """把命令 + 操作者上下文变成一条成功审计事实。
 
     注意这里没有 ``outcome`` 参数：能走到这个函数，就意味着改动即将在同一
-    事务里提交。失败与拒绝不经过它——它们没有授权改变可绑定，走
-    ``AdminAuditStore.append()``。
+    事务里提交。失败与拒绝不经过它——它们没有授权改变可绑定，因此 W1a 根本
+    不写这两类事件。要写它们需要一个能凭空构造审计事实的写方法，而那正是
+    上一轮复审判定必须去掉的东西。
     """
     return AdminAuditCandidate(
         operation_id=operation_id,
@@ -3146,13 +3343,37 @@ class InMemoryUserDirectoryStore:
                 raise
 ```
 
-`_apply_locked` 按命令类型分流，全部复用 `derive_audit()` 与 `self._audit.append_locked()`；`_snapshot`/`_restore` 对五个 dict 与两个集合做浅拷贝与整体替换。分流规则：
+`_apply_locked` 按命令类型分流，全部复用 `derive_audit()` 与 `self._audit.append_locked()`。
+
+`_snapshot`/`_restore` 覆盖 **Step 6 新增的五个字段，外加既有的 `state.local_admin`**（`memory.py:46`）：四个 dict 与一个 set 做浅拷贝，`local_admin` 是单个记录引用、直接存取。**漏掉 `local_admin` 是一个真实缺陷**——bootstrap 在同一次调用里既写凭据又写目录，审计写失败时若只回滚目录、不回滚凭据，就会留下一行 `user_id IS NULL` 的凭据；而那正好落进上面第二行（backfill）而不是第四行（fail-closed），于是一次失败的 bootstrap 看起来会像一次『还没升级』的正常状态。
+
+分流规则：
 
 - `CreateUserCommand`：`user_id` 已存在或 `actor` 被占用 → `UserDirectoryConflictError`；否则写账号 + 角色 + 一条审计。
 - `SetUserStatusCommand` / `AssignRoleCommand` / `RevokeRoleCommand` / `BindExternalIdentityCommand` / `UnbindExternalIdentityCommand`：目标账号或角色不存在 → `UserDirectoryNotFoundError`。
 - `BindExternalIdentityCommand`：摘要已绑到别的账号、或该账号在本作用域已有绑定 → `UserDirectoryConflictError`。
-- `BootstrapLocalAdminCommand`：`local_admins` 已有行 → **返回空元组**（幂等 no-op，不是错误）；否则写账号 + ADMIN 角色 + 凭据行 + 一条审计。
+- `BootstrapLocalAdminCommand`：按下面的四态规则分流。判定读的是 `state.local_admin` 与目录侧的账号/角色，不是『有没有凭据行』这一个布尔。
 - `MigrateLegacyIdentitiesCommand`：逐条写账号 + 角色 + 绑定，每条用 `batch_operation_id(context, index)` 写一条审计；任一条冲突整批抛错，由上面的快照恢复保证零部分落库。
+
+**bootstrap 的判定依据是目录链接是否完整，不是凭据行是否存在。**
+
+| `local_admins` 行 | `user_id` | 目录侧 | 处置 |
+| --- | --- | --- | --- |
+| 无 | — | — | 建凭据 + 账号 + ADMIN 角色 + 链接 + 一条审计 |
+| 有 | `NULL` | — | **保留原 `password_hash` 不动**，补账号 + ADMIN 角色 + 链接 + 一条审计 |
+| 有 | 指向存在且在该作用域持 ADMIN 角色的账号 | 完整 | 幂等 no-op，返回 `()`，不写审计 |
+| 有 | 指向不存在的账号，或该账号没有 ADMIN 角色 | 破损 | `UserDirectoryConflictError`（fail-closed） |
+
+第二行是这版新增的，也是上一版真正的缺陷所在。上一版的规则是『`local_admins`
+已有行 → 立即返回空元组』。而 `local_stack.py:1031` 在**每次**装配 Web 时都调用
+`seed_if_absent`，任何跑过 RI5 的数据库早就有这一行了。于是升级到 `rev_0014`
+之后：`local_admins.user_id` 永远是 `NULL`，`user_accounts` 不会出现，ADMIN
+角色不会出现，bootstrap 审计不会出现——而全新安装的测试全绿，因为全新安装
+走的是第一行。这是一条只在真实升级路径上才踩得到的裂缝。
+
+保留原 `password_hash` 是硬要求：管理员可能早就改过密码，backfill 拿传进来的
+初始口令覆盖回去，等于一次静默的凭据回滚。命令里的 `password_hash` **只在
+第一行**（凭据行不存在）被使用。
 
 - [ ] **Step 6: 扩 `InMemoryPersistenceState` 与 conftest**
 
@@ -3167,7 +3388,7 @@ class InMemoryUserDirectoryStore:
         default_factory=dict
     )
     admin_audit_events: dict[str, AdminAuditEvent] = field(default_factory=dict)
-    admin_audit_stage_keys: set[tuple[str, str]] = field(default_factory=set)
+    admin_audit_terminal_operations: set[str] = field(default_factory=set)
 ```
 
 `external_identities` 的键是 `(provider, tenant_id, environment_id, subject_ref_digest)`，与 `external_identities` 表的主键**逐列相同**——键形状不一致，共享套件就会在两个实现上测出不同的冲突语义。
@@ -3187,9 +3408,37 @@ def user_directory(
     return InMemoryUserDirectoryStore(
         state=persistence_state, clock=clock, audit=admin_audit
     )
+
+
+class _InMemoryLocalAdminProbe:
+    """``LocalAdminProbe`` 的内存实现。"""
+
+    def __init__(self, state: Any) -> None:
+        self._state = state
+
+    async def seed_legacy_credential(
+        self, *, password_hash: str, user_id: str | None = None
+    ) -> None:
+        self._state.local_admin = LocalAdminRecord(
+            password_hash=password_hash, must_change_password=True, user_id=user_id
+        )
+
+    async def linked_user_id(self) -> str | None:
+        return None if self._state.local_admin is None else self._state.local_admin.user_id
+
+    async def stored_password_hash(self) -> str:
+        assert self._state.local_admin is not None
+        return self._state.local_admin.password_hash
+
+
+@pytest.fixture
+def local_admins(persistence_state: Any) -> _InMemoryLocalAdminProbe:
+    return _InMemoryLocalAdminProbe(persistence_state)
 ```
 
 `persistence_state` 与 `clock` 用该文件已有的同名 fixture；若名字不同，按实际名字改，**不要**新建一份 state。
+
+`LocalAdminRecord`（`persistence/local_admin.py:51`，当前只有 `password_hash` 与 `must_change_password` 两个字段）要加一个 `user_id: str | None = None`，与 `local_admins.user_id` 列对应。默认 `None` 让 `fake.py:518` 与 `fake.py:536` 两处既有构造点、以及 9 处 `seed_if_absent` 调用方全部保持不变——改密路径（`fake.py:536`）**不带** `user_id`，于是它会把链接清成 `None`，这是一个真实的回归风险：改一次密码就把目录链接弄丢。所以改密处必须显式带上原记录的 `user_id`，Task 6 有一条用例专门钉这件事。
 
 - [ ] **Step 7: 运行，确认全绿**
 
@@ -3263,6 +3512,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `src/xiaowei_agent/persistence/postgres.py`
 - Modify: `src/xiaowei_agent/persistence/local_admin.py`
+- Modify: `src/xiaowei_agent/persistence/fake.py`（`InMemoryLocalAdminStore.seed_if_absent` 同样改为委托）
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `tests/integration/conftest.py`
 - Create: `tests/integration/test_identity_directory_postgres.py`
@@ -3289,9 +3539,49 @@ def user_directory(
     clean_database: AsyncEngine, clock: Any
 ) -> PostgresUserDirectoryStore:
     return PostgresUserDirectoryStore(engine=clean_database, clock=clock)
+
+
+class _PostgresLocalAdminProbe:
+    """``LocalAdminProbe`` 的 PostgreSQL 实现；直接发 SQL，测试专用。"""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def seed_legacy_credential(
+        self, *, password_hash: str, user_id: str | None = None
+    ) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                sa.insert(LOCAL_ADMINS).values(
+                    id=LOCAL_ADMIN_SINGLETON_ID,
+                    password_hash=password_hash,
+                    must_change_password=True,
+                    updated_at=_FIXED_TIME,
+                    user_id=user_id,
+                )
+            )
+
+    async def _column(self, column: sa.Column[Any]) -> Any:
+        async with self._engine.connect() as connection:
+            return await connection.scalar(
+                sa.select(column).where(LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID)
+            )
+
+    async def linked_user_id(self) -> str | None:
+        return await self._column(LOCAL_ADMINS.c.user_id)
+
+    async def stored_password_hash(self) -> str:
+        return await self._column(LOCAL_ADMINS.c.password_hash)
+
+
+@pytest.fixture
+def local_admins(clean_database: AsyncEngine) -> _PostgresLocalAdminProbe:
+    return _PostgresLocalAdminProbe(clean_database)
 ```
 
-两者都接 `clean_database`，因此它们操作的是**同一个** engine、同一个库——这是"同事务"用例有意义的前提。
+三者都接 `clean_database`，因此它们操作的是**同一个** engine、同一个库——这是"同事务"用例有意义的前提。
+
+`LOCAL_ADMIN_SINGLETON_ID` 是 `persistence/local_admin.py` 里现有的 `_SINGLETON_ID`；把它改成不带下划线的公开常量并从 `local_admin.py` 导出，**不要**在测试里重写一遍字面量。`_FIXED_TIME` 用该 conftest 已有的固定时间常量。
 
 - [ ] **Step 2: 写 PostgreSQL 绑定测试**
 
@@ -3315,7 +3605,12 @@ from xiaowei_agent.persistence.postgres import (
     PostgresAdminAuditStore,
     PostgresUserDirectoryStore,
 )
-from xiaowei_agent.persistence.schema import ADMIN_AUDIT_EVENTS, USER_ACCOUNTS
+from xiaowei_agent.persistence.schema import (
+    ADMIN_AUDIT_EVENTS,
+    LOCAL_ADMINS,
+    USER_ACCOUNTS,
+    USER_ROLE_ASSIGNMENTS,
+)
 
 bind(globals(), IDENTITY_DIRECTORY_CASES)
 
@@ -3446,10 +3741,10 @@ def _classify_directory_integrity_error(exc: IntegrityError) -> UserDirectoryErr
 - 按命令类型发 INSERT/UPDATE/DELETE，全部用传入的 `connection` 与同一个 `now`。
 - 目标账号或角色不存在（UPDATE/DELETE 影响 0 行）→ 抛 `UserDirectoryNotFoundError`，**在同一事务内**，因此审计也不会留下。
 - 每条成功改动用 Task 5 的 `derive_audit()` 生成候选，再 INSERT 进 `ADMIN_AUDIT_EVENTS`；批量命令按 `batch_operation_id(context, index)` 逐条生成。审计 INSERT 放在各自改动之后、事务提交之前。
-- `BootstrapLocalAdminCommand`：先用 `INSERT ... ON CONFLICT DO NOTHING ... RETURNING id` 试写 `local_admins`；没拿到 id 说明已 bootstrap，**直接返回空元组**（整个事务不写任何行），保持 `seed_if_absent` 现有的"已 seed 返回 False"语义。
+- `BootstrapLocalAdminCommand`：按 Task 5 那张四态表分流，与内存实现**同一套语义**。先 `SELECT id, password_hash, user_id FROM local_admins WHERE id = :singleton FOR UPDATE`——`FOR UPDATE` 是必需的：两个 Web 进程同时装配会同时调用 `seed_if_absent`，没有行锁时两边都读到 `user_id IS NULL`、都去建账号，第二个撞 `user_accounts` 主键，一次正常的并发启动变成一次启动失败。没有行时走 `INSERT ... ON CONFLICT DO NOTHING RETURNING id`；拿不到 id 说明另一个事务刚插进去，重读一次按同一张表继续分流。
 - `external_identities` 存 `external_subject_digest(...)`，不存 `open_id`。
 - `resolve_by_subject` 用一次 JOIN 取 account + assignment，并在 SQL 层就写 `WHERE user_accounts.status = 'active'`——把禁用判断放在 Python 里，就得依赖每个调用方都记得判一次。
-- `PostgresAdminAuditStore.append()` 只做 INSERT + 返回，捕获 `IntegrityError` 转 `AdminAuditConflictError`；它**没有** UPDATE/DELETE 路径，Task 7 的 AST 守卫会机械确认这一点。
+- `PostgresAdminAuditStore` 只有 `load()`。审计行全部由 `PostgresUserDirectoryStore._apply_in_transaction` 在目录改动所在的同一事务里 INSERT；这个类**没有**任何写方法，Task 7 的 AST 守卫会机械确认它既没有 UPDATE/DELETE，也没有第二条 INSERT 路径。
 
 - [ ] **Step 5: 让 `seed_if_absent` 走同一条写路径**
 
@@ -3486,6 +3781,8 @@ def _classify_directory_integrity_error(exc: IntegrityError) -> UserDirectoryErr
         return bool(events)
 ```
 
+`InMemoryLocalAdminStore.seed_if_absent`（`fake.py:514`）必须做**同样**的委托，改成调用 `InMemoryUserDirectoryStore.apply()` 而不是自己写 `state.local_admin`。两个实现的 bootstrap 语义必须由同一段分流代码决定——各写一份，四态里迟早有一态在两边不一致，而共享套件恰恰是靠"两边行为相同"才有意义的。
+
 `LOCAL_ADMIN_TENANT_ID` / `LOCAL_ADMIN_ENVIRONMENT_ID` / `LOCAL_ADMIN_ACTOR` 取自既有 `LOCAL_ADMIN_PRINCIPAL`（`interfaces/local_admin_auth.py:127`，值为 `dev-local` / `dev` / `admin`），**从那里导入或与它并置定义，不要各写一遍字面量**。每次调用用新的 `operation_id`，因为已 bootstrap 的情况返回空元组、不写审计，不会撞终态索引。
 
 补一条测试钉住这个行为（放在 `tests/integration/test_identity_directory_postgres.py`）：
@@ -3515,7 +3812,111 @@ async def test_seeding_the_local_admin_writes_its_audit_event(
             )
         ).all()
     assert rows == [("local_admin_bootstrapped", "admin")]
+
+
+async def test_an_already_seeded_database_gets_its_directory_backfilled_on_upgrade(
+    clean_database: Any, clock: Any, alembic_runners: tuple[Any, Any]
+) -> None:
+    """**真实升级路径**：rev_0013 上已 seed 的库升到 rev_0014 之后必须补齐目录。
+
+    这条用例存在的理由是上一版计划的一个真实缺陷：bootstrap 当时的规则是
+    ``local_admins`` 已有行就返回空元组。任何跑过 RI5 的库都已经有那一行，
+    于是升级后 ``user_id`` 永远为 ``NULL``、账号与 ADMIN 角色永远不出现，
+    而全新安装的用例照样全绿。全新安装的证据证明不了升级路径。
+
+    降级到 `rev_0013` 再写一行**旧形状**的凭据，是这里唯一能真实复现该状态
+    的办法——在 `rev_0014` 的表上插一行 ``user_id IS NULL`` 只是模仿它的形状，
+    证明不了迁移本身把旧行带过来时是什么样子。
+    """
+    from xiaowei_agent.interfaces.local_admin_auth import hash_password
+    from xiaowei_agent.persistence.local_admin import (
+        LOCAL_ADMIN_SINGLETON_ID,
+        PostgresLocalAdminStore,
+    )
+
+    run_upgrade, run_downgrade = alembic_runners
+    rotated = hash_password("rot" + "ated-secret")
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0013_clarification_parent")
+        await connection.execute(
+            sa.text(
+                "INSERT INTO local_admins (id, password_hash, must_change_password, "
+                "updated_at) VALUES (:id, :hash, true, now())"
+            ),
+            {"id": LOCAL_ADMIN_SINGLETON_ID, "hash": rotated},
+        )
+        await connection.run_sync(run_upgrade, "head")
+
+    async with clean_database.connect() as connection:
+        assert (
+            await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
+        ) is None, "迁移本身不该猜一个 user_id 出来"
+
+    admins = PostgresLocalAdminStore(engine=clean_database, clock=clock)
+    assert await admins.seed_if_absent(password_hash=hash_password("adm" + "in")) is True
+
+    async with clean_database.connect() as connection:
+        linked = await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
+        stored = await connection.scalar(sa.select(LOCAL_ADMINS.c.password_hash))
+        roles = (
+            await connection.execute(sa.select(USER_ROLE_ASSIGNMENTS.c.role))
+        ).scalars().all()
+        actions = (
+            await connection.execute(sa.select(ADMIN_AUDIT_EVENTS.c.action))
+        ).scalars().all()
+
+    assert linked is not None
+    assert roles == ["admin"]
+    assert actions == ["local_admin_bootstrapped"]
+    # 管理员早就改过密码；backfill 不得把初始口令写回去。
+    assert stored == rotated
+
+    # 第三行：链接已完整，再来一次是 no-op，不写第二条审计。
+    assert await admins.seed_if_absent(password_hash=hash_password("adm" + "in")) is False
+    async with clean_database.connect() as connection:
+        assert (
+            await connection.scalar(
+                sa.select(sa.func.count()).select_from(ADMIN_AUDIT_EVENTS)
+            )
+        ) == 1
+
+
+async def test_changing_the_password_keeps_the_directory_link(
+    clean_database: Any, clock: Any
+) -> None:
+    """改密改的是凭据，不该顺手把目录链接清掉。
+
+    这是加 ``user_id`` 列引入的一处真实回归风险：改密路径重建整条
+    ``LocalAdminRecord``，只要漏带 ``user_id``，改一次密码就把目录链接弄丢，
+    下一次装配就会落进 fail-closed 那一行，Web 直接起不来。
+    """
+    from xiaowei_agent.interfaces.local_admin_auth import hash_password
+    from xiaowei_agent.persistence.local_admin import (
+        ChangePasswordCommand,
+        PostgresLocalAdminStore,
+    )
+
+    admins = PostgresLocalAdminStore(engine=clean_database, clock=clock)
+    await admins.seed_if_absent(password_hash=hash_password("adm" + "in"))
+    async with clean_database.connect() as connection:
+        before = await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
+    assert before is not None
+
+    await admins.change_password_and_rotate_session(
+        command=ChangePasswordCommand(
+            password_hash=hash_password("new" + "-secret"),
+            session_digest="0" * 64,
+            issued_at=clock(),
+        )
+    )
+
+    async with clean_database.connect() as connection:
+        after = await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
+    assert after == before
 ```
+
+`ChangePasswordCommand` 的字段名以 `persistence/local_admin.py:58` 的实际定义为准；上面按当前签名写，实现时若有出入以源码为准，**不要**改断言迁就。
 
 - [ ] **Step 6: 登记 Protocol 一致性**
 
@@ -3593,9 +3994,10 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```python
 """``admin_audit_events`` 的 append-only 由源码扫描机械保证。
 
-协议窄度（``append``/``load``）挡住的是"通过 Store 改审计"。这里挡的是另一
-条路：直接在 ``postgres.py`` 里对这张表发 UPDATE/DELETE。两条都堵上，
-append-only 才是结构性质而不是口头约定。
+``AdminAuditStore`` 是只读协议（只有 ``load``），挡住的是"通过 Store 写审计"。
+这里挡的是另一条路：直接在某个 persistence 模块里对这张表发 UPDATE/DELETE。
+谁可以 INSERT 由 ``test_identity_write_path.py`` 一并治理——审计行和另外四张
+授权事实同属一条写路径，用同一套判定，不另写一份会分叉的逻辑。
 """
 
 import ast
@@ -3665,76 +4067,260 @@ def test_audit_store_offers_no_cleanup_or_retention_api() -> None:
 创建 `tests/security/test_identity_write_path.py`：
 
 ```python
-"""四张授权表只有 ``UserDirectoryStore.apply()`` 一个写入口。
+"""四张授权事实只有 ``UserDirectoryStore.apply()`` 一条写入口。
 
-协议上只有一个写方法，挡住的是"通过 Store 绕开审计"。这里挡的是另一条：
-某个模块直接对授权表发 INSERT/UPDATE。上一版计划正是栽在这条路上——
-``seed_if_absent`` 自己写了账号和 ADMIN 角色，第一次部署就违反了不变量。
+Protocol 层的表面测试挡的是"通过 Store 的公开方法绕开审计"。这里挡的是另一条：
+某个模块绕过 Store 直接对授权表发 INSERT/UPDATE/DELETE。上一版计划正是栽在这条
+路上——``seed_if_absent`` 自己写了账号和 ADMIN 角色。
+
+**按精确相对路径与所在类/方法定位，不按文件名。** 上一版用 basename 放行整个
+``identity.py`` / ``postgres.py``：那只能证明写语句位于某个叫这名字的文件里，
+证明不了它位于 ``apply()`` 这条路径上——在同一个 ``postgres.py`` 里新写一个
+模块级写函数，或在任意别的目录放一个同名文件，都会被原样放行。
+
+定位手法沿用 ``tests/security/test_audit_ledger_guards.py`` 的 ``_method_body``：
+按 ``ClassDef`` + 方法名走到确切位置，而不是按文件名匹配。
 """
 
 import ast
 from pathlib import Path
+from typing import Final
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[2]
-_SRC = _ROOT / "src" / "xiaowei_agent"
-_AUTHZ_TABLES = frozenset(
-    {"USER_ACCOUNTS", "USER_ROLE_ASSIGNMENTS", "EXTERNAL_IDENTITIES"}
-)
-_ALLOWED_MODULES = frozenset({"identity.py", "postgres.py"})
-"""只有这两个模块可以出现授权表的写语句。
-
-``postgres.py`` 承载 ``PostgresUserDirectoryStore``，``identity.py`` 承载内存
-实现。任何第三个模块出现在结果里，都意味着又开了一个写入口。
-"""
-
 pytestmark = pytest.mark.security
 
+_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _ROOT / "src" / "xiaowei_agent"
 
-def writes_to(module: Path, symbols: frozenset[str]) -> list[str]:
+_AUTHZ_TABLES: Final[frozenset[str]] = frozenset(
+    {"USER_ACCOUNTS", "USER_ROLE_ASSIGNMENTS", "EXTERNAL_IDENTITIES"}
+)
+_WRITE_CALLS: Final[frozenset[str]] = frozenset({"insert", "update", "delete"})
+
+_DIRECTORY_STORE_MODULES: Final[dict[str, str]] = {
+    "persistence/identity.py": "InMemoryUserDirectoryStore",
+    "persistence/postgres.py": "PostgresUserDirectoryStore",
+}
+"""精确相对路径 → 该文件里唯一可以写授权表的类。
+
+只允许 ``apply`` 与该类的私有助手（``_`` 前缀）：``_apply_in_transaction`` 必须
+能写，而一个新的**公开**写方法必须被抓住。
+"""
+
+
+def _write_sites(module: Path, symbols: frozenset[str]) -> list[str]:
+    """模块里所有写 ``symbols`` 的语句，标注其所在的 ``类.方法``。"""
     tree = ast.parse(module.read_text(encoding="utf-8"))
-    found: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
+    sites: list[str] = []
+
+    def written_tables(call: ast.Call) -> list[str]:
+        func = call.func
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name not in {"insert", "update", "delete"}:
-            continue
-        targets = [arg for arg in node.args if isinstance(arg, ast.Name)]
+        if name not in _WRITE_CALLS:
+            return []
+        names = [arg.id for arg in call.args if isinstance(arg, ast.Name)]
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            targets.append(func.value)
-        for target in targets:
-            if target.id in symbols:
-                found.append(f"{module.name}:{node.lineno} {name}({target.id})")
-    return found
+            names.append(func.value.id)
+        return [name for name in names if name in symbols]
+
+    def scan(node: ast.AST, owner: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                scan(child, child.name)
+            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                scan(child, f"{owner}.{child.name}" if owner else child.name)
+            else:
+                for call in ast.walk(child):
+                    if isinstance(call, ast.Call):
+                        for table in written_tables(call):
+                            sites.append(f"{owner or '<module>'}:{call.lineno}:{table}")
+
+    scan(tree, "")
+    return sites
 
 
-def test_only_the_directory_store_modules_write_authorization_tables() -> None:
+def _is_allowed(relative_path: str, site: str) -> bool:
+    expected = _DIRECTORY_STORE_MODULES.get(relative_path)
+    if expected is None:
+        return False
+    owner = site.split(":", 1)[0]
+    class_name, _, method = owner.partition(".")
+    if class_name != expected or not method:
+        return False
+    return method == "apply" or method.startswith("_")
+
+
+def test_authorization_tables_are_written_only_inside_the_directory_store() -> None:
     offenders: list[str] = []
     for module in sorted(_SRC.rglob("*.py")):
-        if module.name in _ALLOWED_MODULES:
-            continue
-        offenders.extend(writes_to(module, _AUTHZ_TABLES))
-    assert offenders == [], f"authorization tables have a second write path: {offenders}"
+        relative = module.relative_to(_SRC).as_posix()
+        for site in _write_sites(module, _AUTHZ_TABLES):
+            if not _is_allowed(relative, site):
+                offenders.append(f"{relative} {site}")
+    assert offenders == [], f"授权表出现了第二条写路径：{offenders}"
 
 
 def test_local_admin_module_no_longer_writes_authorization_rows() -> None:
-    """``seed_if_absent`` 必须委托给 apply()，不能自己 INSERT。"""
+    """``seed_if_absent`` 必须委托给 ``apply()``，不能自己 INSERT 账号或角色。"""
     module = _SRC / "persistence" / "local_admin.py"
-    assert writes_to(module, _AUTHZ_TABLES) == []
+    assert _write_sites(module, _AUTHZ_TABLES) == []
 
 
-def test_the_guard_actually_detects_a_second_write_path(tmp_path: Path) -> None:
-    sample = tmp_path / "offender.py"
-    sample.write_text(
+def test_audit_rows_are_written_only_inside_the_directory_store() -> None:
+    """审计行和四张授权事实同属一条写路径。
+
+    ``AdminAuditStore`` 已经是只读协议，但协议只约束通过 Store 的调用。一个
+    模块仍然可以自己 ``sa.insert(ADMIN_AUDIT_EVENTS)`` 写一条"授权成功"，而
+    根本没改过任何授权——那正是上一轮复审在 ``append()`` 上指出的同一个旁路，
+    换了个入口。用同一套判定覆盖它，不另写一份会分叉的逻辑。
+    """
+    offenders: list[str] = []
+    for module in sorted(_SRC.rglob("*.py")):
+        relative = module.relative_to(_SRC).as_posix()
+        for site in _write_sites(module, frozenset({"ADMIN_AUDIT_EVENTS"})):
+            if not _is_allowed(relative, site):
+                offenders.append(f"{relative} {site}")
+    assert offenders == [], f"审计表出现了第二条写路径：{offenders}"
+
+
+def _local_admin_user_id_writes(module: Path) -> list[str]:
+    """写 ``local_admins.user_id`` 的语句。
+
+    **不能**把整张 ``LOCAL_ADMINS`` 列进 ``_AUTHZ_TABLES``：改密码是合法的，而且
+    按规格 §14.2 就该留在 ``LocalAdminStore``——凭据不是授权。要治理的只是它的
+    授权侧，也就是指向目录账号的那一列；把整张表禁掉会误伤改密，而一个会误伤的
+    守卫最终会被放宽成不再守任何东西。
+    """
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    sites: list[str] = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        if not any(keyword.arg == "user_id" for keyword in call.keywords):
+            continue
+        subtree = list(ast.walk(call))
+        touches_local_admins = any(
+            isinstance(node, ast.Name) and node.id == "LOCAL_ADMINS" for node in subtree
+        )
+        writes = any(
+            isinstance(node, ast.Call)
+            and (
+                node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else getattr(node.func, "id", "")
+            )
+            in _WRITE_CALLS
+            for node in subtree
+        )
+        if touches_local_admins and writes:
+            sites.append(f"{module.name}:{call.lineno}")
+    return sites
+
+
+def test_the_local_credential_link_is_written_only_by_the_directory_store() -> None:
+    """``local_admins.user_id`` 是第四张授权事实，和另外三张一个待遇。"""
+    offenders: list[str] = []
+    for module in sorted(_SRC.rglob("*.py")):
+        relative = module.relative_to(_SRC).as_posix()
+        if relative in _DIRECTORY_STORE_MODULES:
+            continue
+        offenders.extend(f"{relative} {site}" for site in _local_admin_user_id_writes(module))
+    assert offenders == [], f"目录链接列出现了第二条写路径：{offenders}"
+```
+
+**四条反例 + 一条正常对照。** 前三条各对应上一版守卫放过的一种情况；最后一条
+证明列级治理没有误伤改密。
+
+```python
+def _sample(tmp_path: Path, name: str, source: str) -> Path:
+    module = tmp_path / name
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text(source, encoding="utf-8")
+    return module
+
+
+def test_the_guard_catches_a_second_write_function_in_the_store_module(
+    tmp_path: Path,
+) -> None:
+    """上一版按 basename 放行整个 ``postgres.py``，这种函数会被原样放过。"""
+    module = _sample(
+        tmp_path,
+        "postgres.py",
         "import sqlalchemy as sa\n"
         "from xiaowei_agent.persistence.schema import USER_ROLE_ASSIGNMENTS\n"
-        "stmt = sa.insert(USER_ROLE_ASSIGNMENTS)\n",
-        encoding="utf-8",
+        "\n"
+        "async def grant_admin(connection):\n"
+        "    await connection.execute(sa.insert(USER_ROLE_ASSIGNMENTS))\n",
     )
-    assert len(writes_to(sample, _AUTHZ_TABLES)) == 1
+    sites = _write_sites(module, _AUTHZ_TABLES)
+    assert len(sites) == 1
+    assert not _is_allowed("persistence/postgres.py", sites[0])
+
+
+def test_the_guard_catches_a_new_public_write_method_on_the_store(
+    tmp_path: Path,
+) -> None:
+    """同一个类上新增的**公开**写方法不是 ``apply()``，必须被抓住。"""
+    module = _sample(
+        tmp_path,
+        "postgres.py",
+        "import sqlalchemy as sa\n"
+        "from xiaowei_agent.persistence.schema import USER_ACCOUNTS\n"
+        "\n"
+        "class PostgresUserDirectoryStore:\n"
+        "    async def apply(self, *, command, context):\n"
+        "        return ()\n"
+        "\n"
+        "    async def force_create(self, connection):\n"
+        "        await connection.execute(sa.insert(USER_ACCOUNTS))\n",
+    )
+    sites = _write_sites(module, _AUTHZ_TABLES)
+    assert sites and all(site.startswith("PostgresUserDirectoryStore.force_create") for site in sites)
+    assert not _is_allowed("persistence/postgres.py", sites[0])
+
+
+def test_the_store_private_helper_is_still_allowed() -> None:
+    """正常对照：``_apply_in_transaction`` 必须写得了，否则守卫不可用。"""
+    assert _is_allowed("persistence/postgres.py", "PostgresUserDirectoryStore._apply_in_transaction:12:USER_ACCOUNTS")
+    assert _is_allowed("persistence/identity.py", "InMemoryUserDirectoryStore.apply:12:USER_ACCOUNTS")
+
+
+def test_a_same_named_module_in_another_package_is_not_allowed() -> None:
+    """上一版按 basename 放行，任意目录下的 ``postgres.py`` 都能写授权表。"""
+    assert not _is_allowed(
+        "interfaces/postgres.py", "PostgresUserDirectoryStore.apply:12:USER_ACCOUNTS"
+    )
+    assert not _is_allowed(
+        "adapters/identity.py", "InMemoryUserDirectoryStore.apply:12:USER_ACCOUNTS"
+    )
+
+
+def test_the_guard_catches_a_direct_write_to_the_credential_link(tmp_path: Path) -> None:
+    module = _sample(
+        tmp_path,
+        "local_admin.py",
+        "import sqlalchemy as sa\n"
+        "from xiaowei_agent.persistence.schema import LOCAL_ADMINS\n"
+        "\n"
+        "def link(connection, user_id):\n"
+        "    return sa.update(LOCAL_ADMINS).values(user_id=user_id)\n",
+    )
+    assert len(_local_admin_user_id_writes(module)) == 1
+
+
+def test_changing_the_local_admin_password_is_not_flagged(tmp_path: Path) -> None:
+    """正常对照：改密改的是凭据不是授权，必须放行。"""
+    module = _sample(
+        tmp_path,
+        "local_admin.py",
+        "import sqlalchemy as sa\n"
+        "from xiaowei_agent.persistence.schema import LOCAL_ADMINS\n"
+        "\n"
+        "def rotate(connection, password_hash):\n"
+        "    return sa.update(LOCAL_ADMINS).values(password_hash=password_hash)\n",
+    )
+    assert _local_admin_user_id_writes(module) == []
 ```
 
 - [ ] **Step 2: 写 PII 暴露守卫**
@@ -4352,23 +4938,110 @@ def test_architecture_states_the_single_write_path_invariant() -> None:
     assert "审计不可写" in text
 
 
-def test_truth_docs_do_not_claim_activation_or_admin_ui_exists() -> None:
+_UNBUILT_AFTER_W1A: Final[tuple[str, ...]] = (
+    "ActivationStore",
+    "IdentityActivationService",
+    "web_oauth_login_contexts",
+    "激活审批",
+    "Admin 管理中心",
+)
+"""W1a 交付后**仍然**不存在的东西：激活审批是 W1b，Admin 页面是 W3。"""
+
+_EXISTENCE_CLAIMS: Final[tuple[str, ...]] = (
+    "已实现",
+    "已上线",
+    "已交付",
+    "已完成",
+    "现已",
+)
+_PHASE_LABEL: Final[re.Pattern[str]] = re.compile(r"\bW\d[a-c]?\b")
+"""交付阶段标签（`W1b`、`W2`、`W4a` …）。"""
+
+_NON_EXISTENCE: Final[tuple[str, ...]] = (
+    "尚未",
+    "未实现",
+    "还没有",
+    "还不",
+    "不存在",
+    "将",
+    "计划中",
+)
+"""明确否定其当前存在的说法。
+
+这两组合起来就是"合格的提及"的完整定义：**要么**在同一行说清它属于哪个阶段，
+**要么**在同一行否认它现在存在。不按这条原则、而是往列表里补字面量补到变绿，
+补出来的就是一个不再表达任何不变量的守卫。
+"""
+
+
+def _false_existence_claims(text: str) -> list[str]:
+    """把还不存在的东西说成当前事实的句子。
+
+    **按行判定，不做整篇豁免。** 上一版写的是
+    ``marker not in text or "W1b" in text or "未实现" in text``——只要文档里任意
+    一处出现过 ``W1b`` 或"未实现"，整篇里所有错误声称都被放行。实测四份真源
+    文档中有三份已经满足这个条件，也就是说那条守卫当时就已经抓不到东西了。
+    这与凭据作用域守卫（``_credential_scope_conflations``）用的是同一套办法：
+    按句子判定，豁免也必须写在同一句里。
+
+    存在性声称不设豁免：一行说"激活审批已实现"，不论同一行还写了什么，都是错的。
+    """
+    claims: list[str] = []
+    for line in text.splitlines():
+        if not any(noun in line for noun in _UNBUILT_AFTER_W1A):
+            continue
+        if any(claim in line for claim in _EXISTENCE_CLAIMS):
+            claims.append(line.strip())
+    return claims
+
+
+def _unqualified_mentions(text: str) -> list[str]:
+    """提到未来组件却没在**同一行**标明它属于哪个未来阶段的句子。"""
+    mentions: list[str] = []
+    for line in text.splitlines():
+        if not any(noun in line for noun in _UNBUILT_AFTER_W1A):
+            continue
+        qualified = _PHASE_LABEL.search(line) is not None or any(
+            marker in line for marker in _NON_EXISTENCE
+        )
+        if not qualified:
+            mentions.append(line.strip())
+    return mentions
+
+
+@pytest.mark.parametrize("name", _CURRENT_TRUTH_DOCS)
+def test_truth_docs_do_not_claim_activation_or_admin_ui_exists(name: str) -> None:
     """W1a 只交付写底座。
 
-    最容易出现的漂移正是"写内核做完了顺手把整条身份线说成做完了"——
-    激活审批是 W1b、Admin 页面是 W3，两者都还不存在。
+    最容易出现的漂移正是"写内核做完了顺手把整条身份线说成做完了"。
     """
-    forbidden = (
-        "ActivationStore",
-        "IdentityActivationService",
-        "web_oauth_login_contexts",
-        "激活审批已实现",
-        "Admin 管理中心已上线",
+    text = _truth_doc_text(name)
+    assert _false_existence_claims(text) == [], (
+        f"{name} 把 W1b/W3 才有的东西写成了当前事实"
     )
-    for name in _CURRENT_TRUTH_DOCS:
-        text = (_ROOT / name).read_text("utf-8")
-        for marker in forbidden:
-            assert marker not in text or "W1b" in text or "未实现" in text
+    assert _unqualified_mentions(text) == [], (
+        f"{name} 提到未来组件却没在同一行标明阶段"
+    )
+
+
+@pytest.mark.parametrize("name", _CURRENT_TRUTH_DOCS)
+def test_the_activation_claim_guard_is_discriminating(name: str) -> None:
+    """逐份注入反例。
+
+    这条用例存在的理由是：上一版守卫用整篇文件级豁免，注入后四份里有三份仍然
+    绿。逐份参数化是必须的——只要有一份文档的豁免条件被满足，整篇豁免就让那一份
+    永久失去保护，而汇总成一条断言时这件事看不出来。
+    """
+    text = _truth_doc_text(name)
+    assert _false_existence_claims(text + "\n激活审批已实现。\n")
+    assert _false_existence_claims(text + "\nAdmin 管理中心已上线。\n")
+    assert _unqualified_mentions(text + "\n身份绑定由 ActivationStore 负责。\n")
+
+
+def test_naming_a_future_component_with_its_phase_is_allowed() -> None:
+    """正常对照：写清楚阶段的句子必须放行，否则真源文档没法描述路线。"""
+    assert _unqualified_mentions("W1b 将引入 `ActivationStore` 承载激活审批。") == []
+    assert _false_existence_claims("激活审批尚未实现，属于 W1b。") == []
 
 
 def test_handoff_names_w1b_as_the_only_post_merge_next_step() -> None:
@@ -4440,7 +5113,8 @@ W1a 只有同时满足以下条件才可判定完成：
 - `tests/security/test_identity_write_path.py` 证明四张授权表在整个 `src/` 里只有目录 store 两个模块会写，`local_admin.py` 不在其中；
 - "审计写失败 → 授权改变回滚"由**真实数据库约束**触发并在真库上验证，隔离变异证明移除同事务包裹后该用例变红；
 - 集成测试有显式类型断言证明 `user_directory` / `admin_audit` 是 PostgreSQL 实现，不是根 conftest 的内存 fixture；
-- 同一 `operation_id` 可写 `STARTED` + 一条终态，第二条 STARTED 与第二条终态都被拒绝；
+- `operation_id` **不是**全局唯一，两条 partial unique index 的存在与 WHERE 由离线结构用例钉住，终态那条由套件用例在两个实现上行为验证；结构用例的 helper 自带『partial 不等于全局』的自证反例；
+- `AdminAuditStore` 上**一个写方法都没有**；W1a 的审计行只由 `apply()` 在改动所在事务里 INSERT，且数据库 CHECK 禁止目录动作写 `STARTED`；
 - `role_assigned` / `user_status_changed` / `user_created` / `local_admin_bootstrapped` / `legacy_identity_migrated` 事件携带闭集 effect，且由数据库 CHECK 强制；非成功 outcome 不得携带 effect；
 - `admin_audit_events` 的 append-only 有源码级机械守卫，且守卫自身有反例证明它抓得到违规；
 - `AdminAuditEvent` 列集合 = 规格 §14.2 的 13 个 + `effect_role` + `effect_status`，无任何自由文本或 JSON 通道；
@@ -4449,7 +5123,10 @@ W1a 只有同时满足以下条件才可判定完成：
 - 旧标签迁移是一个命令一个事务，冲突用例制造在**数据库既有事实**上，冲突后零部分落库，重跑 `created=0`，`approver` 不生效授权，超长 actor 有用例；
 - `legacy_user_id()` 对任意长度 actor 都产出 ≤64 字符的稳定 ID；
 - `feishu_identity.py` 的抽取没有改变既有行为：`tests/contract/test_feishu_identity.py` 全绿；
-- `seed_if_absent` 的签名与返回语义不变，6 处既有 RI5 测试调用方全绿；
+- `seed_if_absent` 的签名不变，9 处既有调用方全绿；返回值含义仍是『这次调用是否做了 bootstrap 工作』，升级路径上的 backfill 返回 `True`（它确实补齐了目录），链接完整时返回 `False`；
+- bootstrap 四态各有用例：全新安装、已有凭据未链接（backfill 且**不覆盖**已改密码）、链接完整幂等、链接破损 fail-closed；其中升级路径由一条**真实降级到 `rev_0013`、插入旧形状凭据、再升级到 head** 的 PostgreSQL 用例证明；
+- 改密不清空 `local_admins.user_id`，有用例钉住；
+- 两条承重守卫各自绑在它们声称的事实上并带自证反例：写路径守卫按精确相对路径 + 所在类/方法判定（四条反例：同文件模块级写函数、同类新增公开写方法、他目录同名文件、直接写 `user_id`；两条正常对照：私有助手放行、改密不误伤）；文档守卫按行判定，四份真源文档**逐份**注入反例都转红；
 - `rev_0014` 与 `schema.py` 离线 DDL 一致（含两条 partial unique index），发布哈希已登记，downgrade 在有数据时要求显式破坏性授权；
 - diff 只含 Task 0 的 allowlist，无 HTTP 路由、无激活载体、无 requester/approver 载体；
 - ADR-008 四门全绿；
@@ -4475,3 +5152,30 @@ W1a 合入后允许的下一步只有：从最新 `main` 新建分支，重新�
 
 - **handoff 状态与 Task 0 停工条件冲突**：本计划 PR 一并更新 `AGENT_HANDOFF.md`，使 W0 已合入成为已记录事实；Task 0 Step 2 相应改写为"若仍写着 W0 进行中则说明 handoff 修订没合进来，停止报告"。
 - **RED 定义与各任务期待的 `ModuleNotFoundError` 矛盾**：Global Constraints 里改为按**失败原因**区分——"被测事实尚不存在"（含新模块的 `ModuleNotFoundError`）是合格 RED，"测试自身写错"不是。
+
+---
+
+## V3 修订记录
+
+V2（`abe8f46392f8d57e602c6430b9360f206be69a58`）经复审再次判定「需修改」。四项 P1 我逐条按真实源码与实跑核对，**全部成立**：
+
+| 意见 | 核实方式与结论 |
+| --- | --- |
+| P1-1 `_unique_column_sets` 把 partial index 误算成全局唯一 | 按同样 SQLAlchemy 结构实跑，输出 `{frozenset({'operation_id'})}` / `False`，与复审报告一致。成立 |
+| P1-2 已 seed 的库升级后目录永远补不上 | `local_admin.py:94` 无条件 `ON CONFLICT DO NOTHING`，`local_stack.py:1031` 每次装配都调用。成立 |
+| P1-3 公开 `append()` 仍能伪造成功授权审计 | V2 自己的两阶段用例就在 append 一条 `ROLE_ASSIGNED + SUCCEEDED` 而不改任何角色。成立 |
+| P1-4 两条守卫假绿 | 按 basename 放行；文档守卫整篇豁免，四份真源文档实测三份满足豁免条件。成立 |
+
+三组共同根因与修订：
+
+| 根因 | V2 的问题 | V3 的修订 |
+| --- | --- | --- |
+| **E. 派生保证只做了一半：`apply()` 收口了，`append()` 没有** | `AdminAuditStore.append(candidate)` 接受完整候选，任何调用方都能写一条"授权成功"而不曾改动任何授权 | `AdminAuditStore` 改为**只读协议**（只有 `load`）。W1a 的审计行全部由 `apply()` 在改动所在事务里 INSERT。内存侧只保留非 `async`、不在协议上的 `append_locked`。删除已无消费者的 `TERMINAL_OUTCOMES` 与 `audit_stage_key`。新增 CHECK `ck_admin_audit_events_directory_actions_are_single_phase`：目录动作不得写 `STARTED`，直接 psql 也绕不过。审计表并入 `test_identity_write_path.py` 的同一套写路径判定 |
+| **F. bootstrap 的幂等键绑在凭据行上，不是目录链接上** | 已有 `local_admins` 行即返回空元组；任何跑过 RI5 的库升级后 `user_id` 永为 `NULL`、账号与 ADMIN 角色永不出现，而全新安装用例照样全绿 | bootstrap 改为四态分流（无凭据／有凭据但未链接／链接完整／链接破损），backfill **保留原 `password_hash`**，破损 fail-closed。`fake.py` 与 `postgres.py` 共用同一套语义。`_snapshot`/`_restore` 补上 `state.local_admin`。新增四条套件用例 + 一条**真实降级到 `rev_0013`、插入旧形状凭据、再升级**的 PostgreSQL 用例。顺带发现并处理同根问题：`LocalAdminRecord` 加 `user_id` 后，改密路径重建记录时漏带该字段会把链接清空，新增用例钉住 |
+| **G. 守卫谓词绑错对象——三处，两个方向** | 写路径守卫按 basename 放行整个文件；文档守卫按整篇豁免；`_unique_column_sets` 只看 `index.unique`。前两处造成**假绿**，第三处造成**假红**（Task 4 按计划执行必然失败） | 写路径守卫改为精确相对路径 + 所在类/方法（沿用 `test_audit_ledger_guards.py` 的定位手法），并把 `local_admins.user_id` 做**列级**治理以免误伤改密；文档守卫改为按行判定（沿用 `_credential_scope_conflations` 的办法），豁免必须写在同一行；`_unique_column_sets` 按 `postgresql_where` 区分全局与 partial。三处各配自证反例 |
+
+**同类问题扫描**（复审未点到、我顺着同一根因找到的）：新增 `rev_0014` 会让**三处**既有锚点转红，不是两处。除复审指出的 `test_latest_declared_revision_is_the_alembic_head` 外，`tests/unit/test_readiness.py:51` 把 `"0013_clarification_parent"` 写死并断言 `revision_matches_head is True`，而探针比对的是**真实** Alembic head。Task 4 新增 Step 5 一并处理，其中前者保留写死 revision（它要钉的就是"最新声明即 head"，两边都取 head 会变成同义反复），后者改为从 Alembic 取 head（它要钉的事实与具体 revision 无关，写死只会让它每加一次迁移就静默转红）。
+
+另有一处笔误已改：开工门原写"见 Task 10"，实际只有 Task 9。
+
+复审认可的两项有意偏离（`actor` 全局唯一比同作用域更严格；`admin` 作为固定用户名常量不重复落库，W2 须继续复述该边界）保持不变。
