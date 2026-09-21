@@ -969,9 +969,16 @@ def test_w0_channel_and_config_bindings_are_discriminating() -> None:
 # 合起来却让读者按已退休的方式准备凭据。所以这里按**精确字面量计数为 0**
 # 断言，并只扫描当前事实文档——保留历史的 ADR 和测试夹具不在其内。
 
+# 同一事实在这些文档里有多种拼写：精确路径字面量、以及英文短语
+# "worker-only / file-backed Compose secret"。只封堵路径字面量时，README 顶部
+# 和 handoff 的「已批准边界固定」段照旧全绿——这正是本轮复审打回的那两处。
+# 保留 `Compose secret` 本身不入闭集：`postgres_password` 仍然是合法的 Compose
+# secret，而 handoff 的历史事故记录（过去时）也应当留得住。
 _RETIRED_GEMINI_SECRET_PATHS: Final[tuple[str, ...]] = (
     ".secrets/gemini_api_key",
     "/run/secrets/gemini_api_key",
+    "worker-only Compose secret",
+    "file-backed Compose secret",
 )
 _STALE_ARCHITECTURE_CLAIMS: Final[tuple[str, ...]] = (
     "已接受但尚未实现的 RI5 修订",
@@ -981,7 +988,9 @@ _CURRENT_TRUTH_DOCS: Final[tuple[str, ...]] = (
     "ARCHITECTURE.md",
     "DEVELOPMENT_PLAN.md",
     "AGENT_HANDOFF.md",
+    "README.md",
 )
+_W0_BASELINE: Final[str] = "b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed"
 _W0_WEB_STAGES: Final[tuple[str, ...]] = (
     "W0",
     "W1a",
@@ -1106,14 +1115,71 @@ def test_w0_handoff_records_design_merge_and_keeps_implementation_claims_closed(
         assert gate in handoff
 
 
+def _handoff_baseline_field(text: str, name: str) -> str:
+    """按字段名取第 1 节基线表的值。
+
+    旧断言只排除一句带粗体的散文，于是同一事实换成表格字段就能漏过去。
+    """
+    section = _section_between(
+        text, start="## 1. 当前基线", end="## 2. 已确认的设计口径"
+    )
+    for line in section.splitlines():
+        row = re.match(rf"^\| *{re.escape(name)} *\| *(.+?) *\|$", line)
+        if row:
+            return row.group(1)
+    raise AssertionError(f"AGENT_HANDOFF.md 第 1 节缺少字段：{name}")
+
+
+def _next_step_statements(text: str) -> list[str]:
+    """收集全文每一处「下一步」声明——表格字段和散文句都算。
+
+    只认 `下一步是` / `下一件事是` 这种**声明式**句子；归档规则里把「下一步」
+    当字段名列举的那类句子和小节标题不在其内。
+    """
+    statements: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        row = re.match(r"^\| *(下一步|阶段) *\| *(.+?) *\|$", line)
+        if row:
+            statements.append(row.group(2))
+            continue
+        if re.search(r"(下一步|下一件事)是", line):
+            statements.append(line)
+    return statements
+
+
 def test_w0_handoff_names_w1a_plan_as_the_only_post_merge_next_step() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert "下一件事是**另起 I3 受治理资料查询计划**" not in handoff
+    statements = _next_step_statements(handoff)
+    assert statements, "handoff 没有任何可解析的下一步声明"
+    for statement in statements:
+        assert "W1a" in statement or "W0" in statement, (
+            f"下一步声明没有指向 W0/W1a：{statement}"
+        )
+        if "I3" in statement:
+            assert "延期" in statement or "未取消" in statement, (
+                f"下一步仍把 I3 写成当前动作：{statement}"
+            )
     assert "W1a" in handoff and "计划" in handoff
-    assert "I3" in handoff and "延期" in handoff
-    # W0 自身的证据等级：只有文档与测试。
-    assert "W0" in handoff
     assert "没有产品源码" in handoff or "未产生产品源码" in handoff
+
+
+def test_w0_handoff_baseline_fields_match_the_recorded_w0_branch() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    project_dir = _handoff_baseline_field(handoff, "项目目录")
+    # 机器专属绝对路径对下一位实现者毫无意义，且必然过期。
+    assert "/Users/" not in project_dir, f"handoff 固化了机器专属路径：{project_dir}"
+    assert _W0_BASELINE in project_dir, (
+        f"第 1 节基线与第 8 节记录的 W0 基线不一致：{project_dir}"
+    )
+
+
+def test_readme_current_status_records_the_w0_stage() -> None:
+    readme = _truth_doc_text("README.md")
+    status = _section_between(readme, start="> 当前状态：", end="## 先看什么")
+    assert "W0" in status and "W1a" in status
+    assert "I3" in status and ("延期" in status or "暂缓" in status)
 
 
 def test_w0_handoff_binding_is_discriminating() -> None:
@@ -1126,8 +1192,34 @@ def test_w0_handoff_binding_is_discriminating() -> None:
     without_source = _replace_once(handoff, _W0_OWNER_APPROVAL, "见 PR #58 已合入")
     assert _W0_OWNER_APPROVAL not in without_source
 
-    revived_i3 = handoff + "\n- 下一件事是**另起 I3 受治理资料查询计划**。\n"
-    assert "下一件事是**另起 I3 受治理资料查询计划**" in revived_i3
+    # 反例必须走真正的解析器，而不是断言自己刚拼上去的字符串。
+    # 本轮复审打回的就是这一点：旧断言只排除一句散文，换成表格字段就漏过去。
+    revived_i3 = _replace_once(
+        handoff,
+        _handoff_baseline_field(handoff, "下一步"),
+        "另起 I3 受治理资料查询计划，先拍板资料源形态",
+    )
+    reverted = [
+        statement
+        for statement in _next_step_statements(revived_i3)
+        if "I3" in statement and "延期" not in statement and "未取消" not in statement
+    ]
+    assert reverted, "把下一步表格字段改回 I3 之后，结构化解析必须能看见它"
+
+    machine_path = _replace_once(
+        handoff,
+        "| 项目目录 | 当前开发分支",
+        "| 项目目录 | 当前在 worktree `/Users/someone/agent`，当前开发分支",
+    )
+    assert "/Users/" in _handoff_baseline_field(machine_path, "项目目录")
 
     for retired in _RETIRED_GEMINI_SECRET_PATHS:
         assert handoff.count(retired) == 0
+    readme = _truth_doc_text("README.md")
+    assert "worker-only Compose secret" not in readme
+    revived_topology = _replace_once(
+        readme, "worker-only 凭据可见性", "worker-only Compose secret"
+    )
+    assert any(
+        revived_topology.count(retired) > 0 for retired in _RETIRED_GEMINI_SECRET_PATHS
+    )

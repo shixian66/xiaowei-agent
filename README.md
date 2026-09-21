@@ -11,19 +11,23 @@
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
+> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。**当前阶段是 W0 文档与 ADR 真源
+> 收口**，只改文档，未产生产品源码；W0 合入后才编写 W1a 详细计划并送审。I3 受治理资料查询
+> **延期但未取消**。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
 > 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
-> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only Compose secret、
+> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、worker-only 凭据可见性、
 > durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
 > PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
 > Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
 > preserved Runner's one-shot grant renewal, fixed projector package ownership and
 > completed its test surface. PR 3B is an offline SDK boundary only. Host
-> Gemini key stays outside Settings and `.env.example`; it lives in a Git-ignored host
-> file and is exposed only as a worker-only Compose secret when the explicit model
-> override is used.
+> Gemini key stays outside Settings and `.env.example`. Since RI5 it lives in the
+> Git-ignored host file `.config/integrations.json` (mounted as
+> `/run/xiaowei-config/integrations.json`), written by the Web admin plane and mounted
+> read-only into the processes that need it; `api` does not mount it.
 > 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
 > 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
 > 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
