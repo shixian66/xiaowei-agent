@@ -53,7 +53,7 @@
 
 ## Review Focus
 
-审核者应优先核对以下十点：
+审核者应优先核对以下十一点：
 
 1. `apply(command, context)` 是否真的**不给调用方任何机会**指定 action、target 或 outcome：签名上有没有 override、可选覆盖字段或 hook。同时核对另一个方向：`AdminAuditStore` 的三个写方法是否**都写不出目录成功事实**（`AdminAuditStart` / `AdminAuditDenial` 没有 `outcome` 与 `effect` 字段；`AdminAuditTerminal` 的稳定字段从已存 `STARTED` 读回，而 CHECK 禁止目录动作写 `STARTED`）。V2 留了通用 `append(candidate)`（可伪造），V3 一度整个删掉写契约（违反 `DEVELOPMENT_PLAN.md:178` 与 `ADR-013:131`）——两个方向都错。
 2. 四张授权表的写入是否**全部**发生在 `apply()` 的那一个 `begin()` 内。`grep` 一遍 `persistence/` 里对这四张表的 INSERT/UPDATE，看有没有第二处；特别核对 `seed_if_absent` 与旧身份迁移。
@@ -63,8 +63,9 @@
 6. 旧标签迁移是否是**一个命令、一个事务**：中途任何一步失败后，两张目录表与审计表是否零部分落库；测试制造的冲突是不是**数据库既有冲突**，而不是被 `_IdentityDocument` 解析期就挡掉的同文件重复 actor。
 7. 由外部输入派生的 `user_id` / `operation_id` 是否有界，最大长度 actor 是否有用例。
 8. bootstrap 的幂等判定读的是**目录链接是否完整**，还是『凭据行是否存在』：一个已经跑过 RI5、`local_admins` 早有行的库，升级到 `rev_0014` 后能否补齐账号、ADMIN 角色与链接，且**不覆盖**已改过的密码。Task 6 有一条真实降级—插入—升级的用例。
-9. 两条承重守卫是否绑在它们声称的事实上：写路径守卫按**精确相对路径 + 所在类/方法**判定（不是文件名），文档守卫按**行**判定（不是整篇豁免）。两者都带自证反例。
-10. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
+9. 承重守卫是否绑在它们声称的事实上：写路径守卫按**精确相对路径 + 冻结的精确方法名**判定（不是文件名，也不是 `startswith` 这类前缀放行）；文档守卫按**行**判定（不是整篇豁免）；接受完整候选的 `_append_locked` 有**调用点**守卫。三者都带自证反例。
+10. **协议与实现是否一致**：`tests/contract/test_protocol_conformance.py` 里那条『公开表面精确等于 Protocol』的断言，对内存与 PostgreSQL 两个实现都成立。`isinstance` 式的 Protocol 检查只保证实现不少于协议，抓不住多出来的公开写方法。
+11. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
 
 ---
 
@@ -135,12 +136,15 @@ src/xiaowei_agent/persistence/fake.py
 src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_admin_audit.py
 src/xiaowei_agent/interfaces/legacy_identity_migration.py
 src/xiaowei_agent/interfaces/feishu_identity.py
+src/xiaowei_agent/interfaces/local_admin_auth.py
 src/xiaowei_agent/_conformance.py
 tests/**
 ARCHITECTURE.md
 AGENT_HANDOFF.md
 DEVELOPMENT_PLAN.md
 ```
+
+`interfaces/local_admin_auth.py` 在列表里，只为让它消费 `contracts/identity.py` 的五个本地管理员常量，并删掉自己那三个字面量。`persistence` 按 `test_module_layering.py:47` 不能反向导入 `interfaces`，所以真源必须下沉到契约层；下沉之后不改接口层，就会留下两份真源。
 
 `contracts/base.py` 在列表里，只为把 `SecretHash` 这一行别名搬家。它现在定义在 `persistence/local_admin.py:42`（`SecretHash = StrictStr`），而 `contracts/identity.py` 要按同一套约定标注 `password_hash`。契约模块不能反向依赖 persistence；在两处各写一份别名，又会让『同一套约定』变成两套。全仓库只有 `local_admin.py:54` 与 `:65` 两个字段用它，搬家后由 `local_admin.py` 从 `contracts/base.py` 导入，不改变任何行为。
 
@@ -152,30 +156,80 @@ V3 的计划直接写了 `from xiaowei_agent.contracts.base import SecretHash`�
 
 任何超出该列表的文件出现在 `git status` 里，都必须先停下来说明理由。
 
-**机械核对一次，不靠眼睛。** 本计划每个任务的 `Files:` 声明必须全部落在上面这个
-列表里；漏一个，执行到那一步就得停工。开工前跑一遍：
+**机械核对三件事，不靠眼睛。** 这三条各自对应一次真实返工，开工前一起跑：
 
 ```bash
 python - <<'CHECK'
 import re, pathlib
+
 text = pathlib.Path(
     "docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md"
 ).read_text(encoding="utf-8")
+
+# 1. 每条 Files: 声明都必须落在 allowlist 里
 allow = re.search(r"只有：\n\n```\n(.*?)```", text, re.S).group(1).split()
 declared = {
     m.group(1)
     for line in text.splitlines()
     if (m := re.match(r"^- (?:Create|Modify|Test): `([^`]+)`", line.strip()))
 }
-missing = sorted(
+outside = sorted(
     p for p in declared
     if not any(p == a or (a.endswith("**") and p.startswith(a[:-2])) for a in allow)
 )
-print("未覆盖：", missing or "（无）")
+print("1) 超出 allowlist：", outside or "（无）")
+
+# 2. 每个任务的 git add 都必须覆盖它自己的 Files:
+tasks = re.split(r"\n### (Task \d+[^\n]*)\n", text)
+unstaged = []
+for name, body in zip(tasks[1::2], tasks[2::2]):
+    files = {
+        m.group(1)
+        for line in body.splitlines()
+        if (m := re.match(r"^- (?:Create|Modify|Test): `([^`]+)`", line.strip()))
+    }
+    source = {f for f in files if f.startswith(("src/", "tests/"))}
+    adds: set[str] = set()
+    for block in re.findall(r"```bash\n(.*?)```", body, re.S):
+        if "git add" in block:
+            segment = block[block.index("git add"):].split("git commit")[0]
+            adds |= set(re.findall(r"[\w./\-]+\.(?:py|md)", segment))
+    if adds and (missing := sorted(source - adds)):
+        unstaged.append((name.split(":")[0], missing))
+print("2) Files 声明了但 git add 漏掉：", unstaged or "（无）")
+
+# 3. 计划引用的既有符号必须真的存在
+import ast, importlib
+wanted: dict[str, set[str]] = {}
+for block in re.findall(r"```python\n(.*?)```", text, re.S):
+    try:
+        tree = ast.parse(block)
+    except SyntaxError:
+        continue
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "xiaowei_agent"
+        ):
+            wanted.setdefault(node.module, set()).update(a.name for a in node.names)
+absent = []
+for module, names in sorted(wanted.items()):
+    try:
+        loaded = importlib.import_module(module)
+    except ModuleNotFoundError:
+        continue  # W1a 将要新建的模块
+    absent += [f"{module}.{n}" for n in sorted(names) if not hasattr(loaded, n)]
+print("3) 引用了不存在的符号（需逐条判定是否为 W1a 新建）：", absent or "（无）")
 CHECK
 ```
 
-预期输出 `未覆盖： （无）`。V3 就是在这里漏了 `persistence/fake.py`——Task 6 新要求改它，allowlist 却没跟着更新，按纪律执行会在 Task 6 停工。
+三条都必须输出 `（无）`，第 3 条允许出现 W1a 将要新建的符号——逐条确认，**不要**
+整体跳过。
+
+三条各自的来历：第 1 条是 V3 漏了 `persistence/fake.py`（Task 6 明确要改它，
+allowlist 却没有，按纪律执行会在 Task 6 停工）；第 2 条是 V4 把 `fake.py` 加进了
+allowlist 与 Files，却没加进 Task 6 的 `git add`；第 3 条是 V3 写了
+`from xiaowei_agent.contracts.base import SecretHash`，而那里没有这个名字。
+三次都是"改了一处，没跟到下一处"。
 
 ---
 
@@ -446,6 +500,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/xiaowei_agent/contracts/base.py`（把 `SecretHash` 别名从 `local_admin.py` 搬过来）
+- Modify: `src/xiaowei_agent/interfaces/local_admin_auth.py`（改为消费契约层的五个本地管理员常量）
 - Modify: `src/xiaowei_agent/persistence/local_admin.py`（改为从 `contracts/base.py` 导入 `SecretHash`）
 - Create: `src/xiaowei_agent/contracts/identity.py`
 - Modify: `src/xiaowei_agent/contracts/__init__.py`
@@ -930,8 +985,11 @@ mypy src
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/xiaowei_agent/contracts/identity.py \
+git add src/xiaowei_agent/contracts/base.py \
+        src/xiaowei_agent/contracts/identity.py \
         src/xiaowei_agent/contracts/__init__.py \
+        src/xiaowei_agent/persistence/local_admin.py \
+        src/xiaowei_agent/interfaces/local_admin_auth.py \
         tests/contract/test_identity_contracts.py
 git commit -m "feat(w1a): add identity directory contracts and the write command closed set
 
@@ -971,9 +1029,13 @@ from pydantic import ValidationError
 
 from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.contracts.admin_audit import (
+    DIRECTORY_ACTIONS,
     AdminAuditCandidate,
+    AdminAuditDenial,
     AdminAuditEffect,
     AdminAuditEvent,
+    AdminAuditStart,
+    AdminAuditTerminal,
     AdminOperationContext,
     admin_audit_target_digest,
 )
@@ -1236,6 +1298,54 @@ def test_binding_actions_carry_no_effect() -> None:
         )
 
 
+def test_two_phase_start_refuses_a_directory_action() -> None:
+    """目录动作在**契约层**就被拒，不依赖任何实现或数据库。
+
+    这条用例存在的理由是：上一版只有 PostgreSQL 的 CHECK 拦它，内存实现直接
+    落库。同一个共享套件在两个绑定上会给出不同答案，而共享套件的全部价值正是
+    "两边行为相同"。
+    """
+    with pytest.raises(ValidationError):
+        AdminAuditStart(
+            operation_id="op-two-phase",
+            tenant_id="dev-local",
+            environment_id="dev",
+            actor_user_id="usr-admin",
+            actor="admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+            action=AdminAuditAction.ROLE_ASSIGNED,
+            target_kind=AdminAuditTargetKind.USER,
+            target_ref_digest="a" * 64,
+        )
+
+
+def test_every_w1a_action_is_a_directory_action() -> None:
+    """钉住一个**有意的**边界，而不是假装它不存在。
+
+    `ADR-013:129` 把两阶段写留给非事务性的配置面动作，而 W1a 的 action 闭集
+    全部是目录动作。结论：W1a 按 `DEVELOPMENT_PLAN.md:178` 交付了
+    ``append_started`` / ``append_terminal`` 的**契约**，但本阶段没有任何合法
+    action 能走通它们的成功路径。
+
+    这条断言会在 W4a 加入配置动作时**转红**——那时才是放开的时机。在此之前它
+    保证没有人用两阶段写绕过 ``apply()`` 的派生。
+    """
+    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction)
+
+
+def test_neither_start_nor_denial_can_state_an_outcome_or_effect() -> None:
+    """窄输入类型靠"字段不存在"提供保证，因此字段集合本身要被钉住。"""
+    for contract in (AdminAuditStart, AdminAuditDenial):
+        fields = set(contract.model_fields)
+        assert "outcome" not in fields and "effect" not in fields
+    assert set(AdminAuditTerminal.model_fields) == {
+        "operation_id",
+        "outcome",
+        "reason_code",
+        "effect",
+    }
+
+
 def test_candidate_cannot_stamp_event_id_or_time() -> None:
     with pytest.raises(ValidationError):
         _candidate(event_id="evt-1")
@@ -1493,6 +1603,19 @@ class AdminAuditStart(Contract):
     action: AdminAuditAction
     target_kind: AdminAuditTargetKind
     target_ref_digest: Sha256Hex
+
+    @model_validator(mode="after")
+    def _two_phase_is_not_for_directory_actions(self) -> Self:
+        """目录动作走不了两阶段写——**在契约层拒绝，不在某个实现里拒绝**。
+
+        数据库有 ``ck_admin_audit_events_directory_actions_are_single_phase``，
+        但内存实现没有数据库。把规则放在契约上，两个实现共用同一条；放在任一
+        实现里，另一个就会在同一个共享套件里给出不同的答案，而共享套件的全部
+        价值正是"两边行为相同"。
+        """
+        if self.action in DIRECTORY_ACTIONS:
+            raise ValueError("directory actions are written in one phase by apply()")
+        return self
 
     def as_candidate(self) -> AdminAuditCandidate:
         return AdminAuditCandidate(
@@ -3066,52 +3189,6 @@ async def test_a_terminal_event_without_a_started_event_is_refused(
         )
 
 
-def test_every_w1a_action_is_a_directory_action_so_two_phase_has_no_legal_action() -> (
-    None
-):
-    """钉住一个**有意的**边界，而不是假装它不存在。
-
-    `ADR-013:129` 把两阶段写留给非事务性的配置面动作，而 W1a 的 action 闭集
-    全部是目录动作——数据库 CHECK 因此禁止它们写 ``STARTED``。结论：W1a 交付了
-    ``append_started`` / ``append_terminal`` 的**契约**（`DEVELOPMENT_PLAN.md:178`
-    要求如此），但本阶段没有任何合法 action 能走通它们的成功路径。
-
-    这条断言会在 W4a 加入配置动作时**转红**，那时才是该放开的时机。在此之前
-    它保证没有人偷偷用两阶段写绕过 ``apply()`` 的派生。
-    """
-    from xiaowei_agent.contracts.admin_audit import DIRECTORY_ACTIONS
-    from xiaowei_agent.contracts.enums import AdminAuditAction
-
-    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction)
-
-
-async def test_started_is_refused_for_a_directory_action(admin_audit: Any) -> None:
-    """上一条的行为面：目录动作走 ``append_started`` 必须被拒。"""
-    from xiaowei_agent.contracts.admin_audit import (
-        AdminAuditStart,
-        admin_audit_target_digest,
-    )
-    from xiaowei_agent.contracts.enums import AdminAuditTargetKind
-    from xiaowei_agent.persistence.admin_audit import AdminAuditConflictError
-
-    with pytest.raises((AdminAuditConflictError, ValueError)):
-        await admin_audit.append_started(
-            start=AdminAuditStart(
-                operation_id="op-two-phase",
-                tenant_id=_TENANT,
-                environment_id=_ENV,
-                actor_user_id="usr-admin",
-                actor="admin",
-                auth_source=IdentitySource.LOCAL_ADMIN,
-                action=AdminAuditAction.ROLE_ASSIGNED,
-                target_kind=AdminAuditTargetKind.USER,
-                target_ref_digest=admin_audit_target_digest(
-                    target_kind=AdminAuditTargetKind.USER, target_ref="usr-1"
-                ),
-            )
-        )
-
-
 def _role_effect() -> Any:
     from xiaowei_agent.contracts.admin_audit import AdminAuditEffect
 
@@ -3142,8 +3219,6 @@ IDENTITY_DIRECTORY_CASES = (
     test_reusing_an_operation_id_is_rejected,
     test_a_denied_event_records_the_refusal_without_claiming_an_effect,
     test_a_terminal_event_without_a_started_event_is_refused,
-    test_every_w1a_action_is_a_directory_action_so_two_phase_has_no_legal_action,
-    test_started_is_refused_for_a_directory_action,
 )
 
 ALL_GROUPS = {"identity_directory": IDENTITY_DIRECTORY_CASES}
@@ -3224,30 +3299,6 @@ def test_admin_audit_store_is_append_only_by_shape() -> None:
         "append_denied",
         "load",
     }
-
-
-def test_no_write_method_can_state_a_successful_directory_change() -> None:
-    """三个窄输入类型在**字段层面**就表达不出目录成功事实。
-
-    这条用例存在的理由是：V2 的通用 ``append(candidate)`` 能直接写一条
-    ``ROLE_ASSIGNED + SUCCEEDED``。窄方法之所以安全，靠的正是这些字段不存在。
-    """
-    from xiaowei_agent.contracts.admin_audit import (
-        AdminAuditDenial,
-        AdminAuditStart,
-        AdminAuditTerminal,
-    )
-
-    for contract in (AdminAuditStart, AdminAuditDenial):
-        fields = set(contract.model_fields)
-        assert "outcome" not in fields and "effect" not in fields
-
-    # 终态可以是 SUCCEEDED，但它一个稳定字段都收不到——全部从 STARTED 读回。
-    terminal_fields = set(AdminAuditTerminal.model_fields)
-    assert terminal_fields == {"operation_id", "outcome", "reason_code", "effect"}
-    assert AdminAuditOutcome.DENIED not in getattr(
-        AdminAuditTerminal.model_fields["outcome"].annotation, "__args__", ()
-    )
 
 
 def test_every_command_has_a_declared_action_and_effect() -> None:
@@ -3376,11 +3427,11 @@ class InMemoryAdminAuditStore:
 
     async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
         async with self._state.lock:
-            return self.append_locked(start.as_candidate())
+            return self._append_locked(start.as_candidate())
 
     async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
         async with self._state.lock:
-            return self.append_locked(denial.as_candidate())
+            return self._append_locked(denial.as_candidate())
 
     async def append_terminal(
         self, *, terminal: AdminAuditTerminal
@@ -3390,7 +3441,7 @@ class InMemoryAdminAuditStore:
             started = self._started_locked(terminal.operation_id)
             if started is None:
                 raise AdminAuditMissingStartError("operation has no started event")
-            return self.append_locked(terminal.as_candidate(started=started))
+            return self._append_locked(terminal.as_candidate(started=started))
 
     def _started_locked(self, operation_id: str) -> AdminAuditEvent | None:
         for event in self._state.admin_audit_events.values():
@@ -3401,13 +3452,19 @@ class InMemoryAdminAuditStore:
                 return event
         return None
 
-    def append_locked(self, candidate: AdminAuditCandidate) -> AdminAuditEvent:
+    def _append_locked(self, candidate: AdminAuditCandidate) -> AdminAuditEvent:
         """已持锁时的追加；``InMemoryUserDirectoryStore`` 在自己的临界区内复用它。
 
         复用而不是复制：两份追加逻辑会在"什么算冲突"上分叉，而这正是目录
-        回滚证明所依赖的那条约束。它不在协议上、也不是 ``async``，因此不是
-        一条公开写路径——但它接受完整候选，所以 Task 7 的 AST 守卫仍然要求
-        它只在目录 store 里被调用。
+        回滚证明所依赖的那条约束。
+
+        **它接受完整候选，因此是本模块里唯一一处能写出任意审计事实的地方。**
+        上一版把它叫 ``append_locked``（公开命名），并在这段注释里声称"Task 7
+        的 AST 守卫要求它只在目录 store 里被调用"——**那个守卫当时并不存在**。
+        一段声称保护存在的注释比没有注释更糟：它让下一个读代码的人停止追问。
+        现在它是私有命名，并且真的有一条调用点守卫
+        （``test_identity_write_path.py::test_the_full_candidate_helper_has_only_derived_call_sites``）
+        把调用点冻结在目录派生路径与三个窄方法上。
         """
         key = audit_stage_key(candidate)
         if key in self._state.admin_audit_stage_keys:
@@ -3724,7 +3781,7 @@ class InMemoryUserDirectoryStore:
                 raise
 ```
 
-`_apply_locked` 按命令类型分流，全部复用 `derive_audit()` 与 `self._audit.append_locked()`。
+`_apply_locked` 按命令类型分流，全部复用 `derive_audit()` 与 `self._audit._append_locked()`。
 
 `_snapshot`/`_restore` 覆盖 **Step 6 新增的五个字段，外加既有的 `state.local_admin`**（`memory.py:46`）：四个 dict 与一个 set 做浅拷贝，`local_admin` 是单个记录引用、直接存取。**漏掉 `local_admin` 是一个真实缺陷**——bootstrap 在同一次调用里既写凭据又写目录，审计写失败时若只回滚目录、不回滚凭据，就会留下一行 `user_id IS NULL` 的凭据；而那正好落进上面第二行（backfill）而不是第四行（fail-closed），于是一次失败的 bootstrap 看起来会像一次『还没升级』的正常状态。
 
@@ -3901,7 +3958,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 4 的表、Task 5 的协议、派生层与共享套件
-- Produces: `PostgresUserDirectoryStore`、`PostgresAdminAuditStore`；`seed_if_absent` 改为走 `apply()`
+- Produces: `PostgresUserDirectoryStore`、`PostgresAdminAuditStore`（四个方法与内存实现同 Protocol）、`_audit_row`、`_classify_audit_integrity_error`；`seed_if_absent` 改为走 `apply()`
 
 **fixture 必须显式定义。** 仓库的共享套件靠 `tests/integration/conftest.py` 用**同名** fixture 覆盖根 conftest 的内存实现（`store`、`plan_store`、`clarification_record_store` 都是这样）。只写 `bind(...)` 而不定义同名 fixture，集成文件会安静地继续跑内存实现，"PostgreSQL 同事务证据"就是假绿。另外该 conftest 里**没有** `engine` fixture，可用的是 `migrated_engine`（session 级）与 `clean_database`（函数级，每个用例清库）。
 
@@ -4125,7 +4182,107 @@ def _classify_directory_integrity_error(exc: IntegrityError) -> UserDirectoryErr
 - `BootstrapLocalAdminCommand`：按 Task 5 那张四态表分流，与内存实现**同一套语义**。先 `SELECT id, password_hash, user_id FROM local_admins WHERE id = :singleton FOR UPDATE`——`FOR UPDATE` 是必需的：两个 Web 进程同时装配会同时调用 `seed_if_absent`，没有行锁时两边都读到 `user_id IS NULL`、都去建账号，第二个撞 `user_accounts` 主键，一次正常的并发启动变成一次启动失败。没有行时走 `INSERT ... ON CONFLICT DO NOTHING RETURNING id`；拿不到 id 说明另一个事务刚插进去，重读一次按同一张表继续分流。
 - `external_identities` 存 `external_subject_digest(...)`，不存 `open_id`。
 - `resolve_by_subject` 用一次 JOIN 取 account + assignment，并在 SQL 层就写 `WHERE user_accounts.status = 'active'`——把禁用判断放在 Python 里，就得依赖每个调用方都记得判一次。
-- `PostgresAdminAuditStore` 只有 `load()`。审计行全部由 `PostgresUserDirectoryStore._apply_in_transaction` 在目录改动所在的同一事务里 INSERT；这个类**没有**任何写方法，Task 7 的 AST 守卫会机械确认它既没有 UPDATE/DELETE，也没有第二条 INSERT 路径。
+- `PostgresAdminAuditStore` 实现与内存实现**同一个** Protocol：`append_started` / `append_terminal` / `append_denied` / `load`，公开表面精确等于这四个。它**没有** UPDATE/DELETE，Task 7 的 AST 守卫机械确认。
+
+```python
+class PostgresAdminAuditStore:
+    """``AdminAuditStore`` 的 PostgreSQL 实现。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
+        return await self._insert(start.as_candidate())
+
+    async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
+        return await self._insert(denial.as_candidate())
+
+    async def append_terminal(
+        self, *, terminal: AdminAuditTerminal
+    ) -> AdminAuditEvent:
+        """读回 ``STARTED`` 再写终态，**同一个事务**。
+
+        读与写必须在一个事务里：跨事务时两者之间可以插进别的写，读回的稳定
+        字段就不一定还是要落库那一行的来源。
+
+        这里**不需要** ``SELECT ... FOR UPDATE``。审计表是 append-only，
+        ``STARTED`` 行不会被改也不会被删，所以读到的值不会在事务内失效；
+        真正的并发点是两个终态同时写，而那由终态 partial unique index 裁决——
+        加行锁只会把一次干净的约束冲突换成一次锁等待，不增加任何保证。
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(ADMIN_AUDIT_EVENTS).where(
+                        ADMIN_AUDIT_EVENTS.c.operation_id == terminal.operation_id,
+                        ADMIN_AUDIT_EVENTS.c.outcome == AdminAuditOutcome.STARTED,
+                    )
+                )
+            ).mappings().first()
+            if row is None:
+                raise AdminAuditMissingStartError("operation has no started event")
+            started = AdminAuditEvent.model_validate(dict(row))
+            return await self._insert_on(
+                connection, terminal.as_candidate(started=started)
+            )
+
+    async def _insert(self, candidate: AdminAuditCandidate) -> AdminAuditEvent:
+        async with self._engine.begin() as connection:
+            return await self._insert_on(connection, candidate)
+
+    async def _insert_on(
+        self, connection: AsyncConnection, candidate: AdminAuditCandidate
+    ) -> AdminAuditEvent:
+        event = AdminAuditEvent(
+            **candidate.model_dump(mode="python"),
+            event_id=uuid.uuid4().hex,
+            created_at=self._clock(),
+        )
+        try:
+            await connection.execute(
+                sa.insert(ADMIN_AUDIT_EVENTS).values(_audit_row(event))
+            )
+        except IntegrityError as exc:
+            raise _classify_audit_integrity_error(exc) from None
+        return event
+
+    async def load(self, *, event_id: str) -> AdminAuditEvent | None:
+        async with self._engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(ADMIN_AUDIT_EVENTS).where(
+                        ADMIN_AUDIT_EVENTS.c.event_id == event_id
+                    )
+                )
+            ).mappings().first()
+        return None if row is None else AdminAuditEvent.model_validate(dict(row))
+```
+
+错误分类（与目录路径共用 `_AUDIT_CONSTRAINTS` 那份名单，不另写一份）：
+
+| 冲突的约束 | 抛出 | 理由 |
+| --- | --- | --- |
+| `uq_admin_audit_one_started_per_operation` | `AdminAuditConflictError` | 同一 operation 第二条 STARTED |
+| `uq_admin_audit_one_terminal_per_operation` | `AdminAuditConflictError` | 同一 operation 第二条终态 |
+| `ck_..._directory_actions_are_single_phase` | `AdminAuditConflictError` | 理论上不可达（契约层已拒），留作直连 psql 的兜底 |
+| 其余 | 原样上抛 | 未知约束不该被吞成"冲突" |
+
+```python
+def _classify_audit_integrity_error(exc: IntegrityError) -> AdminAuditError:
+    """只按**约束名**分类；不把 ``IntegrityError`` 的正文放进消息。
+
+    正文里带着被拒绝的那一行，其中有 actor 与 target 摘要。让它进 traceback
+    就等于把受控 PII 写进日志——与目录路径的 ``_classify_directory_integrity_error``
+    同一个理由，同一套做法。
+    """
+    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None) or ""
+    if name in _AUDIT_CONSTRAINTS:
+        return AdminAuditConflictError("admin audit event conflicts with a stored event")
+    raise exc
+```
+
+`_audit_row(event)` 把 `effect` 展开成 `effect_role` / `effect_status` 两列；目录路径的审计 INSERT 复用**同一个**函数，否则两条路径迟早在列映射上分叉。
 
 - [ ] **Step 5: 让 `seed_if_absent` 走同一条写路径**
 
@@ -4164,7 +4321,74 @@ def _classify_directory_integrity_error(exc: IntegrityError) -> UserDirectoryErr
 
 `InMemoryLocalAdminStore.seed_if_absent`（`fake.py:514`）必须做**同样**的委托，改成调用 `InMemoryUserDirectoryStore.apply()` 而不是自己写 `state.local_admin`。两个实现的 bootstrap 语义必须由同一段分流代码决定——各写一份，四态里迟早有一态在两边不一致，而共享套件恰恰是靠"两边行为相同"才有意义的。
 
-`LOCAL_ADMIN_TENANT_ID` / `LOCAL_ADMIN_ENVIRONMENT_ID` / `LOCAL_ADMIN_ACTOR` 取自既有 `LOCAL_ADMIN_PRINCIPAL`（`interfaces/local_admin_auth.py:127`，值为 `dev-local` / `dev` / `admin`），**从那里导入或与它并置定义，不要各写一遍字面量**。每次调用用新的 `operation_id`，因为已 bootstrap 的情况返回空元组、不写审计，不会撞终态索引。
+**五个 bootstrap 常量的唯一真源是 `contracts/identity.py`，不是"二选一"。**
+
+上一版写的是"从 `interfaces/local_admin_auth.py` 导入或与它并置定义"。两条路都不通：
+
+- 反向导入不通——`tests/security/test_module_layering.py:47` 规定 `persistence`
+  只能导入 `contracts` / `planning` / `persistence`，`interfaces` 不在其中。
+  `persistence/local_admin.py` 去导 `interfaces/local_admin_auth.py` 会直接撞这道门。
+- "并置定义"就是各写一遍字面量，正是这段话自己禁止的事。
+
+放 `contracts/identity.py`：它是最底层，`persistence` 与 `interfaces` 都能导
+（`test_module_layering.py:140` 允许 `interfaces/local_admin_auth.py` 导入
+`xiaowei_agent.contracts`），身份常量本来也属于契约。
+
+```python
+LOCAL_ADMIN_TENANT_ID: Final[str] = "dev-local"
+LOCAL_ADMIN_ENVIRONMENT_ID: Final[str] = "dev"
+LOCAL_ADMIN_ACTOR: Final[str] = "admin"
+LOCAL_ADMIN_USER_ID: Final[str] = "usr-local-admin"
+LOCAL_ADMIN_DISPLAY_NAME: Final[str] = "Local Admin"
+"""本地管理员的身份常量；`interfaces/local_admin_auth.py` 与 `persistence` 共用这一份。
+
+前三个的值来自既有的 `LOCAL_ADMIN_PRINCIPAL`（`interfaces/local_admin_auth.py:127`）。
+搬到契约层之后，`local_admin_auth.py` 改为从这里导入，**删掉**它自己那三个字面量——
+留着就是两份真源，而两份真源迟早会在某次改租户名时只改一边。
+"""
+```
+
+`interfaces/local_admin_auth.py` 相应改为：
+
+```python
+LOCAL_ADMIN_PRINCIPAL: Final = AuthenticatedPrincipal(
+    tenant_id=LOCAL_ADMIN_TENANT_ID,
+    environment_id=LOCAL_ADMIN_ENVIRONMENT_ID,
+    actor=LOCAL_ADMIN_ACTOR,
+    source=IdentitySource.LOCAL_ADMIN,
+    subject_ref=LOCAL_ADMIN_SUBJECT_REF,
+    permissions=frozenset(
+        {
+            ChannelPermission.VIEW_SAFE_TASK,
+            ChannelPermission.SUBMIT_READONLY_TASK,
+            ChannelPermission.ADMIN_ALL_SAFE_TASKS,
+        }
+    ),
+)
+```
+
+补一条用例钉住"只有一份"（放在 `tests/contract/test_identity_contracts.py`）：
+
+```python
+def test_the_local_admin_principal_consumes_the_contract_constants() -> None:
+    """两处必须是同一份值，而且是靠导入同一份、不是靠巧合相等。
+
+    这条用例存在的理由：这五个常量一旦在 interfaces 与 persistence 各写一遍，
+    改一次租户名就会只改一边，而 bootstrap 建出来的 ADMIN 角色会落在另一个
+    作用域——登录成功但什么都看不见，且没有任何报错。
+    """
+    from xiaowei_agent.interfaces.local_admin_auth import LOCAL_ADMIN_PRINCIPAL
+
+    assert LOCAL_ADMIN_PRINCIPAL.tenant_id == LOCAL_ADMIN_TENANT_ID
+    assert LOCAL_ADMIN_PRINCIPAL.environment_id == LOCAL_ADMIN_ENVIRONMENT_ID
+    assert LOCAL_ADMIN_PRINCIPAL.actor == LOCAL_ADMIN_ACTOR
+
+    source = Path(inspect.getfile(local_admin_auth)).read_text(encoding="utf-8")
+    for literal in ('"dev-local"', '"dev"'):
+        assert literal not in source, "接口层不得保留自己那份字面量"
+```
+
+每次调用 `seed_if_absent` 用新的 `operation_id`，因为已 bootstrap 的情况返回空元组、不写审计，不会撞终态索引。
 
 补一条测试钉住这个行为（放在 `tests/integration/test_identity_directory_postgres.py`）：
 
@@ -4304,6 +4528,38 @@ async def test_changing_the_password_keeps_the_directory_link(
 
 在 `_conformance.py` 里按既有写法为 `UserDirectoryStore` 与 `AdminAuditStore` 各加一条 Protocol 断言，覆盖内存与 PostgreSQL 两个实现。
 
+`isinstance` 式的 Protocol 断言只保证实现**不少于**协议；它挡不住"多出来一个公开写方法"。在 `tests/contract/test_protocol_conformance.py` 里再加一条**精确相等**的表面断言：
+
+```python
+@pytest.mark.parametrize(
+    ("protocol", "implementation"),
+    [
+        (AdminAuditStore, InMemoryAdminAuditStore),
+        (AdminAuditStore, PostgresAdminAuditStore),
+        (UserDirectoryStore, InMemoryUserDirectoryStore),
+        (UserDirectoryStore, PostgresUserDirectoryStore),
+    ],
+)
+def test_the_implementation_surface_equals_the_protocol_surface(
+    protocol: type, implementation: type
+) -> None:
+    """公开表面**精确等于**协议，多一个都不行。
+
+    这条用例存在的理由是一次真实的返工：上一版把 `AdminAuditStore` 从只读改成
+    三个窄写方法时，只改了 Protocol——内存实现留着一个公开的
+    ``append_locked(candidate)``（接受完整候选，能直接写 `ROLE_ASSIGNED +
+    SUCCEEDED`），PostgreSQL 实现则还是只有 `load()`。两处都与协议不一致，
+    而当时仓库里没有任何一条断言会因此转红。
+
+    `isinstance` 式的 Protocol 检查只保证实现**不少于**协议，方向正好相反：
+    它对"多出来一个公开写方法"完全无感。所以这里必须是 `==`。
+    """
+    def surface(obj: type) -> set[str]:
+        return {name for name in dir(obj) if not name.startswith("_")}
+
+    assert surface(implementation) == surface(protocol)
+```
+
 - [ ] **Step 7: 运行四组测试**
 
 ```bash
@@ -4347,6 +4603,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/integration/test_identity_direc
 ```bash
 git add src/xiaowei_agent/persistence/postgres.py \
         src/xiaowei_agent/persistence/local_admin.py \
+        src/xiaowei_agent/persistence/fake.py \
         src/xiaowei_agent/_conformance.py \
         tests/integration/conftest.py \
         tests/integration/test_identity_directory_postgres.py \
@@ -4454,19 +4711,18 @@ def test_audit_store_offers_no_cleanup_or_retention_api() -> None:
 创建 `tests/security/test_identity_write_path.py`：
 
 ```python
-"""四张授权事实只有 ``UserDirectoryStore.apply()`` 一条写入口。
+"""授权事实与审计事实的写入口是一份**冻结的方法名单**。
 
-Protocol 层的表面测试挡的是"通过 Store 的公开方法绕开审计"。这里挡的是另一条：
-某个模块绕过 Store 直接对授权表发 INSERT/UPDATE/DELETE。上一版计划正是栽在这条
-路上——``seed_if_absent`` 自己写了账号和 ADMIN 角色。
+Protocol 层的表面测试挡的是"通过 Store 的公开方法绕开审计"。这里挡另外两条：
 
-**按精确相对路径与所在类/方法定位，不按文件名。** 上一版用 basename 放行整个
-``identity.py`` / ``postgres.py``：那只能证明写语句位于某个叫这名字的文件里，
-证明不了它位于 ``apply()`` 这条路径上——在同一个 ``postgres.py`` 里新写一个
-模块级写函数，或在任意别的目录放一个同名文件，都会被原样放行。
+1. 某个模块绕过 Store 直接对这些表发 INSERT/UPDATE/DELETE；
+2. 某处调用那个接受完整 ``AdminAuditCandidate`` 的 helper，凭空写一条
+   ``ROLE_ASSIGNED + SUCCEEDED``。
 
-定位手法沿用 ``tests/security/test_audit_ledger_guards.py`` 的 ``_method_body``：
-按 ``ClassDef`` + 方法名走到确切位置，而不是按文件名匹配。
+**按精确相对路径 + 精确方法名判定。** 两版教训各一条：V3 按 basename 放行整个
+文件（只能证明写语句在某个叫这名字的文件里）；V4 用 ``method.startswith("_")``
+放行该类的任意私有方法（于是新加一个私有写方法就自动获得授权）。名单必须是
+枚举，不是前缀。
 """
 
 import ast
@@ -4483,33 +4739,53 @@ _SRC = _ROOT / "src" / "xiaowei_agent"
 _AUTHZ_TABLES: Final[frozenset[str]] = frozenset(
     {"USER_ACCOUNTS", "USER_ROLE_ASSIGNMENTS", "EXTERNAL_IDENTITIES"}
 )
+_AUDIT_TABLE: Final[frozenset[str]] = frozenset({"ADMIN_AUDIT_EVENTS"})
 _WRITE_CALLS: Final[frozenset[str]] = frozenset({"insert", "update", "delete"})
 
-_DIRECTORY_STORE_MODULES: Final[dict[str, str]] = {
-    "persistence/identity.py": "InMemoryUserDirectoryStore",
-    "persistence/postgres.py": "PostgresUserDirectoryStore",
-}
-"""精确相对路径 → 该文件里唯一可以写授权表的类。
+_AUTHZ_WRITE_SITES: Final[frozenset[str]] = frozenset(
+    {
+        "persistence/identity.py::InMemoryUserDirectoryStore._apply_locked",
+        "persistence/postgres.py::PostgresUserDirectoryStore._apply_in_transaction",
+    }
+)
+"""四张授权事实的全部合法写入点。
 
-只允许 ``apply`` 与该类的私有助手（``_`` 前缀）：``_apply_in_transaction`` 必须
-能写，而一个新的**公开**写方法必须被抓住。
+``apply()`` 本身不发 SQL——它开事务并委托给这两个私有助手，所以名单里是助手。
+"""
+
+_AUDIT_WRITE_SITES: Final[frozenset[str]] = _AUTHZ_WRITE_SITES | frozenset(
+    {
+        "persistence/postgres.py::PostgresAdminAuditStore._insert_on",
+    }
+)
+"""审计表比授权表**多**一个合法写入点。
+
+``AdminAuditStore`` 按 `DEVELOPMENT_PLAN.md:178` 是要交付写契约的；它的三个窄
+方法最终都汇到 ``_insert_on`` 这一处 INSERT。多出来的是这一处，不是三处——
+三个窄方法共用同一条落库路径，否则"什么算冲突"会在三处各写一份。
+"""
+
+_FULL_CANDIDATE_HELPER: Final[str] = "_append_locked"
+_HELPER_CALL_SITES: Final[frozenset[str]] = frozenset(
+    {
+        "persistence/admin_audit.py::InMemoryAdminAuditStore.append_started",
+        "persistence/admin_audit.py::InMemoryAdminAuditStore.append_terminal",
+        "persistence/admin_audit.py::InMemoryAdminAuditStore.append_denied",
+        "persistence/identity.py::InMemoryUserDirectoryStore._apply_locked",
+    }
+)
+"""``_append_locked`` 接受完整候选，因此它的**调用点**也要冻结。
+
+V4 的注释里写着"Task 7 的 AST 守卫要求它只在目录 store 里被调用"，而那个守卫
+当时并不存在——一段声称保护存在的注释比没有注释更糟，它让读代码的人停止追问。
+这一条就是那个守卫。
 """
 
 
-def _write_sites(module: Path, symbols: frozenset[str]) -> list[str]:
-    """模块里所有写 ``symbols`` 的语句，标注其所在的 ``类.方法``。"""
+def _sites(module: Path, matcher) -> list[str]:
+    """模块里所有命中 ``matcher`` 的调用，标注 ``类.方法``。"""
     tree = ast.parse(module.read_text(encoding="utf-8"))
-    sites: list[str] = []
-
-    def written_tables(call: ast.Call) -> list[str]:
-        func = call.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name not in _WRITE_CALLS:
-            return []
-        names = [arg.id for arg in call.args if isinstance(arg, ast.Name)]
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            names.append(func.value.id)
-        return [name for name in names if name in symbols]
+    found: list[str] = []
 
     def scan(node: ast.AST, owner: str) -> None:
         for child in ast.iter_child_nodes(node):
@@ -4519,57 +4795,72 @@ def _write_sites(module: Path, symbols: frozenset[str]) -> list[str]:
                 scan(child, f"{owner}.{child.name}" if owner else child.name)
             else:
                 for call in ast.walk(child):
-                    if isinstance(call, ast.Call):
-                        for table in written_tables(call):
-                            sites.append(f"{owner or '<module>'}:{call.lineno}:{table}")
+                    if isinstance(call, ast.Call) and matcher(call):
+                        found.append(f"{owner or '<module>'}:{call.lineno}")
 
     scan(tree, "")
-    return sites
+    return found
 
 
-def _is_allowed(relative_path: str, site: str) -> bool:
-    expected = _DIRECTORY_STORE_MODULES.get(relative_path)
-    if expected is None:
-        return False
-    owner = site.split(":", 1)[0]
-    class_name, _, method = owner.partition(".")
-    if class_name != expected or not method:
-        return False
-    return method == "apply" or method.startswith("_")
+def _table_write(symbols: frozenset[str]):
+    def matcher(call: ast.Call) -> bool:
+        func = call.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in _WRITE_CALLS:
+            return False
+        names = [arg.id for arg in call.args if isinstance(arg, ast.Name)]
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            names.append(func.value.id)
+        return any(n in symbols for n in names)
+
+    return matcher
 
 
-def test_authorization_tables_are_written_only_inside_the_directory_store() -> None:
-    offenders: list[str] = []
+def _helper_call(call: ast.Call) -> bool:
+    func = call.func
+    return isinstance(func, ast.Attribute) and func.attr == _FULL_CANDIDATE_HELPER
+
+
+def _offenders(symbols: frozenset[str], allowed: frozenset[str]) -> list[str]:
+    bad: list[str] = []
     for module in sorted(_SRC.rglob("*.py")):
         relative = module.relative_to(_SRC).as_posix()
-        for site in _write_sites(module, _AUTHZ_TABLES):
-            if not _is_allowed(relative, site):
-                offenders.append(f"{relative} {site}")
-    assert offenders == [], f"授权表出现了第二条写路径：{offenders}"
+        for site in _sites(module, _table_write(symbols)):
+            owner = site.split(":", 1)[0]
+            if f"{relative}::{owner}" not in allowed:
+                bad.append(f"{relative}::{site}")
+    return bad
+
+
+def test_authorization_tables_are_written_only_at_frozen_sites() -> None:
+    assert _offenders(_AUTHZ_TABLES, _AUTHZ_WRITE_SITES) == []
+
+
+def test_audit_table_is_written_only_at_frozen_sites() -> None:
+    """审计行与授权事实同一套判定。
+
+    ``AdminAuditStore`` 的写方法已经窄到写不出目录成功事实，但协议只约束通过
+    Store 的调用；一个模块仍然可以自己 ``sa.insert(ADMIN_AUDIT_EVENTS)``。
+    """
+    assert _offenders(_AUDIT_TABLE, _AUDIT_WRITE_SITES) == []
+
+
+def test_the_full_candidate_helper_has_only_derived_call_sites() -> None:
+    """``_append_locked`` 是唯一能写出任意审计事实的地方，调用点必须冻结。"""
+    bad: list[str] = []
+    for module in sorted(_SRC.rglob("*.py")):
+        relative = module.relative_to(_SRC).as_posix()
+        for site in _sites(module, _helper_call):
+            owner = site.split(":", 1)[0]
+            if f"{relative}::{owner}" not in _HELPER_CALL_SITES:
+                bad.append(f"{relative}::{site}")
+    assert bad == [], f"完整候选 helper 出现了未授权调用点：{bad}"
 
 
 def test_local_admin_module_no_longer_writes_authorization_rows() -> None:
     """``seed_if_absent`` 必须委托给 ``apply()``，不能自己 INSERT 账号或角色。"""
     module = _SRC / "persistence" / "local_admin.py"
-    assert _write_sites(module, _AUTHZ_TABLES) == []
-
-
-def test_audit_rows_are_written_only_inside_the_directory_store() -> None:
-    """审计行和四张授权事实同属一条写路径。
-
-    ``AdminAuditStore`` 的写方法已经窄到写不出目录成功事实，但协议只约束通过
-    Store 的调用。一个
-    模块仍然可以自己 ``sa.insert(ADMIN_AUDIT_EVENTS)`` 写一条"授权成功"，而
-    根本没改过任何授权——那正是上一轮复审在 ``append()`` 上指出的同一个旁路，
-    换了个入口。用同一套判定覆盖它，不另写一份会分叉的逻辑。
-    """
-    offenders: list[str] = []
-    for module in sorted(_SRC.rglob("*.py")):
-        relative = module.relative_to(_SRC).as_posix()
-        for site in _write_sites(module, frozenset({"ADMIN_AUDIT_EVENTS"})):
-            if not _is_allowed(relative, site):
-                offenders.append(f"{relative} {site}")
-    assert offenders == [], f"审计表出现了第二条写路径：{offenders}"
+    assert _sites(module, _table_write(_AUTHZ_TABLES)) == []
 
 
 def _local_admin_user_id_writes(module: Path) -> list[str]:
@@ -4588,7 +4879,7 @@ def _local_admin_user_id_writes(module: Path) -> list[str]:
         if not any(keyword.arg == "user_id" for keyword in call.keywords):
             continue
         subtree = list(ast.walk(call))
-        touches_local_admins = any(
+        touches = any(
             isinstance(node, ast.Name) and node.id == "LOCAL_ADMINS" for node in subtree
         )
         writes = any(
@@ -4601,24 +4892,26 @@ def _local_admin_user_id_writes(module: Path) -> list[str]:
             in _WRITE_CALLS
             for node in subtree
         )
-        if touches_local_admins and writes:
+        if touches and writes:
             sites.append(f"{module.name}:{call.lineno}")
     return sites
 
 
 def test_the_local_credential_link_is_written_only_by_the_directory_store() -> None:
     """``local_admins.user_id`` 是第四张授权事实，和另外三张一个待遇。"""
+    allowed_modules = {"persistence/identity.py", "persistence/postgres.py"}
     offenders: list[str] = []
     for module in sorted(_SRC.rglob("*.py")):
         relative = module.relative_to(_SRC).as_posix()
-        if relative in _DIRECTORY_STORE_MODULES:
+        if relative in allowed_modules:
             continue
-        offenders.extend(f"{relative} {site}" for site in _local_admin_user_id_writes(module))
+        offenders.extend(
+            f"{relative} {site}" for site in _local_admin_user_id_writes(module)
+        )
     assert offenders == [], f"目录链接列出现了第二条写路径：{offenders}"
 ```
 
-**四条反例 + 一条正常对照。** 前三条各对应上一版守卫放过的一种情况；最后一条
-证明列级治理没有误伤改密。
+**反例与正常对照。** 每条反例对应一版守卫真实放过的一种情况。
 
 ```python
 def _sample(tmp_path: Path, name: str, source: str) -> Path:
@@ -4628,10 +4921,12 @@ def _sample(tmp_path: Path, name: str, source: str) -> Path:
     return module
 
 
-def test_the_guard_catches_a_second_write_function_in_the_store_module(
-    tmp_path: Path,
-) -> None:
-    """上一版按 basename 放行整个 ``postgres.py``，这种函数会被原样放过。"""
+def _owners(module: Path, matcher) -> set[str]:
+    return {site.split(":", 1)[0] for site in _sites(module, matcher)}
+
+
+def test_the_guard_catches_a_module_level_write_function(tmp_path: Path) -> None:
+    """V3 按 basename 放行整个 ``postgres.py``，这种函数会被原样放过。"""
     module = _sample(
         tmp_path,
         "postgres.py",
@@ -4641,15 +4936,15 @@ def test_the_guard_catches_a_second_write_function_in_the_store_module(
         "async def grant_admin(connection):\n"
         "    await connection.execute(sa.insert(USER_ROLE_ASSIGNMENTS))\n",
     )
-    sites = _write_sites(module, _AUTHZ_TABLES)
-    assert len(sites) == 1
-    assert not _is_allowed("persistence/postgres.py", sites[0])
+    owners = _owners(module, _table_write(_AUTHZ_TABLES))
+    assert owners == {"grant_admin"}
+    assert not any(
+        f"persistence/postgres.py::{o}" in _AUTHZ_WRITE_SITES for o in owners
+    )
 
 
-def test_the_guard_catches_a_new_public_write_method_on_the_store(
-    tmp_path: Path,
-) -> None:
-    """同一个类上新增的**公开**写方法不是 ``apply()``，必须被抓住。"""
+def test_the_guard_catches_a_new_private_write_method(tmp_path: Path) -> None:
+    """V4 用 ``startswith("_")`` 放行任意私有方法——这个就会被放过。"""
     module = _sample(
         tmp_path,
         "postgres.py",
@@ -4657,31 +4952,67 @@ def test_the_guard_catches_a_new_public_write_method_on_the_store(
         "from xiaowei_agent.persistence.schema import USER_ACCOUNTS\n"
         "\n"
         "class PostgresUserDirectoryStore:\n"
-        "    async def apply(self, *, command, context):\n"
-        "        return ()\n"
-        "\n"
-        "    async def force_create(self, connection):\n"
+        "    async def _force_create(self, connection):\n"
         "        await connection.execute(sa.insert(USER_ACCOUNTS))\n",
     )
-    sites = _write_sites(module, _AUTHZ_TABLES)
-    assert sites and all(site.startswith("PostgresUserDirectoryStore.force_create") for site in sites)
-    assert not _is_allowed("persistence/postgres.py", sites[0])
-
-
-def test_the_store_private_helper_is_still_allowed() -> None:
-    """正常对照：``_apply_in_transaction`` 必须写得了，否则守卫不可用。"""
-    assert _is_allowed("persistence/postgres.py", "PostgresUserDirectoryStore._apply_in_transaction:12:USER_ACCOUNTS")
-    assert _is_allowed("persistence/identity.py", "InMemoryUserDirectoryStore.apply:12:USER_ACCOUNTS")
+    owners = _owners(module, _table_write(_AUTHZ_TABLES))
+    assert owners == {"PostgresUserDirectoryStore._force_create"}
+    assert not any(
+        f"persistence/postgres.py::{o}" in _AUTHZ_WRITE_SITES for o in owners
+    )
 
 
 def test_a_same_named_module_in_another_package_is_not_allowed() -> None:
-    """上一版按 basename 放行，任意目录下的 ``postgres.py`` 都能写授权表。"""
-    assert not _is_allowed(
-        "interfaces/postgres.py", "PostgresUserDirectoryStore.apply:12:USER_ACCOUNTS"
+    """按精确相对路径判定，别的目录下的同名文件不获授权。"""
+    assert (
+        "interfaces/postgres.py::PostgresUserDirectoryStore._apply_in_transaction"
+        not in _AUTHZ_WRITE_SITES
     )
-    assert not _is_allowed(
-        "adapters/identity.py", "InMemoryUserDirectoryStore.apply:12:USER_ACCOUNTS"
+
+
+def test_the_frozen_sites_are_still_allowed() -> None:
+    """正常对照：合法写入点必须在名单里，否则守卫不可用。"""
+    for site in (
+        "persistence/postgres.py::PostgresUserDirectoryStore._apply_in_transaction",
+        "persistence/identity.py::InMemoryUserDirectoryStore._apply_locked",
+    ):
+        assert site in _AUTHZ_WRITE_SITES and site in _AUDIT_WRITE_SITES
+    assert (
+        "persistence/postgres.py::PostgresAdminAuditStore._insert_on"
+        in _AUDIT_WRITE_SITES
     )
+    # 审计 store 不许碰授权表。
+    assert (
+        "persistence/postgres.py::PostgresAdminAuditStore._insert_on"
+        not in _AUTHZ_WRITE_SITES
+    )
+
+
+def test_the_guard_catches_a_forged_success_through_the_helper(tmp_path: Path) -> None:
+    """直接拿完整候选写一条 ``ROLE_ASSIGNED + SUCCEEDED``，必须被抓住。
+
+    这正是 V2 那条通用 ``append()`` 旁路换了个入口的样子。
+    """
+    module = _sample(
+        tmp_path,
+        "activation.py",
+        "class ActivationService:\n"
+        "    def approve(self, audit, candidate):\n"
+        "        return audit._append_locked(candidate)\n",
+    )
+    owners = _owners(module, _helper_call)
+    assert owners == {"ActivationService.approve"}
+    assert not any(f"application/activation.py::{o}" in _HELPER_CALL_SITES for o in owners)
+
+
+def test_the_helper_call_sites_cover_the_three_narrow_methods() -> None:
+    """正常对照：三个窄方法与目录派生路径都必须在名单里。"""
+    assert len(_HELPER_CALL_SITES) == 4
+    for method in ("append_started", "append_terminal", "append_denied"):
+        assert (
+            f"persistence/admin_audit.py::InMemoryAdminAuditStore.{method}"
+            in _HELPER_CALL_SITES
+        )
 
 
 def test_the_guard_catches_a_direct_write_to_the_credential_link(tmp_path: Path) -> None:
@@ -5502,7 +5833,9 @@ W1a 只有同时满足以下条件才可判定完成：
 - "审计写失败 → 授权改变回滚"由**真实数据库约束**触发并在真库上验证，隔离变异证明移除同事务包裹后该用例变红；
 - 集成测试有显式类型断言证明 `user_directory` / `admin_audit` 是 PostgreSQL 实现，不是根 conftest 的内存 fixture；
 - `operation_id` **不是**全局唯一，两条 partial unique index 的存在与 WHERE 由离线结构用例钉住，终态那条由套件用例在两个实现上行为验证；结构用例的 helper 自带『partial 不等于全局』的自证反例；
-- `AdminAuditStore` 按 `DEVELOPMENT_PLAN.md:178` / `ADR-013:131` 交付 append-only 写契约，表面恰好是 `append_started` / `append_terminal` / `append_denied` / `load`；三者**都**写不出目录成功事实，各有一条用例证明；目录成功事实只由 `apply()` 在改动所在事务里派生并 INSERT；
+- `AdminAuditStore` 按 `DEVELOPMENT_PLAN.md:178` / `ADR-013:131` 交付 append-only 写契约，表面恰好是 `append_started` / `append_terminal` / `append_denied` / `load`；**内存与 PostgreSQL 两个实现的公开表面都精确等于它**，由 `test_protocol_conformance.py` 的 `==` 断言钉住；三个方法都写不出目录成功事实（目录动作在 `AdminAuditStart` 契约层即被拒，两个实现共用这条规则）；目录成功事实只由 `apply()` 在改动所在事务里派生并 INSERT；
+- 接受完整 `AdminAuditCandidate` 的 `_append_locked` 是私有命名，且其**调用点**被 AST 守卫冻结在三个窄方法与目录派生路径上，并带『伪造 ROLE_ASSIGNED + SUCCEEDED』的反例；
+- 五个 `LOCAL_ADMIN_*` 常量在 `contracts/identity.py` 只有一份，`interfaces/local_admin_auth.py` 消费它并不再保留自己的字面量；
 - `role_assigned` / `user_status_changed` / `user_created` / `local_admin_bootstrapped` / `legacy_identity_migrated` 事件携带闭集 effect，且由数据库 CHECK 强制；非成功 outcome 不得携带 effect；
 - `admin_audit_events` 的 append-only 有源码级机械守卫，且守卫自身有反例证明它抓得到违规；
 - `AdminAuditEvent` 列集合 = 规格 §14.2 的 13 个 + `effect_role` + `effect_status`，无任何自由文本或 JSON 通道；
@@ -5600,7 +5933,36 @@ V3（`af153a26d54f597eee162ae5acad525cd98efe65`）经复审判定「需修改」
 **这一轮承认的边界：** `append_started` / `append_terminal` 的**成功路径**在 W1a
 没有行为覆盖——`ADR-013:129` 把两阶段写留给非事务性配置面动作，而 W1a 的 action
 闭集全部是目录动作，CHECK 禁止它们写 `STARTED`。这不是遗漏，是有意的：计划用一条
-`test_every_w1a_action_is_a_directory_action_so_two_phase_has_no_legal_action`
+`test_every_w1a_action_is_a_directory_action`
 把它钉成**显式事实**，该断言会在 W4a 加入配置动作时转红，那时才是放开的时机。
 两个方法的拒绝路径在本阶段有用例。
 
+---
+
+## V5 修订记录
+
+V4（`29d6be67dde23f2006b50b5600029d444d1b721d`）经复审判定「需修改」。三项 P1 逐条核实，**全部成立**：
+
+| 意见 | 核实方式与结论 |
+| --- | --- |
+| P1-1 PostgreSQL 实现仍是旧的只读设计 | Task 6 原文仍写着「`PostgresAdminAuditStore` 只有 `load()`…这个类**没有**任何写方法」，而共享套件会在 PostgreSQL fixture 上调这三个窄方法。成立 |
+| P1-2 内存实现过不了自己的测试，且重开通用旁路 | `append_started` 直接 `append_locked(start.as_candidate())`，没有任何 `DIRECTORY_ACTIONS` 检查；`append_locked` 是公开命名、接受完整候选。更严重的是它的注释声称「Task 7 的 AST 守卫要求它只在目录 store 里被调用」——`grep` 全文，**那个守卫不存在**。成立 |
+| P1-3 bootstrap 常量没有合法落点 | `tests/security/test_module_layering.py:47` 规定 `persistence` 只能导 `contracts` / `planning` / `persistence`；计划允许的「从 `interfaces/local_admin_auth.py` 导入」会直接撞这道门。成立 |
+
+**三项共一个根因：改造只推进到最外层。** V4 把写契约改到了 Protocol 与契约类型，就停下了；内存实现、PostgreSQL 实现、AST 守卫、提交清单全都停留在上一版设计。这与 V4 修订记录里的 **I 组（同一轮改造没有贯穿计划全文）是同一个根因，连续第二轮**。
+
+V4 为此加了两条机械核对（allowlist 覆盖、import 符号存在），但两条都抓不住「Protocol 与实现不一致」——这正是本轮的失败形态。所以本轮的结构性修订不是再写一遍"记得贯穿"，而是补上能机械发现它的那条断言：
+
+| 修订 | 内容 |
+| --- | --- |
+| **契约层统一规则** | 目录动作在 `AdminAuditStart` 的 `model_validator` 里被拒，内存与 PostgreSQL 共用同一条。放在任一实现里，共享套件就会在两个绑定上给出不同答案 |
+| **PostgreSQL 三个窄方法** | 给出实现、错误分类表、事务与并发语义（含「为什么**不**需要 `SELECT FOR UPDATE`」：审计表 append-only，`STARTED` 行不会被改删，真正的并发点由终态 partial unique index 裁决） |
+| **`append_locked` → `_append_locked`** | 私有命名，并真的写出那条调用点守卫，冻结在三个窄方法 + 目录派生路径共四处 |
+| **AST 守卫改为冻结的精确方法集合** | 不再用 `startswith` 前缀放行（V4 的写法会让新加的任意私有写方法自动获得授权）；审计表与授权表各有一份名单，审计表多出 `PostgresAdminAuditStore._insert_on` 一处 |
+| **公开表面精确等于 Protocol** | 对四个具体实现参数化断言。`isinstance` 式的 Protocol 检查只保证实现**不少于**协议，方向正好相反——对"多出来一个公开写方法"完全无感 |
+| **`LOCAL_ADMIN_*` 下沉到 `contracts/identity.py`** | 明确唯一真源而不是"二选一"；`interfaces/local_admin_auth.py` 改为消费它并删掉自己的字面量，并补一条用例钉住接口层不得保留 `"dev-local"` / `"dev"` |
+| **Task 0 机械核对扩到三条** | 新增第 2 条：每个任务的 `git add` 必须覆盖它自己的 `Files:`。V4 把 `fake.py` 加进了 allowlist 与 Files，却漏了 Task 6 的 `git add` |
+
+**顺带修掉的重复校验：** Task 5 的 `test_no_write_method_can_state_a_successful_directory_change` 与 Task 3 新增的契约用例测同一件事；共享套件里的 `test_started_is_refused_for_a_directory_action` 与 `test_every_w1a_action_...` 是纯契约事实、不需要 store fixture。三条合并到 `tests/contract/test_admin_audit_contracts.py`。
+
+**复审指出的两处报告不准，一并更正：** 上一轮我报告 allowlist 覆盖核对的声明文件数是 35，实际是 36（我是在补完 Task 2 的 Files 之前跑的那次计数）；计划文件末尾多了一个空行，`git diff --check` 会报 `new blank line at EOF`，已删除。
