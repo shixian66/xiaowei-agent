@@ -495,7 +495,7 @@ if not context.is_offline_mode():
    互相冒充。
 6. 命令**不能自带时间或身份**：`created_at` / `created_by` / `event_id` 由 store 盖章。
 7. 所有 ID 字段有界；`operation_id ≤ 48` 是为批量子 id 后缀（`{op}:{index}`）留的余量。
-8. `schema.py` 的 `METADATA` **没有命名约定**（`schema.py:24`），因此 `primary_key=True` 声明出来的
+8. `schema.py` 的 `METADATA` **没有命名约定**（`schema.py:58`），因此 `primary_key=True` 声明出来的
    主键在 metadata 里 `name is None`。任何"按约束名去查"的结构用例都会永久变红——结构用例必须
    按**列集合**判定。
 

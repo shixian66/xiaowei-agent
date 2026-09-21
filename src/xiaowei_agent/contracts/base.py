@@ -182,6 +182,29 @@ def _sha256_hex(value: str) -> str:
 Sha256Hex = Annotated[str, Field(strict=True), AfterValidator(_sha256_hex)]
 
 
+SecretHash = StrictStr
+"""口令哈希的标记类型。
+
+名字以 ``Secret`` 开头是有意义的：凡是这样标注的字段都必须同时写
+``exclude=True`` 与 ``repr=False``（见 ``tests/security/test_secret_field_exposure.py``，
+它按 AST 扫**注解名**发现字段，不按字段名）。哈希不是明文口令，但它是凭据
+材料——进了日志或响应体就等于把离线爆破的输入交出去。
+
+它住在 ``contracts/base.py`` 而不是 ``persistence/`` ：``contracts`` 是分层的叶子，
+不能反向依赖 ``persistence``，而两边各写一份别名会让"同一套约定"变成两套。
+"""
+
+ControlledPii = StrictStr
+"""受控 PII 的标记类型（飞书 ``open_id`` 这类外部主体标识）。
+
+与 :data:`SecretHash` 同一套约定：凡这样标注的字段必须同时写 ``exclude=True``
+与 ``repr=False``，由 ``tests/security/test_controlled_pii_exposure.py`` 承重。
+
+它不叫 ``Secret*``，因为它不是凭据：泄露 ``open_id`` 不会让人登录，但会把
+"这个人是谁"交出去。两类义务相同、理由不同，因此分两个标记类型、两条用例。
+"""
+
+
 def frozen_map(value: Mapping[str, Any]) -> Mapping[str, Any]:
     """复制并包装为只读映射。"""
     return MappingProxyType(dict(value))

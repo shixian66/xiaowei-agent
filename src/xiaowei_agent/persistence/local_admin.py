@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from xiaowei_agent.contracts import (
     Contract,
     IdentitySource,
+    SecretHash,
     Sha256Hex,
     StrictInt,
-    StrictStr,
 )
 from xiaowei_agent.persistence.schema import LOCAL_ADMINS, WEB_SESSIONS
 from xiaowei_agent.persistence.store import Clock
@@ -39,12 +39,19 @@ class LocalAdminNotFoundError(LocalAdminStoreError, LookupError):
         super().__init__("local admin not found")
 
 
-SecretHash = StrictStr
-"""口令哈希的标记类型。
-
-名字以 ``Secret`` 开头是有意义的：凡是这样标注的字段都必须同时写
-``exclude=True`` 与 ``repr=False``（见 ``tests/security/test_secret_field_exposure.py``）。
-哈希不是明文口令，但它是凭据材料——进了日志或响应体就等于把离线爆破的输入交出去。
+__all__ = [
+    "LOCAL_ADMIN_SUBJECT_REF",
+    "ChangePasswordCommand",
+    "LocalAdminNotFoundError",
+    "LocalAdminRecord",
+    "LocalAdminStore",
+    "LocalAdminStoreError",
+    "PostgresLocalAdminStore",
+    "SecretHash",
+]
+"""``SecretHash`` 已下沉到 ``contracts/base.py``（契约层不能反向依赖
+``persistence``，而 ``contracts/identity.py`` 要按同一套约定标注口令哈希）。
+这里重新导出只为不打断既有调用方；**定义只有一份**。
 """
 
 

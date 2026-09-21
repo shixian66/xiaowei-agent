@@ -849,3 +849,286 @@ async def test_rev_0012_downgrade_requires_authorization_for_clarification_recor
     async with clean_database.begin() as connection:
         await connection.run_sync(run_upgrade, "head")
     assert "task_clarification_records" in await _table_names(clean_database)
+
+
+async def _column_names(engine: AsyncEngine, table: str) -> set[str]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = :table"
+            ),
+            {"table": table},
+        )
+        return {row[0] for row in rows}
+
+
+_W1A_TABLES = {
+    "user_accounts",
+    "user_role_assignments",
+    "external_identities",
+    "admin_audit_events",
+}
+
+
+async def _restore_head(engine: AsyncEngine, run_upgrade: Any) -> None:
+    """无条件把 schema 升回 head，并断言它真的回来了。
+
+    ``migrated_engine`` 是 **session 级**、只升一次，``clean_database`` 只 TRUNCATE
+    不重建 schema。任何主动降级的用例不还原，后续集成用例就会全部跑在旧 revision
+    上，甚至在 TRUNCATE 阶段直接失败——那是测试顺序依赖，不是那些用例自己的失败。
+    因此这个函数只在 ``finally`` 里调用，而且它自己带断言：悄悄失败的还原比不还原
+    更难查。
+    """
+    async with engine.begin() as connection:
+        await connection.run_sync(run_upgrade)
+    async with engine.connect() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+    assert revision == _head_revision()
+    assert _W1A_TABLES <= await _table_names(engine)
+    assert "user_id" in await _column_names(engine, "local_admins")
+
+
+async def _seed_directory_and_audit(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO user_accounts "
+                "(user_id, actor, display_name, status, created_at, updated_at) "
+                "VALUES ('u-1', 'alice', 'Alice', 'active', now(), now())"
+            )
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, tenant_id, environment_id, role, created_by, "
+                "created_at, updated_at) "
+                "VALUES ('u-1', 't-1', 'dev', 'operator', 'admin-1', now(), now())"
+            )
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO admin_audit_events "
+                "(event_id, operation_id, tenant_id, environment_id, actor_user_id, "
+                "actor, auth_source, action, target_kind, target_ref_digest, outcome, "
+                "reason_code, effect_role, effect_status, created_at) VALUES "
+                "('e-1', 'op-1', 't-1', 'dev', 'admin-1', 'admin', 'local_admin', "
+                "'role_assigned', 'user', :digest, 'succeeded', NULL, 'operator', "
+                "NULL, now())"
+            ),
+            {"digest": "a" * 64},
+        )
+
+
+async def test_rev_0014_downgrade_requires_authorization_for_identity_and_audit(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    """有授权事实或审计事件时默认拒绝降级；显式授权后可完整往返。
+
+    降级会**同时**丢掉两类不可再生的东西：当前谁有什么权限，以及这些权限是怎么
+    给出去的。后者尤其无法从别处重建——审计是 append-only 的唯一记录。
+    """
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        await _seed_directory_and_audit(clean_database)
+
+        with pytest.raises(MigrationSafetyError) as exc_info:
+            async with clean_database.begin() as connection:
+                await connection.run_sync(run_downgrade, "0013_clarification_parent")
+
+        # 分类精确到"哪一类数据会被丢掉"，不是一个布尔。手工预检会把它降级成布尔，
+        # 而 counts 正是既有用例断言的那个值。
+        assert exc_info.value.counts == (
+            ("identity_directory", 1),
+            ("admin_audit", 1),
+        )
+
+        async with clean_database.connect() as connection:
+            revision = await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            )
+            accounts = await connection.scalar(
+                sa.text("SELECT count(*) FROM user_accounts")
+            )
+            assignments = await connection.scalar(
+                sa.text("SELECT count(*) FROM user_role_assignments")
+            )
+            events = await connection.scalar(
+                sa.text("SELECT count(*) FROM admin_audit_events")
+            )
+        assert revision == _head_revision()
+        assert (accounts, assignments, events) == (1, 1, 1)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(
+                run_downgrade, "0013_clarification_parent", True
+            )
+        assert not _W1A_TABLES & await _table_names(clean_database)
+        assert "user_id" not in await _column_names(clean_database, "local_admins")
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0014_downgrade_needs_no_authorization_on_an_empty_directory(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    """正常对照：没有受保护数据时不该要授权。
+
+    只断"有数据会被拒"时，一条永远抛异常的守卫也照样绿——而那条守卫会让任何一次
+    合法回滚都变成需要人工干预的死局。
+    """
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0013_clarification_parent")
+        assert not _W1A_TABLES & await _table_names(clean_database)
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def _insert_audit_event(engine: AsyncEngine, **values: Any) -> None:
+    row = {
+        "event_id": "e-1",
+        "operation_id": "op-1",
+        "tenant_id": "t-1",
+        "environment_id": "dev",
+        "actor_user_id": "admin-1",
+        "actor": "admin",
+        "auth_source": "local_admin",
+        "action": "role_assigned",
+        "target_kind": "user",
+        "target_ref_digest": "a" * 64,
+        "outcome": "succeeded",
+        "reason_code": None,
+        "effect_role": "operator",
+        "effect_status": None,
+    }
+    row.update(values)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO admin_audit_events "
+                "(event_id, operation_id, tenant_id, environment_id, actor_user_id, "
+                "actor, auth_source, action, target_kind, target_ref_digest, outcome, "
+                "reason_code, effect_role, effect_status, created_at) VALUES "
+                "(:event_id, :operation_id, :tenant_id, :environment_id, "
+                ":actor_user_id, :actor, :auth_source, :action, :target_kind, "
+                ":target_ref_digest, :outcome, :reason_code, :effect_role, "
+                ":effect_status, now())"
+            ),
+            row,
+        )
+
+
+async def test_the_audit_table_itself_refuses_a_forged_success(
+    clean_database: AsyncEngine,
+) -> None:
+    """三条 CHECK 由**数据库**执行，不只是在 metadata 里声明过。
+
+    结构用例只能证明"约束声明了"；只有真的 INSERT 一行才能证明"迁移把它建出来了"。
+    这两件事在漂移时恰好分开：``schema.py`` 有而迁移漏掉，所有内存用例照常全绿，
+    而生产库上那一行会写进去。
+
+    这里逐条恢复的是三个具体的旧缺陷：
+    1. 一次被拒的操作也能声称它授予了角色；
+    2. 改了角色却不记是哪个角色（后续改动一覆盖就再也还原不出来）；
+    3. 目录动作写出一条 ``STARTED``，声称有一个本不存在的"结果未知"中间态。
+    """
+    await _insert_audit_event(clean_database)
+
+    with pytest.raises(sa.exc.IntegrityError):
+        await _insert_audit_event(
+            clean_database,
+            event_id="e-2",
+            operation_id="op-2",
+            outcome="denied",
+            reason_code="actor_not_admin",
+            effect_role="admin",
+        )
+
+    with pytest.raises(sa.exc.IntegrityError):
+        await _insert_audit_event(
+            clean_database, event_id="e-3", operation_id="op-3", effect_role=None
+        )
+
+    with pytest.raises(sa.exc.IntegrityError):
+        await _insert_audit_event(
+            clean_database,
+            event_id="e-4",
+            operation_id="op-4",
+            outcome="started",
+            effect_role=None,
+        )
+
+    async with clean_database.connect() as connection:
+        remaining = await connection.scalar(
+            sa.text("SELECT count(*) FROM admin_audit_events")
+        )
+    assert remaining == 1
+
+
+async def test_one_operation_cannot_hold_two_events_at_the_same_stage(
+    clean_database: AsyncEngine,
+) -> None:
+    """终态偏唯一索引在真实库上生效，而它**不是** ``operation_id`` 的全局唯一。
+
+    正对照是最后那次插入：换一个 ``operation_id`` 写同一阶段必须成功。只断"重复
+    终态被拒"时，给 ``operation_id`` 加一条全局 UNIQUE 也照样绿——而全局唯一会堵死
+    规格 §14.2 的两阶段配置审计。
+
+    **另一半（同一个 operation 同时有 STARTED 和终态）在 W1a 无法构造**，因为
+    ``DIRECTORY_ACTIONS`` 恰好等于本阶段全部八个 action，单阶段 CHECK 会拒绝任何
+    ``STARTED`` 行。这是设计结果不是遗漏：写这条用例时第一版正是拿一个目录动作去
+    插 ``STARTED``，被 CHECK 拒了——当时要么改测试，要么放宽那条 CHECK，而放宽它
+    等于允许目录动作声称一个本不存在的"结果未知"中间态。这里改的是测试。
+    W4a 引入第一个非目录动作时，那一半才有得测。
+    """
+    await _insert_audit_event(clean_database)
+
+    with pytest.raises(sa.exc.IntegrityError):
+        await _insert_audit_event(
+            clean_database,
+            event_id="e-2",
+            outcome="failed",
+            reason_code="conflict",
+            effect_role=None,
+        )
+
+    await _insert_audit_event(clean_database, event_id="e-3", operation_id="op-2")
+    async with clean_database.connect() as connection:
+        remaining = await connection.scalar(
+            sa.text("SELECT count(*) FROM admin_audit_events")
+        )
+    assert remaining == 2
+
+
+async def test_no_w1a_action_can_write_a_started_row(
+    clean_database: AsyncEngine,
+) -> None:
+    """W1a 的每一个 action 都写不出 ``STARTED``，逐个动作断言。
+
+    只测一个动作时，单阶段 CHECK 的动作列表漏掉某一个不会被发现——而漏掉的那个
+    动作从此可以在数据库层留下一条"结果未知"的事件。
+    """
+    from xiaowei_agent.contracts.enums import AdminAuditAction
+
+    for index, action in enumerate(AdminAuditAction):
+        with pytest.raises(sa.exc.IntegrityError):
+            await _insert_audit_event(
+                clean_database,
+                event_id=f"e-{index}",
+                operation_id=f"op-{index}",
+                action=action.value,
+                outcome="started",
+                effect_role=None,
+            )
+
+    async with clean_database.connect() as connection:
+        remaining = await connection.scalar(
+            sa.text("SELECT count(*) FROM admin_audit_events")
+        )
+    assert remaining == 0

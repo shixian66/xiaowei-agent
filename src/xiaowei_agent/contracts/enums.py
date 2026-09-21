@@ -70,6 +70,107 @@ class IdentitySource(StrEnum):
     LOCAL_ADMIN = "local_admin"
 
 
+class ProductRole(StrEnum):
+    """身份目录里的作用域角色闭集（规格 §6.1）。
+
+    不设 UNKNOWN 兜底成员：解析不出角色时必须失败，而不是落到一个可被当作
+    "大概是普通用户"的取值上——那正是 fail-closed 被稀释的典型形状。
+    """
+
+    ADMIN = "admin"
+    OPERATOR = "operator"
+    USER = "user"
+
+
+class UserStatus(StrEnum):
+    """账号状态闭集。禁用是一个**状态**，不是删除行。"""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class AdminCapability(StrEnum):
+    """管理面能力闭集，七成员逐字取自 ADR-013 修订。
+
+    与 :class:`ChannelPermission` **分开建模**是刻意的：渠道权限闭集被 M7 的投影
+    断言承重，往里加管理面成员会让那些断言全部失去意义。
+
+    ``MANAGE_INTEGRATIONS`` 与 ``RUN_CONNECTION_TESTS`` 只允许 ``LOCAL_ADMIN``
+    认证来源，这条不写在枚举里，而由
+    :func:`xiaowei_agent.governance.product_roles.admin_capabilities` 强制。
+    """
+
+    MANAGE_USERS = "manage_users"
+    MANAGE_DUTY_BINDINGS = "manage_duty_bindings"
+    VIEW_ADMIN_AUDIT = "view_admin_audit"
+    VIEW_PRIVATE_TASK_CONTENT = "view_private_task_content"
+    VIEW_INTEGRATION_STATUS = "view_integration_status"
+    MANAGE_INTEGRATIONS = "manage_integrations"
+    RUN_CONNECTION_TESTS = "run_connection_tests"
+
+
+class AdminAuditAction(StrEnum):
+    """管理面审计动作闭集。
+
+    **认证生命周期不在这里**：登录成功/失败、改密、退出走结构化安全日志。
+    把它们混进来会让审计表同时承担两种保留期与两种读者，而改密改的是凭据、
+    不是授权。``test_authentication_lifecycle_never_became_an_audit_action``
+    钉住这一点。
+    """
+
+    USER_CREATED = "user_created"
+    USER_STATUS_CHANGED = "user_status_changed"
+    ROLE_ASSIGNED = "role_assigned"
+    ROLE_REVOKED = "role_revoked"
+    EXTERNAL_IDENTITY_BOUND = "external_identity_bound"
+    EXTERNAL_IDENTITY_UNBOUND = "external_identity_unbound"
+    LOCAL_ADMIN_BOOTSTRAPPED = "local_admin_bootstrapped"
+    LEGACY_IDENTITY_MIGRATED = "legacy_identity_migrated"
+
+
+class AdminAuditTargetKind(StrEnum):
+    """审计目标类别闭集（规格 §14.2）。
+
+    ``ACTIVATION`` / ``DUTY_BINDING`` / ``CONFIG`` / ``TASK_CONTENT`` 在 W1a 没有
+    任何命令能产生，但它们是规格逐字列出的**值域**，留在闭集里与"提前建一张没有
+    消费者的表"是两回事。
+    """
+
+    USER = "user"
+    ACTIVATION = "activation"
+    DUTY_BINDING = "duty_binding"
+    CONFIG = "config"
+    TASK_CONTENT = "task_content"
+
+
+class AdminAuditOutcome(StrEnum):
+    """审计结果闭集。
+
+    ``STARTED`` 属于规格 §14.2 的两阶段配置审计，W1a 的目录动作一律单阶段——
+    这条差别由契约与数据库 CHECK 同时强制。
+    """
+
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    DENIED = "denied"
+    FAILED = "failed"
+
+
+class AdminAuditReasonCode(StrEnum):
+    """负面结果的原因码闭集。
+
+    写成闭集而不是自由文本，使原因可以被聚合、被断言；也使审计表不必为了解释
+    一次拒绝而开一个能容纳异常正文的 ``str`` 通道。
+    """
+
+    ACTOR_NOT_ADMIN = "actor_not_admin"
+    AUTH_SOURCE_NOT_ALLOWED = "auth_source_not_allowed"
+    TARGET_NOT_FOUND = "target_not_found"
+    SCOPE_MISMATCH = "scope_mismatch"
+    CONFLICT = "conflict"
+    AUDIT_UNWRITABLE = "audit_unwritable"
+
+
 class ProviderName(StrEnum):
     """`integrations.json` 里可配置的 Provider 闭集。"""
 

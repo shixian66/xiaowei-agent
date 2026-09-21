@@ -16,10 +16,44 @@ append-only 契约载荷主要以 JSONB 保存。任何展开字段都必须由 
 方言的 DDL 再逐字比较，离线执行，不需要数据库。
 """
 
+from collections.abc import Iterable
 from typing import Final
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
+
+from xiaowei_agent.contracts.admin_audit import (
+    DIRECTORY_ACTIONS,
+    ROLE_EFFECT_ACTIONS,
+    STATUS_EFFECT_ACTIONS,
+)
+from xiaowei_agent.contracts.enums import (
+    AdminAuditAction,
+    AdminAuditOutcome,
+    AdminAuditReasonCode,
+    AdminAuditTargetKind,
+    IdentitySource,
+    ProductRole,
+    UserStatus,
+)
+
+_DIRECTORY_ACTION_VALUES: Final[frozenset[str]] = frozenset(
+    action.value for action in DIRECTORY_ACTIONS
+)
+_ROLE_EFFECT_VALUES: Final[frozenset[str]] = frozenset(
+    action.value for action in ROLE_EFFECT_ACTIONS
+)
+_STATUS_EFFECT_VALUES: Final[frozenset[str]] = frozenset(
+    action.value for action in STATUS_EFFECT_ACTIONS
+)
+_NEGATIVE_OUTCOME_VALUES: Final[frozenset[str]] = frozenset(
+    {AdminAuditOutcome.DENIED.value, AdminAuditOutcome.FAILED.value}
+)
+_TERMINAL_OUTCOME_VALUES: Final[frozenset[str]] = _NEGATIVE_OUTCOME_VALUES | {
+    AdminAuditOutcome.SUCCEEDED.value
+}
+"""三个终态。**不是**只有 ``succeeded``：偏唯一索引的谓词只写 ``= 'succeeded'`` 时，
+一次操作可以同时留下一条 succeeded 和一条 failed，而读者无从判断哪条是真的。"""
 
 METADATA: Final = sa.MetaData()
 
@@ -521,6 +555,16 @@ LOCAL_ADMINS: Final = sa.Table(
     sa.Column("password_hash", sa.Text, nullable=False),
     sa.Column("must_change_password", sa.Boolean, nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey(
+            "user_accounts.user_id",
+            name="fk_local_admins_user_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    ),
     sa.CheckConstraint("id = 1", name="ck_local_admins_single_row"),
 )
 """本地管理员；CHECK 把表锁成最多一行，不存在"第二个管理员"这种状态。"""
@@ -583,6 +627,233 @@ PROVIDER_TEST_STATE: Final = sa.Table(
 )
 """控制面探针结果；通过与错误码互斥由 CHECK 保证，不靠调用方自觉。"""
 
+def _closed_set(column: str, values: Iterable[str]) -> str:
+    """把一个闭集枚举渲染成 CHECK 的 ``IN`` 列表。
+
+    从枚举生成而不是手抄：手抄的那份不会随枚举增长，于是新增一个成员会在数据库
+    层被拒绝，而契约层照常放行——两层给出不同答案时，症状是一条写入在真实库上
+    失败、在内存实现上成功。
+
+    ``sorted`` 是为了 DDL 稳定：集合迭代序会变，而 ``schema.py`` 与迁移必须逐字
+    相等（``tests/contract/test_schema_matches_migration.py``）。
+    """
+    listed = ", ".join(f"'{value}'" for value in sorted(values))
+    return f"{column} IN ({listed})"
+
+
+def _nullable_closed_set(column: str, values: Iterable[str]) -> str:
+    return f"{column} IS NULL OR {_closed_set(column, values)}"
+
+
+USER_ACCOUNTS: Final = sa.Table(
+    "user_accounts",
+    METADATA,
+    sa.Column("user_id", sa.Text, primary_key=True),
+    sa.Column("actor", sa.Text, nullable=False),
+    sa.Column("display_name", sa.Text, nullable=False),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("actor", name="uq_user_accounts_actor"),
+    sa.CheckConstraint(
+        _closed_set("status", (member.value for member in UserStatus)),
+        name="ck_user_accounts_status_closed",
+    ),
+)
+"""身份目录的账号。
+
+``actor`` **全局唯一**，作用域不在这里——这是与规格 §6.1 字段表的有意偏离，且
+严格强于规格要求的"同一作用域内拒绝 actor 冲突"。不唯一时，同一个人可以在两个
+账号下各拿一套角色，而撤销其中一个不影响另一个。
+"""
+
+USER_ROLE_ASSIGNMENTS: Final = sa.Table(
+    "user_role_assignments",
+    METADATA,
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey(
+            "user_accounts.user_id",
+            name="fk_user_role_assignments_user_id",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    ),
+    sa.Column("tenant_id", sa.Text, primary_key=True),
+    sa.Column("environment_id", sa.Text, primary_key=True),
+    sa.Column("role", sa.Text, nullable=False),
+    sa.Column("created_by", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        _closed_set("role", (member.value for member in ProductRole)),
+        name="ck_user_role_assignments_role_closed",
+    ),
+)
+"""某个账号在某个作用域里的角色；主键是三元组，一个作用域最多一个角色。
+
+外键是 ``RESTRICT`` 而不是 ``CASCADE``：``CASCADE`` 会让一次删账号静默带走它的
+角色行，而那正是事后要查"当时这个人有什么权限"时唯一的依据。
+"""
+
+EXTERNAL_IDENTITIES: Final = sa.Table(
+    "external_identities",
+    METADATA,
+    sa.Column("provider", sa.Text, primary_key=True),
+    sa.Column("tenant_id", sa.Text, primary_key=True),
+    sa.Column("environment_id", sa.Text, primary_key=True),
+    sa.Column("subject_ref_digest", sa.CHAR(64), primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey(
+            "user_accounts.user_id",
+            name="fk_external_identities_user_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    ),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint(
+        "provider",
+        "tenant_id",
+        "environment_id",
+        "user_id",
+        name="uq_external_identities_one_subject_per_account",
+    ),
+    sa.CheckConstraint(
+        _closed_set("provider", (IdentitySource.FEISHU.value,)),
+        name="ck_external_identities_provider_closed",
+    ),
+)
+"""外部主体到账号的绑定。**只存摘要**。
+
+``open_id`` 落库就等于给它开了一条同时进入备份、慢查询日志和运维截图的通道。
+
+两个方向都钉住：主键保证"一个外部主体最多绑一个账号"，UNIQUE 保证"一个账号在
+同作用域最多绑一个主体"。只钉主键时，一个账号可以绑上任意多个 open_id，于是
+"撤销这个人"要撤几次没有定论。
+"""
+
+ADMIN_AUDIT_EVENTS: Final = sa.Table(
+    "admin_audit_events",
+    METADATA,
+    sa.Column("event_id", sa.Text, primary_key=True),
+    sa.Column("operation_id", sa.Text, nullable=False),
+    sa.Column("tenant_id", sa.Text, nullable=False),
+    sa.Column("environment_id", sa.Text, nullable=False),
+    sa.Column("actor_user_id", sa.Text, nullable=False),
+    sa.Column("actor", sa.Text, nullable=False),
+    sa.Column("auth_source", sa.Text, nullable=False),
+    sa.Column("action", sa.Text, nullable=False),
+    sa.Column("target_kind", sa.Text, nullable=False),
+    sa.Column("target_ref_digest", sa.CHAR(64), nullable=False),
+    sa.Column("outcome", sa.Text, nullable=False),
+    sa.Column("reason_code", sa.Text, nullable=True),
+    sa.Column("effect_role", sa.Text, nullable=True),
+    sa.Column("effect_status", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        _closed_set("auth_source", (member.value for member in IdentitySource)),
+        name="ck_admin_audit_events_auth_source_closed",
+    ),
+    sa.CheckConstraint(
+        _closed_set("action", (member.value for member in AdminAuditAction)),
+        name="ck_admin_audit_events_action_closed",
+    ),
+    sa.CheckConstraint(
+        _closed_set("target_kind", (member.value for member in AdminAuditTargetKind)),
+        name="ck_admin_audit_events_target_kind_closed",
+    ),
+    sa.CheckConstraint(
+        _closed_set("outcome", (member.value for member in AdminAuditOutcome)),
+        name="ck_admin_audit_events_outcome_closed",
+    ),
+    sa.CheckConstraint(
+        _nullable_closed_set(
+            "reason_code", (member.value for member in AdminAuditReasonCode)
+        ),
+        name="ck_admin_audit_events_reason_code_closed",
+    ),
+    sa.CheckConstraint(
+        _nullable_closed_set("effect_role", (member.value for member in ProductRole)),
+        name="ck_admin_audit_events_effect_role_closed",
+    ),
+    sa.CheckConstraint(
+        _nullable_closed_set("effect_status", (member.value for member in UserStatus)),
+        name="ck_admin_audit_events_effect_status_closed",
+    ),
+    sa.CheckConstraint(
+        f"({_closed_set('outcome', _NEGATIVE_OUTCOME_VALUES)})"
+        " = (reason_code IS NOT NULL)",
+        name="ck_admin_audit_events_reason_code_matches_outcome",
+    ),
+    sa.CheckConstraint(
+        "outcome = 'succeeded'"
+        " OR (effect_role IS NULL AND effect_status IS NULL)",
+        name="ck_admin_audit_events_effect_only_on_success",
+    ),
+    sa.CheckConstraint(
+        "outcome <> 'succeeded' OR"
+        f" ({_closed_set('action', _ROLE_EFFECT_VALUES)})"
+        " = (effect_role IS NOT NULL)",
+        name="ck_admin_audit_events_role_effect_required",
+    ),
+    sa.CheckConstraint(
+        "outcome <> 'succeeded' OR"
+        f" ({_closed_set('action', _STATUS_EFFECT_VALUES)})"
+        " = (effect_status IS NOT NULL)",
+        name="ck_admin_audit_events_status_effect_required",
+    ),
+    sa.CheckConstraint(
+        "outcome <> 'started' OR"
+        f" NOT ({_closed_set('action', _DIRECTORY_ACTION_VALUES)})",
+        name="ck_admin_audit_events_directory_actions_are_single_phase",
+    ),
+)
+"""Admin 审计事件；append-only，**没有任何自由文本列**。
+
+只要留一个能容纳异常正文的列，第一个赶工的调用方就会把 ``str(exc)`` 塞进去，而
+那时它已经进了备份。原因一律走闭集 ``reason_code``，结果一律走两个闭集 effect 列。
+
+effect 与 action、``reason_code`` 与 ``outcome`` 都用 ``=`` 写成**双向**绑定而不是
+单向蕴含：只钉一个方向时，"成功却带着原因码"与"改了角色却不记是哪个角色"都能过。
+"""
+
+ADMIN_AUDIT_EVENTS_CREATED_AT_INDEX: Final = sa.Index(
+    "ix_admin_audit_events_created_at",
+    ADMIN_AUDIT_EVENTS.c.created_at,
+)
+
+ADMIN_AUDIT_ONE_STARTED_PER_OPERATION: Final = sa.Index(
+    "uq_admin_audit_one_started_per_operation",
+    ADMIN_AUDIT_EVENTS.c.operation_id,
+    unique=True,
+    postgresql_where=ADMIN_AUDIT_EVENTS.c.outcome == AdminAuditOutcome.STARTED.value,
+)
+"""一次操作最多一条 ``STARTED``。
+
+用**偏**唯一索引而不是给 ``operation_id`` 加全局 UNIQUE：规格 §14.2 的两阶段配置
+审计要求同一个 operation 写 ``STARTED`` 与终态两条事件，全局唯一会让第二条必然
+撞约束；换一个 operation id 又无法证明两条事件属于同一次操作。
+"""
+
+ADMIN_AUDIT_ONE_TERMINAL_PER_OPERATION: Final = sa.Index(
+    "uq_admin_audit_one_terminal_per_operation",
+    ADMIN_AUDIT_EVENTS.c.operation_id,
+    unique=True,
+    postgresql_where=ADMIN_AUDIT_EVENTS.c.outcome.in_(
+        sorted(_TERMINAL_OUTCOME_VALUES)
+    ),
+)
+"""一次操作最多一条终态事件。
+
+谓词必须列出**三个**终态：只写 ``= 'succeeded'`` 时，一次操作可以同时留下一条
+succeeded 和一条 failed，而读者无从判断哪条是真的。
+"""
+
 ALL_TABLES: Final = (
     TASKS,
     TASK_SUBMISSIONS,
@@ -601,4 +872,8 @@ ALL_TABLES: Final = (
     LOCAL_ADMINS,
     SERVICE_CONFIG_STATE,
     PROVIDER_TEST_STATE,
+    USER_ACCOUNTS,
+    USER_ROLE_ASSIGNMENTS,
+    EXTERNAL_IDENTITIES,
+    ADMIN_AUDIT_EVENTS,
 )
