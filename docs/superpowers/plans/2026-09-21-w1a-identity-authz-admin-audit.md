@@ -51,9 +51,98 @@
 2. **`LocalCredential.username` 本阶段不落库。**
    规格 §6.1 列出 `username`（首版固定 `admin`），但 W1a 没有消费者：现有 `local_admin_auth.py` 的登录只校验口令，不读用户名，登录页属于 W2。本阶段只落 `local_admins.user_id`。复审结论：可以接受，**前提是 W2 继续把 `admin` 作为固定认证常量**，不得借机新增可变用户名或第二套账号真源。该前提写入本计划，W2 计划必须复述它。
 
+## 三张规范矩阵（唯一真源）
+
+下面三张表是本计划里**唯一**一处定义错误语义、写入口与冲突探测方式的地方。后面
+每个 Task 只引用它们，不再各自给一份答案。
+
+上一版的缺陷正是"同一条规则在多个章节各写一遍"：`apply()` 里同一个"复用
+`operation_id`"场景，Task 5 的一条用例期望 `AdminAuditUnwritableError`，另一条
+期望 `AdminAuditConflictError`——两条不可能同时通过。规则散在多处时，分叉不会
+被任何人看见。
+
+### 矩阵一：错误语义
+
+归属规则一句话：**谁的公开方法失败，就用谁的错误族。** `apply()` 内部的审计冲突
+不以 `AdminAuditConflictError` 的面目出现——它是一次授权改变的失败，叫
+`AdminAuditUnwritableError`。
+
+| 公开入口 | 事实 | 抛出 | 授权改变 |
+| --- | --- | --- | --- |
+| `UserDirectoryStore.apply` | `user_id`、`actor` 或 `subject` 摘要与既有目录事实冲突 | `UserDirectoryConflictError` | 回滚 |
+| `UserDirectoryStore.apply` | 命令的目标账号或角色不存在 | `UserDirectoryNotFoundError` | 回滚 |
+| `UserDirectoryStore.apply` | 该 `operation_id` 在该阶段已有审计事件，审计写不进去 | `AdminAuditUnwritableError` | 回滚 |
+| `UserDirectoryStore.apply` | bootstrap 的凭据行指向不存在的账号，或该账号没有 ADMIN 角色 | `UserDirectoryConflictError`（fail-closed） | 回滚 |
+| `AdminAuditStore.append_started` / `append_denied` / `append_terminal` | 该 `operation_id` 在该阶段已有事件 | `AdminAuditConflictError` | — |
+| `AdminAuditStore.append_terminal` | 找不到对应的 `STARTED` | `AdminAuditMissingStartError` | — |
+| 以上任意入口 | 未知唯一约束、CHECK、外键、NOT NULL、schema、解码故障 | `PersistenceIntegrityError`，`write_outcome` 由 `_write_transaction` 判定 | 回滚 |
+| 以上任意入口 | 连接、超时、连接池故障 | `PersistenceUnavailableError`，`write_outcome` 同上 | 见 `write_outcome` |
+
+内存实现与 PostgreSQL 实现在这张表上**逐格相同**，共享套件断言的就是这张表。内存
+实现没有事务，用快照恢复表达"回滚"那一列——它表达的是同一个语义，不是另一个。
+
+### 矩阵二：写入口
+
+| 事实 | 唯一写入口 | 机械守卫 |
+| --- | --- | --- |
+| `user_accounts` | `apply()` → `_apply_locked` / `_apply_in_transaction` | `_AUTHZ_WRITE_SITES` |
+| `user_role_assignments` | 同上 | `_AUTHZ_WRITE_SITES` |
+| `external_identities` | 同上 | `_AUTHZ_WRITE_SITES` |
+| `local_admins.user_id` | 同上 | `_CREDENTIAL_LINK_SITES` |
+| `local_admins.password_hash` / `must_change_password` | `LocalAdminStore`（既有，本阶段不动） | 不禁止：改密是凭据，不是授权 |
+| `admin_audit_events`（PostgreSQL） | 模块级 `_insert_audit_event`，**仅此一处**。目录路径与 `PostgresAdminAuditStore._write` 都调用它 | `_AUDIT_WRITE_SITES`（单元素）+ `_FULL_CANDIDATE_HELPERS` |
+| `admin_audit_events`（内存） | `InMemoryAdminAuditStore._append_locked`，目录 store 在自己的临界区内复用它 | `_FULL_CANDIDATE_HELPERS` |
+
+### 矩阵三：事务与冲突探测
+
+**已知冲突不靠捕获 `IntegrityError` 判定，而是用 `ON CONFLICT DO NOTHING ... RETURNING`
+在事务体内探测。** 这是仓库既有做法，不是本计划的发明：`PostgresTaskStore.create_task`
+（`postgres.py:1927` 的 docstring 写明了理由）、`PostgresPlanStore.save`（`:2222`）、
+`append_evidence`（`:416`）全是这个形状，而 `persistence/` 里**没有任何一处**捕获
+`IntegrityError` 来分类冲突。
+
+| 层 | 职责 | 不做什么 |
+| --- | --- | --- |
+| 事务体内（`_apply_in_transaction` / `_write`） | 已知唯一约束用 `ON CONFLICT DO NOTHING ... RETURNING` 探测；拿不到行就抛矩阵一的闭集领域错误 | 不捕获 `IntegrityError`，不读约束名，不碰 `exc.orig` |
+| `_write_transaction`（`postgres.py:293`） | 没被探测吞掉的驱动异常在这里收敛，并按事务退出的事实判定 `ROLLED_BACK` / `NOT_CONFIRMED` | 不认识任何业务语义 |
+| `@_persistence_boundary`（`postgres.py:244`） | 最终闭集与异常链切断 | 不区分冲突种类 |
+
+闭集领域错误（`RuntimeError` 子类）穿过后两层时**原样通过**：
+`classify_persistence_exception` 对它们返回 `None`，两层都走 `raise` 重抛。
+
+`ON CONFLICT DO NOTHING` **不带**推断目标：一条 INSERT 可能撞上该表的任意一条唯一
+约束，而带目标时只推断一条。它吞掉的**只有**唯一/主键/偏唯一索引冲突；CHECK、外键、
+NOT NULL 一律照抛，落到 `_write_transaction`。
+
+因此"未知约束被伪装成业务冲突"这条风险不是靠运行期判别堵的——运行期根本不去判别
+——而是靠一条**静态**用例把这几张表的可推断冲突列组合逐格钉死（Task 6 Step 2 的离线用例）：新增一
+条唯一约束就必须来那条用例里回答"它撞了意味着什么"。
+
+### 这三张表依据的实测事实
+
+以下结论来自在真实 PostgreSQL 16.15 + asyncpg 0.30.0 + SQLAlchemy 2.0.52 上跑的临时
+探针（独立探针库，跑完即删），不是从文档或记忆推断的：
+
+| 问题 | 实测结果 |
+| --- | --- |
+| `sa.exc.IntegrityError.orig` 是什么类型 | `sqlalchemy.dialects.postgresql.asyncpg.IntegrityError` |
+| 它有没有 `.diag` | **没有**。`.diag.constraint_name` 是 psycopg 的接口，本仓库用 asyncpg |
+| 它身上有什么 | 只有 `.sqlstate` / `.pgcode`（`23505`）；**没有** `constraint_name` |
+| 约束名在哪 | 只在 `exc.orig.__cause__`（`asyncpg.exceptions.UniqueViolationError`）上——而那正是 `_persistence_boundary` 存在的目的所在：`str(exc)` 同时带着被拒绝的那一行 |
+| 事务体内抛 `IntegrityError` 后，外层能不能 `except sa.exc.IntegrityError` | **不能**。`_write_transaction` 已经把它换成了 `PersistenceIntegrityError(constraint, rolled_back)`，且 `__cause__` 为 `None` |
+| 不带推断目标的 `ON CONFLICT DO NOTHING` 吞掉什么 | 主键冲突、普通唯一约束冲突、**偏唯一索引**冲突三种：`RETURNING` 为空且不抛异常 |
+| 它不吞什么 | CHECK、外键、NOT NULL 照抛，经两层收敛成 `PersistenceIntegrityError(constraint, rolled_back)` |
+| 事务体内抛闭集领域错误（`RuntimeError` 子类）会怎样 | 穿过两层不变形；同事务里已发出的授权 INSERT 已回滚（实测该表行数为 0） |
+| 事务体内直接抛 `PersistenceIntegrityError` 会怎样 | `category` 与 `write_outcome` 穿过两层后保持不变 |
+
+探针本身不进仓库：它需要一个跑起来的库和一个能建库的账号，属于一次性事实核对，不是
+可重复的回归。它证明的每一条，在 Task 6 的集成用例里都有对应断言。
+
+---
+
 ## Review Focus
 
-审核者应优先核对以下十二点：
+审核者应优先核对以下十三点。**第 0 点先看**：上面的三张规范矩阵是错误语义、写入口与冲突探测的唯一真源，下面每一点都只是它的核对方式；任何一处正文与矩阵不一致，以矩阵为准并当作缺陷报出来。
 
 1. `apply(command, context)` 是否真的**不给调用方任何机会**指定 action、target 或 outcome：签名上有没有 override、可选覆盖字段或 hook。同时核对另一个方向：`AdminAuditStore` 的三个写方法是否**都写不出目录成功事实**（`AdminAuditStart` / `AdminAuditDenial` 没有 `outcome` 与 `effect` 字段；`AdminAuditTerminal` 的稳定字段从已存 `STARTED` 读回，而 CHECK 禁止目录动作写 `STARTED`）。V2 留了通用 `append(candidate)`（可伪造），V3 一度整个删掉写契约（违反 `DEVELOPMENT_PLAN.md:178` 与 `ADR-013:131`）——两个方向都错。
 2. 四张授权表的写入是否**全部**发生在 `apply()` 的那一个 `begin()` 内。`grep` 一遍 `persistence/` 里对这四张表的 INSERT/UPDATE，看有没有第二处；特别核对 `seed_if_absent` 与旧身份迁移。
@@ -63,10 +152,12 @@
 6. 旧标签迁移是否是**一个命令、一个事务**：中途任何一步失败后，两张目录表与审计表是否零部分落库；测试制造的冲突是不是**数据库既有冲突**，而不是被 `_IdentityDocument` 解析期就挡掉的同文件重复 actor。
 7. 由外部输入派生的 `user_id` / `operation_id` 是否有界，最大长度 actor 是否有用例。
 8. bootstrap 的幂等判定读的是**目录链接是否完整**，还是『凭据行是否存在』：一个已经跑过 RI5、`local_admins` 早有行的库，升级到 `rev_0014` 后能否补齐账号、ADMIN 角色与链接，且**不覆盖**已改过的密码。Task 6 有一条真实降级—插入—升级的用例。
-9. 承重守卫是否按**属性**判定而不是按名字枚举：完整候选 helper 由 AST 按**签名**发现（`AdminAuditCandidate` 参数）而非按方法名冻结；`local_admins.user_id` 两种 SQLAlchemy 写法（关键字与 mapping）都认；所有允许项 owner-qualified 到 `路径::类.方法`，**不跳过整模块**。
+9. 承重守卫是否按**属性**判定而不是按写法枚举：完整候选 helper 由 AST 按**签名**发现（`AdminAuditCandidate` 参数）而非按方法名冻结；`local_admins.user_id` 的守卫是否提取 `values()` **实际写入的列**，四种等价写法（`values(user_id=v)`、`values({T.c.user_id: v})`、`values({"user_id": v})`、`values({T.c["user_id"]: v})`）全部命中，而**静态判不出写哪一列**的形式（变量键、`**` 展开）报警而不是放行；所有允许项 owner-qualified 到 `路径::类.方法`，**不跳过整模块**；只改 `password_hash` 的正常路径不误报。
 10. **协议与实现是否一致**：`tests/contract/test_protocol_conformance.py` 里那条『公开表面精确等于 Protocol』的断言，对内存与 PostgreSQL 两个实现都成立。`isinstance` 式的 Protocol 检查只保证实现不少于协议，抓不住多出来的公开写方法。
-11. 新 PostgreSQL 代码是否**复用了同文件里既有的机制**：公开方法都带 `@_persistence_boundary`，写路径走 `_write_transaction`，行与契约互转在 `rows.py` 且枚举显式构造。直接 `engine.begin()` 或 `model_validate(dict(row))` 都是错的。
-12. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
+11. 新 PostgreSQL 代码是否**复用了同文件里既有的机制**：公开方法都带 `@_persistence_boundary`，写路径走 `_write_transaction`，行与契约互转在 `rows.py` 且枚举显式构造，已知冲突用 `ON CONFLICT DO NOTHING ... RETURNING` 探测。直接 `engine.begin()`、`model_validate(dict(row))`、`except sa.exc.IntegrityError`、读 `exc.orig` 或约束名，都是错的。
+
+12. **错误语义是否只有矩阵一那一份**：全文搜索 `AdminAuditConflictError`、`AdminAuditUnwritableError`、`UserDirectoryConflictError`、`PersistenceIntegrityError`，每一处出现是否都能在矩阵一里找到对应的那一格。特别核对同一个场景（复用 `operation_id` 调 `apply()`）在所有章节里是否只有一个答案。
+13. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
 
 ---
 
@@ -3105,41 +3196,49 @@ async def test_legacy_migration_emits_one_audit_event_per_entry(
         assert await admin_audit.load(event_id=event.event_id) is not None
 
 
-async def test_reusing_an_operation_id_is_rejected(user_directory: Any) -> None:
-    """一次 operation 至多留下一条终态事件。
+async def test_a_second_event_at_the_same_stage_is_rejected(admin_audit: Any) -> None:
+    """直连 ``AdminAuditStore`` 时的阶段重复 → ``AdminAuditConflictError``。
 
-    这是目录回滚证明所依赖的那条约束的正面用例：第二次用同一个 ``operation_id``
-    会撞终态 partial unique index。它只走 ``apply()``——W1a 没有第二个写入口，
-    也没有任何公开方法能直接写一条审计事实。
+    这是**矩阵一第五行**的正面用例，配对的是
+    ``test_audit_write_failure_rolls_back_the_authorization_change``——同一条
+    数据库约束，两个不同的公开入口，因此两个不同的错误族：谁的公开方法失败，
+    就用谁的错误族。
 
-    上一版这里放的是两条直接调用 ``AdminAuditStore.append()`` 的两阶段用例，
-    而它们恰好在演示当时那个旁路：写一条 ``ROLE_ASSIGNED + SUCCEEDED``，却没有
-    改动任何角色。规格 §14.2 的两阶段能力现在由 Task 4 的离线结构用例与 Task 6
-    的数据库用例证明，不再需要一个能凭空写成功授权事实的公开方法。
+    上一版这里放的是"复用 ``operation_id`` 调 ``apply()``"，与上面那条回滚用例
+    **是同一个场景**，却期望另一个异常类型。两条不可能同时通过，而这正是"错误
+    语义散在多个章节各写一遍"的代价。现在 ``apply()`` 侧只有那一条，本条改成
+    覆盖直连路径——它原本是缺的。
+
+    用 ``append_denied`` 而不是 ``append_started``：两者撞的是同一条终态 partial
+    unique index，而 ``append_denied`` 不需要先有 ``STARTED``，用例里没有第二个
+    前置条件。
     """
+    from xiaowei_agent.contracts.admin_audit import (
+        AdminAuditDenial,
+        admin_audit_target_digest,
+    )
+    from xiaowei_agent.contracts.enums import AdminAuditReasonCode, AdminAuditTargetKind
     from xiaowei_agent.persistence.admin_audit import AdminAuditConflictError
 
-    await user_directory.apply(
-        command=CreateUserCommand(
+    def _denial() -> Any:
+        return AdminAuditDenial(
+            operation_id="op-dup-stage",
             tenant_id=_TENANT,
             environment_id=_ENV,
-            user_id="usr-a",
-            actor="alice",
-            display_name="Alice",
-        ),
-        context=_context("op-reused"),
-    )
-    with pytest.raises(AdminAuditConflictError):
-        await user_directory.apply(
-            command=CreateUserCommand(
-                tenant_id=_TENANT,
-                environment_id=_ENV,
-                user_id="usr-b",
-                actor="bob",
-                display_name="Bob",
+            actor_user_id="usr-admin",
+            actor="admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+            action=AdminAuditAction.ROLE_ASSIGNED,
+            target_kind=AdminAuditTargetKind.USER,
+            target_ref_digest=admin_audit_target_digest(
+                target_kind=AdminAuditTargetKind.USER, target_ref="usr-1"
             ),
-            context=_context("op-reused"),
+            reason_code=AdminAuditReasonCode.ACTOR_NOT_ADMIN,
         )
+
+    await admin_audit.append_denied(denial=_denial())
+    with pytest.raises(AdminAuditConflictError):
+        await admin_audit.append_denied(denial=_denial())
 
 
 async def test_a_denied_event_records_the_refusal_without_claiming_an_effect(
@@ -3224,7 +3323,7 @@ IDENTITY_DIRECTORY_CASES = (
     test_bootstrap_fails_closed_when_the_linked_account_lost_admin,
     test_legacy_migration_writes_the_whole_batch_or_nothing,
     test_legacy_migration_emits_one_audit_event_per_entry,
-    test_reusing_an_operation_id_is_rejected,
+    test_a_second_event_at_the_same_stage_is_rejected,
     test_a_denied_event_records_the_refusal_without_claiming_an_effect,
     test_a_terminal_event_without_a_started_event_is_refused,
 )
@@ -3471,7 +3570,7 @@ class InMemoryAdminAuditStore:
         的 AST 守卫要求它只在目录 store 里被调用"——**那个守卫当时并不存在**。
         一段声称保护存在的注释比没有注释更糟：它让下一个读代码的人停止追问。
         现在它是私有命名，并且真的有一条调用点守卫
-        （``test_identity_write_path.py::test_the_full_candidate_helper_has_only_derived_call_sites``）
+        （``test_identity_write_path.py::test_the_full_candidate_helpers_have_only_declared_call_sites``）
         把调用点冻结在目录派生路径与三个窄方法上。
         """
         key = audit_stage_key(candidate)
@@ -3967,7 +4066,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 4 的表、Task 5 的协议、派生层与共享套件
-- Produces: `PostgresUserDirectoryStore`、`PostgresAdminAuditStore`（四个方法与内存实现同 Protocol）、`_raise_audit_conflict_or_defer`；`persistence/rows.py` 的 `admin_audit_event_to_row` / `row_to_admin_audit_event`；`seed_if_absent` 改为走 `apply()`
+- Produces: `PostgresUserDirectoryStore`、`PostgresAdminAuditStore`（四个方法与内存实现同 Protocol）、模块级 `_insert_audit_event`、`_conflict` / `_audit_unwritable`；`persistence/rows.py` 的 `admin_audit_event_to_row` / `row_to_admin_audit_event`；`seed_if_absent` 改为走 `apply()`
 
 **fixture 必须显式定义。** 仓库的共享套件靠 `tests/integration/conftest.py` 用**同名** fixture 覆盖根 conftest 的内存实现（`store`、`plan_store`、`clarification_record_store` 都是这样）。只写 `bind(...)` 而不定义同名 fixture，集成文件会安静地继续跑内存实现，"PostgreSQL 同事务证据"就是假绿。另外该 conftest 里**没有** `engine` fixture，可用的是 `migrated_engine`（session 级）与 `clean_database`（函数级，每个用例清库）。
 
@@ -4127,6 +4226,184 @@ async def test_rolled_back_change_leaves_no_row_in_either_table(
     assert events == 1
 ```
 
+再在同一个文件追加两条用例：一条钉死"未知约束不是业务冲突"，一条钉死
+`PersistenceUnavailableError` 之外的那一半分界。
+
+```python
+async def test_an_unknown_constraint_is_not_dressed_up_as_a_business_conflict(
+    admin_audit: PostgresAdminAuditStore, clean_database: Any
+) -> None:
+    """矩阵一倒数第二行：未知约束 → ``PersistenceIntegrityError``。
+
+    直连 ``connection`` 写一条违反
+    ``ck_admin_audit_events_directory_actions_are_single_phase`` 的行——这是
+    契约层拦不住、只有直连数据库才造得出的形态，也正是"未知约束"在真实运维里
+    的样子。``ON CONFLICT DO NOTHING`` **不吞** CHECK 违反，因此它会穿过探测、
+    落到 ``_write_transaction``，收敛成 ``PersistenceIntegrityError``。
+
+    上一版把这一格映射成了 ``AdminAuditConflictError``，理由写的是"理论上不可达，
+    留作兜底"。一条不可达的映射不是兜底，是一句不会被任何用例证伪的话。
+    """
+    with pytest.raises(PersistenceIntegrityError) as caught:
+        # 用 _write_transaction 而不是 clean_database.begin()：这条用例要断言的
+        # write_outcome 正是它按事务退出的事实判定出来的，换成裸 begin() 就只
+        # 剩一个 write_outcome=None 的分类，证明不了『失败时调用方知不知道有
+        # 没有落库』。
+        async with _write_transaction(clean_database) as connection:
+            await connection.execute(
+                sa.insert(ADMIN_AUDIT_EVENTS).values(
+                    event_id="evt-illegal",
+                    operation_id="op-illegal",
+                    tenant_id="dev-local",
+                    environment_id="dev",
+                    actor_user_id="usr-admin",
+                    actor="admin",
+                    auth_source=IdentitySource.LOCAL_ADMIN.value,
+                    # 目录动作 + STARTED：CHECK 禁止的组合。
+                    action=AdminAuditAction.USER_CREATED.value,
+                    target_kind=AdminAuditTargetKind.USER.value,
+                    target_ref_digest="0" * 64,
+                    outcome=AdminAuditOutcome.STARTED.value,
+                    reason_code=None,
+                    effect_role=None,
+                    effect_status=None,
+                    created_at=_dt.datetime.now(tz=_dt.UTC),
+                )
+            )
+    assert caught.value.category is PersistenceIntegrityCategory.CONSTRAINT
+    assert caught.value.write_outcome is PersistenceWriteOutcome.ROLLED_BACK
+    assert caught.value.__cause__ is None, "异常链必须切断：原文里带着被拒的那一行"
+    assert "admin_audit_events" not in str(caught.value)
+```
+
+**这条用例为什么不走 store 的公开方法**：走不了。`AdminAuditStart` 的
+`_two_phase_is_not_for_directory_actions` 校验器在契约层就把这个组合拒了，`_write`
+根本收不到它。要证明"未被探测吞掉的约束落到哪一格"，只能从数据库那一侧造——而
+这也正是这条 CHECK 存在的理由：它防的是绕过契约层直接写库的人。
+
+本用例要在文件顶部的导入块补五个名字，`_write_transaction` 是其中唯一的私有名。
+测试导入 `postgres.py` 的私有名在本仓库有先例，而这里需要的恰恰是它那条"按事务
+退出的事实判定 `write_outcome`"的行为：
+
+```python
+import datetime as _dt
+
+from xiaowei_agent.contracts.enums import AdminAuditAction, AdminAuditTargetKind
+from xiaowei_agent.persistence.errors import (
+    PersistenceIntegrityCategory,
+    PersistenceIntegrityError,
+    PersistenceWriteOutcome,
+)
+from xiaowei_agent.persistence.postgres import _write_transaction
+```
+
+（`AdminAuditOutcome` 与 `IdentitySource` 该文件已经导入，不重复。）
+
+还要补一组**离线**用例，放进 `tests/contract/test_identity_schema.py`。它是"未知约束
+不得被伪装成业务冲突"这条风险的真正防线——运行期不做判别，防线就必须是静态的。
+
+该文件 Task 4 建立时只导入了 `re` 与 `sqlalchemy`，这一组要用 `pytest.mark.parametrize`
+与 `Final`，因此**先补两行导入**：
+
+```python
+from typing import Final
+
+import pytest
+```
+
+然后追加：
+
+```python
+_CONFLICT_TARGETS: Final[dict[str, set[frozenset[str]]]] = {
+    "user_accounts": {
+        frozenset({"user_id"}),  # 主键：账号已存在
+        frozenset({"actor"}),  # uq_user_accounts_actor：actor 被别人占了
+    },
+    "user_role_assignments": {
+        frozenset({"user_id", "tenant_id", "environment_id"}),  # 主键
+    },
+    "external_identities": {
+        # 主键：这个 subject 在本作用域已绑到某个账号
+        frozenset({"provider", "tenant_id", "environment_id", "subject_ref_digest"}),
+        # uq_external_identities_one_subject_per_account：该账号在本作用域已有绑定
+        frozenset({"provider", "tenant_id", "environment_id", "user_id"}),
+    },
+    "admin_audit_events": {
+        frozenset({"event_id"}),  # 主键
+        # 两条偏唯一索引都在 operation_id 上：同阶段已有事实
+        frozenset({"operation_id"}),
+    },
+}
+"""这四张表上，``ON CONFLICT DO NOTHING`` 会**静默吞掉**的全部列组合。
+
+**每一格都必须在矩阵一里有一行。** 新增一条唯一约束或偏唯一索引，下面那条用例
+立刻变红——因为它会被 ``ON CONFLICT`` 吞掉，而吞掉之后调用方会收到一个说"这是
+业务冲突"的闭集错误。加约束的人必须先来这里回答"它撞了意味着什么"。
+
+**按列组合而不是按约束名钉。** ``ON CONFLICT`` 推断的是列，不是名字；本仓库的
+``METADATA`` 没有 naming convention，主键大多由 ``primary_key=True`` 声明、在
+metadata 里 ``name is None``（真库上才由 PostgreSQL 命名为 ``<表>_pkey``）。按名
+字钉会把一条能通过的断言写成恒假。两条 ``operation_id`` 偏唯一索引因此折叠成一
+格——它们各自的名字与 WHERE 由
+``test_one_started_and_one_terminal_event_per_operation`` 单独钉着，这里不重复。
+
+CHECK、外键、NOT NULL **不在**这里：``ON CONFLICT DO NOTHING`` 不吞它们，它们照
+抛并收敛成 ``PersistenceIntegrityError``（上面那条集成用例证明了这一点）。
+"""
+
+
+def _conflict_targets(table: sa.Table) -> set[frozenset[str]]:
+    """``ON CONFLICT DO NOTHING``（不带推断目标）会吞掉的列组合。
+
+    = 主键 ∪ 全局唯一 ∪ 偏唯一索引。复用同文件的 ``_unique_column_sets`` 与
+    ``_partial_where``：那两个 helper 已经把"全局唯一 vs 偏唯一"分开了，这里要
+    的是两者的并集，因为实测确认不带推断目标时两者都被吞。
+    """
+    targets = {frozenset(column.name for column in table.primary_key)}
+    targets |= _unique_column_sets(table)
+    targets |= {
+        frozenset(column.name for column in index.columns)
+        for index in table.indexes
+        if index.unique and _partial_where(index) is not None
+    }
+    return targets
+
+
+@pytest.mark.parametrize("table_name", sorted(_CONFLICT_TARGETS))
+def test_the_conflict_probed_tables_have_exactly_the_declared_targets(
+    table_name: str,
+) -> None:
+    """``==`` 而不是 ``<=``：多一格少一格都必须来这里显式回答。"""
+    table = next(t for t in ALL_TABLES if t.name == table_name)
+    assert _conflict_targets(table) == _CONFLICT_TARGETS[table_name]
+
+
+def test_the_conflict_target_helper_sees_both_kinds_of_unique_index() -> None:
+    """helper 自证：全局唯一与偏唯一都必须被算进来。
+
+    ``_unique_column_sets`` **有意**把偏唯一索引排除在外（它服务的是"operation_id
+    不全局唯一"那条断言）。直接拿它当冲突目标集，两条 ``operation_id`` 偏索引就
+    会漏掉——而那正是审计表上最要紧的两条。这条用例钉住这次并集没有漏。
+    """
+    probe = sa.Table(
+        "probe_conflict_targets",
+        sa.MetaData(),
+        sa.Column("id", sa.Text, primary_key=True),
+        sa.Column("whole", sa.Text),
+        sa.Column("part", sa.Text),
+        sa.UniqueConstraint("whole", name="uq_probe_whole"),
+        sa.Index(
+            "uq_probe_part", "part", unique=True, postgresql_where=sa.text("part <> ''")
+        ),
+    )
+    assert _unique_column_sets(probe) == {frozenset({"whole"})}
+    assert _conflict_targets(probe) == {
+        frozenset({"id"}),
+        frozenset({"whole"}),
+        frozenset({"part"}),
+    }
+```
+
 - [ ] **Step 3: 运行，确认 RED**
 
 ```bash
@@ -4149,62 +4426,109 @@ class PostgresUserDirectoryStore:
     async def apply(
         self, *, command: DirectoryCommand, context: AdminOperationContext
     ) -> tuple[AdminAuditEvent, ...]:
-        try:
-            # 一个事务，目录写入与审计 INSERT 都在里面。**不要**在这里开第二个
-            # 连接或第二个事务：那正是"权限改了、审计没记上"能够发生的唯一形态。
-            #
-            # 用 _write_transaction 而不是裸 engine.begin()：它按事务退出的事实
-            # 区分 ROLLED_BACK 与 NOT_CONFIRMED。一次授权改变失败时，调用方必须
-            # 能知道到底有没有落库。
-            async with _write_transaction(self._engine) as connection:
-                return await self._apply_in_transaction(connection, command, context)
-        except sa.exc.IntegrityError as exc:
-            raise _classify_directory_integrity_error(exc) from None
+        # 一个事务，目录写入与审计 INSERT 都在里面。**不要**在这里开第二个连接或
+        # 第二个事务：那正是"权限改了、审计没记上"能够发生的唯一形态。
+        #
+        # 用 _write_transaction 而不是裸 engine.begin()：它按事务退出的事实区分
+        # ROLLED_BACK 与 NOT_CONFIRMED。一次授权改变失败时，调用方必须能知道到底
+        # 有没有落库。
+        #
+        # 这里**没有** except：已知冲突在事务体内就由 ON CONFLICT 探测出来并抛成
+        # 闭集领域错误，剩下的由 _write_transaction 收敛。见矩阵三。
+        async with _write_transaction(self._engine) as connection:
+            return await self._apply_in_transaction(connection, command, context)
 ```
 
-外层的 `@_persistence_boundary(write=True)` 与内层的 `except` 分工明确：**内层**把
-本模块认识的约束名翻成闭集领域错误（`UserDirectoryConflictError` 等），**外层**兜住
-其余一切驱动异常，收敛成 `PersistenceIntegrityError` / `PersistenceUnavailableError`
-并切断异常链。少了外层，一个未知约束或一次连接中断就会把带着 SQL 与绑定参数的原始
-异常抛给调用方——engine 没有开 `hide_parameters`，那串参数里有 actor 和
-`target_ref_digest`。
+**这里不能写 `except sa.exc.IntegrityError`。** 上一版写了，而它**不可达**：
+`_write_transaction` 的 `except Exception` 已经先把 `IntegrityError` 交给
+`classify_persistence_exception`，换成了 `PersistenceIntegrityError`。实测确认
+（见"这三张表依据的实测事实"）：该 `except` 分支永远不会命中，外层看到的是
+`PersistenceIntegrityError(constraint, rolled_back)`，`__cause__` 为 `None`。
+一段不可达的保护比没有保护更糟——它让读代码的人以为这条路径已经被处理了。
 
-分流函数按**约束名**判断，而不是按异常文本匹配：
+**也不能按约束名分流。** 上一版写的是
+`getattr(getattr(exc.orig, "diag", None), "constraint_name", None)`，那是 psycopg
+的接口；本仓库用的是 asyncpg，`exc.orig` 是
+`sqlalchemy.dialects.postgresql.asyncpg.IntegrityError`，身上只有 `.sqlstate`
+/ `.pgcode`，**没有 `.diag`**。那行代码在真库上恒为 `""`，于是每一次冲突——
+包括审计冲突——都会落进 `UserDirectoryConflictError`，审计回滚用例会以错误的
+异常类型"通过"。约束名只在 `exc.orig.__cause__` 上，而那条链正是
+`_persistence_boundary` 要切断的东西。
+
+**已知冲突改用 `ON CONFLICT DO NOTHING ... RETURNING` 在事务体内探测**，这是
+矩阵三，也是仓库里既有的三处写法。分流函数因此整个删掉，取而代之的是一个把
+"探测不到行"翻成闭集错误的小助手：
 
 ```python
-_AUDIT_CONSTRAINTS: Final[frozenset[str]] = frozenset(
-    {
-        "uq_admin_audit_one_started_per_operation",
-        "uq_admin_audit_one_terminal_per_operation",
-        "admin_audit_events_pkey",
-    }
-)
+def _conflict(command: DirectoryCommand) -> UserDirectoryError:
+    """已知目录唯一约束冲突 → 矩阵一第一行。
 
-
-def _classify_directory_integrity_error(exc: sa.exc.IntegrityError) -> UserDirectoryError:
-    """把数据库约束冲突翻译成闭集错误。
-
-    ``from None`` 与固定消息是一组的：``IntegrityError`` 的文本里带着被拒绝
-    的那一行，其中包含 ``subject_ref_digest``、actor 和租户。让它进 traceback
-    就等于把受控 PII 写进日志。
+    固定消息、不带命令内容：``command`` 里有 actor 与 ``subject_ref`` 摘要，
+    进了消息就等于把受控 PII 写进日志。参数只用来在 mypy 上钉住调用点确实
+    在处理一条命令，不进消息。
     """
-    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None) or ""
-    if name in _AUDIT_CONSTRAINTS:
-        return AdminAuditUnwritableError("admin audit event could not be written")
     return UserDirectoryConflictError("directory command conflicts with stored facts")
+
+
+def _audit_unwritable() -> AdminAuditUnwritableError:
+    """审计事实写不进去 → 矩阵一第三行。授权改变由事务回滚。"""
+    return AdminAuditUnwritableError("admin audit event could not be written")
 ```
 
 `_apply_in_transaction` 的规则：
 
 - 按命令类型发 INSERT/UPDATE/DELETE，全部用传入的 `connection` 与同一个 `now`。
+- **每一条 INSERT 都是 `sa.dialects.postgresql.insert(...).on_conflict_do_nothing().returning(<主键列>)`，拿不到行就抛矩阵一对应的那个错。** 目录表拿不到行 → `_conflict(command)`；`ADMIN_AUDIT_EVENTS` 拿不到行 → `_audit_unwritable()`。这两个 `raise` 发生在事务体内，因此本事务里已经发出的授权写入随之回滚——这就是"审计写不进去必须回滚授权改变"的实现，不需要任何额外机制。
+- **`on_conflict_do_nothing()` 不带推断目标**：一条 INSERT 可能撞上该表的任意一条唯一约束（`user_accounts` 上是主键与 `actor` 唯一索引两条），带目标时只推断一条，另一条会漏成 `PersistenceIntegrityError`。不带目标时三种唯一冲突全吞，而 CHECK、外键、NOT NULL 照抛——正是我们想要的分界。见矩阵三与实测表。
 - 目标账号或角色不存在（UPDATE/DELETE 影响 0 行）→ 抛 `UserDirectoryNotFoundError`，**在同一事务内**，因此审计也不会留下。
-- 每条成功改动用 Task 5 的 `derive_audit()` 生成候选，再 INSERT 进 `ADMIN_AUDIT_EVENTS`；批量命令按 `batch_operation_id(context, index)` 逐条生成。审计 INSERT 放在各自改动之后、事务提交之前。
+- 每条成功改动用 Task 5 的 `derive_audit()` 生成候选，再交给模块级的 `_insert_audit_event(connection, candidate, now=now)`——**不要在这里另写一条 `sa.insert(ADMIN_AUDIT_EVENTS)`**。它返回 `None` 就抛 `_audit_unwritable()`（矩阵一第三行）；`PostgresAdminAuditStore._write` 调用同一个函数，返回 `None` 时抛 `AdminAuditConflictError`（第五行）。同一条约束、同一处落库、两个公开入口两个错误族。批量命令按 `batch_operation_id(context, index)` 逐条生成。审计 INSERT 放在各自改动之后、事务提交之前。
 - `BootstrapLocalAdminCommand`：按 Task 5 那张四态表分流，与内存实现**同一套语义**。先 `SELECT id, password_hash, user_id FROM local_admins WHERE id = :singleton FOR UPDATE`——`FOR UPDATE` 是必需的：两个 Web 进程同时装配会同时调用 `seed_if_absent`，没有行锁时两边都读到 `user_id IS NULL`、都去建账号，第二个撞 `user_accounts` 主键，一次正常的并发启动变成一次启动失败。没有行时走 `INSERT ... ON CONFLICT DO NOTHING RETURNING id`；拿不到 id 说明另一个事务刚插进去，重读一次按同一张表继续分流。
 - `external_identities` 存 `external_subject_digest(...)`，不存 `open_id`。
 - `resolve_by_subject` 用一次 JOIN 取 account + assignment，并在 SQL 层就写 `WHERE user_accounts.status = 'active'`——把禁用判断放在 Python 里，就得依赖每个调用方都记得判一次。
 - `PostgresAdminAuditStore` 实现与内存实现**同一个** Protocol：`append_started` / `append_terminal` / `append_denied` / `load`，公开表面精确等于这四个。它**没有** UPDATE/DELETE，Task 7 的 AST 守卫机械确认。
 
-新代码用到的 `_persistence_boundary`（`postgres.py:244`）、`_write_transaction`（`:293`）、`AsyncConnection`（`:36` 已导入）都是既有的，不新增依赖。异常类型写 `sa.exc.IntegrityError`——仓库里没有 `from sqlalchemy.exc import ...` 的先例，`errors.py:87` 就是走 `sa.exc.` 命名空间。`NoReturn` 从 `typing` 补入（`:33` 那行）。
+新代码用到的 `_persistence_boundary`（`postgres.py:244`）、`_write_transaction`（`:293`）、`AsyncConnection`（`:36` 已导入）、`_dt`（`:28`）、`uuid`（`:30`）、`sa.dialects.postgresql.insert`（`:2222` 等处已在用）全部是既有的，**不新增任何第三方依赖**。
+
+需要新增的 import 只有 W1a 自己的符号，按 `postgres.py` 既有的分组追加：
+
+```python
+from xiaowei_agent.contracts.admin_audit import (
+    AdminAuditCandidate,
+    AdminAuditDenial,
+    AdminAuditEvent,
+    AdminAuditStart,
+    AdminAuditTerminal,
+    AdminOperationContext,
+)
+from xiaowei_agent.contracts.identity import DirectoryCommand
+from xiaowei_agent.persistence.admin_audit import (
+    AdminAuditConflictError,
+    AdminAuditMissingStartError,
+)
+from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
+    UserDirectoryConflictError,
+    UserDirectoryError,
+    UserDirectoryNotFoundError,
+    derive_audit,
+)
+from xiaowei_agent.persistence.rows import (
+    admin_audit_event_to_row,
+    row_to_admin_audit_event,
+)
+from xiaowei_agent.persistence.schema import (
+    ADMIN_AUDIT_EVENTS,
+    EXTERNAL_IDENTITIES,
+    USER_ACCOUNTS,
+    USER_ROLE_ASSIGNMENTS,
+)
+```
+
+`AdminAuditCandidate` 必须**真的 import 进来**，不能写成字符串注解或 `Any`：Task 7 的
+守卫按参数注解里出现的名字发现完整候选 helper，`_insert_audit_event` 要能被它发现。
+
+**删掉的 import**：按约束名分流那套代码去掉之后，`sa.exc` 与 `NoReturn` 在本任务里
+都不再需要，不要顺手留着。
 
 **照同一个文件里既有的 Store 写，不要另起一套。** `persistence/postgres.py` 里每一个既有 Store 的公开方法都是这个形状：`@_persistence_boundary(write=...)` 装饰，写路径用 `_write_transaction(self._engine)`，行与契约的互转放在 `persistence/rows.py` 的 `X_to_row` / `row_to_X` 里。这不是风格问题，三件事各自承重：
 
@@ -4304,49 +4628,67 @@ Task 7 的调用点守卫当时只冻结了 `_append_locked`。**私有命名不
     async def _write(
         self, connection: AsyncConnection, candidate: AdminAuditCandidate
     ) -> AdminAuditEvent:
-        """唯一一处接受完整候选的地方，调用点由 Task 7 守卫冻结。"""
-        event = AdminAuditEvent(
-            **candidate.model_dump(mode="python"),
-            event_id=uuid.uuid4().hex,
-            created_at=self._clock(),
-        )
-        try:
-            await connection.execute(
-                sa.insert(ADMIN_AUDIT_EVENTS).values(admin_audit_event_to_row(event))
+        """三个窄写方法共用的落库口，调用点由 Task 7 守卫冻结。
+
+        它只做一件事：把 ``_insert_audit_event`` 的"没插进去"翻成
+        ``AdminAuditStore`` 这个公开入口该抛的错（矩阵一第五行）。目录路径调用
+        同一个 ``_insert_audit_event``，翻成的是 ``AdminAuditUnwritableError``。
+        """
+        event = await _insert_audit_event(connection, candidate, now=self._clock())
+        if event is None:
+            raise AdminAuditConflictError(
+                "admin audit event conflicts with a stored event"
             )
-        except sa.exc.IntegrityError as exc:
-            _raise_audit_conflict_or_defer(exc)
         return event
-```
 
-错误分类（与目录路径共用 `_AUDIT_CONSTRAINTS` 那份名单，不另写一份）：
 
-| 冲突的约束 | 结果 | 理由 |
-| --- | --- | --- |
-| `uq_admin_audit_one_started_per_operation` | `AdminAuditConflictError` | 同一 operation 第二条 STARTED |
-| `uq_admin_audit_one_terminal_per_operation` | `AdminAuditConflictError` | 同一 operation 第二条终态 |
-| `ck_..._directory_actions_are_single_phase` | `AdminAuditConflictError` | 理论上不可达（契约层已拒），留作直连 psql 的兜底 |
-| 其余 | **交给 `_persistence_boundary`** | 未知约束既不能被吞成"冲突"，也**不能原样上抛**——原始异常带着 SQL 与参数。边界会把它收敛成 `PersistenceIntegrityError` 并切断异常链 |
+async def _insert_audit_event(
+    connection: AsyncConnection, candidate: AdminAuditCandidate, *, now: _dt.datetime
+) -> AdminAuditEvent | None:
+    """把候选变成事实并落库；同阶段事实已存在时返回 ``None``。
 
-```python
-def _raise_audit_conflict_or_defer(exc: sa.exc.IntegrityError) -> NoReturn:
-    """只按**约束名**分类；不把 ``IntegrityError`` 的正文放进消息。
+    **`persistence/` 里唯一一处 `INSERT INTO admin_audit_events`。** 目录路径与
+    审计 store 都走它，因此"什么算阶段重复"只有一份定义。上一版是两处各写一条
+    INSERT：两条 INSERT 迟早会在 ON CONFLICT 目标、列映射或冲突判定上分叉，而
+    目录回滚证明依赖的正是这两条必须是同一条。
 
-    正文里带着被拒绝的那一行，其中有 actor 与 target 摘要。让它进 traceback
-    就等于把受控 PII 写进日志——与目录路径的 ``_classify_directory_integrity_error``
-    同一个理由，同一套做法。
-
-    未知约束**原样 raise**，但这不是"泄漏"：外层的 ``_persistence_boundary``
-    会把它收敛成闭集错误并切断异常链。上一版没有那层装饰器，所以同一句
-    ``raise exc`` 当时确实会把参数带出去。
+    **返回 ``None`` 而不是抛错**：调用它的公开入口不同，错误族就不同（矩阵一
+    第三行与第五行）。这个函数不知道自己是被谁调的，所以它不做这个决定——
+    做了就等于把两个入口的语义焊死成一个。
     """
-    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None) or ""
-    if name in _AUDIT_CONSTRAINTS:
-        raise AdminAuditConflictError(
-            "admin audit event conflicts with a stored event"
-        ) from None
-    raise exc
+    event = AdminAuditEvent(
+        **candidate.model_dump(mode="python"),
+        event_id=uuid.uuid4().hex,
+        created_at=now,
+    )
+    inserted = (
+        await connection.execute(
+            sa.dialects.postgresql.insert(ADMIN_AUDIT_EVENTS)
+            .values(admin_audit_event_to_row(event))
+            .on_conflict_do_nothing()
+            .returning(ADMIN_AUDIT_EVENTS.c.event_id)
+        )
+    ).first()
+    return None if inserted is None else event
 ```
+
+**`_write` 抛的是 `AdminAuditConflictError`，不是 `AdminAuditUnwritableError`。**
+矩阵一的归属规则：`_write` 服务的公开入口是 `AdminAuditStore` 的三个窄写方法。
+`PostgresUserDirectoryStore._apply_in_transaction` 不调用 `_write`——它走自己的
+审计 INSERT，拿不到行时抛 `_audit_unwritable()`。两条路径撞的是同一条约束，抛
+不同的错，因为公开入口不同；这是有意的，不是分叉。
+
+**上一版的三处缺陷在这里一起消失：**
+
+| 上一版 | 事实 |
+| --- | --- |
+| `except sa.exc.IntegrityError` | 在 `_write_transaction` 内部时它可达（`_write` 收的是 connection），但它要读的东西不存在 |
+| `exc.orig.diag.constraint_name` | asyncpg 上恒为 `None`，于是 `name` 恒为 `""`，**每一次审计冲突都会走到 `raise exc`**，变成 `PersistenceIntegrityError`——那条"阶段重复 → `AdminAuditConflictError`"的断言永远不会绿 |
+| `ck_..._directory_actions_are_single_phase` 映射成 `AdminAuditConflictError` | 这条 CHECK 的违反**不是**冲突，`ON CONFLICT` 也不吞它。它现在如实落进 `PersistenceIntegrityError`——一条直连 psql 写进来的非法行是数据完整性故障，不是"你重复提交了" |
+
+`_AUDIT_CONSTRAINTS`、`_classify_directory_integrity_error`、
+`_raise_audit_conflict_or_defer` 三个名字全部删除，不再有任何一份"约束名 → 错误"
+的名单需要与数据库保持同步。约束名与语义的对应改由 Task 6 Step 2 的静态用例钉死。
 
 **行与契约的互转放 `persistence/rows.py`**，与 `row_to_channel_binding` / `channel_binding_to_row` 同名同形。数据库与契约的形状差异只有两处，必须显式写出来——直接 `AdminAuditEvent.model_validate(dict(row))` 会**同时**撞上两条：`Contract` 是 `strict=True`（字符串喂不进 `StrEnum` 字段，报 `is_instance_of`）且 `extra="forbid"`（`effect_role` / `effect_status` 两列报 `extra_forbidden`）。
 
@@ -4416,7 +4758,7 @@ def row_to_admin_audit_event(row: Mapping[Any, Any]) -> "AdminAuditEvent":
     )
 ```
 
-`PostgresUserDirectoryStore._apply_in_transaction` 的审计 INSERT 复用**同一个** `admin_audit_event_to_row`，否则两条路径迟早在列映射上分叉。
+`PostgresUserDirectoryStore._apply_in_transaction` 不自己发审计 INSERT，它调用模块级的 `_insert_audit_event`——`admin_audit_event_to_row` 在那里面用。上一版让两条路径各写一条 INSERT、只共享列映射；只共享一半的东西迟早在另一半上分叉，而分叉点正好是『什么算阶段重复』。
 
 **领域错误必须穿过这两层边界，不能被收敛掉。** `classify_persistence_exception`
 对普通 `RuntimeError` 子类返回 `None`，两层都会原样重抛——`AdminAuditConflictError`、
@@ -4905,10 +5247,22 @@ def test_audit_store_offers_no_cleanup_or_retention_api() -> None:
    ``ROLE_ASSIGNED + SUCCEEDED``；
 3. 目录链接列：绕过目录 store 直接写 ``local_admins.user_id``。
 
-**判定按属性，不按我记得的那个名字。** 第 2 条上一版把 ``_append_locked`` 这个
-**名字**冻结起来，随后新增的 ``_insert`` / ``_insert_on`` 同样接受完整候选，却
-自动逃出了名单。名字会变，属性不会：这一版改成"凡是签名里有
-``AdminAuditCandidate`` 参数的函数"，由 AST 自己找出来。
+**判定按属性，不按我记得的那个名字，也不按我记得的那个写法。**
+
+第 2 条 V5 把 ``_append_locked`` 这个**名字**冻结起来，随后新增的 ``_insert`` /
+``_insert_on`` 同样接受完整候选，却自动逃出了名单。名字会变，属性不会：改成
+"凡是签名里有 ``AdminAuditCandidate`` 参数的函数"，由 AST 自己找出来。
+
+第 3 条 V6 枚举的是两种**写法**（``values(user_id=...)`` 与
+``values({LOCAL_ADMINS.c.user_id: ...})``），而 ``values({"user_id": ...})`` 和
+``values({LOCAL_ADMINS.c["user_id"]: ...})`` 生成完全相同的 UPDATE，却整条漏过。
+写法也会变：改成提取 ``values()`` **实际写入的列**，再问里面有没有那一列。静态
+判不出写哪一列的形式（变量键、``**`` 展开）**报警而不是放行**。
+
+**反例调用的是守卫本身，不是守卫的副本。** V6 的反例走一个叫
+``_owners_credential`` 的函数，它把判定逻辑抄了一遍——于是反例证明的是那份副本
+正确，守卫本体改没改它都不知道。这一版 ``_credential_link_writes`` 多收一个
+``relative`` 参数，反例因此能直接调用它：反例与被守护的实现是同一段代码。
 
 **允许项一律 owner-qualified（精确到 ``相对路径::类.方法``）。** 三版教训：V3 按
 basename 放行整个文件；V4 用 ``startswith("_")`` 放行任意私有方法；V5 的第 3 条
@@ -4944,10 +5298,18 @@ _AUTHZ_WRITE_SITES: Final[frozenset[str]] = frozenset(
 ``apply()`` 本身不发 SQL——它开事务并委托给这两个私有助手，所以名单里是助手。
 """
 
-_AUDIT_WRITE_SITES: Final[frozenset[str]] = _AUTHZ_WRITE_SITES | frozenset(
-    {"persistence/postgres.py::PostgresAdminAuditStore._write"}
+_AUDIT_WRITE_SITES: Final[frozenset[str]] = frozenset(
+    {"persistence/postgres.py::_insert_audit_event"}
 )
-"""审计表比授权表**多**一个合法写入点：三个窄方法共用的那一处落库。"""
+"""`INSERT INTO admin_audit_events` 的**唯一**合法位置。
+
+**不写成 `_AUTHZ_WRITE_SITES | {...}`。** 上一版那样写，等于顺带允许
+`_apply_in_transaction` 与 `_apply_locked` 直接写审计表——而它们现在都走
+`_insert_audit_event`，不需要这个权限。把不需要的允许项留在名单里，守卫就比它
+能守的范围松一圈，而松出来的那一圈正好是"绕过唯一落库口"。
+
+内存实现不在名单里，因为它根本不碰 SQLAlchemy：`_table_write` 匹配的是
+`sa.insert(ADMIN_AUDIT_EVENTS)` 这种语句，内存实现写的是 dict。"""
 
 _CANDIDATE_TYPE: Final[str] = "AdminAuditCandidate"
 
@@ -4955,6 +5317,7 @@ _FULL_CANDIDATE_HELPERS: Final[frozenset[str]] = frozenset(
     {
         "persistence/admin_audit.py::InMemoryAdminAuditStore._append_locked",
         "persistence/postgres.py::PostgresAdminAuditStore._write",
+        "persistence/postgres.py::_insert_audit_event",
     }
 )
 """签名里能收下完整 ``AdminAuditCandidate`` 的全部函数。
@@ -5107,62 +5470,131 @@ def test_the_full_candidate_helpers_have_only_declared_call_sites() -> None:
     assert bad == [], f"完整候选 helper 出现了未授权调用点：{bad}"
 
 
-def _credential_link_writes(module: Path) -> list[str]:
-    """写 ``local_admins.user_id`` 的语句，**两种 SQLAlchemy 写法都认**。
+_CREDENTIAL_TABLE: Final[str] = "LOCAL_ADMINS"
+_CREDENTIAL_LINK_COLUMN: Final[str] = "user_id"
+_COLUMN_CONTAINER: Final[str] = "c"
+
+
+def _call_name(call: ast.Call) -> str:
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+
+
+def _is_column_container(node: ast.expr) -> bool:
+    """``<表>.c``——SQLAlchemy 取列的那个容器。"""
+    return isinstance(node, ast.Attribute) and node.attr == _COLUMN_CONTAINER
+
+
+def _column_name_of(key: ast.expr | None) -> str | None:
+    """``values()`` 的字典键指向哪一列；判不出来返回 ``None``。
+
+    三种等价键写法都认；第四种（关键字实参）在 ``_written_columns`` 里处理。
+    """
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return key.value  # values({"user_id": v})
+    if isinstance(key, ast.Attribute) and _is_column_container(key.value):
+        return key.attr  # values({LOCAL_ADMINS.c.user_id: v})
+    if isinstance(key, ast.Subscript) and _is_column_container(key.value):
+        index = key.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, str):
+            return index.value  # values({LOCAL_ADMINS.c["user_id"]: v})
+    return None
+
+
+def _written_columns(call: ast.Call) -> tuple[frozenset[str], bool]:
+    """``values()`` **实际写入**的列名，外加"有没有静态判不出的键"。
+
+    第二个返回值是**故意**存在的。``values({column: v})`` 里 ``column`` 是变量、
+    ``values(**patch)`` 里 ``patch`` 是字典时，AST 判不出写的是哪一列。判不出就
+    报出来，不是放行——一条把自己判不出的情况当成合规的守卫，等于给绕过它的人
+    附了一份说明书。
+    """
+    names: set[str] = set()
+    unresolved = False
+    for keyword in call.keywords:
+        if keyword.arg is None:  # values(**mapping)
+            unresolved = True
+        else:
+            names.add(keyword.arg)  # values(user_id=v)
+    for argument in call.args:
+        if not isinstance(argument, ast.Dict):
+            unresolved = True
+            continue
+        for key in argument.keys:
+            resolved = _column_name_of(key)
+            if resolved is None:
+                unresolved = True
+            else:
+                names.add(resolved)
+    return frozenset(names), unresolved
+
+
+def _targets_credential_table(call: ast.Call) -> bool:
+    """这条 ``values()`` 挂在一个写 ``LOCAL_ADMINS`` 的语句上。"""
+    return any(
+        isinstance(node, ast.Call)
+        and _call_name(node) in _WRITE_CALLS
+        and any(
+            isinstance(inner, ast.Name) and inner.id == _CREDENTIAL_TABLE
+            for inner in ast.walk(node)
+        )
+        for node in ast.walk(call)
+    )
+
+
+def _credential_link_writes(module: Path, relative: str | None = None) -> list[str]:
+    """改动 ``local_admins.user_id`` 的地方，**按写入的列判定，不按写法判定**。
 
     **不能**把整张 ``LOCAL_ADMINS`` 列进 ``_AUTHZ_TABLES``：改密码是合法的，按
     规格 §14.2 就该留在 ``LocalAdminStore``——凭据不是授权。要治理的只是它的
     授权侧那一列；把整张表禁掉会误伤改密，而会误伤的守卫最终会被放宽成不守。
 
-    只认 ``values(user_id=...)`` 是上一版的漏洞：
-    ``values({LOCAL_ADMINS.c.user_id: v})`` 是等价写法，却完全不被发现。
+    上一版枚举的是两种**写法**（``values(user_id=...)`` 与
+    ``values({LOCAL_ADMINS.c.user_id: ...})``），于是另外两种等价写法
+    ——``values({"user_id": ...})`` 和 ``values({LOCAL_ADMINS.c["user_id"]: ...})``
+    ——生成完全相同的 UPDATE，却整条漏过。枚举写法的守卫永远差一种写法；这一版
+    改成提取 ``values()`` 实际写入的列，再问"里面有没有那一列"。
+
+    ``sa.delete(LOCAL_ADMINS)`` 一并纳入：删掉整行同样解除了目录链接，它和写
+    ``user_id`` 是同一个属性上的同一件事，不是两件事。
     """
-    relative = module.relative_to(_SRC).as_posix()
+    relative = relative or module.relative_to(_SRC).as_posix()
     sites: list[str] = []
     for owner, node in _walk(module):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
+        hit = False
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
-            subtree = list(ast.walk(call))
-            touches = any(
-                isinstance(n, ast.Name) and n.id == "LOCAL_ADMINS" for n in subtree
-            )
-            writes = any(
-                isinstance(n, ast.Call)
-                and (
-                    n.func.attr
-                    if isinstance(n.func, ast.Attribute)
-                    else getattr(n.func, "id", "")
-                )
-                in _WRITE_CALLS
-                for n in subtree
-            )
-            if not (touches and writes):
-                continue
-            by_keyword = any(k.arg == "user_id" for k in call.keywords)
-            by_mapping = any(
-                isinstance(n, ast.Attribute)
-                and n.attr == "user_id"
-                and isinstance(n.value, ast.Attribute)
-                and n.value.attr == "c"
-                for n in subtree
-            )
-            if by_keyword or by_mapping:
-                sites.append(f"{relative}::{owner}")
-    return sites
+            name = _call_name(call)
+            if name == "values":
+                if not _targets_credential_table(call):
+                    continue
+                columns, unresolved = _written_columns(call)
+                if _CREDENTIAL_LINK_COLUMN in columns or unresolved:
+                    hit = True
+            elif name == "delete" and any(
+                isinstance(inner, ast.Name) and inner.id == _CREDENTIAL_TABLE
+                for inner in ast.walk(call)
+            ):
+                hit = True
+        if hit:
+            sites.append(f"{relative}::{owner}")
+    return sorted(set(sites))
 
 
 def test_the_credential_link_is_written_only_at_frozen_sites() -> None:
     """``local_admins.user_id`` 是第四张授权事实，和另外三张一个待遇。
 
-    **不跳过任何模块。** 上一版整体跳过 ``identity.py`` / ``postgres.py``，于是
-    同一个模块里新增一个错误的写入口也不会报警。
+    **不跳过任何模块。** V5 整体跳过 ``identity.py`` / ``postgres.py``，于是同一个
+    模块里新增一个错误的写入口也不会报警。
     """
     bad: list[str] = []
     for module in sorted(_SRC.rglob("*.py")):
-        bad += [s for s in _credential_link_writes(module) if s not in _CREDENTIAL_LINK_SITES]
+        bad += [
+            s for s in _credential_link_writes(module) if s not in _CREDENTIAL_LINK_SITES
+        ]
     assert bad == [], f"目录链接列出现了第二条写路径：{bad}"
 ```
 
@@ -5259,31 +5691,79 @@ def test_the_helper_discovery_finds_a_newly_added_candidate_taker(
     )
 
 
-def test_the_credential_guard_catches_the_mapping_form(tmp_path: Path) -> None:
-    """``values({LOCAL_ADMINS.c.user_id: v})`` 与关键字写法等价，必须同样被抓。"""
-    module = _sample(
+_CREDENTIAL_LINK_FORMS: Final[tuple[tuple[str, str], ...]] = (
+    ("关键字", "sa.update(LOCAL_ADMINS).values(user_id=value)"),
+    ("列对象键", "sa.update(LOCAL_ADMINS).values({LOCAL_ADMINS.c.user_id: value})"),
+    ("字符串键", 'sa.update(LOCAL_ADMINS).values({"user_id": value})'),
+    ("下标列键", 'sa.update(LOCAL_ADMINS).values({LOCAL_ADMINS.c["user_id"]: value})'),
+)
+"""四种写法生成**完全相同**的 UPDATE。V6 的守卫只认前两种。"""
+
+_CREDENTIAL_LINK_OPAQUE: Final[tuple[tuple[str, str], ...]] = (
+    ("变量键", "sa.update(LOCAL_ADMINS).values({column: value})"),
+    ("字典展开", "sa.update(LOCAL_ADMINS).values(**patch)"),
+    ("整行删除", "sa.delete(LOCAL_ADMINS)"),
+)
+"""静态判不出写哪一列，或不经 ``values()`` 就解除链接。判不出必须报警。"""
+
+_CREDENTIAL_LINK_CONTROLS: Final[tuple[tuple[str, str], ...]] = (
+    ("改密关键字", "sa.update(LOCAL_ADMINS).values(password_hash=value)"),
+    ("改密列对象键", "sa.update(LOCAL_ADMINS).values({LOCAL_ADMINS.c.password_hash: value})"),
+    ("改密字符串键", 'sa.update(LOCAL_ADMINS).values({"password_hash": value})'),
+    ("别的表写 user_id", "sa.insert(USER_ROLE_ASSIGNMENTS).values(user_id=value)"),
+    ("只读凭据表", "sa.select(LOCAL_ADMINS.c.user_id)"),
+)
+"""正常对照。改密是凭据不是授权，误报会让这条守卫被放宽成不守。"""
+
+
+def _credential_sample(tmp_path: Path, expression: str) -> Path:
+    return _sample(
         tmp_path,
         "local_admin.py",
         "import sqlalchemy as sa\n"
-        "from xiaowei_agent.persistence.schema import LOCAL_ADMINS\n"
+        "from xiaowei_agent.persistence.schema import (\n"
+        "    LOCAL_ADMINS,\n"
+        "    USER_ROLE_ASSIGNMENTS,\n"
+        ")\n"
         "\n"
-        "def link(connection, value):\n"
-        "    return sa.update(LOCAL_ADMINS).values({LOCAL_ADMINS.c.user_id: value})\n",
+        "def link(connection, value, column, patch):\n"
+        f"    return {expression}\n",
     )
-    assert _owners_credential(module) == {"link"}
 
 
-def test_the_credential_guard_catches_the_keyword_form(tmp_path: Path) -> None:
-    module = _sample(
-        tmp_path,
-        "local_admin.py",
-        "import sqlalchemy as sa\n"
-        "from xiaowei_agent.persistence.schema import LOCAL_ADMINS\n"
-        "\n"
-        "def link(connection, user_id):\n"
-        "    return sa.update(LOCAL_ADMINS).values(user_id=user_id)\n",
-    )
-    assert _owners_credential(module) == {"link"}
+@pytest.mark.parametrize(("label", "expression"), _CREDENTIAL_LINK_FORMS)
+def test_every_equivalent_credential_link_write_is_caught(
+    tmp_path: Path, label: str, expression: str
+) -> None:
+    """四种等价写法必须全部命中。
+
+    V6 枚举的是两种**写法**，于是另外两种生成相同 UPDATE 的写法整条漏过。守卫
+    现在提取 ``values()`` 实际写入的列，写法就不再是判据。
+    """
+    module = _credential_sample(tmp_path, expression)
+    assert _credential_link_writes(module, module.name) == ["local_admin.py::link"], label
+
+
+@pytest.mark.parametrize(("label", "expression"), _CREDENTIAL_LINK_OPAQUE)
+def test_an_unprovable_credential_write_is_reported_not_waved_through(
+    tmp_path: Path, label: str, expression: str
+) -> None:
+    """判不出写哪一列，就报出来。
+
+    一条把"我判不出来"当成"它合规"的守卫，等于给绕过它的人附了一份说明书。
+    ``sa.delete(LOCAL_ADMINS)`` 一并纳入：删掉整行同样解除了目录链接。
+    """
+    module = _credential_sample(tmp_path, expression)
+    assert _credential_link_writes(module, module.name) == ["local_admin.py::link"], label
+
+
+@pytest.mark.parametrize(("label", "expression"), _CREDENTIAL_LINK_CONTROLS)
+def test_credential_writes_that_are_not_the_link_column_are_not_flagged(
+    tmp_path: Path, label: str, expression: str
+) -> None:
+    """正常对照：改密、别的表、只读，一律放行。"""
+    module = _credential_sample(tmp_path, expression)
+    assert _credential_link_writes(module, module.name) == [], label
 
 
 def test_the_credential_guard_catches_a_wrong_owner_inside_an_allowed_module(
@@ -5299,64 +5779,12 @@ def test_the_credential_guard_catches_a_wrong_owner_inside_an_allowed_module(
         "class PostgresLocalAdminStore:\n"
         "    async def relink(self, connection, user_id):\n"
         "        await connection.execute(\n"
-        "            sa.update(LOCAL_ADMINS).values(user_id=user_id)\n"
+        '            sa.update(LOCAL_ADMINS).values({"user_id": user_id})\n'
         "        )\n",
     )
-    owners = _owners_credential(module)
-    assert owners == {"PostgresLocalAdminStore.relink"}
-    assert not any(
-        f"persistence/postgres.py::{o}" in _CREDENTIAL_LINK_SITES for o in owners
-    )
-
-
-def test_changing_the_local_admin_password_is_not_flagged(tmp_path: Path) -> None:
-    """正常对照：改密改的是凭据不是授权，必须放行。"""
-    module = _sample(
-        tmp_path,
-        "local_admin.py",
-        "import sqlalchemy as sa\n"
-        "from xiaowei_agent.persistence.schema import LOCAL_ADMINS\n"
-        "\n"
-        "def rotate(connection, password_hash):\n"
-        "    return sa.update(LOCAL_ADMINS).values(password_hash=password_hash)\n",
-    )
-    assert _owners_credential(module) == set()
-
-
-def _owners_credential(module: Path) -> set[str]:
-    """反例模块不在 ``_SRC`` 下，复制判定逻辑的 owner 部分。"""
-    out: set[str] = set()
-    for owner, node in _walk(module):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call):
-                continue
-            subtree = list(ast.walk(call))
-            touches = any(
-                isinstance(n, ast.Name) and n.id == "LOCAL_ADMINS" for n in subtree
-            )
-            writes = any(
-                isinstance(n, ast.Call)
-                and (
-                    n.func.attr
-                    if isinstance(n.func, ast.Attribute)
-                    else getattr(n.func, "id", "")
-                )
-                in _WRITE_CALLS
-                for n in subtree
-            )
-            by_keyword = any(k.arg == "user_id" for k in call.keywords)
-            by_mapping = any(
-                isinstance(n, ast.Attribute)
-                and n.attr == "user_id"
-                and isinstance(n.value, ast.Attribute)
-                and n.value.attr == "c"
-                for n in subtree
-            )
-            if touches and writes and (by_keyword or by_mapping):
-                out.add(owner)
-    return out
+    found = _credential_link_writes(module, "persistence/postgres.py")
+    assert found == ["persistence/postgres.py::PostgresLocalAdminStore.relink"]
+    assert found[0] not in _CREDENTIAL_LINK_SITES
 
 
 def test_the_frozen_sites_are_still_allowed() -> None:
@@ -5368,18 +5796,14 @@ def test_the_frozen_sites_are_still_allowed() -> None:
         assert site in _AUTHZ_WRITE_SITES
         assert site in _AUDIT_WRITE_SITES
         assert site in _CREDENTIAL_LINK_SITES
-    assert (
-        "persistence/postgres.py::PostgresAdminAuditStore._write" in _AUDIT_WRITE_SITES
-    )
-    # 审计 store 不许碰授权表，也不许碰凭据链接列。
-    assert (
-        "persistence/postgres.py::PostgresAdminAuditStore._write"
-        not in _AUTHZ_WRITE_SITES
-    )
-    assert (
-        "persistence/postgres.py::PostgresAdminAuditStore._write"
-        not in _CREDENTIAL_LINK_SITES
-    )
+    assert _AUDIT_WRITE_SITES == frozenset(
+        {"persistence/postgres.py::_insert_audit_event"}
+    ), "审计表只能有一处 INSERT；多一处就等于多一份冲突判定"
+    # 那一处落库不许碰授权表，也不许碰凭据链接列。
+    assert "persistence/postgres.py::_insert_audit_event" not in _AUTHZ_WRITE_SITES
+    assert "persistence/postgres.py::_insert_audit_event" not in _CREDENTIAL_LINK_SITES
+    # 反过来：目录写入点不得直接写审计表，它们只能经 _insert_audit_event。
+    assert not (_AUTHZ_WRITE_SITES & _AUDIT_WRITE_SITES)
 ```
 
 - [ ] **Step 2: 写 PII 暴露守卫**
@@ -5465,6 +5889,8 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -m security -q 2>&1 | tail -5
 
 - [ ] **Step 4: 隔离变异反证**
 
+PII 守卫：
+
 ```bash
 cp src/xiaowei_agent/contracts/identity.py /tmp/keep-pii.py
 python - <<'MUT'
@@ -5479,10 +5905,51 @@ p.write_text(t)
 MUT
 PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_controlled_pii_exposure.py -q 2>&1 | tail -5
 cp /tmp/keep-pii.py src/xiaowei_agent/contracts/identity.py && rm /tmp/keep-pii.py
+```
+
+写入口守卫：**四条变异，每条对应某一版守卫真实放过的一种情况**，逐条确认只有它
+该红的那条红。每条做完立刻还原，不要叠加——叠加之后分不清是哪一条触发的。
+
+```bash
+cp src/xiaowei_agent/persistence/postgres.py /tmp/keep-pg.py
+mutate() {  # $1=追加的代码  $2=说明
+  cp /tmp/keep-pg.py src/xiaowei_agent/persistence/postgres.py
+  printf '\n\n%s\n' "$1" >> src/xiaowei_agent/persistence/postgres.py
+  echo "--- 变异：$2"
+  PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/security/test_identity_write_path.py -q 2>&1 | tail -3
+}
+
+# 1. 新增一个接受完整候选的私有 helper —— 按签名发现应把它揪出来
+mutate 'class _Rogue:
+    async def _stash(self, connection, candidate: AdminAuditCandidate) -> None:
+        await _insert_audit_event(connection, candidate, now=self._clock())' \
+  '新的完整候选 helper（V5 按名字冻结时会漏）'
+
+# 2. 模块外调用唯一落库口 —— 调用点守卫应该报警
+mutate 'async def _forge(connection, candidate, now):
+    return await _insert_audit_event(connection, candidate, now=now)' \
+  '未授权的落库口调用点'
+
+# 3. 字符串键写 user_id，错误 owner，在允许模块内 —— V6 两处都漏
+mutate 'class _RogueLink:
+    async def relink(self, connection, user_id):
+        await connection.execute(
+            sa.update(LOCAL_ADMINS).values({"user_id": user_id})
+        )' \
+  '字符串键 + 错误 owner + 允许模块内（V6 漏）'
+
+# 4. 第二条审计 INSERT —— _AUDIT_WRITE_SITES 现在是单元素集合
+mutate 'async def _second_audit_insert(connection, row):
+    await connection.execute(sa.insert(ADMIN_AUDIT_EVENTS).values(row))' \
+  '第二条 INSERT INTO admin_audit_events'
+
+cp /tmp/keep-pg.py src/xiaowei_agent/persistence/postgres.py && rm /tmp/keep-pg.py
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -m security -q 2>&1 | tail -3
 ```
 
-预期：变异后变红；还原后全绿。
+预期：四条变异各自变红，且**红的是对应的那一条用例**（不是整文件语法错）；四次还原
+后 security gate 全绿。若某条变异没红，说明那条守卫仍在识别写法而不是属性——先修
+守卫，不要改变异。
 
 - [ ] **Step 5: 提交**
 
@@ -6121,7 +6588,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_doc_fact_binding.
 
 - `ARCHITECTURE.md`：在组件表加入 `UserDirectory` 与 `AdminAuditStore` 两行（职责/禁止逐字取自规格 §12），并写明两条不变量：「四张授权表只有 `UserDirectoryStore.apply()` 一个**唯一写入口**」与「授权改变与审计同事务，**审计不可写**即 fail-closed」。
 - `DEVELOPMENT_PLAN.md`：把 W1a 标为已交付，下一项为 W1b；**不改** W4c/R1 的独立阻塞门位置。
-- `AGENT_HANDOFF.md`：第 0 节改为"W1a 写内核已离线实现"，记录实现基线 SHA、四门实测数字、变异反证结论；明确写出**未覆盖**：没有激活审批、没有 Admin 页面、没有登录改造、没有真实飞书调用、没有部署与用户验收；以及**残余风险**：既有 `AuthenticatedPrincipal.subject_ref` 仍未标 PII 遮蔽（本阶段未触碰渠道投影，留待 W2）。
+- `AGENT_HANDOFF.md`：第 0 节改为"W1a 写内核已离线实现"，记录实现基线 SHA、四门实测数字、变异反证结论；明确写出**未覆盖**：没有激活审批、没有 Admin 页面、没有登录改造、没有真实飞书调用、没有部署与用户验收；以及**残余风险**：既有 `AuthenticatedPrincipal.subject_ref` 仍未标 PII 遮蔽（本阶段未触碰渠道投影，留待 W2）；三条 AST 守卫的静态上限（别名/`Any`/未注解参数绕得过签名发现、运行时算出来的列名只能报警不能判定、`sa.text("insert into ...")` 不在视野内）按 Exit Criteria 那段**原样抄进 handoff**，不得写成『已封死』；engine 未开 `hide_parameters=True` 是全仓库既有状态，本阶段不改，仓库对该风险的既有答案是 `_persistence_boundary` 切断异常链。
 
 - [ ] **Step 4: 深档自审**
 
@@ -6175,7 +6642,9 @@ W1a 只有同时满足以下条件才可判定完成：
 - `operation_id` **不是**全局唯一，两条 partial unique index 的存在与 WHERE 由离线结构用例钉住，终态那条由套件用例在两个实现上行为验证；结构用例的 helper 自带『partial 不等于全局』的自证反例；
 - `AdminAuditStore` 按 `DEVELOPMENT_PLAN.md:178` / `ADR-013:131` 交付 append-only 写契约，表面恰好是 `append_started` / `append_terminal` / `append_denied` / `load`；**内存与 PostgreSQL 两个实现的公开表面都精确等于它**，由 `test_protocol_conformance.py` 的 `==` 断言钉住；三个方法都写不出目录成功事实（目录动作在 `AdminAuditStart` 契约层即被拒，两个实现共用这条规则）；目录成功事实只由 `apply()` 在改动所在事务里派生并 INSERT；
 - 接受完整 `AdminAuditCandidate` 的助手由守卫**按签名发现**（不是按名字冻结），发现结果与声明名单 `==`，调用点全部 owner-qualified 冻结，并带『新增一个收候选的 helper』与『外部模块调用它伪造成功』两条反例；
-- `local_admins.user_id` 守卫认关键字与 mapping 两种写法，且**不跳过任何模块**，带『允许模块内的错误 owner』反例与『改密不误伤』正常对照；
+- `local_admins.user_id` 守卫提取 `values()` **实际写入的列**（关键字、字符串键、列对象键、下标列键四种等价写法逐一有反例），静态判不出写哪一列的形式（变量键、`**` 展开）与 `sa.delete(LOCAL_ADMINS)` 同样报警，且**不跳过任何模块**；带『允许模块内的错误 owner』反例与三条『改密不误伤』正常对照；反例调用守卫本身，不调用它的副本；
+- 错误语义只有矩阵一那一份：全文任何一处 `AdminAuditConflictError` / `AdminAuditUnwritableError` / `UserDirectoryConflictError` / `PersistenceIntegrityError` 都能对上矩阵一的某一格，同一个场景在所有章节只有一个答案；
+- `persistence/` 里**没有任何一处**捕获 `IntegrityError` 或读取约束名来判定冲突；已知冲突全部由 `ON CONFLICT DO NOTHING ... RETURNING` 探测，未知约束落到 `PersistenceIntegrityError` 并有真库用例钉住；`INSERT INTO admin_audit_events` 在 PostgreSQL 侧只有 `_insert_audit_event` 一处；四张被探测表的唯一约束集合由离线 `==` 用例钉死；
 - 新 PostgreSQL 代码全部复用既有机制：公开方法 `@_persistence_boundary`、写路径 `_write_transaction`、行↔契约在 `rows.py` 且枚举显式构造；审计事件的契约→列→契约往返有离线恒等用例（succeeded 带 effect 与 denied 不带 effect 各一）；闭集领域错误穿过边界不被收敛，有用例钉住；
 - 五个 `LOCAL_ADMIN_*` 常量在 `contracts/identity.py` 只有一份，`interfaces/local_admin_auth.py` 消费它并不再保留自己的字面量；
 - `role_assigned` / `user_status_changed` / `user_created` / `local_admin_bootstrapped` / `legacy_identity_migrated` 事件携带闭集 effect，且由数据库 CHECK 强制；非成功 outcome 不得携带 effect；
@@ -6195,6 +6664,13 @@ W1a 只有同时满足以下条件才可判定完成：
 - ADR-008 四门全绿；
 - W1a PR 经精确 SHA 复审并由**负责人合入** `main`；
 - handoff 明确记录：没有激活审批、没有 Admin 页面、没有登录改造、没有真实飞书/Gemini/StarRocks 调用、没有部署、canary 或用户验收。
+
+**这些守卫做不到的事，必须原样写进 handoff 的残余风险，不得说成『已封死』：**
+
+- 完整候选 helper 按签名发现，只认参数注解里**字面出现** `AdminAuditCandidate`。用别名（`Candidate = AdminAuditCandidate`）、字符串注解里的别名、`Any`、`object` 或未注解参数，都绕得过去。这是 AST 静态判定的固有上限，不是实现没写好。
+- `local_admins.user_id` 守卫同理：它认得出"这条 `values()` 写了哪些列"，认不出"这条 `values()` 写的列是运行时算出来的"——所以那种形式一律报警。报警不是证明，它只保证这种写法过不了审，不保证没有别的通路。
+- 表写入守卫按 `sa.insert(TABLE)` 这种**语句形状**匹配。`sa.text("insert into ...")` 或把表对象存进变量再传递，都不在它的视野里。仓库当前没有这种写法，但守卫并不禁止它。
+- 以上三条都不是"需要补的漏洞"，而是"这类守卫能做到哪一步"的边界。真正的兜底是 code review 与 `_AUDIT_WRITE_SITES` 这种**单元素**名单：名单越小，绕过它需要的改动就越显眼。
 
 W1a 合入后允许的下一步只有：从最新 `main` 新建分支，重新入职，编写 **W1b 激活内核详细计划**并送审。W1b 计划未获批前不得写它的测试、migration 或源码。
 
@@ -6375,3 +6851,123 @@ V3 只读协议时期的话。已改为说明"公开方法一个都收不下完�
 engine 没有开 `hide_parameters=True`。这是全仓库既有状态，改它会影响每一个 Store 的
 异常行为，超出 W1a 的 allowlist 与变更面。仓库对这个风险的既有答案就是
 `_persistence_boundary` 切断异常链——本轮的修订正是回到这条答案上。已列入残余风险。
+
+---
+
+## V7 修订记录
+
+针对 `1fb9e5ab8f0e995d58ceab2d095b6c8c03d07d4c` 的复审。四条 P1 逐条核实，**全部成立**，
+归成两组根因。本轮的修订方式与前几轮不同：先建单一语义真源（新增的"三张规范矩阵"），
+再沿全文统一修复，不按评论位置逐点打补丁。
+
+### O. 错误语义没有唯一真源（P1-A1 ~ A5）
+
+**根因** —— 同一条规则在四个章节各写了一遍，于是它们各自漂移。最刺眼的证据是
+两条用例：同一个"复用 `operation_id` 调 `apply()`"场景，一条期望
+`AdminAuditUnwritableError`，另一条期望 `AdminAuditConflictError`。两条不可能同时
+通过，而规则散在多处时，没有任何人会看见它们已经分叉。
+
+第二层根因是**凭记忆写驱动行为**。我写下
+`getattr(getattr(exc.orig, "diag", None), "constraint_name", None)`，那是 psycopg
+的接口；本仓库 `pyproject.toml:28` 钉的是 asyncpg。真库实测：`exc.orig` 是
+`sqlalchemy.dialects.postgresql.asyncpg.IntegrityError`，**没有 `.diag`**，只有
+`.sqlstate`。那行代码在真库上恒为 `""`，于是每一次审计冲突都会掉进 else 分支——
+"阶段重复 → `AdminAuditConflictError`" 那条断言**永远不会绿**。同理，`apply()` 外层
+的 `except sa.exc.IntegrityError` 不可达：`_write_transaction` 已经先把它换成了
+`PersistenceIntegrityError`。
+
+**修复位置** ——
+
+| 位置 | 改动 |
+| --- | --- |
+| 新增「三张规范矩阵」 | 错误语义、写入口、事务与冲突探测各一份真源，附实测事实表；后续章节只引用 |
+| 共享套件 | 删掉与回滚用例重复的那个 `apply()` 场景，改成复审点名但原本缺失的"直连 `append_denied` 重复 → `AdminAuditConflictError`" |
+| `PostgresUserDirectoryStore.apply` | 删掉不可达的 `except`；已知冲突改为事务体内 `ON CONFLICT DO NOTHING ... RETURNING` 探测 |
+| `PostgresAdminAuditStore._write` | 同上；不再捕获 `IntegrityError`、不读约束名 |
+| 删除 | `_AUDIT_CONSTRAINTS`、`_classify_directory_integrity_error`、`_raise_audit_conflict_or_defer`、那张"约束名 → 错误"的表，以及其中那条自称"理论上不可达"的 `ck_...` 映射 |
+| 新增静态防线 | `_CONFLICT_TARGETS`：四张表上 `ON CONFLICT` 能吞掉的列组合逐格钉死，`==` 断言 |
+| 新增真库用例 | CHECK 违反（未知/未探测约束）→ `PersistenceIntegrityError(constraint, rolled_back)`，且 `__cause__ is None` |
+
+**归属规则一句话**：谁的公开方法失败，就用谁的错误族。`apply()` 内部的审计冲突叫
+`AdminAuditUnwritableError`，直连 store 叫 `AdminAuditConflictError`；同一条约束、
+两个入口、两个错误族，这是有意的，不是分叉。
+
+**为什么用 `ON CONFLICT` 而不是按复审建议"设计真实的约束名提取逻辑"** —— 复审对
+症状的判断成立，但提议的修法不是这个仓库的做法。`persistence/` 里**没有任何一处**
+捕获 `IntegrityError` 来分类冲突：`create_task`（`postgres.py:1927` 的 docstring 写明
+了理由）、`PlanStore.save`、`append_evidence` 全部用 `ON CONFLICT DO NOTHING ...
+RETURNING`。而约束名只挂在 `exc.orig.__cause__` 上——那条链正是 `_persistence_boundary`
+存在的目的（`str(exc)` 带着被拒绝的整行）。从边界要切断的链里取值来做业务判断，是
+在拆自己的防线。实测确认 `ON CONFLICT DO NOTHING` 恰好吞掉主键/唯一/偏唯一三种冲突，
+而 CHECK、外键、NOT NULL 照抛——分界正好落在"我认识的"与"我不认识的"之间。
+
+**同类问题一起处理（复审未点到）**
+
+- `INSERT INTO admin_audit_events` 原本在两处：目录路径一条、审计 store 一条，只共享列映射。只共享一半的东西会在另一半上分叉，而分叉点正好是"什么算阶段重复"。合并成模块级 `_insert_audit_event`，PostgreSQL 侧**唯一**一处落库。
+- `_AUDIT_WRITE_SITES` 原本写成 `_AUTHZ_WRITE_SITES | {...}`，顺带允许两个目录助手直接写审计表——而它们现在都不需要。收紧成单元素集合，并加一条 `_AUTHZ_WRITE_SITES & _AUDIT_WRITE_SITES == ∅` 的断言。
+- 内存实现 docstring 引用的守卫用例名 `test_the_full_candidate_helper_has_only_derived_call_sites` 不存在（实际叫 `..._helpers_have_only_declared_call_sites`）。与 V4 那次"注释声称的守卫不存在"同一类，改正。
+- 我自己新写的 `_CONFLICT_PROBED_TABLES` 第一版按**约束名**钉。实跑发现：本仓库 `METADATA` 没有 naming convention，主键由 `primary_key=True` 声明、在 metadata 里 `name is None`，那条用例会 `AssertionError` 恒红。改成按**列组合**钉——`ON CONFLICT` 推断的本来就是列不是名字。
+
+### P. AST 守卫仍在识别写法（P1-B）
+
+**根因** —— 与 V6 的 N 组是同一句话的下一层：V6 已经把"按名字"改成了"按签名"，
+却把 `local_admins.user_id` 那条留在了"按写法"。守卫枚举
+`values(user_id=...)` 与 `values({LOCAL_ADMINS.c.user_id: ...})` 两种写法，而
+`values({"user_id": ...})` 和 `values({LOCAL_ADMINS.c["user_id"]: ...})` 生成**完全
+相同**的 UPDATE，整条漏过。枚举写法的守卫永远差一种写法。
+
+**修复位置** —— `_credential_link_writes` 重构为：提取 `values()` **实际写入的列**
+（`_written_columns` + `_column_name_of`），判断里面有没有 `user_id`；允许项仍
+owner-qualified，不跳过任何模块。
+
+**静态判不出的一律报警，不放行。** 变量键 `values({column: v})` 与 `values(**patch)`
+判不出写哪一列——判不出就报出来。一条把"我判不出来"当成"它合规"的守卫，等于给绕过
+它的人附了一份说明书。
+
+**同类问题一起处理（复审未点到）**
+
+- 反例走的是一个叫 `_owners_credential` 的函数，它把判定逻辑**抄了一遍**。反例因此证明的是那份副本正确，守卫本体改没改它都不知道——这正是本轮 O 组要根治的"同一规则两份实现"。`_credential_link_writes` 多收一个 `relative` 参数后，反例直接调用它本身。
+- `sa.delete(LOCAL_ADMINS)` 一并纳入：删掉整行同样解除目录链接，与写 `user_id` 是同一属性上的同一件事。
+- 完整候选 helper 守卫的静态上限（别名、`Any`、未注解参数）如实写进 Exit Criteria 与 handoff 残余风险，**不写成"完全封死"**。
+
+### 先红后绿
+
+| 证据 | 先 | 后 |
+| --- | --- | --- |
+| 真库探针 E1：asyncpg 异常链 | `exc.orig` 无 `.diag`、无 `constraint_name` → 计划里的分流恒为 `""` | 分流整个删除 |
+| 真库探针 E4：`_write_transaction` 之外 `except sa.exc.IntegrityError` | 不命中；外层拿到的是 `PersistenceIntegrityError(constraint, rolled_back)`、`__cause__ is None` | 该 `except` 删除 |
+| 真库探针 E7：不带目标的 `ON CONFLICT DO NOTHING` | 主键/唯一/偏唯一三种冲突 `RETURNING` 为空且不抛；CHECK/外键/NOT NULL 照抛 | 成为矩阵三的机制 |
+| 真库探针 E5：事务体内抛闭集领域错误 | 穿过两层不变形，同事务授权写入回滚（实测行数 0） | 成为"审计写不进去 → 回滚"的实现 |
+| 守卫四种等价写法 | V6：字符串键、下标列键**放行** | 四种全部报警 |
+| 守卫判不出的两种形式 + 整行删除 | V6：三种全部**放行** | 三种全部报警 |
+| 正常对照四条（改密三种写法、别的表、只读） | 放行 | 仍放行 |
+| 计划正文里的守卫（从 Markdown 提取后实跑） | — | 11 条用例全部符合预期；对真实 `src/` 零命中 |
+| 计划正文里的反例用例（提取后 pytest 实跑） | — | `13 passed` |
+| 隔离变异（错误 owner + 下标列键 / `**` 展开 / 整行删除） | 基线绿 | 三条各自转红；合法 owner 改密码仍绿；还原后绿 |
+| `_conflict_targets` 对计划自己声明的四张表 | 按约束名的第一版：主键 `name is None` → 恒红 | 按列组合：四张表逐格相等，helper 自证通过 |
+
+### 本轮删掉的重复与矛盾规则
+
+1. `apply()` 复用 `operation_id` 的**两个**互斥期望 → 只剩一个（回滚用例），另一条改成覆盖原本缺失的直连路径。
+2. `_AUDIT_CONSTRAINTS` + 两处按约束名分流的函数 + 一张"约束名 → 错误"表 → 全部删除。
+3. 其中 `ck_..._directory_actions_are_single_phase → AdminAuditConflictError` 这条自称"理论上不可达"的映射 → 删除并改正：它如实落进 `PersistenceIntegrityError`。
+4. 两处 `INSERT INTO admin_audit_events` → 一处。
+5. `_AUDIT_WRITE_SITES` 的多余允许项 → 单元素集合。
+6. 反例里那份 `_owners_credential` 判定逻辑副本 → 删除，反例直接调用守卫。
+7. `apply()` 外层不可达的 `except sa.exc.IntegrityError` → 删除。
+
+### 未覆盖
+
+- 计划里的代码块**仍然绝大部分未执行**。本轮实跑的是：六项真库探针、守卫本体（从 Markdown 正文提取）、13 条反例用例、三条隔离变异、`_conflict_targets` 对四张表声明的一致性。PostgreSQL 实现本身要等 Task 6 才第一次运行。
+- 真库探针用的是本机 Compose 里那个 PostgreSQL 16.15 容器，建了独立探针库、跑完即删，**没有触碰 `xiaowei` 库**。探针脚本不进仓库：它需要一个跑起来的库和一个能建库的账号，是一次性事实核对，不是可重复回归。它证明的每一条在 Task 6 的集成用例里都有对应断言。
+- `append_started` / `append_terminal` 的成功路径在 W1a 仍无行为覆盖（有意的边界，按 `ADR-013:129` 归 W4a）。
+- 无源码、无 migration、无部署、无用户验收证据。
+- GitHub CI：8 个 job 全部 0 steps，**未执行**。不记作通过。
+
+### 残余风险
+
+- **连续第四轮出现"改了一处、没跟到下一处"这一族。** V4 是 allowlist，V5 是既有契约字段，V6 是持久化边界，V7 是错误语义。本轮的结构性回应是"单一真源 + 引用"，而不是再加一条检查：矩阵存在之后，分叉会变成两处文字不一致，而不是两条用例互斥。这仍然靠人眼核对，没有机械手段。
+- 三张矩阵本身没有机械守卫。正文与矩阵不一致时不会有测试变红。复审项第 12 条就是为此设的核对方式。
+- AST 守卫的静态上限：别名 / `Any` / 未注解参数绕得过签名发现；运行时算出来的列名只能报警不能判定；`sa.text("insert into ...")` 不在视野内。这些是这类守卫的能力边界，不是没写好，**不得说成"已封死"**。真正的兜底是 `_AUDIT_WRITE_SITES` 这种单元素名单——名单越小，绕过它需要的改动越显眼。
+- engine 未开 `hide_parameters=True`，全仓库既有状态，本阶段不改（见上一节）。
+- `AuthenticatedPrincipal.subject_ref` 仍未标 PII 遮蔽，留给 W2。
