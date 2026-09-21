@@ -30,7 +30,7 @@
 - W0 只证明**文档与 ADR 真源已收口**，不是本阶段任何源码、迁移、部署、真实调用或用户验收的证据。
 - 编写本计划前已按 `AGENTS.md` 顺序读取 `ARCHITECTURE.md`、`AGENT_HANDOFF.md`、`README.md`、`DEVELOPMENT_PLAN.md`，并读取规格、ADR-013 修订，以及 `contracts/{enums,channel,base}.py`、`persistence/{schema,store,local_admin,rows,errors,fake,memory,postgres}.py`、`persistence/migrations/{guards.py,runner.py,versions/rev_0013_*.py}`、`interfaces/{feishu_identity,local_admin_auth,local_stack}.py`、`tests/suites/`、`tests/integration/conftest.py`、`tests/integration/test_migration_paths.py`、`tests/contract/test_schema_matches_migration.py` 的现有形状。
 - 计划分支实测四门：`3977 passed, 269 skipped` / security `1447 passed, 83 skipped, 2716 deselected` / `ruff` 全绿 / `mypy` 189 个文件无问题；文档契约 `47 passed`。实现者必须从届时最新 `main` 重新跑取当期数字，**不得**把本行当作未来运行结果。
-- 本计划为 V10。前九版的返工来历见文末「返工来历」，只作教训保留，不再是当前规则。
+- 本计划为 V11。前十版的返工来历见文末「返工来历」，只作教训保留，不再是当前规则。
 
 ## Global Constraints
 
@@ -46,6 +46,7 @@
 - **一次操作最多一条 STARTED 和一条终态事件。** `operation_id` **不能**全局唯一（会堵死规格 §14.2 的两阶段配置审计）；用两条 partial unique index 表达。
 - **`subject_ref` 是受控 PII。** 飞书 `open_id` 在新契约上必须 `exclude=True, repr=False`，数据库只存 domain-separated 摘要，不进普通日志、trace、异常和审计正文。
 - **所有持久 ID 有界。** 由外部输入派生的 ID 必须经摘要截断得到有界值，**不得**直接拼接 actor 这类没有长度上限的外部字符串。
+- **长度边界必须两端闭合。** 新契约的上限，和它要接收的旧数据的实际取值范围，必须对得上。契约收得比输入紧，就是把一批真实旧数据永久挡在门外；收得比输入松，超长值会一路写到库里。所以三个上限在本计划里是**确定值**：`_ID = 64`、`_NAME = 128`、`_ACTOR = 256`。超出上限的旧数据是**整批零写入**的错误，不是"截断后继续"；只有 `display_name` 这一个**纯显示**字段允许截断，因为它不参与任何身份或授权判定。凡是写下"超长就拒"的地方，都必须能在另一处指出这个阈值之下的旧数据是完整迁移的——两句话不能同时为真又互不相干。
 - **认证生命周期事件不进 `AdminAuditStore`。** 登录成功/失败、改密、登出走结构化安全日志；不新建第二套认证审计表。改密因此仍留在 `LocalAdminStore`：它改的是凭据，不是授权。
 - **不提前建无消费者的名单。** 不创建 requester/approver 表、列或枚举成员；旧 `approver` 标签只进迁移报告，不生效任何授权。DBA/值班绑定属于 W3。
 - **旧静态 JSON 不双写。** 迁移成功后静态文件保留只读一个发布周期；本阶段不删除它，也不让它与数据库目录同时成为写入目标。
@@ -187,7 +188,7 @@ src/xiaowei_agent/_conformance.py
 tests/**
 ARCHITECTURE.md
 AGENT_HANDOFF.md
-DEVELOPMENT_PLAN.md
+README.md
 ```
 
 几条不显然的说明：
@@ -350,7 +351,11 @@ def channel_permissions(*, role: ProductRole) -> frozenset[ChannelPermission]: .
 
 **身份目录契约**（`contracts/identity.py`）。`ControlledPii = StrictStr`，凡这样标注的字段必须同时
 写 `exclude=True, repr=False`；`_ID = Field(min_length=1, max_length=64)`，
-`_NAME = (1, 128)`，`_PII = (1, 128, exclude, repr=False)`。
+`_NAME = (1, 128)`，`_ACTOR = (1, 256)`，`_PII = (1, 128, exclude, repr=False)`。
+对应关系是固定的：`user_id` / `tenant_id` / `environment_id` / `created_by` 用 `_ID`，`actor` 用
+`_ACTOR`，`display_name` 用 `_NAME`，`subject_ref` 用 `_PII`。`_ACTOR` 比 `_NAME` 宽，是因为 `actor`
+是**身份**、不可截断，而它要接收的旧静态文档对 actor 没有任何长度上限
+（`src/xiaowei_agent/interfaces/feishu_identity.py:40`）；256 这个数怎么落到旧数据上，见切片 C.1 的转换策略。
 
 ```python
 class UserAccount(Contract):
@@ -526,7 +531,7 @@ if not context.is_offline_mode():
 | `test_bootstrap_command_never_exposes_the_password_hash` | 口令哈希 `exclude` + `repr=False` |
 | `test_migration_command_carries_the_whole_batch_and_hides_open_ids` | 批量是一个命令，且不泄 `open_id` |
 | `test_migration_command_rejects_an_empty_batch` | 空批次是错误，不是 no-op |
-| `test_identifier_fields_are_bounded` | 超长 `user_id` / `actor` 在契约层就被拒 |
+| `test_identifier_fields_are_bounded` | 三个上限的两侧都写死：65 字符 `user_id`、257 字符 `actor`、129 字符 `display_name` 被拒；**正对照**：64 / 256 / 128 全部被接受——只断"拒"不断"收"的界，把上限改成 1 也照样绿 |
 | `test_bind_command_requires_a_non_empty_subject_ref` | 空 subject 不是合法绑定 |
 | `test_the_local_admin_principal_consumes_the_contract_constants` | 五个常量只有一份，且 `local_admin_auth.py` 里不再有那几个字面量 |
 
@@ -977,8 +982,18 @@ test -z "$(git status --porcelain)" || {
 
 ## 切片 C. 旧身份迁移
 
-**目标：** 把旧静态 JSON 里的身份标签一次性、原子地迁进数据库目录，并把三份当前真源文档改成
+**目标：** 把旧静态 JSON 里的身份标签一次性、原子地迁进数据库目录，并把当前真源文档改成
 "W1a 写内核已实现"。这是唯一对**既有部署数据**产生影响的一步。
+
+**改哪几份文档不是自选题。** `tests/contract/test_doc_fact_binding.py:987` 的 `_CURRENT_TRUTH_DOCS`
+把 `ARCHITECTURE.md`、`DEVELOPMENT_PLAN.md`、`AGENT_HANDOFF.md`、`README.md` 四份同时列为当前事实
+文档。而 `README.md:16` 到 `README.md:19` 现在逐字写着本阶段是 W1a 计划送审、没有 `UserAccount`、`AdminAuditStore`、`rev_0014`
+或任何源码，计划获批后才可开始实现。三个切片全部完成、所有用例全绿之后，这句话就是假的，
+而四门依旧全绿——这正是验收假绿。所以 `README.md` 必须进本切片的 Files、allowlist 和 `git add`。
+
+**反过来，`DEVELOPMENT_PLAN.md` 本切片不改。** `AGENTS.md:155` 规定它只写里程碑顺序、决策门、
+交付物、退出标准，**不写里程碑进度和验证证据**，那些只放 `AGENT_HANDOFF.md`。W1a 没有改变任何
+交付物或退出标准，所以它一行不动。上一版把它列进 `git add` 而把 `README.md` 漏掉，两头都错。
 
 **Files:**
 - Modify: `src/xiaowei_agent/interfaces/feishu_identity.py`
@@ -987,7 +1002,7 @@ test -z "$(git status --porcelain)" || {
 - Test: `tests/contract/test_legacy_identity_migration.py`
 - Modify: `ARCHITECTURE.md`
 - Modify: `AGENT_HANDOFF.md`
-- Modify: `DEVELOPMENT_PLAN.md`
+- Modify: `README.md`
 - Modify: `tests/contract/test_doc_fact_binding.py`
 
 ### C.1 接口形状
@@ -1001,10 +1016,15 @@ labels 的只读解析契约，让两条路径共用同一个解析器——不�
 规则、大小上限、权限位检查，也不改变任何现有调用方的行为。
 
 ```python
-# interfaces/feishu_identity.py —— 把私有的 `_IdentityEntry` 改名公开，字段与校验一字不改，
-# 只给 subject_ref 补 exclude=True, repr=False（它是受控 PII）
+# interfaces/feishu_identity.py —— 把私有的 `_IdentityEntry` 改名公开。值域、数量边界、校验规则
+# 一字不改（下面这行就是 feishu_identity.py:41-43 的原样），只给 subject_ref 补
+# exclude=True, repr=False（它是受控 PII）
 class LegacyIdentityEntry(Contract):
-    subject_ref: ControlledPii; actor: StrictStr; labels: tuple[StrictStr, ...]
+    subject_ref: ControlledPii
+    actor: StrictStr                                   # 旧文档对 actor 无长度上限，保持无上限
+    labels: tuple[
+        Literal["operator", "dba", "oncall", "viewer", "approver", "admin"], ...
+    ] = Field(min_length=1, max_length=6)
 
 def read_legacy_identity_document(
     *, path: str, tenant_id: str, environment_id: str
@@ -1030,8 +1050,26 @@ async def migrate_static_identities(
 artifact 时才决定它的映射。现在给它任何高于 `USER` 的东西，都是在凭空生效一份没有消费者的授权。
 它只进 `deferred_labels` 报告。
 
-`legacy_user_id` **不直接拼 actor**：静态解析器对 actor 没有长度上限，而 `user_id` 契约上限是 64。
-拼接的话，一个长 actor 会在写库时才炸，而且是在批量中途。用 domain-separated 摘要截断。
+**`labels` 保持六成员闭集，数量边界保持 1–6。** 这一条单独写出来，是因为上一版把它写成了
+`tuple[StrictStr, ...]`——那会让今天被拒的空标签、未知标签、7 项标签全部变成合法输入，**改变既有
+飞书身份解析行为**，而未知标签一路走到 §6.6 映射表时会变成一个非结构化的 `KeyError`，不是
+fail-closed 的拒绝。公开化只改可见性和 `subject_ref` 的 `exclude` / `repr`，不改值域。
+
+**长度转换策略（三个字段各走各的）。** 旧文档对 actor 没有上限，而新契约有，两端必须在这里接上：
+
+| 目标字段 | 上限 | 旧 actor 怎么变成它 | 超限时 |
+| --- | --- | --- | --- |
+| `user_id` | 64 | `legacy_user_id(actor=...)`，domain-separated 摘要截断；**不拼 actor** | 不可能超限，摘要定长 |
+| `actor` | 256 | **原样搬过去，不截断**——它是身份，截断会把两个人合成一个 | 整批零写入 |
+| `display_name` | 128 | 由 actor 截断到 128 | 不适用，按定义总能装下 |
+
+于是 256 这个阈值两侧的行为都是确定的：**≤ 256 字符的 actor 完整迁移**，`actor` 列里存的就是原值；
+**> 256 字符的 actor 让整批零写入**，在组装 `MigrateLegacyIdentitiesCommand` 时就被契约拒绝，
+发生在任何 `apply()` 之前，因此不存在"写了一半"的状态。实现时把那一次 `ValidationError` 转成
+`LegacyMigrationConflictError`，不要让 pydantic 的异常泄到调用方。
+
+这也是上一版自相矛盾的地方：切片 A 写"超长 actor 在契约层就被拒"，切片 C 写"200 字符的 actor
+不会炸"，却从没给出那个上限是多少——两句话可以同时是对的，也可以同时是错的，无法验证。
 
 ### C.2 关键不变量
 
@@ -1058,7 +1096,13 @@ artifact 时才决定它的映射。现在给它任何高于 `USER` 的东西，
 `test_reading_enforces_the_same_scope_check_as_before`、
 `test_reading_never_echoes_the_document_on_failure`、
 `test_the_existing_directory_loader_still_behaves_identically`（既有调用方零行为变化）、
-`test_the_public_entry_hides_the_open_id`。
+`test_the_public_entry_hides_the_open_id`、
+`test_empty_labels_are_still_rejected`、
+`test_an_unknown_label_is_still_rejected`、
+`test_more_than_six_labels_are_still_rejected`。
+
+**后三条是"公开化没有放宽值域"的证据**，不是凑数：它们逐条对应上一版会误放进来的三类输入。
+把 `labels` 写回 `tuple[StrictStr, ...]` 时，这三条必须同时变红。
 
 `tests/contract/test_legacy_identity_migration.py`：
 
@@ -1070,7 +1114,9 @@ artifact 时才决定它的映射。现在给它任何高于 `USER` 的东西，
 | `test_rerunning_the_migration_changes_nothing` | **正常对照**：完整迁移过的条目判 `skipped`，迁移可重跑 |
 | `test_a_database_conflict_leaves_zero_rows_behind` | 整批原子性；冲突必须制造在**数据库既有事实**上——在输入文件里放两个相同 actor 测到的是解析器，解析期就被拒了 |
 | `test_every_migrated_entry_writes_its_own_audit_event` | 每条一个审计，动作与结果正确 |
-| `test_derived_ids_stay_within_the_contract_bounds` | 200 字符的 actor 不会在批量中途炸 |
+| `test_a_256_character_actor_migrates_whole` | 上限之内**完整迁移**：`actor` 列逐字等于原值（没被截断），`user_id` 是摘要且 ≤ 64，`display_name` 截到 128 |
+| `test_an_actor_beyond_the_contract_bound_writes_zero_rows` | 上限之外**整批零写入**：257 字符 actor 抛 `LegacyMigrationConflictError`，同批次里合法的那一条也没进库，审计一条没多 |
+| `test_the_bound_failure_happens_before_any_apply` | 上一条红在"命令组装期"而不是"写到一半"：断言 `UserDirectoryStore.apply()` 从未被调用 |
 | `test_report_never_contains_a_plaintext_open_id` | 不变量 3 |
 | `test_an_account_without_its_binding_is_a_conflict_not_a_skip` | 不变量 2 的"绑定缺失"一格；同时断言批次里**另一条**没写进去、审计一条没多 |
 | `test_a_role_that_no_longer_matches_is_a_conflict` | 不变量 2 的"角色不符"一格 |
@@ -1096,8 +1142,15 @@ artifact 时才决定它的映射。现在给它任何高于 `USER` 的东西，
   `test_truth_docs_do_not_claim_activation_or_admin_ui_exists`、
   `test_the_activation_claim_guard_is_discriminating`（反证：那条守卫不能宽到什么都抓不到）、
   `test_naming_a_future_component_with_its_phase_is_allowed`（正常对照：写"W1b 将提供 X"合法）、
-  `test_handoff_names_w1b_as_the_only_post_merge_next_step`。
-- 三份文档**不得**声称激活流程、登录改造、Admin 页面、真实飞书调用、部署或用户验收已经存在。
+  `test_handoff_names_w1b_as_the_only_post_merge_next_step`、
+  `test_readme_no_longer_says_w1a_has_no_source`（README 顶部不再出现"没有 W1a 源码"
+  "计划送审""计划获批后才可开始"这类字面量；它现在说的是"W1a 离线写内核已实现，下一步 W1b"）、
+  `test_the_readme_guard_is_discriminating`（反证：把 README 那段改回旧措辞，上一条必须变红——
+  否则它就是一条抓不到东西的守卫）、
+  `test_development_plan_carries_no_implementation_progress`（`AGENTS.md:155`：进度与证据只放
+  handoff。这一条同时说明本切片为什么**不**改 `DEVELOPMENT_PLAN.md`）。
+- 四份当前真源文档**都不得**声称激活流程、登录改造、Admin 页面、真实飞书调用、部署或用户验收
+  已经存在——包括本切片新纳入的 `README.md`。
 - 提交后 `git status --porcelain` 为空。
 
 ```bash
@@ -1106,7 +1159,7 @@ git add src/xiaowei_agent/interfaces/feishu_identity.py \
         tests/contract/test_legacy_identity_document.py \
         tests/contract/test_legacy_identity_migration.py \
         tests/contract/test_doc_fact_binding.py \
-        ARCHITECTURE.md AGENT_HANDOFF.md DEVELOPMENT_PLAN.md
+        ARCHITECTURE.md AGENT_HANDOFF.md README.md
 git commit -m "feat(w1a): migrate legacy identity labels in one atomic command
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
@@ -1178,7 +1231,13 @@ test -z "$(git status --porcelain)" || {
 | V7 | 错误语义没有唯一真源；按 psycopg 的 `exc.orig.diag` 取约束名，而本仓库用 asyncpg |
 | V8 | 片段各自验证过，但从没按最终形状拼起来跑过——拼出来的守卫文件带着一组互斥断言 |
 | V9 | 与既有代码的接缝只写了自己那一端：调用既有函数没核对签名，给既有契约加字段没跟到读取路径 |
-| V10（本版） | 主动降级的用例不还原 schema，会污染后续集成测试；反例与变异没有真正撤掉目标保护 |
+| V10 | 主动降级的用例不还原 schema，会污染后续集成测试；反例与变异没有真正撤掉目标保护 |
+| V11（本版） | 收缩时把旧契约的值域和长度上限重写成了更宽的形状，且两个切片对同一个上限给出互相矛盾的要求；文档同步漏掉 `README.md`，而 `README.md` 正是四份当前真源之一 |
+
+**V11 的两处都属于同一类：收缩时只跟到了自己写的那一端。** `labels` 写成 `tuple[StrictStr, ...]`
+是没回头看既有实现；一个上限在切片 A 说"拒"、在切片 C 说"过"，是没把两个切片放在一起读；
+`README.md` 漏掉，是没回头看 `_CURRENT_TRUTH_DOCS` 到底列了几份。收缩本身是对的，但收缩过的
+每一处，都要拿既有代码和既有契约再对一遍——这正是 V9 那条根因的复发形式。
 
 **V10 同时做了一件结构性的事：把计划从 8100 行收缩到现在这个规模。** 前九轮里有五轮的缺陷
 出在计划里那些从未运行过的代码片段上。它们看着像证据，其实一行都没跑过；而在真实代码上，
