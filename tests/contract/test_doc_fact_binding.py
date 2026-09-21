@@ -990,7 +990,29 @@ _CURRENT_TRUTH_DOCS: Final[tuple[str, ...]] = (
     "AGENT_HANDOFF.md",
     "README.md",
 )
-_W0_BASELINE: Final[str] = "b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed"
+_MAIN_BASELINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"`main@([0-9a-f]{40})`")
+"""handoff 里引用某个 `main` 基线的写法。"""
+
+_CURRENT_BASELINE_MARKER: Final[str] = "- **当前基线**："
+"""当前基线的唯一规范出处。
+
+不写死某一轮的 SHA：那样的守卫只在写它的那一轮为真，下一轮必然误报，
+而误报的守卫最终会被放宽——放宽之后它就再也抓不到真正的漂移了。
+
+也不能只要求"第 1 节的 SHA 在第 0 节出现过"：第 0 节记录的是基线**历史**，
+每一轮的 SHA 都留在那里，于是任何一个陈旧 SHA 都能满足它。必须绑定到
+**单一规范出处**，两处才真的会一起动。
+"""
+
+
+def _current_baseline(text: str) -> str:
+    """取第 0 节那一行规范声明里的 `main` SHA。"""
+    for line in text.splitlines():
+        if line.startswith(_CURRENT_BASELINE_MARKER):
+            found = _MAIN_BASELINE_PATTERN.findall(line)
+            assert len(found) == 1, f"当前基线行必须恰好一个 SHA：{line}"
+            return found[0]
+    raise AssertionError("AGENT_HANDOFF.md 第 0 节缺少「- **当前基线**：」规范声明")
 _W0_WEB_STAGES: Final[tuple[str, ...]] = (
     "W0",
     "W1a",
@@ -1165,14 +1187,45 @@ def test_w0_handoff_names_w1a_plan_as_the_only_post_merge_next_step() -> None:
     assert "没有产品源码" in handoff or "未产生产品源码" in handoff
 
 
-def test_w0_handoff_baseline_fields_match_the_recorded_w0_branch() -> None:
+def test_handoff_baseline_table_agrees_with_the_recorded_merge() -> None:
+    """第 1 节基线表引用的 `main` SHA 必须也出现在第 0 节的合入记录里。
+
+    两处各自记录"当前基线"，因此它们漂移是必然风险而不是偶发错误：第 0 节
+    换了新的合入事实、第 1 节还留着上一轮的分支和 SHA，下一位实现者就会从
+    错误的基线开工，而两处单独看都言之成理。
+    """
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     project_dir = _handoff_baseline_field(handoff, "项目目录")
     # 机器专属绝对路径对下一位实现者毫无意义，且必然过期。
     assert "/Users/" not in project_dir, f"handoff 固化了机器专属路径：{project_dir}"
-    assert _W0_BASELINE in project_dir, (
-        f"第 1 节基线与第 8 节记录的 W0 基线不一致：{project_dir}"
+
+    cited = _MAIN_BASELINE_PATTERN.findall(project_dir)
+    assert len(cited) == 1, (
+        f"项目目录字段必须恰好引用一个 `main@<40 位 SHA>` 基线：{project_dir}"
     )
+    assert cited[0] == _current_baseline(handoff), (
+        f"第 1 节基线 {cited[0]} 与第 0 节的当前基线声明不一致"
+    )
+
+
+def test_handoff_baseline_agreement_guard_is_discriminating() -> None:
+    """反例：把第 1 节的基线换成一个第 0 节没有的 SHA，必须转红。
+
+    没有这条，上面那条在正则写错时会静默通过——匹配不到任何 SHA 和
+    字段里本来就没有 SHA，表现是一样的。
+    """
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    project_dir = _handoff_baseline_field(handoff, "项目目录")
+    # 只改第 1 节那一处；当前 SHA 在第 0 节也出现，全文替换会把两处一起改掉
+    # 而使漂移重新"自洽"——那样反例就证明不了任何事。
+    drifted_field = _MAIN_BASELINE_PATTERN.sub(f"`main@{'0' * 40}`", project_dir)
+    drifted = handoff.replace(project_dir, drifted_field, 1)
+
+    # 反例走真正的解析器，不是断言自己刚拼上去的字符串。
+    refetched = _handoff_baseline_field(drifted, "项目目录")
+    cited = _MAIN_BASELINE_PATTERN.findall(refetched)
+    assert cited == ["0" * 40]
+    assert cited[0] != _current_baseline(drifted)
 
 
 def test_readme_current_status_records_the_w0_stage() -> None:
