@@ -21,6 +21,11 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
 )
+from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_ACTOR,
+    LOCAL_ADMIN_ENVIRONMENT_ID,
+    LOCAL_ADMIN_TENANT_ID,
+)
 from xiaowei_agent.interfaces.web_auth import (
     IssuedWebSession,
     web_csrf_token,
@@ -125,9 +130,9 @@ __all__ = [
 
 
 LOCAL_ADMIN_PRINCIPAL: Final = AuthenticatedPrincipal(
-    tenant_id="dev-local",
-    environment_id="dev",
-    actor="admin",
+    tenant_id=LOCAL_ADMIN_TENANT_ID,
+    environment_id=LOCAL_ADMIN_ENVIRONMENT_ID,
+    actor=LOCAL_ADMIN_ACTOR,
     source=IdentitySource.LOCAL_ADMIN,
     subject_ref=LOCAL_ADMIN_SUBJECT_REF,
     permissions=frozenset(

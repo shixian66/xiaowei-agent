@@ -30,6 +30,7 @@ from xiaowei_agent.persistence.schema import (
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
+    LOCAL_ADMINS,
     TASK_INTERACTION_ARTIFACTS,
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
@@ -49,6 +50,12 @@ _PUBLISHED_REVISION_SOURCE_SHA256 = {
     "rev_0011_interaction_clarification.py": (
         "1292a176752eca152870324f933a4025ccd40e208c427cd86a927ff938922063"
     ),
+    # rev_0014 建的是授权事实与 append-only 审计。原地改它的行为，会让两台已经
+    # 升级过的机器带着**不同**的约束跑同一个 revision 号，而 alembic_version 里
+    # 只有那个号——差异从此不可见。要改就新增 revision。
+    "rev_0014_identity_admin_audit.py": (
+        "31322ee8684305be33f03716cc3cb1d5d1d18129f62578561ddcbbe8755acd32"
+    ),
 }
 
 # 被后续 revision 用 ALTER 演进过的表。它们的 CREATE TABLE 是**当初**那一版，逐字
@@ -61,6 +68,11 @@ _ALTERED_AFTER_CREATION = (
     TASK_SUBMISSIONS,
     WEB_SESSIONS,
     TASK_INTERACTION_ARTIFACTS,
+    # rev_0014 用 ALTER 给它加了 user_id 与外键：本地凭据从此指向一个目录账号。
+    # 它的 CREATE TABLE 停留在 rev_0010 那一版，逐字比对必然不等于今天的
+    # schema.py——这正是冻结历史快照应有的样子。新列与新外键改由
+    # test_altered_table_head_has_all_declared_columns_and_constraints 覆盖。
+    LOCAL_ADMINS,
 )
 _RENAMED_TABLES = {
     "task_accepted_intents": "task_interaction_artifacts",
@@ -226,9 +238,18 @@ def test_rev_0013_has_the_expected_revision_chain() -> None:
     assert revision.down_revision == "0012_clarification_records"
 
 
+def test_rev_0014_has_the_expected_revision_chain() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0014_identity_admin_audit as revision,
+    )
+
+    assert revision.revision == "0014_identity_admin_audit"
+    assert revision.down_revision == "0013_clarification_parent"
+
+
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0013_clarification_parent as revision,
+        rev_0014_identity_admin_audit as revision,
     )
 
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (

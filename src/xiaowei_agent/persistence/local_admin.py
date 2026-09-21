@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from xiaowei_agent.contracts import (
     Contract,
     IdentitySource,
+    SecretHash,
     Sha256Hex,
     StrictInt,
-    StrictStr,
 )
 from xiaowei_agent.persistence.schema import LOCAL_ADMINS, WEB_SESSIONS
 from xiaowei_agent.persistence.store import Clock
@@ -37,15 +37,6 @@ class LocalAdminNotFoundError(LocalAdminStoreError, LookupError):
 
     def __init__(self) -> None:
         super().__init__("local admin not found")
-
-
-SecretHash = StrictStr
-"""口令哈希的标记类型。
-
-名字以 ``Secret`` 开头是有意义的：凡是这样标注的字段都必须同时写
-``exclude=True`` 与 ``repr=False``（见 ``tests/security/test_secret_field_exposure.py``）。
-哈希不是明文口令，但它是凭据材料——进了日志或响应体就等于把离线爆破的输入交出去。
-"""
 
 
 class LocalAdminRecord(Contract):
@@ -178,4 +169,14 @@ __all__ = [
     "LocalAdminStore",
     "LocalAdminStoreError",
     "PostgresLocalAdminStore",
+    "SecretHash",
 ]
+"""``SecretHash`` 的定义已下沉到 ``contracts/base.py``（契约层不能反向依赖
+``persistence``，而 ``contracts/identity.py`` 要按同一套约定标注口令哈希），这里只是
+重新导出，不打断既有调用方。
+
+**模块里只能有这一份 ``__all__``。** 上一版在模块中段另写了一份（因为没去找现有
+的那份），而后赋值的这份静默覆盖了它：``SecretHash`` 属性在、却不在 ``__all__``
+里，与注释声称的相反。当前仓库没有通配导入调用方，所以它没造成真实故障；
+但"声明了却不生效"这个形状本身就是下一个缺陷的形状。
+"""
