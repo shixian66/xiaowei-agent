@@ -38,15 +38,30 @@ from xiaowei_agent.contracts.enums import (
 from xiaowei_agent.contracts.identity import BoundedId
 
 _OPERATION_ID_MAX_LENGTH: Final[int] = 48
-"""比普通 ID 的 64 更紧，给批量子 id 后缀 ``{op}:{index}`` 留余量。
+"""调用方提供的**根** operation id 上限，比普通 ID 的 64 更紧。
 
-留成 64 时，一个刚好 64 的 operation_id 会让整批迁移在中途炸——而中途炸掉的批量
-正是最难还原的那一类失败。
+紧的那一截就是给批量子 id 后缀 ``{op}:{index}`` 留的余量：留成 64 时，一个刚好
+64 的 operation_id 会让整批迁移在中途炸，而中途炸掉的批量正是最难还原的那一类失败。
 """
 
 OperationId: TypeAlias = Annotated[
     StrictStr, Field(min_length=1, max_length=_OPERATION_ID_MAX_LENGTH)
 ]
+"""调用方写得出来的那个 id。**只用于** :class:`AdminOperationContext`。"""
+
+AuditOperationId: TypeAlias = BoundedId
+"""落库审计事件上的 operation id，走普通 ID 的 64 字符边界。
+
+**它与 :data:`OperationId` 必须是两个类型，不要合并。** 上一版合并了，于是
+"给后缀留余量" 只写在注释里、余量却无处可用：一个合法的 48 字符根 id 接上批次
+序号后是 54 字符，而审计候选也只接受 48——批量迁移会在生成第一条候选时就校验
+失败，事务根本进不去。一个类型同时承担两个角色时，它只能满足其中一个。
+
+不另定一个新上限，而是直接用 :data:`~xiaowei_agent.contracts.identity.BoundedId`：
+持久 ID 的边界在本项目只有一个值，再写一遍 64 就是第二份真源。
+两个上限的关系（根 + 最大批次序号 ≤ 宽边界）由
+``test_a_batch_child_id_derived_from_the_longest_root_still_fits`` 盯住。
+"""
 
 _DIGEST_DOMAIN: Final[str] = "xiaowei.admin_audit.target.v1"
 
@@ -136,7 +151,7 @@ class AdminAuditCandidate(Contract):
     CHECK 是**第二道**独立表达，不是唯一一道。
     """
 
-    operation_id: OperationId
+    operation_id: AuditOperationId
     tenant_id: BoundedId
     environment_id: BoundedId
     actor_user_id: BoundedId
@@ -216,7 +231,7 @@ class AdminAuditStart(Contract):
     这条校验——放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
     """
 
-    operation_id: OperationId
+    operation_id: AuditOperationId
     tenant_id: BoundedId
     environment_id: BoundedId
     actor_user_id: BoundedId
@@ -240,7 +255,7 @@ class AdminAuditTerminal(Contract):
     任何东西矛盾——第一条事件已经写完了。
     """
 
-    operation_id: OperationId
+    operation_id: AuditOperationId
     outcome: AdminAuditOutcome
     reason_code: AdminAuditReasonCode | None = None
     effect: AdminAuditEffect = AdminAuditEffect()
@@ -268,7 +283,7 @@ class AdminAuditDenial(Contract):
     一种，因此它在结构上写不出一条成功。
     """
 
-    operation_id: OperationId
+    operation_id: AuditOperationId
     tenant_id: BoundedId
     environment_id: BoundedId
     actor_user_id: BoundedId

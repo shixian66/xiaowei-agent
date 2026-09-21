@@ -28,6 +28,7 @@ from xiaowei_agent.contracts import (
     UserStatus,
 )
 from xiaowei_agent.contracts.admin_audit import (
+    _OPERATION_ID_MAX_LENGTH,
     DIRECTORY_ACTIONS,
     ROLE_EFFECT_ACTIONS,
     STATUS_EFFECT_ACTIONS,
@@ -40,6 +41,7 @@ from xiaowei_agent.contracts.admin_audit import (
     AdminOperationContext,
     admin_audit_target_digest,
 )
+from xiaowei_agent.contracts.identity import _MAX_MIGRATION_ENTRIES
 
 _NOW = dt.datetime(2026, 9, 21, 12, 0, tzinfo=dt.UTC)
 _DIGEST = admin_audit_target_digest(
@@ -62,6 +64,15 @@ _SPEC_14_2_FIELDS = {
     "created_at",
 }
 """规格 §14.2 逐行列出的十三项。"""
+
+
+def _max_length(model: type, field: str) -> int | None:
+    """从字段元数据里取 ``max_length``，不靠字符串匹配源码。"""
+    for item in model.model_fields[field].metadata:
+        length = getattr(item, "max_length", None)
+        if length is not None:
+            return int(length)
+    return None
 
 
 def _candidate(**overrides: object) -> AdminAuditCandidate:
@@ -95,11 +106,12 @@ def test_operation_context_carries_no_audit_decision() -> None:
     }
 
 
-def test_operation_id_leaves_room_for_batch_suffixes() -> None:
-    """``operation_id`` ≤ 48，与批量子 id 后缀 ``{op}:{index}`` 相容。
+def test_the_caller_root_operation_id_is_the_tight_bound() -> None:
+    """调用方提供的**根** ``operation_id`` ≤ 48。
 
-    批量迁移一条一条写审计，子 id 是在 operation_id 后面接序号；上限定成和普通
-    ID 一样的 64 时，一个刚好 64 的 operation_id 会让整批在中途炸。
+    它收得比普通 ID 紧，是为了给批量子 id 后缀 ``{op}:{index}`` 留余量。
+    但“留了余量”这件事本身不在这条用例里——见
+    ``test_a_batch_child_id_derived_from_the_longest_root_still_fits``。
     """
     AdminOperationContext(
         operation_id="o" * 48,
@@ -114,6 +126,82 @@ def test_operation_id_leaves_room_for_batch_suffixes() -> None:
             actor="admin",
             auth_source=IdentitySource.LOCAL_ADMIN,
         )
+
+
+def _longest_batch_child_id() -> str:
+    """最差情况的批量子 id：最长合法父 id + 最大批次序号。
+
+    两个数都从契约里算出来，不写死：写死的那份不会跟着上限变，而这条用例
+    存在的全部理由就是把两个上限的关系钉住。
+    """
+    root = "o" * _OPERATION_ID_MAX_LENGTH
+    return f"{root}:{_MAX_MIGRATION_ENTRIES}"
+
+
+def test_a_batch_child_id_derived_from_the_longest_root_still_fits() -> None:
+    """最长合法父 id 派生出的子 id，必须能真的构造出一条审计候选。
+
+    这是上一版的缺陷：根 id 和持久化审计 id 共用同一个 48 字符类型，于是
+    “给后缀留余量”这句话写在注释里、余量却无处可用——批量迁移会在生成第一条
+    候选时就校验失败，事务根本进不去。而当时的用例只断了父 id 的 48/49 两侧，
+    名字里的 ``leaves_room_for_batch_suffixes`` 从来没被验证过。
+
+    四个写类型都要过：它们共用同一个持久化边界，只改其中一个等于把缺陷
+    挪到另三条路径上。
+    """
+    child = _longest_batch_child_id()
+    assert len(child) > _OPERATION_ID_MAX_LENGTH
+
+    _candidate(operation_id=child)
+    AdminAuditDenial(
+        operation_id=child,
+        tenant_id="t-1",
+        environment_id="dev",
+        actor_user_id="admin-1",
+        actor="admin",
+        auth_source=IdentitySource.LOCAL_ADMIN,
+        action=AdminAuditAction.ROLE_ASSIGNED,
+        target_kind=AdminAuditTargetKind.USER,
+        target_ref_digest=_DIGEST,
+        reason_code=AdminAuditReasonCode.ACTOR_NOT_ADMIN,
+    )
+    AdminAuditTerminal(operation_id=child, outcome=AdminAuditOutcome.SUCCEEDED)
+
+
+def test_the_start_type_shares_the_same_persisted_bound() -> None:
+    """``AdminAuditStart`` 也走持久化边界。
+
+    它在 W1a 没有合法 action（全部八个都是目录动作），因此构造它必定抛错。
+    这里直接断字段的元数据，避开“长度错误被目录动作拒绝掩盖”这个假绿形状。
+    """
+    longest = len(_longest_batch_child_id())
+    for model in (
+        AdminAuditCandidate,
+        AdminAuditEvent,
+        AdminAuditStart,
+        AdminAuditTerminal,
+        AdminAuditDenial,
+    ):
+        bound = _max_length(model, "operation_id")
+        assert bound is not None, model.__name__
+        assert bound >= longest, f"{model.__name__} 的 operation_id 上限 {bound} 装不下 {longest}"
+
+    root_bound = _max_length(AdminOperationContext, "operation_id")
+    assert root_bound == _OPERATION_ID_MAX_LENGTH
+    assert root_bound < longest, "根 id 的边界必须比派生值紧，否则余量无从谈起"
+
+
+def test_a_persisted_operation_id_beyond_the_wide_bound_is_rejected() -> None:
+    """宽边界也是边界：超过它的值必须被拒。
+
+    只改成“更宽”而不断上界时，把它改成无界也照样绿，而无界的 ID 正是
+    “所有持久 ID 有界”要堵的东西。
+    """
+    bound = _max_length(AdminAuditCandidate, "operation_id")
+    assert bound is not None
+    _candidate(operation_id="o" * bound)
+    with pytest.raises(ValidationError):
+        _candidate(operation_id="o" * (bound + 1))
 
 
 def test_audit_candidate_fields_are_the_spec_set_plus_the_closed_effect() -> None:
