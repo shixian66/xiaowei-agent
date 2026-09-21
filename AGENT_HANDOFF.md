@@ -2,7 +2,11 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前事实：Web 产品设计已合入，正在做 W0 文档收口
+## 0. 当前事实：W0 文档收口已合入，下一步是 W1a 详细计划
+
+- **当前基线**：`main@a12578cd59cfaccf3fe6702e6437502b9462c28d`（PR #61 squash 合入）。
+  本行是当前基线的**唯一**规范出处；本文件其余位置出现的 `main@` SHA 都是历史记录，
+  不得用来回答『现在从哪开工』。第 1 节基线表必须引用本行这一个 SHA。
 
 - **I2 限定领域普通对话已完成离线实施并归档**，归档基线
   `main@cc617f5e2d18c53b4a92528663edb1bd16aab557`，详见
@@ -16,11 +20,18 @@
   <https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268>。
   该记录逐条批准 `ADR-007 D5`、`ADR-014 RI5 R1/R2/R3` 四项修订、R2 的风险接受，
   以及优先级从 I3 切换为 `W0 → W1a`。**合入事实本身不是批准来源**，引用时用这条链接。
-- **当前阶段：W0 文档与 ADR 真源收口。** 本轮只改 Markdown 与
-  `tests/contract/test_doc_fact_binding.py`，**没有产品源码**、没有 migration、
-  没有运行配置、没有部署、没有真实网络调用、没有用户验收。
-- **W0 合入后唯一获准的下一步是编写 W1a 详细计划并送审**，不是实现 W1a。
-  W1a 计划未获批前，不得写它的测试、migration 或源码。
+- **W0 文档与 ADR 真源收口已由 PR #61 squash 合入**
+  `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`；受审 head 为
+  `1cb2b4b8e0f79916888f7e2fcb70d7efae414dd4`，合入树与受审 head 文件树完全一致。
+  该轮只改 10 份 Markdown 与 `tests/contract/test_doc_fact_binding.py`，
+  **没有产品源码**、没有 migration、没有运行配置、没有部署、没有真实网络调用、
+  没有用户验收。
+- **当前阶段：W1a 详细计划送审。** 计划文档在
+  `docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md`。
+  它同样只是**计划**，不是实现：没有 `UserAccount`、`AdminAuditStore`、
+  `rev_0014` 或任何 W1a 源码。
+- **W1a 计划合入后唯一获准的下一步是按该计划 TDD 实现 W1a 写内核。**
+  计划未获批前，不得写它的测试、migration 或源码。
 - **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理
   资料的源是什么形态（仓库内文档 / 独立 store / 外部系统）。恢复 I3 时另起计划，
   不与 Web 产品线并行修改同一真源。
@@ -126,9 +137,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/w0-web-product-adr-truth-sync`（W0 文档收口，PR #61 待复审），基线 `main@b0fcf5c154d7bfa1be2a20bd56e55e19eea28aed`。不记录机器专属 worktree 路径——它对下一位实现者没有意义且必然过期 |
+| 项目目录 | 当前开发分支 `claude/w1a-identity-authz-audit-plan`（W1a 详细计划，PR #62 待复审），基线 `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`。不记录机器专属 worktree 路径——它对下一位实现者没有意义且必然过期 |
 | 截止时间 | 2026-09-20（Asia/Shanghai） |
-| 阶段 | **Web 产品设计（PR #58）与 W0 实施计划（PR #59）已合入；当前在做 W0 文档/ADR 真源收口，未产生产品源码。下一步是 W0 合入后编写 W1a 详细计划并送审。I3 延期未取消。真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
+| 阶段 | **Web 产品设计（PR #58）、W0 实施计划（PR #59）与 W0 文档收口（PR #61）均已合入，未产生任何产品源码。当前在做 W1a 详细计划送审（PR #62）。下一步是该计划获批后按它 TDD 实现 W1a 写内核。I3 延期未取消。真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5（2026-09-20 增加 `W0 → W5` 序列与优先级切换）；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -178,7 +189,7 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | W0（PR #61）合入后，唯一获准动作是编写 **W1a 详细计划**并送审；W1a 计划获批前不得写其测试、migration 或源码。I3 受治理资料查询延期但未取消，恢复时仍需先拍板资料源形态（仓库内文档 / 独立 store / 外部系统）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | W1a 详细计划（PR #62）获批合入后，唯一获准动作是按该计划 **TDD 实现 W1a 用户、权限与 Admin 审计写内核**；计划获批前不得写其测试、migration 或源码。I3 受治理资料查询延期但未取消，恢复时仍需先拍板资料源形态（仓库内文档 / 独立 store / 外部系统）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure、I1-D Eval/closure（PR #52）与完整 I2（PR #53/#54/#55/#56，已归档）。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
