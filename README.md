@@ -11,9 +11,12 @@
 > 2026-09-09 按**离线范围**验收并授权归档，历史事实见
 > [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
 > 真实渠道退出标准已经通过。
-> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。**当前阶段是 W0 文档与 ADR 真源
-> 收口**，只改文档，未产生产品源码；W0 合入后才编写 W1a 详细计划并送审。I3 受治理资料查询
-> **延期但未取消**。
+> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。W0 文档与 ADR 真源收口已由
+> PR #61 合入 `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`，该轮只改 Markdown 与一个
+> 文档契约测试，**没有产品源码**。**当前阶段是 W1a 详细实施计划送审**：计划文档在
+> `docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md`，它同样只是计划，
+> 没有 `UserAccount`、`AdminAuditStore`、`rev_0014` 或任何 W1a 源码；计划获批后才可开始
+> W1a 实现。I3 受治理资料查询**延期但未取消**。
 > RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
 > `tests`。它没有部署或连接真实飞书。
 > RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于

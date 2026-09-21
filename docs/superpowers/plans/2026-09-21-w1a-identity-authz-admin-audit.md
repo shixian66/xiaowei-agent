@@ -17,8 +17,8 @@
 - 本计划基线：`origin/main@a12578cd59cfaccf3fe6702e6437502b9462c28d`（PR #61 squash 合入 W0）。
 - W0 只证明**文档与 ADR 真源已收口**。它不是本阶段任何源码、迁移、部署、真实调用或用户验收的证据。
 - 编写本计划前已按 `AGENTS.md` 顺序读取 `ARCHITECTURE.md`、`AGENT_HANDOFF.md`、`README.md`、`DEVELOPMENT_PLAN.md`，并读取规格、ADR-013 修订、`contracts/enums.py`、`contracts/channel.py`、`persistence/{schema,store,local_admin,clarification_records,postgres}.py`、`interfaces/{feishu_identity,local_admin_auth,web_auth,local_stack}.py` 与 `tests/suites/`、`tests/integration/conftest.py`、`tests/contract/test_schema_matches_migration.py` 的现有形状。
-- 基线四门（计划分支实测）：文档契约 `46 passed`。实现者必须从届时最新 `main` 重新跑全部四门取当期数字，**不得**把本行当作未来运行结果。
-- 本计划为 V2，依据 PR #62 对 `e7ff83fe21b3bc697209519e56fb0dec592e4fa1` 的复审意见做根因修订。四组根因与修订位置见文末「V2 修订记录」。
+- 基线四门（计划分支实测）：`3977 passed, 269 skipped` / security `1447 passed, 83 skipped, 2716 deselected` / `ruff` 全绿 / `mypy` 189 个文件无问题；文档契约 `47 passed`。实现者必须从届时最新 `main` 重新跑全部四门取当期数字，**不得**把本行当作未来运行结果。
+- 本计划为 V9。每一版都是对 PR #62 上一轮复审的根因修订，各版根因与修订位置见文末的 V2～V9 修订记录；**最新一版在最后**，前面各版只保留为返工来历，不再是当前规则。
 
 ## Global Constraints
 
@@ -43,6 +43,11 @@
 - **RED 的判定标准。** 每个任务先写会失败的测试，并确认失败是**被测事实尚不存在**造成的——新模块尚未创建时的 `ModuleNotFoundError`、新符号尚未定义时的 `ImportError`、断言不成立时的 `AssertionError` 都是合格的 RED。不合格的是**测试自身写错**造成的失败：fixture 名拼错、参数名不符、语法错误。分辨方法是问一句：错误指向的是你要实现的东西，还是你刚写的测试？后者先修测试，再重新取 RED。
 - 不得靠删断言、放宽集合、跳过用例、吞异常或加特殊分支制造全绿。
 - 每个提交只暂存本任务列出的文件；不使用 `git add -A`。
+- **每个提交之后工作区必须干净，该提交必须自己能跑。** 每个任务的提交步骤末尾都带一句
+  `test -z "$(git status --porcelain)"`。它挡的是 Task 0 第 7 条静态核对挡不住的那一半：
+  某个文件计划从头到尾没提过，`Files:` 和 `git add` **两边一起漏**——静态检查看不见它，
+  但只要真的改了它，工作区就不干净。不干净就停下来判断：是该把它加进本任务的 `Files:`
+  与 `git add`，还是它本来就不该被改。**不要**用 `git add -A` 把它扫进去。
 
 ## 与规格的两处有意偏离（复审已确认可接受）
 
@@ -142,7 +147,7 @@ NOT NULL 一律照抛，落到 `_write_transaction`。
 
 ## Review Focus
 
-审核者应优先核对以下十三点。**第 0 点先看**：上面的三张规范矩阵是错误语义、写入口与冲突探测的唯一真源，下面每一点都只是它的核对方式；任何一处正文与矩阵不一致，以矩阵为准并当作缺陷报出来。
+审核者应优先核对以下十七点。**第 0 点先看**：上面的三张规范矩阵是错误语义、写入口与冲突探测的唯一真源，下面每一点都只是它的核对方式；任何一处正文与矩阵不一致，以矩阵为准并当作缺陷报出来。
 
 1. `apply(command, context)` 是否真的**不给调用方任何机会**指定 action、target 或 outcome：签名上有没有 override、可选覆盖字段或 hook。同时核对另一个方向：`AdminAuditStore` 的三个写方法是否**都写不出目录成功事实**（`AdminAuditStart` / `AdminAuditDenial` 没有 `outcome` 与 `effect` 字段；`AdminAuditTerminal` 的稳定字段从已存 `STARTED` 读回，而 CHECK 禁止目录动作写 `STARTED`）。V2 留了通用 `append(candidate)`（可伪造），V3 一度整个删掉写契约（违反 `DEVELOPMENT_PLAN.md:178` 与 `ADR-013:131`）——两个方向都错。
 2. 四张授权表的写入是否**全部**发生在 `apply()` 的那一个 `begin()` 内。`grep` 一遍 `persistence/` 里对这四张表的 INSERT/UPDATE，看有没有第二处；特别核对 `seed_if_absent` 与旧身份迁移。
@@ -158,6 +163,10 @@ NOT NULL 一律照抛，落到 `_write_transaction`。
 
 12. **错误语义是否只有矩阵一那一份**：全文搜索 `AdminAuditConflictError`、`AdminAuditUnwritableError`、`UserDirectoryConflictError`、`PersistenceIntegrityError`，每一处出现是否都能在矩阵一里找到对应的那一格。特别核对同一个场景（复用 `operation_id` 调 `apply()`）在所有章节里是否只有一个答案。
 13. diff 是否只含 Task 0 的 allowlist；有没有顺手加 HTTP 路由、激活表、DBA/值班表或 requester/approver 载体。
+14. **迁移降级守卫是否真的会生效**：`rev_0014.downgrade()` 的调用形状是否与 `guards.py:48` 的真实签名一致（`connection` 位置参数 + `guarded=`），有没有留下手工的存在性预检把分类 `counts` 降级成布尔；以及真实 PostgreSQL 上是否有拒绝、数据保留、显式授权后删除、重新升级四段证据——离线用例不执行 `downgrade()`，抓不到这一类。
+15. **给既有契约新增的字段是否贯穿了全部构造点**：`LocalAdminRecord.user_id` 在 `get()`、改密返回值与两个内存构造点上是否都被回填；测试是否同时断言数据库列、返回值与下一次读取三处，而不是只断言数据库列。
+16. **每个任务的文件闭集是否三方闭合**：`Files:`、`git add` 与正文段落标记互相覆盖，且每个提交之后 `git status --porcelain` 为空。Task 0 的第 2、7 条查静态两方，工作区干净那一条兜「两边一起漏」。
+17. **旧身份迁移的 skip 判据是否 fail-closed**：账号、actor、状态、角色与外部身份绑定五项全部精确匹配才跳过；部分存在是否整批冲突回滚。被剔除出批次的条目，后面的唯一约束再也看不见它——「靠后面兜底」在这里不成立。
 
 ---
 
@@ -251,7 +260,7 @@ V3 的计划直接写了 `from xiaowei_agent.contracts.base import SecretHash`�
 
 任何超出该列表的文件出现在 `git status` 里，都必须先停下来说明理由。
 
-**机械核对四件事，不靠眼睛。** 这四条各自对应一次真实返工，开工前一起跑：
+**机械核对七件事，不靠眼睛。** 这七条各自对应一次真实返工，开工前一起跑：
 
 ```bash
 python - <<'CHECK'
@@ -312,13 +321,19 @@ for module, names in sorted(wanted.items()):
         loaded = importlib.import_module(module)
     except ModuleNotFoundError:
         continue  # W1a 将要新建的模块
-    absent += [f"{module}.{n}" for n in sorted(names) if not hasattr(loaded, n)]
+    for n in sorted(names):
+        if hasattr(loaded, n):
+            continue
+        try:  # ``from pkg import submodule`` 不是缺符号
+            importlib.import_module(f"{module}.{n}")
+        except ModuleNotFoundError:
+            absent.append(f"{module}.{n}")
 print("3) 引用了不存在的符号（需逐条判定是否为 W1a 新建）：", absent or "（无）")
 
 # 4. 按最终形状把文件拼回来，查未定义名与重复导入
 import subprocess, tempfile
 boundary = re.compile(
-    r"\n(?:创建|追加到) `[^`]+`(?:[（(][^）)]*[）)])?：|\n- \[ \] \*\*Step |\n### Task "
+    r"\n(?:创建|追加到|修改) `[^`]+`(?:[（(][^）)]*[）)])?[：。]|\n- \[ \] \*\*Step |\n### Task "
 )
 merged: dict[str, str] = {}
 for m in re.finditer(r"\n(?:创建|追加到) `([^`]+\.py)`(?:[（(][^）)]*[）)])?：", text):
@@ -331,8 +346,12 @@ with tempfile.TemporaryDirectory() as tmp:
         blocks = re.findall(r"```python\n(.*?)```", body, re.S)
         if not blocks:
             continue
+        # 追加到既有文件时先垫上真实文件内容：不垫，片段必然报一堆假的未定义名，
+        # 真正的漏导入反而淹没在里面。
+        real = pathlib.Path(path)
+        head = real.read_text(encoding="utf-8").rstrip() + "\n\n" if real.exists() else ""
         f = pathlib.Path(tmp) / path.replace("/", "__")
-        f.write_text("\n\n".join(b.rstrip() + "\n" for b in blocks), encoding="utf-8")
+        f.write_text(head + "\n\n".join(b.rstrip() + "\n" for b in blocks), encoding="utf-8")
         r = subprocess.run(
             ["ruff", "check", "--select", "F821,F811", "--no-cache",
              "--output-format", "concise", str(f)],
@@ -342,13 +361,102 @@ with tempfile.TemporaryDirectory() as tmp:
             broken.append((path, r.stdout.strip().splitlines()[:6]))
 print("4) 拼回文件后仍有未定义名/重复导入：", broken or "（无）",
       f"[共拼出 {len(merged)} 个文件]")
+
+# 5. 调用既有 src/ 符号时，实参必须能绑上真实签名
+import ast, inspect
+_MARK = object()
+unbindable = []
+for block in re.findall(r"```python\n(.*?)```", text, re.S):
+    try:
+        tree = ast.parse(block)
+    except SyntaxError:
+        continue
+    known: dict[str, object] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "xiaowei_agent"
+        ):
+            try:
+                loaded = importlib.import_module(node.module)
+            except ModuleNotFoundError:
+                continue
+            for alias in node.names:
+                obj = getattr(loaded, alias.name, _MARK)
+                if obj is not _MARK and (inspect.isfunction(obj) or inspect.isclass(obj)):
+                    known[alias.asname or alias.name] = obj
+    shadowed = {
+        n.name
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        name = node.func.id
+        if name in shadowed or name not in known:
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args) or any(
+            k.arg is None for k in node.keywords
+        ):
+            continue
+        try:
+            sig = inspect.signature(known[name])
+            sig.bind(*([_MARK] * len(node.args)), **{k.arg: _MARK for k in node.keywords})
+        except (TypeError, ValueError) as exc:
+            unbindable.append(f"{name}(...)：{exc}")
+print("5) 调用既有符号时实参绑不上真实签名：", sorted(set(unbindable)) or "（无）")
+
+# 6. 给既有契约加字段时，它的全部构造点必须逐个列出
+table = re.search(
+    r"^\| 构造点（`相对路径::owner`）[^\n]*\n\|[-| ]+\n((?:\|[^\n]*\n)+)", text, re.M
+)
+assert table, "计划没有那张构造点清单——加字段却不列构造点，这条核对就是白跑的"
+listed = {m.group(1) for m in re.finditer(r"^\| `([^`]+)` \|", table.group(1), re.M)}
+discovered = set()
+for path in sorted(pathlib.Path("src").rglob("*.py")):
+    stack: list[str] = []
+
+    def walk(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stack.append(node.name)
+            for child in ast.iter_child_nodes(node):
+                walk(child)
+            stack.pop()
+            return
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "LocalAdminRecord"
+        ):
+            discovered.add(f"{path.relative_to('src/xiaowei_agent')}::{'.'.join(stack)}")
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    walk(ast.parse(path.read_text(encoding="utf-8")))
+print("6) `LocalAdminRecord` 构造点与计划清单不一致：",
+      sorted(listed ^ discovered) or "（无）")
+
+# 7. 正文段落标记写到的文件，必须出现在该任务的 Files:
+mismarked = []
+for name, body in zip(tasks[1::2], tasks[2::2]):
+    files = {
+        m.group(1)
+        for line in body.splitlines()
+        if (m := re.match(r"^- (?:Create|Modify|Test): `([^`]+)`", line.strip()))
+    }
+    marked = {
+        m.group(1) for m in re.finditer(r"^(?:创建|追加到|修改) `([^`]+\.py)`", body, re.M)
+    }
+    if missing := sorted(marked - files):
+        mismarked.append((name.split(":")[0], missing))
+print("7) 正文写到了但 Files: 没声明：", mismarked or "（无）")
 CHECK
 ```
 
-四条都必须输出 `（无）`，第 3 条允许出现 W1a 将要新建的符号——逐条确认，**不要**
+七条都必须输出 `（无）`，第 3 条允许出现 W1a 将要新建的符号——逐条确认，**不要**
 整体跳过。
 
-四条各自的来历，**全部是同一句话的不同层**："改了一处，没跟到下一处"。
+七条各自的来历，**全部是同一句话的不同层**："改了一处，没跟到下一处"。
 
 | 条 | 来历 |
 | --- | --- |
@@ -356,16 +464,32 @@ CHECK
 | 2 | V4 把 `fake.py` 加进了 allowlist 与 Files，却没加进 Task 6 的 `git add` |
 | 3 | V3 写了 `from xiaowei_agent.contracts.base import SecretHash`，而那里没有这个名字 |
 | 4 | V7 的 Task 7 文件里有一组**互斥断言**（同时要求某个站点"在"和"不在"同一个集合），而 `_helper_names()` 对模块级路径解析出的是 `py::_insert_audit_event` 不是函数名；集成测试用了从未导入过的 `AdminAuditOutcome`，旁边还写着一句"该文件已经导入" |
+| 5 | V8 的 `rev_0014` 降级里写着 `require_destructive_authorization("rev_0014 downgrade …")`，而真实签名要 `connection` 与 `guarded=`。守卫看起来在，有数据时抛的却是 `TypeError` |
+| 6 | V8 给 `LocalAdminRecord` 加了 `user_id`，却只跟到写入路径：`PostgresLocalAdminStore.get()` 与改密的返回值都不回填它，于是"库里已关联、Store 说没关联" |
+| 7 | V8 的 Task 6 正文要改 `contracts/identity.py`、`interfaces/local_admin_auth.py` 与两个契约测试文件，Files 与 `git add` **两边都没有**——第 2 条只查得出"声明了却没暂存",查不出"两边一起漏" |
 
 **第 4 条是前三条抓不到的那一类。** 前三条查的是"声明与声明之间对不对得上"，第 4 条
 查的是"把一个文件的所有代码块按文档顺序拼起来之后，它还成不成立"。V7 之前每一轮我都
 在验证**片段**：片段各自跑通过，拼起来却带着互斥断言和缺失导入。段落标题写的是哪个
 路径，下面的代码块就属于哪个文件——这条规则现在是机械可查的，也因此**每个文件只能有
-一份导入块**，不允许"再补两行导入"式的补充块。
+一份导入块**，不允许"再补两行导入"式的补充块。追加到既有文件时，第 4 条会先把**真实
+文件内容**垫在前面再查，所以"这个名字在那个文件里本来就有"不用靠记忆判断。
 
-第 4 条只做静态检查（未定义名、重复导入），它**不**能验证：拼出来的文件能否 import
-（W1a 模块尚未存在）、断言是否互相矛盾、代码是否真的正确。Task 7 的守卫文件另有一步：
-它不依赖任何 W1a 运行期代码，因此可以拼出来直接 `pytest` 跑——见 Task 7 Step 1 的说明。
+**第 5、6 条查的是计划与既有代码的接缝，方向相反的两端。** 第 5 条是**调用方向**：计划
+调用仓库里已有的函数时，实参能不能绑上它的真实签名。第 6 条是**被调用方向**：计划给
+既有契约加了字段，它的全部构造点有没有被逐个处理——清单由 AST 发现，`==` 比对，将来
+任何人新增一个构造点都会让它变红。这两条都只能靠"去读真实定义"发现，而"去读真实定义"
+正是前八版反复失守的地方。
+
+**第 7 条与"提交后工作区必须干净"配对使用。** 第 7 条是静态的：正文里凡用
+以 `创建` / `追加到` / `修改` 加反引号路径加全角冒号标记写到的文件，必须出现在该任务的 `Files:` 里；因此
+**每个要落盘的文件都必须有这样一个标记**，不能只在散文里提一句"放在 X 里"。但静态检查
+永远抓不到"计划从头到尾就没提过这个文件"。那一半由每个任务提交步骤后的
+`git status --porcelain` 兜底：改了没暂存，工作区就不干净。
+
+七条都只做静态检查，它们**不**能验证：拼出来的文件能否 import（W1a 模块尚未存在）、
+断言是否互相矛盾、代码是否真的正确。Task 7 的守卫文件另有一步：它不依赖任何 W1a 运行期
+代码，因此可以拼出来直接 `pytest` 跑——见 Task 7 Step 1 的说明。
 
 ---
 
@@ -628,6 +752,9 @@ git add src/xiaowei_agent/contracts/enums.py \
 git commit -m "feat(w1a): map product roles and auth sources to closed permission sets
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -904,7 +1031,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_identity_contract
 ```python
 """持久身份目录的契约：账号、作用域角色、外部身份与写命令闭集。"""
 
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import Field
 
@@ -1135,6 +1262,9 @@ git add src/xiaowei_agent/contracts/base.py \
 git commit -m "feat(w1a): add identity directory contracts and the write command closed set
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -1864,6 +1994,9 @@ git add src/xiaowei_agent/contracts/enums.py \
 git commit -m "feat(w1a): derive-only admin audit contracts with closed effects
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -1875,6 +2008,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_admin_audit.py`
 - Modify: `tests/contract/test_schema_matches_migration.py`（发布哈希登记 + `rev_0014` chain + head 锚点）
 - Modify: `tests/unit/test_readiness.py`（head 锚点改为从 Alembic 取，不再写死 revision 字面量）
+- Modify: `tests/integration/test_migration_paths.py`（真实 PostgreSQL 上的 `rev_0014` 降级守卫用例）
 - Test: `tests/contract/test_identity_schema.py`
 
 **Interfaces:**
@@ -2323,7 +2457,7 @@ Revises: 0013_clarification_parent
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 from xiaowei_agent.persistence.migrations.guards import (
     require_destructive_authorization,
@@ -2513,20 +2647,13 @@ def downgrade() -> None:
     **它们为什么变成这样的唯一记录**。默认降级就静默删掉它们，等于把
     一次回滚变成一次无痕的提权窗口。
     """
-    bind = op.get_bind()
-    has_accounts = bool(
-        bind.execute(
-            sa.select(sa.literal(1)).select_from(_USER_ACCOUNTS).limit(1)
-        ).first()
-    )
-    has_events = bool(
-        bind.execute(
-            sa.select(sa.literal(1)).select_from(_ADMIN_AUDIT_EVENTS).limit(1)
-        ).first()
-    )
-    if has_accounts or has_events:
+    if not context.is_offline_mode():
         require_destructive_authorization(
-            "rev_0014 downgrade drops identity directory and admin audit rows"
+            op.get_bind(),
+            guarded=(
+                (_USER_ACCOUNTS, "user_accounts"),
+                (_ADMIN_AUDIT_EVENTS, "admin_audit_events"),
+            ),
         )
     op.drop_constraint("fk_local_admins_user_id", "local_admins", type_="foreignkey")
     op.drop_column("local_admins", "user_id")
@@ -2543,7 +2670,26 @@ def downgrade() -> None:
     op.drop_table("user_accounts")
 ```
 
-先读 `src/xiaowei_agent/persistence/migrations/guards.py` 确认 `require_destructive_authorization` 的确切签名，按它的既有形状调用，**不要**改它。
+**调用形状逐字取自既有迁移，不是凭印象写的。** `require_destructive_authorization`
+的真实签名是 `(connection: Connection, *, guarded: Sequence[tuple[FromClause, str]])`
+（`persistence/migrations/guards.py:48`），`rev_0013_clarification_parent.py:79` 是最近
+一条用它的迁移，形状就是上面这一段。V8 的计划这里写的是
+`require_destructive_authorization("rev_0014 downgrade ...")`——一个位置字符串，既没有
+`connection` 也没有 `guarded`。**按原文跑，有数据时降级抛的是 `TypeError` 而不是
+`MigrationSafetyError`**：守卫看起来在，实际上从未生效，而"显式授权后才允许删授权事实"
+这条规则会连同它一起失效。
+
+一并删掉的还有手工写的 `has_accounts` / `has_events` 预检：`_row_counts`
+（`guards.py:26`）已经在数这两张表，守卫自己就有"没有受保护行就直接返回"的分支
+（`guards.py:55`）。手工预检不但重复，还把 `counts` 这个**分类计数**降级成了一个布尔，
+而 `counts` 正是既有用例断言的那个值（`test_migration_paths.py:414` 等处都断言
+`exc_info.value.counts`）。
+
+`if not context.is_offline_mode():` 是既有迁移的统一写法：离线模式（`--sql`）下没有可
+执行的连接，读表会直接炸。
+
+`guarded` 的两个类别名 `user_accounts` / `admin_audit_events` 就是断言里会出现的字符串，
+顺序即 `counts` 的顺序。
 
 - [ ] **Step 5: 同步随新 revision 断裂的既有锚点**
 
@@ -2644,17 +2790,138 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_identity_schema.p
 
 预期：全绿。若 `test_schema_matches_migration.py` 报 DDL 不一致（partial index 的 `WHERE` 子句最容易在这里对不上），说明 `schema.py` 与迁移写的不是同一套 DDL——**改到两边一致，不要改断言**。
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 7: 真实 PostgreSQL 上验证降级守卫**
+
+上一步全是离线的：它证明 DDL 两边一致，**不**证明守卫会在有数据时拦住降级。守卫的
+调用形状一旦写错（V8 就写错了），离线用例一条都不会红——因为离线用例根本不执行
+`downgrade()`。所以这条必须在真库上跑。
+
+追加到 `tests/integration/test_migration_paths.py`（与既有的
+`test_rev_0012_downgrade_requires_authorization_for_clarification_records` 并排，
+同一套 `clean_database` / `alembic_runners` fixture）：
+
+```python
+async def _seed_identity_and_audit(engine: AsyncEngine) -> None:
+    """一条账号事实加一条它的审计，两者都必须被守卫数到。"""
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO user_accounts "
+                "(user_id, actor, display_name, status, created_at, updated_at) "
+                "VALUES ('usr-guarded', 'guarded', 'Guarded', 'active', now(), now())"
+            )
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO admin_audit_events "
+                "(event_id, operation_id, tenant_id, environment_id, actor_user_id, "
+                "actor, auth_source, action, target_kind, target_ref_digest, outcome, "
+                "reason_code, effect_role, effect_status, created_at) VALUES "
+                "('evt-guarded', 'op-guarded', 'dev-local', 'dev', 'usr-local-admin', "
+                "'admin', 'local_admin', 'user_created', 'user', :digest, "
+                "'succeeded', NULL, 'user', 'active', now())"
+            ),
+            {"digest": "e" * 64},
+        )
+
+
+async def test_rev_0014_downgrade_requires_authorization_for_identity_and_audit(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    """授权事实与"它为什么变成这样"的唯一记录，都不能被一次无声降级删掉。"""
+    await _seed_identity_and_audit(clean_database)
+    run_upgrade, run_downgrade = alembic_runners
+
+    with pytest.raises(MigrationSafetyError) as exc_info:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0013_clarification_parent")
+    assert exc_info.value.counts == (
+        ("user_accounts", 1),
+        ("admin_audit_events", 1),
+    )
+
+    # 拒绝之后：版本没动，两张表的行一行都没少。
+    async with clean_database.connect() as connection:
+        revision = await connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        )
+        accounts = await connection.scalar(
+            sa.text("SELECT count(*) FROM user_accounts")
+        )
+        events = await connection.scalar(
+            sa.text("SELECT count(*) FROM admin_audit_events")
+        )
+    assert revision == _head_revision()
+    assert (accounts, events) == (1, 1)
+
+    # 显式授权后才真的删，删完能重新升回来。
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0013_clarification_parent", True)
+    dropped = await _table_names(clean_database)
+    assert not {
+        "user_accounts",
+        "user_role_assignments",
+        "external_identities",
+        "admin_audit_events",
+    } & dropped
+
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_upgrade, "head")
+    restored = await _table_names(clean_database)
+    assert {
+        "user_accounts",
+        "user_role_assignments",
+        "external_identities",
+        "admin_audit_events",
+    } <= restored
+    async with clean_database.connect() as connection:
+        columns = await connection.execute(
+            sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'local_admins'"
+            )
+        )
+    assert "user_id" in {row[0] for row in columns}
+
+
+async def test_rev_0014_downgrade_needs_no_authorization_on_an_empty_directory(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    """正常对照：没有受保护数据时，降级不该要授权。
+
+    没有这一条，上一条用例无法区分"守卫按数据拦住了"和"守卫无条件拦住一切"。
+    """
+    _, run_downgrade = alembic_runners
+    async with clean_database.begin() as connection:
+        await connection.run_sync(run_downgrade, "0013_clarification_parent")
+    assert "user_accounts" not in await _table_names(clean_database)
+```
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/integration/test_migration_paths.py -q 2>&1 | tail -5
+```
+
+预期：全绿。若第一条报 `TypeError` 而不是 `MigrationSafetyError`，就是守卫调用形状又
+写错了——回 Step 4 对着 `guards.py:48` 改实现，**不要**把 `pytest.raises` 改成
+`TypeError`。
+
+- [ ] **Step 8: 提交**
 
 ```bash
 git add src/xiaowei_agent/persistence/schema.py \
         src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_admin_audit.py \
         tests/contract/test_schema_matches_migration.py \
         tests/contract/test_identity_schema.py \
+        tests/integration/test_migration_paths.py \
         tests/unit/test_readiness.py
 git commit -m "feat(w1a): add identity directory and admin audit tables in rev_0014
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -2667,6 +2934,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Create: `src/xiaowei_agent/persistence/identity.py`
 - Create: `src/xiaowei_agent/persistence/admin_audit.py`
 - Modify: `src/xiaowei_agent/persistence/memory.py`
+- Modify: `src/xiaowei_agent/persistence/local_admin.py`（`LocalAdminRecord` 加 `user_id` 字段）
 - Modify: `tests/conftest.py`
 - Create: `tests/suites/identity_directory.py`
 - Create: `tests/contract/test_identity_store.py`
@@ -4104,7 +4372,41 @@ def local_admins(persistence_state: Any) -> _InMemoryLocalAdminProbe:
 
 `persistence_state` 与 `clock` 用该文件已有的同名 fixture；若名字不同，按实际名字改，**不要**新建一份 state。
 
-`LocalAdminRecord`（`persistence/local_admin.py:51`，当前只有 `password_hash` 与 `must_change_password` 两个字段）要加一个 `user_id: str | None = None`，与 `local_admins.user_id` 列对应。默认 `None` 让 `fake.py:518` 与 `fake.py:536` 两处既有构造点、以及 9 处 `seed_if_absent` 调用方全部保持不变——改密路径（`fake.py:536`）**不带** `user_id`，于是它会把链接清成 `None`，这是一个真实的回归风险：改一次密码就把目录链接弄丢。所以改密处必须显式带上原记录的 `user_id`，Task 6 有一条用例专门钉这件事。
+修改 `src/xiaowei_agent/persistence/local_admin.py`：`LocalAdminRecord`
+（`local_admin.py:51`，当前只有 `password_hash` 与 `must_change_password` 两个字段）
+加一个字段，与 `local_admins.user_id` 列对应。
+
+```python
+class LocalAdminRecord(Contract):
+    """本地管理员的持久化事实；只有哈希，没有明文。"""
+
+    password_hash: SecretHash = Field(exclude=True, repr=False)
+    must_change_password: bool
+    user_id: StrictStr | None = None
+```
+
+`StrictStr | None`，不是 `str | None`：`Contract` 是 strict 模式，其余字段也都用契约
+层的严格别名。
+
+**默认 `None` 是为了不惊动 9 处 `seed_if_absent` 调用方，但它同时让每一个漏改的构造点
+都安静地返回 `None`。** 这不是理论风险：`None` 在四态表里正好是第二行（backfill），
+一个漏回填的读取路径会让"数据库里已经链接好了"看起来像"还没升级"。所以本任务不靠记忆，
+把构造点**全部列出来**——下面这张表由 AST 发现，Task 0 机械核对第 6 条会把它和真实发现
+集合做 `==` 比对，将来任何人新增一个构造点都会让那条核对变红。
+
+| 构造点（`相对路径::owner`） | 当前传入 | 本轮必须变成 |
+| --- | --- | --- |
+| `persistence/fake.py::InMemoryLocalAdminStore.seed_if_absent` | `password_hash`, `must_change_password` | Task 6 Step 5 改为委托 `apply()`，不再自己构造 |
+| `persistence/fake.py::InMemoryLocalAdminStore.change_password_and_rotate_session` | `password_hash`, `must_change_password` | 补 `user_id=self._state.local_admin.user_id` |
+| `persistence/local_admin.py::PostgresLocalAdminStore.get` | `password_hash`, `must_change_password` | 补 `user_id=row["user_id"]` |
+| `persistence/local_admin.py::PostgresLocalAdminStore.change_password_and_rotate_session` | `password_hash`, `must_change_password` | 补 `user_id`，取自 UPDATE 的 `RETURNING` |
+
+后三行都在 Task 6 落地（那一步才改 PostgreSQL 实现），本任务只负责加字段本身；但清单
+写在这里，因为**加字段的是这一步**，而"加了字段没跟到读取路径"正是这一类缺陷的发生
+时刻。第四行尤其要注意：`change_password_and_rotate_session` 的返回值**不是**从库里读
+出来的，而是用命令字段现搭的（`local_admin.py:168`），命令里根本没有 `user_id`——照原样
+加字段，它每次改密都返回 `user_id=None`，而数据库里那一列好端端地还在。这就是"数据库
+已关联、Store 返回未关联"的分叉，两个实现的语义会在这里各走各的。
 
 - [ ] **Step 7: 运行，确认全绿**
 
@@ -4163,12 +4465,16 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_identity_store.py
 git add src/xiaowei_agent/persistence/identity.py \
         src/xiaowei_agent/persistence/admin_audit.py \
         src/xiaowei_agent/persistence/memory.py \
+        src/xiaowei_agent/persistence/local_admin.py \
         tests/suites/identity_directory.py \
         tests/contract/test_identity_store.py \
         tests/conftest.py
 git commit -m "feat(w1a): derive admin audit from the command on a single write path
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -4180,10 +4486,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `src/xiaowei_agent/persistence/rows.py`（审计事件的双向列映射，与既有 `row_to_*` 并排）
 - Modify: `src/xiaowei_agent/persistence/local_admin.py`
 - Modify: `src/xiaowei_agent/persistence/fake.py`（`InMemoryLocalAdminStore.seed_if_absent` 同样改为委托）
+- Modify: `src/xiaowei_agent/contracts/identity.py`（五个 bootstrap 常量的唯一真源）
+- Modify: `src/xiaowei_agent/interfaces/local_admin_auth.py`（改为导入那五个常量，删掉自己那三个字面量）
 - Modify: `src/xiaowei_agent/_conformance.py`
 - Modify: `tests/integration/conftest.py`
 - Create: `tests/integration/test_identity_directory_postgres.py`
 - Modify: `tests/contract/test_protocol_conformance.py`
+- Modify: `tests/contract/test_identity_contracts.py`（常量只有一份）
+- Modify: `tests/contract/test_identity_schema.py`（冲突目标钉死 + 行映射往返）
 
 **Interfaces:**
 - Consumes: Task 4 的表、Task 5 的协议、派生层与共享套件
@@ -4193,9 +4503,23 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: 加 PostgreSQL fixture**
 
-在 `tests/integration/conftest.py` 里，按 `clarification_record_store` 的既有写法追加：
+追加到 `tests/integration/conftest.py`（按 `clarification_record_store` 的既有写法）：
 
 ```python
+# 下面四个名字并进该文件**既有的**导入块，不新开一段：
+# PostgresAdminAuditStore / PostgresUserDirectoryStore 进已有的
+# `from xiaowei_agent.persistence.postgres import (...)`；
+# LOCAL_ADMINS 进已有的 `from xiaowei_agent.persistence.schema import (...)`；
+# LOCAL_ADMIN_SINGLETON_ID 需要新增一行
+# `from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SINGLETON_ID`。
+from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SINGLETON_ID
+from xiaowei_agent.persistence.postgres import (
+    PostgresAdminAuditStore,
+    PostgresUserDirectoryStore,
+)
+from xiaowei_agent.persistence.schema import LOCAL_ADMINS
+
+
 @pytest.fixture
 def admin_audit(clean_database: AsyncEngine, clock: Any) -> PostgresAdminAuditStore:
     return PostgresAdminAuditStore(engine=clean_database, clock=clock)
@@ -4211,8 +4535,9 @@ def user_directory(
 class _PostgresLocalAdminProbe:
     """``LocalAdminProbe`` 的 PostgreSQL 实现；直接发 SQL，测试专用。"""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, clock: Any) -> None:
         self._engine = engine
+        self._clock = clock
 
     async def seed_legacy_credential(
         self, *, password_hash: str, user_id: str | None = None
@@ -4223,7 +4548,7 @@ class _PostgresLocalAdminProbe:
                     id=LOCAL_ADMIN_SINGLETON_ID,
                     password_hash=password_hash,
                     must_change_password=True,
-                    updated_at=_FIXED_TIME,
+                    updated_at=self._clock(),
                     user_id=user_id,
                 )
             )
@@ -4242,13 +4567,13 @@ class _PostgresLocalAdminProbe:
 
 
 @pytest.fixture
-def local_admins(clean_database: AsyncEngine) -> _PostgresLocalAdminProbe:
-    return _PostgresLocalAdminProbe(clean_database)
+def local_admins(clean_database: AsyncEngine, clock: Any) -> _PostgresLocalAdminProbe:
+    return _PostgresLocalAdminProbe(clean_database, clock)
 ```
 
 三者都接 `clean_database`，因此它们操作的是**同一个** engine、同一个库——这是"同事务"用例有意义的前提。
 
-`LOCAL_ADMIN_SINGLETON_ID` 是 `persistence/local_admin.py` 里现有的 `_SINGLETON_ID`；把它改成不带下划线的公开常量并从 `local_admin.py` 导出，**不要**在测试里重写一遍字面量。`_FIXED_TIME` 用该 conftest 已有的固定时间常量。
+`LOCAL_ADMIN_SINGLETON_ID` 是 `persistence/local_admin.py` 里现有的 `_SINGLETON_ID`；把它改成不带下划线的公开常量并从 `local_admin.py` 导出，**不要**在测试里重写一遍字面量。`updated_at` 取根 `conftest.py` 的 `clock` fixture（`tests/fakes/clock.py::ManualClock`，固定在 2026-09-02 UTC）——V8 这里写的是 `_FIXED_TIME`，而这个名字在两个 conftest 里都不存在，按原文跑是 `NameError`。
 
 - [ ] **Step 2: 写 PostgreSQL 绑定测试**
 
@@ -4989,7 +5314,86 @@ def test_the_row_uses_plain_strings_so_the_database_sees_its_own_types() -> None
         return bool(events)
 ```
 
-`InMemoryLocalAdminStore.seed_if_absent`（`fake.py:514`）必须做**同样**的委托，改成调用 `InMemoryUserDirectoryStore.apply()` 而不是自己写 `state.local_admin`。两个实现的 bootstrap 语义必须由同一段分流代码决定——各写一份，四态里迟早有一态在两边不一致，而共享套件恰恰是靠"两边行为相同"才有意义的。
+`InMemoryLocalAdminStore.seed_if_absent`（`fake.py:515`）必须做**同样**的委托，改成调用 `InMemoryUserDirectoryStore.apply()` 而不是自己写 `state.local_admin`。两个实现的 bootstrap 语义必须由同一段分流代码决定——各写一份，四态里迟早有一态在两边不一致，而共享套件恰恰是靠"两边行为相同"才有意义的。
+
+**新字段要贯穿读取路径，不只是写进去。** Task 5 给 `LocalAdminRecord` 加了
+`user_id`，但 `PostgresLocalAdminStore` 的两个出口都不会自己长出这个值：
+
+修改 `src/xiaowei_agent/persistence/local_admin.py`：
+
+```python
+    async def get(self) -> LocalAdminRecord:
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.select(LOCAL_ADMINS).where(
+                            LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise LocalAdminNotFoundError
+        return LocalAdminRecord(
+            password_hash=row["password_hash"],
+            must_change_password=row["must_change_password"],
+            user_id=row["user_id"],
+        )
+```
+
+`get()` 的 `SELECT` 本来就是 `sa.select(LOCAL_ADMINS)`（整表），新列自动在 `row` 里，
+只差把它装进契约——**正因为"自动在 row 里"，漏掉这一行不会有任何报错**。
+
+改密路径要从 `RETURNING` 里把它取回来，不能凭命令现搭：
+
+```python
+    async def change_password_and_rotate_session(
+        self, *, command: ChangePasswordCommand
+    ) -> LocalAdminRecord:
+        now = self._clock()
+        async with self._engine.begin() as connection:
+            updated = (
+                await connection.execute(
+                    sa.update(LOCAL_ADMINS)
+                    .where(LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID)
+                    .values(
+                        password_hash=command.password_hash,
+                        must_change_password=False,
+                        updated_at=now,
+                    )
+                    .returning(LOCAL_ADMINS.c.id, LOCAL_ADMINS.c.user_id)
+                )
+            ).first()
+            if updated is None:
+                raise LocalAdminNotFoundError
+            # ……撤销旧 session、签发新 session 两段保持不变……
+        return LocalAdminRecord(
+            password_hash=command.password_hash,
+            must_change_password=False,
+            user_id=updated.user_id,
+        )
+```
+
+`UPDATE ... RETURNING user_id` 读的是**这次改密所在的那一行**，与那条 UPDATE 在同一个
+语句里，所以不存在"读完又被别人改掉"的窗口。原本这里只 `.scalar(...)` 取 `id`，现在要
+两列，所以改成 `.execute(...).first()`——`updated is None` 的判空语义不变。
+
+`InMemoryLocalAdminStore.change_password_and_rotate_session`（`fake.py:538`）同样要带上
+原记录的 `user_id`：
+
+```python
+            record = LocalAdminRecord(
+                password_hash=command.password_hash,
+                must_change_password=False,
+                user_id=self._state.local_admin.user_id,
+            )
+```
+
+`LOCAL_ADMIN_SINGLETON_ID` 就是本步把 `_SINGLETON_ID` 公开后的名字（见 Step 1 说明）；
+`get()` 与改密两处的 `where` 都跟着改，不要留一个私有名、一个公开名。
 
 **五个 bootstrap 常量的唯一真源是 `contracts/identity.py`，不是"二选一"。**
 
@@ -5003,6 +5407,8 @@ def test_the_row_uses_plain_strings_so_the_database_sees_its_own_types() -> None
 放 `contracts/identity.py`：它是最底层，`persistence` 与 `interfaces` 都能导
 （`test_module_layering.py:140` 允许 `interfaces/local_admin_auth.py` 导入
 `xiaowei_agent.contracts`），身份常量本来也属于契约。
+
+追加到 `src/xiaowei_agent/contracts/identity.py`：
 
 ```python
 LOCAL_ADMIN_TENANT_ID: Final[str] = "dev-local"
@@ -5018,7 +5424,7 @@ LOCAL_ADMIN_DISPLAY_NAME: Final[str] = "Local Admin"
 """
 ```
 
-`interfaces/local_admin_auth.py` 相应改为：
+修改 `src/xiaowei_agent/interfaces/local_admin_auth.py`：
 
 ```python
 LOCAL_ADMIN_PRINCIPAL: Final = AuthenticatedPrincipal(
@@ -5037,7 +5443,7 @@ LOCAL_ADMIN_PRINCIPAL: Final = AuthenticatedPrincipal(
 )
 ```
 
-补一条用例钉住"只有一份"（放在 `tests/contract/test_identity_contracts.py`）：
+追加到 `tests/contract/test_identity_contracts.py`（Task 2 建的那个文件）：
 
 ```python
 def test_the_local_admin_principal_consumes_the_contract_constants() -> None:
@@ -5047,6 +5453,15 @@ def test_the_local_admin_principal_consumes_the_contract_constants() -> None:
     改一次租户名就会只改一边，而 bootstrap 建出来的 ADMIN 角色会落在另一个
     作用域——登录成功但什么都看不见，且没有任何报错。
     """
+    import inspect
+    from pathlib import Path
+
+    from xiaowei_agent.contracts.identity import (
+        LOCAL_ADMIN_ACTOR,
+        LOCAL_ADMIN_ENVIRONMENT_ID,
+        LOCAL_ADMIN_TENANT_ID,
+    )
+    from xiaowei_agent.interfaces import local_admin_auth
     from xiaowei_agent.interfaces.local_admin_auth import LOCAL_ADMIN_PRINCIPAL
 
     assert LOCAL_ADMIN_PRINCIPAL.tenant_id == LOCAL_ADMIN_TENANT_ID
@@ -5060,7 +5475,7 @@ def test_the_local_admin_principal_consumes_the_contract_constants() -> None:
 
 每次调用 `seed_if_absent` 用新的 `operation_id`，因为已 bootstrap 的情况返回空元组、不写审计，不会撞终态索引。
 
-补一条测试钉住这个行为（放在 `tests/integration/test_identity_directory_postgres.py`）：
+追加到 `tests/integration/test_identity_directory_postgres.py`：
 
 ```python
 async def test_seeding_the_local_admin_writes_its_audit_event(
@@ -5177,8 +5592,10 @@ async def test_changing_the_password_keeps_the_directory_link(
     async with clean_database.connect() as connection:
         before = await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
     assert before is not None
+    # Store 看到的和库里的必须是同一件事——只断言列，等于只测了一半。
+    assert (await admins.get()).user_id == before
 
-    await admins.change_password_and_rotate_session(
+    rotated = await admins.change_password_and_rotate_session(
         command=ChangePasswordCommand(
             password_hash=hash_password("new" + "-secret"),
             new_session_digest="0" * 64,
@@ -5190,15 +5607,25 @@ async def test_changing_the_password_keeps_the_directory_link(
     async with clean_database.connect() as connection:
         after = await connection.scalar(sa.select(LOCAL_ADMINS.c.user_id))
     assert after == before
+    assert rotated.user_id == before
+    assert (await admins.get()).user_id == before
 ```
+
+三条断言钉的是三件不同的事，缺一条就漏一条路径：数据库列没被清空（`after`）、
+改密的**返回值**带着链接（`rotated.user_id`）、下一次**读取**也带着链接
+（`get().user_id`）。只断言第一条时，`get()` 与改密返回值可以双双返回 `None` 而全绿——
+那正是 V8 计划的状态。
+
+同一组断言在内存实现上由共享套件覆盖：`tests/suites/identity_directory.py` 的
+`LocalAdminProbe` 已经有 `linked_user_id()`，两个绑定读到的必须是同一个值。
 
 上面四个字段逐字取自 `persistence/local_admin.py:58` 的当前定义（`password_hash`、`new_session_digest`、`public_origin_digest`、`session_ttl_seconds`，后者 `gt=0, le=86_400`）。V3 这里写的是 `session_digest` 与 `issued_at`——两个都不存在，按原文跑会在到达 `user_id` 断言之前就因**测试自身写错**而失败，正是 Global Constraints 里那条不合格 RED。实现时若源码已变，以源码为准，**不要**改断言迁就。
 
 - [ ] **Step 6: 登记 Protocol 一致性**
 
-在 `_conformance.py` 里按既有写法为 `UserDirectoryStore` 与 `AdminAuditStore` 各加一条 Protocol 断言，覆盖内存与 PostgreSQL 两个实现。
+修改 `src/xiaowei_agent/_conformance.py`：按既有写法为 `UserDirectoryStore` 与 `AdminAuditStore` 各加一条 Protocol 断言，覆盖内存与 PostgreSQL 两个实现。
 
-`isinstance` 式的 Protocol 断言只保证实现**不少于**协议；它挡不住"多出来一个公开写方法"。在 `tests/contract/test_protocol_conformance.py` 里再加一条**精确相等**的表面断言：
+`isinstance` 式的 Protocol 断言只保证实现**不少于**协议；它挡不住"多出来一个公开写方法"。追加到 `tests/contract/test_protocol_conformance.py`（再加一条**精确相等**的表面断言）：
 
 ```python
 @pytest.mark.parametrize(
@@ -5312,13 +5739,20 @@ git add src/xiaowei_agent/persistence/postgres.py \
         src/xiaowei_agent/persistence/rows.py \
         src/xiaowei_agent/persistence/local_admin.py \
         src/xiaowei_agent/persistence/fake.py \
+        src/xiaowei_agent/contracts/identity.py \
+        src/xiaowei_agent/interfaces/local_admin_auth.py \
         src/xiaowei_agent/_conformance.py \
         tests/integration/conftest.py \
         tests/integration/test_identity_directory_postgres.py \
-        tests/contract/test_protocol_conformance.py
+        tests/contract/test_protocol_conformance.py \
+        tests/contract/test_identity_contracts.py \
+        tests/contract/test_identity_schema.py
 git commit -m "feat(w1a): commit identity changes and their audit in one transaction
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -6244,6 +6678,9 @@ git add tests/security/test_admin_audit_append_only.py \
 git commit -m "test(w1a): guard the single write path, append-only audit and PII exposure
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -6610,8 +7047,101 @@ async def test_report_never_contains_a_plaintext_open_id(tmp_path, user_director
     report = await _run(path, user_directory)
     assert _OPEN_ID_A not in repr(report)
     assert _OPEN_ID_A not in report.model_dump_json()
+
+
+async def _precreate(directory, *, actor, role, user_id=None, operation_id):
+    """在库里先放一个账号，用来制造"半迁移"与"角色对不上"两种既有事实。"""
+    from xiaowei_agent.contracts.admin_audit import AdminOperationContext
+    from xiaowei_agent.contracts.enums import IdentitySource
+    from xiaowei_agent.contracts.identity import CreateUserCommand
+
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id=legacy_user_id(actor=actor) if user_id is None else user_id,
+            actor=actor,
+            display_name=actor,
+            tenant_id=_TENANT,
+            environment_id=_ENV,
+            role=role,
+        ),
+        context=AdminOperationContext(
+            operation_id=operation_id,
+            actor_user_id="usr-local-admin",
+            actor="admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        ),
+    )
+
+
+async def test_an_account_without_its_binding_is_a_conflict_not_a_skip(
+    tmp_path, user_directory, persistence_state
+):
+    """账号在、飞书绑定不在——这不是"迁移过了"，是半迁移。
+
+    这条用例存在的理由是一次真实缺陷：上一版只看 ``load_account()`` 非空就记
+    ``skipped`` 并把条目**从批次里剔除**，于是第 4 步的唯一约束根本不会碰到它。
+    结果是报告写着成功、审计里什么都没有，而那个人仍然登不进来——当时没有任何
+    一条断言会因此转红。
+    """
+    from xiaowei_agent.contracts.enums import IdentitySource
+
+    await _precreate(
+        user_directory,
+        actor="alice",
+        role=ProductRole.OPERATOR,
+        operation_id="pre-half-migrated",
+    )
+    before = len(persistence_state.admin_audit_events)
+
+    path = _write(
+        tmp_path,
+        [
+            {"subject_ref": _OPEN_ID_A, "actor": "alice", "labels": ["operator"]},
+            {"subject_ref": _OPEN_ID_B, "actor": "bob", "labels": ["viewer"]},
+        ],
+    )
+    with pytest.raises(LegacyMigrationConflictError):
+        await _run(path, user_directory)
+
+    # 整批没写：bob 不在、alice 仍然没有绑定、审计一条都没多。
+    assert await _account(user_directory, "bob") is None
+    assert (
+        await user_directory.resolve_by_subject(
+            provider=IdentitySource.FEISHU,
+            tenant_id=_TENANT,
+            environment_id=_ENV,
+            subject_ref=_OPEN_ID_A,
+        )
+        is None
+    )
+    assert len(persistence_state.admin_audit_events) == before
+
+
+async def test_a_role_that_no_longer_matches_is_a_conflict(tmp_path, user_directory):
+    """角色对不上也不能跳过。
+
+    跳过等于在"旧文档说了算"和"库里说了算"之间替人做了选择，而这两者哪个对，
+    迁移程序不知道。
+    """
+    await _precreate(
+        user_directory,
+        actor="alice",
+        role=ProductRole.USER,
+        operation_id="pre-wrong-role",
+    )
+    path = _write(
+        tmp_path,
+        [{"subject_ref": _OPEN_ID_A, "actor": "alice", "labels": ["operator"]}],
+    )
+    with pytest.raises(LegacyMigrationConflictError):
+        await _run(path, user_directory)
 ```
 
+`test_rerunning_the_migration_changes_nothing`（本文件已有）就是这两条的正常对照：
+完整迁移过的条目仍然要判 `skipped`，否则迁移变成不可重跑。两条反例里**必须**同时断言
+"另一条没写进去"与"审计没多"——只断言抛了异常，无法区分"整批回滚"和"写了一半才炸"。
+`persistence_state` 是根 `conftest.py` 已有的 fixture，与 `user_directory` 共享同一份
+状态（Task 5 Step 6）。
 - [ ] **Step 5: 写迁移命令**
 
 创建 `src/xiaowei_agent/interfaces/legacy_identity_migration.py`。标签映射与 ID 派生照抄：
@@ -6670,11 +7200,58 @@ class LegacyMigrationReport(Contract):
 
 1. 用 Task 8 Step 2 的 `read_legacy_identity_document()` 读入条目，拿到**原始 labels**。
 2. 校验与派生：actor 超过 `_MAX_ACTOR_LENGTH` → `LegacyMigrationConflictError`；每条按 `_ROLE_RANK` 取最高角色；带 `approver` 的记进 `deferred_labels`（不改变它拿到的 `USER`）。
-3. 用 `directory.load_account()` 查出**已经迁移过**的条目，记为 `skipped` 并从批次中剔除。剩余条目为空时直接返回 `created=0`。
+3. 判定哪些条目**已经完整迁移过**。只有五项全部精确匹配才算，剔除出批次并记为
+   `skipped`；**部分存在或任何一项不一致，立即抛 `LegacyMigrationConflictError`**，
+   整批不写。剩余条目为空时直接返回 `created=0`。
+
+   ```python
+   for entry in entries:
+       user_id = legacy_user_id(actor=entry.actor)
+       facts = await directory.load_account(
+           user_id=user_id, tenant_id=tenant_id, environment_id=environment_id
+       )
+       bound = await directory.resolve_by_subject(
+           provider=IdentitySource.FEISHU,
+           tenant_id=tenant_id,
+           environment_id=environment_id,
+           subject_ref=entry.subject_ref,
+       )
+       already = (
+           facts is not None
+           and bound is not None
+           and bound.account.user_id == user_id
+           and facts.account.actor == entry.actor
+           and facts.account.status is UserStatus.ACTIVE
+           and facts.assignment.role is role_for(entry)
+       )
+       if already:
+           skipped += 1
+           continue
+       if facts is not None or bound is not None:
+           # 账号在、绑定不在（或角色/状态对不上）：这条既不能跳过，也不能重写。
+           raise LegacyMigrationConflictError(
+               f"legacy identity for {user_id} is partially migrated"
+           )
+       pending.append(entry)
+   ```
+
 4. 把剩余条目组装成**一个** `MigrateLegacyIdentitiesCommand`，一次 `apply()` 写完。捕获 `UserDirectoryConflictError` / `AdminAuditUnwritableError` 并转成 `LegacyMigrationConflictError`——**不做事务外预检**：预检和写入之间有时间窗，而且预检通过不等于写入成功。原子性由那一个事务给。
 5. `created` 取 `len(events)`，`audit_event_ids` 取事件 id。
 
-第 3 步的 `skipped` 查询是**报告用途**，不是正确性前提：即使它漏判，第 4 步的数据库唯一约束仍会让整批回滚。
+**第 3 步的判定不是"报告用途"，它是闭集判据。** V8 的计划这里写的是"`load_account()`
+非空即记为 `skipped`"，还附了一句自我安慰："即使它漏判，第 4 步的数据库唯一约束仍会
+让整批回滚"。这句话不成立，而且**恰恰是因为第 3 步自己**：被判为 `skipped` 的条目已经
+从批次里剔除了，第 4 步根本不会碰它，唯一约束当然不会执行。于是一个"账号和角色在、
+飞书绑定不在"的半迁移用户会被静默跳过，报告写着成功，而那个人仍然登不进来——**没有
+任何一条断言会因此转红**。
+
+凡是"先剔除、再让后面的约束兜底"的结构，都要问一句：剔除之后，后面的约束还看得见它
+吗？看不见，那这一步就是最终判据，必须自己 fail-closed。
+
+`role_for(entry)` 就是第 2 步按 `_ROLE_RANK` 取出的最高角色；`tenant_id` /
+`environment_id` 是迁移的目标作用域参数。`resolve_by_subject()` 拿的是**明文**
+`subject_ref`，摘要化在 store 内部完成（见 Task 5 的 `external_subject_digest`）——
+调用方不自己算摘要，算错了就会永远判成"未绑定"。
 
 - [ ] **Step 6: 运行并跑全量**
 
@@ -6687,17 +7264,57 @@ ruff check . && mypy src
 
 - [ ] **Step 7: 隔离变异反证**
 
-把整批命令拆回逐条 `apply`：
+两条承重保护各变异一次。变异脚本自带"确实改到了代码"的自检——**改不到目标就是脚本错
+了，不是保护有效**。
 
 ```bash
-cp src/xiaowei_agent/interfaces/legacy_identity_migration.py /tmp/keep-mig.py
-# 手工把第 4 步改成 for entry in entries: await directory.apply(CreateUserCommand(...))
-PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_legacy_identity_migration.py -q 2>&1 | tail -6
-cp /tmp/keep-mig.py src/xiaowei_agent/interfaces/legacy_identity_migration.py && rm /tmp/keep-mig.py
-PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/contract/test_legacy_identity_migration.py -q 2>&1 | tail -3
+MIG=src/xiaowei_agent/interfaces/legacy_identity_migration.py
+mutate() {  # $1=旧串 $2=新串
+  cp "$MIG" /tmp/keep-mig.py
+  OLD="$1" NEW="$2" python - <<'MUT'
+import os, pathlib
+p = pathlib.Path(os.environ["MIG"])
+before = p.read_text(encoding="utf-8")
+after = before.replace(os.environ["OLD"], os.environ["NEW"], 1)
+assert after != before, "变异没有匹配到目标代码——先修脚本，不要把它当成『保护有效』"
+p.write_text(after, encoding="utf-8")
+MUT
+  PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+    tests/contract/test_legacy_identity_migration.py -q 2>&1 | tail -6
+  cp /tmp/keep-mig.py "$MIG" && rm /tmp/keep-mig.py
+}
+export MIG
 ```
 
-预期：`test_a_database_conflict_leaves_zero_rows_behind` 变红（`alice` 留在库里）。还原后回到全绿。
+变异一：把"半迁移必须冲突"改回"账号在就跳过"。
+
+```bash
+mutate '        if facts is not None or bound is not None:' \
+       '        if False:'
+```
+
+预期：`test_an_account_without_its_binding_is_a_conflict_not_a_skip` 与
+`test_a_role_that_no_longer_matches_is_a_conflict` 同时变红，且红在
+`pytest.raises(LegacyMigrationConflictError)` 上——**根本没有异常抛出**，正是 V8 的行为。
+
+变异二：把整批命令拆成逐条写。
+
+```bash
+mutate '    events = await directory.apply(' \
+       '    events = ()
+    for entry in pending:
+        events += await directory.apply('
+```
+
+预期：`test_a_database_conflict_leaves_zero_rows_behind` 变红（`alice` 留在库里）。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+  tests/contract/test_legacy_identity_migration.py -q 2>&1 | tail -3
+```
+
+两次变异都必须确认还原后回到全绿再提交。变异二的替换串要按实际写出来的代码微调
+（参数缩进），但 `assert after != before` 会先告诉你有没有改到。
 
 - [ ] **Step 8: 提交**
 
@@ -6709,6 +7326,9 @@ git add src/xiaowei_agent/interfaces/feishu_identity.py \
 git commit -m "feat(w1a): migrate legacy identity labels in one atomic command
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 ```
 
 ---
@@ -6908,6 +7528,9 @@ git add ARCHITECTURE.md AGENT_HANDOFF.md DEVELOPMENT_PLAN.md \
 git commit -m "docs(w1a): record the identity and audit write kernel as current truth
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+test -z "$(git status --porcelain)" || {
+  echo "提交后工作区不干净：下面这些文件改了却没进本次提交"; git status --porcelain; false
+}
 git push -u origin claude/w1a-identity-authz-audit
 ```
 
@@ -7372,3 +7995,131 @@ helper 抛出的任何其他异常——`ValidationError`、`KeyError`、一个 
 - AST 守卫的静态上限（别名 / `Any` / 未注解参数 / 运行时列名 / `sa.text`）不变，不得说成
   "已封死"。
 - engine 未开 `hide_parameters=True`；`AuthenticatedPrincipal.subject_ref` 仍未标 PII 遮蔽。
+
+---
+
+## V9 修订记录
+
+针对 `5c03032264dfad2d42ef4b57f92c65fc46aff551` 的复审。四条 P1 逐条核实，**全部成立**，
+另一条非阻断漂移一并修正。
+
+四条**不是四个独立缺陷**，是三个根因：
+
+| 复审条目 | 根因 |
+| --- | --- |
+| 1（降级守卫签名）、3（`user_id` 没贯穿读取路径） | **T. 与既有代码的接缝只写了自己那一端** |
+| 2（Task 5/6 文件闭集假绿） | **U. 任务的文件闭集只在计划内部自洽** |
+| 4（半迁移被误判为已迁移） | **V. 把"剔除后靠后面兜底"当成了闭集判据** |
+
+### T. 与既有代码的接缝只写了自己那一端
+
+**根因** —— 计划触碰仓库里已有的符号时，只写了计划这一侧，没有去读真实定义核对另一侧。
+调用方向和被调用方向各失守一次：
+
+| 方向 | 事实 |
+| --- | --- |
+| 调用既有函数 | `rev_0014.downgrade()` 写的是 `require_destructive_authorization("rev_0014 downgrade …")`，一个位置字符串。真实签名是 `(connection, *, guarded)`（`guards.py:48`）。**有数据时降级抛的是 `TypeError`，不是 `MigrationSafetyError`**——守卫在文档里在，在运行时从来没生效过。更刺眼的是紧挨着它的那句话："先读 `guards.py` 确认确切签名，按它的既有形状调用"：提醒写了，核对没做 |
+| 给既有契约加字段 | `LocalAdminRecord` 加了 `user_id`，但它在 `src/` 有**四个**构造点，四个都不传这个字段。默认 `None` 让它们全部静默通过，于是 `get()` 与改密返回值都报告"未关联"，而数据库那一列好端端地存着 |
+
+第二条的危害不止于"读不到"：`None` 在 bootstrap 四态表里正好是第二行（backfill），
+一个漏回填的读取路径会让"已经链接好了"看起来像"还没升级"。
+
+**修复位置**
+
+- Task 4 Step 4：`downgrade()` 改成 `require_destructive_authorization(op.get_bind(),
+  guarded=((_USER_ACCOUNTS, "user_accounts"), (_ADMIN_AUDIT_EVENTS,
+  "admin_audit_events")))`，外面套 `if not context.is_offline_mode():`，形状逐字取自
+  `rev_0013_clarification_parent.py:79`。**一并删掉**手工写的 `has_accounts` /
+  `has_events` 预检：`_row_counts` 已经在数同样两张表，守卫自己就有"没有受保护行就返回"
+  的分支，而手工预检把 `counts` 这个分类计数降级成了一个布尔——`counts` 正是既有用例
+  断言的那个值。
+- Task 4 **新增 Step 7**：在真实 PostgreSQL 上跑降级守卫——拒绝（`counts` 精确相等）、
+  版本不动、数据一行不少、显式授权后真的删掉、再升回来且 `local_admins.user_id` 回来。
+  外加一条正常对照"空目录降级不需要授权"，否则前一条无法区分"按数据拦住"和"无条件
+  拦住一切"。离线用例一条都抓不到这个缺陷，**因为离线用例根本不执行 `downgrade()`**。
+- Task 5 Step 6：把 `LocalAdminRecord` 的**四个构造点逐个列成表**（AST 发现），每个写清
+  本轮要变成什么。
+- Task 6 Step 5：`get()` 补 `user_id=row["user_id"]`；改密改用
+  `.returning(LOCAL_ADMINS.c.id, LOCAL_ADMINS.c.user_id)` 并从中回填——**不能凭命令现搭**，
+  命令里根本没有这个字段；`InMemoryLocalAdminStore` 改密同样带上原记录的值。
+  `test_changing_the_password_keeps_the_directory_link` 从只断言数据库列，扩成三条：
+  列没被清空、改密**返回值**带着链接、下一次**读取**也带着链接。
+
+**同类问题（复审未点到，一并处理）**
+
+- Task 6 的 PostgreSQL 探针写 `updated_at=_FIXED_TIME`，旁边注着"用该 conftest 已有的固定
+  时间常量"——**两个 conftest 里都没有这个名字**，按原文跑是 `NameError`。改为接根
+  `conftest.py` 的 `clock` fixture。
+- `contracts/identity.py` 的导入块缺 `Final`，而 Task 6 要往里追加五个 `Final[str]` 常量。
+- `tests/integration/conftest.py` 的新 fixture 用了四个从未说明要导入的名字。
+- `test_identity_contracts.py` 的新用例用了 `Path` / `inspect` / `local_admin_auth` /
+  三个常量，一个都没导入。
+- 后三条都是**新增的机械核对自己查出来的**，不是我重读一遍发现的。
+
+**结构性修订** —— Task 0 机械核对新增两条，方向正好相反：
+
+- **第 5 条（调用方向）**：把计划所有 Python 代码块里对既有 `src/` 符号的调用抽出来，用
+  `inspect.signature().bind()` 逐个绑实参。绑不上就报错。
+- **第 6 条（被调用方向）**：给既有契约加字段时，该契约在 `src/` 的全部构造点由 AST 发现，
+  与计划里那张清单做 `==`。将来任何人新增一个构造点，这条核对都会变红。
+
+第 4 条也一并加强：**追加到既有文件时先把真实文件内容垫在前面再查**，于是"这个名字在
+那个文件里本来就有"不再靠记忆判断；`修改` 开头的标记现在也会终止上一段，不会再把下一段
+代码错误地并进上一个文件。
+
+### U. 任务的文件闭集只在计划内部自洽
+
+**根因** —— Task 5 正文要改 `persistence/local_admin.py`，Task 6 正文要改
+`contracts/identity.py`、`interfaces/local_admin_auth.py` 与两个契约测试文件；这五处在
+`Files:` 与 `git add` **两边都没有**。V4 加的第 2 条机械核对查的是"`Files:` 声明了但
+`git add` 漏掉"——**两边一起漏**，它按定义查不出来。后果是本地全绿、提交里缺文件，而
+每个任务的提交本应自己能跑。
+
+**修复位置** —— Task 4 补 `tests/integration/test_migration_paths.py`；Task 5 补
+`persistence/local_admin.py`；Task 6 补 `contracts/identity.py`、
+`interfaces/local_admin_auth.py`、`tests/contract/test_identity_contracts.py`、
+`tests/contract/test_identity_schema.py`。`Files:` 与 `git add` 同步改，第 2 条核对保持
+`（无）`。
+
+**结构性修订** —— 一静一动，配对使用：
+
+- **Task 0 第 7 条（静态）**：正文里凡用 以 `创建` / `追加到` / `修改` 加反引号路径加全角冒号标记写到的文件，
+  必须出现在该任务的 `Files:` 里。因此**每个要落盘的文件都必须有这样一个标记**——
+  "放在 X 里"这种散文提法不再算数。本轮把 Task 6 里六处散文提法改成了标记，其中
+  `tests/contract/test_identity_schema.py` 当场就是红的。
+- **Global Constraints + 每个提交步骤（动态）**：提交之后 `git status --porcelain` 必须为空。
+  这一条兜的正是静态检查兜不住的那一半——计划从头到尾没提过某个文件时，静态检查看不见
+  它，但只要真的改了它，工作区就不干净。不干净就停下来判断该不该把它加进本任务，
+  **不要**用 `git add -A` 扫进去。
+
+### V. 把"剔除后靠后面兜底"当成了闭集判据
+
+**根因** —— 旧身份迁移只要 `load_account()` 非空就记 `skipped`，并附了一句自我安慰：
+"即使它漏判，第 4 步的数据库唯一约束仍会让整批回滚"。这句话不成立，**而且恰恰是因为
+第 3 步自己**：被判为 `skipped` 的条目已经从批次里剔除，第 4 步根本不会碰它，唯一约束
+当然不会执行。于是一个"账号和角色在、飞书绑定不在"的半迁移用户被静默跳过，报告写着
+成功，而那个人仍然登不进来——没有任何一条断言会因此转红。
+
+凡是"先剔除、再让后面的约束兜底"的结构，都要问一句：剔除之后，后面的约束还看得见它吗？
+看不见，那这一步就是最终判据，必须自己 fail-closed。
+
+**修复位置** —— Task 8 Step 5 第 3 步：账号、actor、状态、角色与 `resolve_by_subject()`
+绑定**五项全部精确匹配**才跳过；部分存在或任何一项不一致立即抛
+`LegacyMigrationConflictError`，整批不写。Step 4 新增两条反例
+（`test_an_account_without_its_binding_is_a_conflict_not_a_skip`、
+`test_a_role_that_no_longer_matches_is_a_conflict`），前者同时断言"另一条没写进去"
+与"审计一条没多"——只断言抛了异常，无法区分"整批回滚"和"写了一半才炸"。本文件已有的
+`test_rerunning_the_migration_changes_nothing` 就是它们的正常对照：完整迁移过的条目仍然
+要判 `skipped`，否则迁移变成不可重跑。
+
+**同类问题（复审未点到，一并处理）** —— Task 8 Step 7 的变异反证写的是
+"`# 手工把第 4 步改成 …`"，正是 V8 刚在 Task 6 修掉的"示意形状"。改成两条可执行变异，
+各自带 `assert after != before` 自检，且分别红在不同的断言上。
+
+### 非阻断：README 阶段漂移
+
+`README.md:14` 仍写着"当前阶段是 W0 文档与 ADR 真源收口……W0 合入后才编写 W1a 详细计划
+并送审"，而 W0 已由 PR #61 合入 `main@a12578cd`，`AGENT_HANDOFF.md:23` 已写"当前阶段：
+W1a 详细计划送审"。两份当前真源文档互相矛盾时不静默选一边——这里 handoff 有合入 SHA
+作证据，README 落后，按 handoff 改。措辞保持"计划获批后才可开始 W1a 实现"，**不**写成
+"W1a 已开始"。
