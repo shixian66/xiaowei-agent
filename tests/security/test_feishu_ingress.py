@@ -83,6 +83,9 @@ def test_listener_stack_field_surface_has_no_execution_authority() -> None:
         "task_store",
         "channel_store",
         "identity_directory",
+        "activation_service",
+        "activation_notifications",
+        "message_port",
         "submission_service",
         "clock",
         "settings",
@@ -145,10 +148,16 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.interfaces.http_models",
     }
     listener_only = {
+        "xiaowei_agent.application.activation_notification",
+        "xiaowei_agent.application.channel_projection",
         "xiaowei_agent.application.channel_submission",
+        "xiaowei_agent.application.identity_activation",
+        "xiaowei_agent.governance.product_roles",
+        "xiaowei_agent.interfaces.directory_identity",
         "xiaowei_agent.interfaces.feishu_identity",
         "xiaowei_agent.interfaces.feishu_listener",
         "xiaowei_agent.interfaces.feishu_sdk",
+        "xiaowei_agent.rendering.feishu",
     }
     assert loaded == (
         set(_TASK_VIEW_PROCESS_ALLOWED_MODULES) - internal_api_only

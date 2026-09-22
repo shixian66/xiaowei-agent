@@ -95,6 +95,7 @@ from xiaowei_agent.interfaces.provider_probe import (
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     FeishuOAuthPort,
+    WebActivationPendingError,
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
@@ -1230,6 +1231,8 @@ def create_app(
                 response = await oauth_connection_test_callback(
                     request, code=code, state=state, state_cookie=state_cookie
                 )
+            except WebActivationPendingError:
+                response = _error(403, "activation_pending")
             except WebAuthenticationError:
                 response = _error(401, "unauthorized")
             except WebOAuthCodeError:

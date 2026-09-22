@@ -133,7 +133,8 @@ def test_reading_never_echoes_the_document_on_failure(
     assert "alice" not in message
 
 
-def test_the_existing_directory_loader_still_behaves_identically(
+@pytest.mark.asyncio
+async def test_the_existing_directory_loader_still_behaves_identically(
     tmp_path: Path,
 ) -> None:
     document = _document(
@@ -149,7 +150,7 @@ def test_the_existing_directory_loader_still_behaves_identically(
     )
 
     for label, expected in _PERMISSIONS_BEFORE.items():
-        principal = directory.resolve(subject_ref=f"subject-{label}")
+        principal = await directory.resolve(subject_ref=f"subject-{label}")
         assert principal.permissions == expected
         assert principal.actor == label
         assert principal.tenant_id == "dev-local"

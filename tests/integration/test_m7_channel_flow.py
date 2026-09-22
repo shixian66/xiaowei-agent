@@ -6,14 +6,32 @@ from pathlib import Path
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
-from xiaowei_agent.contracts import ActorTaskPageQuery, TaskStatus, WebMode
+from xiaowei_agent.contracts import (
+    LOCAL_ADMIN_ACTOR,
+    LOCAL_ADMIN_USER_ID,
+    ActorTaskPageQuery,
+    IdentitySource,
+    TaskStatus,
+    UserStatus,
+    WebMode,
+)
+from xiaowei_agent.contracts.admin_audit import AdminOperationContext
+from xiaowei_agent.contracts.identity import (
+    ApproveActivationCommand,
+    RejectActivationCommand,
+    SetUserStatusCommand,
+)
 from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces.feishu_sdk import FeishuMention, FeishuMessageEvent
+from xiaowei_agent.interfaces.legacy_identity_migration import (
+    migrate_static_identities,
+)
 from xiaowei_agent.interfaces.local_stack import (
     build_postgres_channel_worker_stack,
     build_postgres_feishu_listener_stack,
@@ -22,7 +40,14 @@ from xiaowei_agent.interfaces.local_stack import (
 )
 from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import create_app, session_cookie_name
-from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
+from xiaowei_agent.interfaces.web_auth import (
+    FeishuOAuthIdentity,
+    WebActivationPendingError,
+    WebAuthenticationError,
+    WebAuthService,
+)
+from xiaowei_agent.persistence.postgres import PostgresUserDirectoryStore
+from xiaowei_agent.persistence.schema import ACTIVATION_REQUESTS, TASKS, WEB_SESSIONS
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 
 _SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
@@ -85,6 +110,7 @@ class _OAuth:
             "alice-code": "subject-alice",
             "bob-code": "subject-bob",
             "admin-code": "subject-admin",
+            "new-user-code": "subject-new-user",
         }
         return FeishuOAuthIdentity(subject_ref=subjects[code])
 
@@ -116,7 +142,7 @@ def _identity_file(tmp_path: Path) -> Path:
                     },
                     {
                         "subject_ref": "subject-admin",
-                        "actor": "admin",
+                        "actor": "feishu-admin",
                         "labels": ["admin"],
                     },
                     {
@@ -151,6 +177,7 @@ def _group_event(
     text: str = "@_user_1 检查最近三十分钟慢查询",
     event_id: str = "event-group-1",
     message_id: str = "incoming-message-1",
+    sender_subject_ref: str = "subject-alice",
 ) -> FeishuMessageEvent:
     return FeishuMessageEvent(
         schema="2.0",
@@ -159,7 +186,7 @@ def _group_event(
         app_id="offline_test_app",
         tenant_key="offline-tenant",
         sender_type="user",
-        sender_subject_ref="subject-alice",
+        sender_subject_ref=sender_subject_ref,
         message_id=message_id,
         chat_id="chat-operations",
         chat_type="group",
@@ -191,6 +218,152 @@ async def _web_session(auth: WebAuthService, *, code: str) -> str:
     return issued.session_cookie
 
 
+async def _migrate_legacy_identities(
+    *,
+    settings: Settings,
+    engine: AsyncEngine,
+    clock,
+) -> None:
+    assert settings.feishu_identity_file is not None
+    report = await migrate_static_identities(
+        document_path=settings.feishu_identity_file,
+        directory=PostgresUserDirectoryStore(engine=engine, clock=clock),
+        tenant_id=settings.tenant_id,
+        environment_id=settings.environment_id,
+        actor_user_id="integration-migration",
+        actor="integration-migration",
+    )
+    assert report.created == 3
+
+
+async def test_unknown_group_identity_persists_one_request_and_no_task(
+    clean_database: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clock,
+) -> None:
+    settings = _settings(tmp_path)
+    messages = _Messages()
+    monkeypatch.setattr(
+        local_stack_module,
+        "create_database_engine",
+        lambda _: clean_database,
+    )
+    listener = await build_postgres_feishu_listener_stack(
+        settings=settings,
+        clock=clock,
+        transport=RecordingFeishuInboundTransport(),
+        message_port=messages,
+        credentials=ProviderCredentials(
+            feishu_app_id="offline_test_app",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
+    )
+    event = _group_event(
+        text="@_user_1 select secret from private_table",
+        event_id="event-unknown-group",
+        sender_subject_ref="subject-unknown",
+    )
+
+    assert await listener.listener.handle_event(event=event) is True
+    assert await listener.listener.handle_event(event=event) is True
+
+    async with clean_database.connect() as connection:
+        activation_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(ACTIVATION_REQUESTS)
+        )
+        task_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(TASKS)
+        )
+    assert activation_count == 1
+    assert task_count == 0
+    assert len(messages.chat_sends) == 2
+    assert messages.chat_sends[0][2] == messages.chat_sends[1][2]
+    assert "private_table" not in messages.chat_sends[0][1].content_json
+    await listener.aclose()
+
+
+async def test_bound_but_disabled_identity_never_reenters_activation(
+    clean_database: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clock,
+) -> None:
+    settings = _settings(tmp_path)
+    messages = _Messages()
+    monkeypatch.setattr(
+        local_stack_module,
+        "create_database_engine",
+        lambda _: clean_database,
+    )
+    await _migrate_legacy_identities(
+        settings=settings, engine=clean_database, clock=clock
+    )
+    web = await build_postgres_web_stack(
+        settings=settings,
+        oauth=_OAuth(),
+        membership=_Membership(),
+        clock=clock,
+    )
+    listener = await build_postgres_feishu_listener_stack(
+        settings=settings,
+        clock=clock,
+        transport=RecordingFeishuInboundTransport(),
+        message_port=messages,
+        credentials=ProviderCredentials(
+            feishu_app_id="offline_test_app",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
+    )
+    directory = PostgresUserDirectoryStore(engine=clean_database, clock=clock)
+    facts = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=settings.tenant_id,
+        environment_id=settings.environment_id,
+        subject_ref="subject-alice",
+    )
+    assert facts is not None
+    await directory.apply(
+        command=SetUserStatusCommand(
+            user_id=facts.account.user_id,
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+            status=UserStatus.DISABLED,
+        ),
+        context=AdminOperationContext(
+            operation_id="integration-disable-alice",
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor=LOCAL_ADMIN_ACTOR,
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        ),
+    )
+
+    started = await web.auth.start_login()
+    with pytest.raises(WebAuthenticationError):
+        await web.auth.complete_login(
+            code="alice-code",
+            state=started.state_cookie,
+            state_cookie=started.state_cookie,
+            previous_session_cookie=None,
+        )
+    assert await listener.listener.handle_event(event=_group_event()) is False
+
+    async with clean_database.connect() as connection:
+        activation_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(ACTIVATION_REQUESTS)
+        )
+        session_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(WEB_SESSIONS)
+        )
+        task_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(TASKS)
+        )
+    assert (activation_count, session_count, task_count) == (0, 0, 0)
+    assert messages.chat_sends == []
+    await listener.aclose()
+    await web.aclose()
+
+
 async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_policy(
     clean_database: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +378,9 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
         "create_database_engine",
         lambda _: clean_database,
     )
+    await _migrate_legacy_identities(
+        settings=settings, engine=clean_database, clock=clock
+    )
     full = await build_postgres_local_stack(
         settings=settings,
         clock=clock,
@@ -214,6 +390,7 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
         settings=settings,
         clock=clock,
         transport=RecordingFeishuInboundTransport(),
+        message_port=messages,
         credentials=ProviderCredentials(
             feishu_app_id="offline_test_app",
             feishu_app_secret="listener-" + "fixture-secret",
@@ -354,6 +531,9 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
         "create_database_engine",
         lambda _: clean_database,
     )
+    await _migrate_legacy_identities(
+        settings=settings, engine=clean_database, clock=clock
+    )
     full = await build_postgres_local_stack(
         settings=settings,
         clock=clock,
@@ -363,6 +543,7 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
         settings=settings,
         clock=clock,
         transport=RecordingFeishuInboundTransport(),
+        message_port=_Messages(),
         credentials=ProviderCredentials(
             feishu_app_id="offline_test_app",
             feishu_app_secret="listener-" + "fixture-secret",
@@ -446,3 +627,108 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
     assert feishu_json["render"] == web_json["render"]
     assert feishu_json.get("disclosure") is None
     assert web_json.get("disclosure") is None
+
+
+async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
+    clean_database: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clock,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(
+        local_stack_module,
+        "create_database_engine",
+        lambda _: clean_database,
+    )
+    web = await build_postgres_web_stack(
+        settings=settings,
+        oauth=_OAuth(),
+        membership=_Membership(),
+        clock=clock,
+    )
+    assert web.auth is not None
+    assert web.activation_service is not None
+
+    first = await web.auth.start_login()
+    with pytest.raises(WebActivationPendingError):
+        await web.auth.complete_login(
+            code="new-user-code",
+            state=first.state_cookie,
+            state_cookie=first.state_cookie,
+            previous_session_cookie=None,
+        )
+
+    async with clean_database.connect() as connection:
+        request_id = await connection.scalar(
+            sa.select(ACTIVATION_REQUESTS.c.request_id)
+        )
+        session_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(WEB_SESSIONS)
+        )
+    assert isinstance(request_id, str)
+    assert session_count == 0
+
+    await web.activation_service.decide(
+        command=RejectActivationCommand(
+            request_id=request_id,
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        ),
+        context=AdminOperationContext(
+            operation_id="integration-reject-new-user",
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor=LOCAL_ADMIN_ACTOR,
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        ),
+    )
+
+    after_rejection = await web.auth.start_login()
+    with pytest.raises(WebActivationPendingError):
+        await web.auth.complete_login(
+            code="new-user-code",
+            state=after_rejection.state_cookie,
+            state_cookie=after_rejection.state_cookie,
+            previous_session_cookie=None,
+        )
+
+    async with clean_database.connect() as connection:
+        pending_request_id = await connection.scalar(
+            sa.select(ACTIVATION_REQUESTS.c.request_id).where(
+                ACTIVATION_REQUESTS.c.status == "pending"
+            )
+        )
+        session_count = await connection.scalar(
+            sa.select(sa.func.count()).select_from(WEB_SESSIONS)
+        )
+    assert isinstance(pending_request_id, str)
+    assert pending_request_id != request_id
+    assert session_count == 0
+
+    await web.activation_service.decide(
+        command=ApproveActivationCommand(
+            request_id=pending_request_id,
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+            actor="new-user",
+            display_name="New User",
+        ),
+        context=AdminOperationContext(
+            operation_id="integration-approve-new-user",
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor=LOCAL_ADMIN_ACTOR,
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        ),
+    )
+
+    second = await web.auth.start_login()
+    issued = await web.auth.complete_login(
+        code="new-user-code",
+        state=second.state_cookie,
+        state_cookie=second.state_cookie,
+        previous_session_cookie=None,
+    )
+
+    assert issued.principal.actor == "new-user"
+    assert issued.principal.subject_ref == "subject-new-user"
+    await web.aclose()

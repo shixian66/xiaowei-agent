@@ -13,6 +13,7 @@ from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from pydantic import AfterValidator, Field
 
+from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.config import canonical_web_public_origin
 from xiaowei_agent.contracts import (
     CONTROLLED_PII_MAX_LENGTH,
@@ -25,7 +26,9 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityDirectory,
     FeishuIdentityNotFoundError,
+    FeishuIdentityUnavailableError,
 )
+from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthStateCommand,
     IssueOAuthStateCommand,
@@ -61,6 +64,13 @@ class WebAuthenticationError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("web authentication failed")
+
+
+class WebActivationPendingError(RuntimeError):
+    """身份未知且激活待办已创建或复用；不得签发 Session。"""
+
+    def __init__(self) -> None:
+        super().__init__("web activation pending")
 
 
 class WebOAuthStateError(RuntimeError):
@@ -304,6 +314,7 @@ class WebAuthService:
         *,
         sessions: WebSessionStore,
         identities: FeishuIdentityDirectory,
+        activations: IdentityActivationService,
         oauth: FeishuOAuthPort,
         public_origin: str,
         mode: WebMode,
@@ -324,6 +335,7 @@ class WebAuthService:
             raise ValueError("oauth timeout is out of range")
         self._sessions = sessions
         self._identities = identities
+        self._activations = activations
         self._oauth = oauth
         self._mode = mode
         self._public_origin = public_origin.rstrip("/")
@@ -488,11 +500,21 @@ class WebAuthService:
         identity = await self._exchange(code=code)
         identity_missing = False
         try:
-            principal = self._identities.resolve(subject_ref=identity.subject_ref)
+            principal = await self._identities.resolve(
+                subject_ref=identity.subject_ref
+            )
+        except FeishuIdentityUnavailableError:
+            raise WebAuthenticationError from None
         except FeishuIdentityNotFoundError:
             identity_missing = True
         if identity_missing:
-            raise WebAuthenticationError
+            try:
+                await self._activations.request_web(
+                    subject_ref=identity.subject_ref
+                )
+            except ActivationCapacityError:
+                raise WebOAuthUnavailableError from None
+            raise WebActivationPendingError
 
         cookie = self._new_secret()
         previous_digest = (
@@ -535,8 +557,12 @@ class WebAuthService:
                 # cookie 就会被当成飞书身份放行。隔离必须双向——
                 # ``LocalAdminAuthService.authenticate`` 那侧是这句的镜像。
                 raise WebAuthenticationError
-            principal = self._identities.resolve(subject_ref=session.subject_ref)
-        except (WebSessionNotFoundError, FeishuIdentityNotFoundError):
+            principal = await self._identities.resolve(subject_ref=session.subject_ref)
+        except (
+            WebSessionNotFoundError,
+            FeishuIdentityNotFoundError,
+            FeishuIdentityUnavailableError,
+        ):
             authentication_failed = True
         if authentication_failed:
             raise WebAuthenticationError
@@ -581,6 +607,7 @@ __all__ = [
     "FeishuOAuthUnavailableError",
     "IssuedWebSession",
     "OAuthStart",
+    "WebActivationPendingError",
     "WebAuthService",
     "WebAuthenticationError",
     "WebCsrfError",

@@ -15,6 +15,7 @@ import pytest
 import uvicorn
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
+from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
@@ -38,7 +39,12 @@ from xiaowei_agent.interfaces.web_app import (
     session_cookie_name,
 )
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity, WebAuthService
-from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
+from xiaowei_agent.persistence.fake import (
+    InMemoryActivationStore,
+    InMemoryAdminAuditStore,
+    InMemoryUserDirectoryStore,
+    InMemoryWebSessionStore,
+)
 from xiaowei_agent.trace import get_trace_id
 
 _SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
@@ -100,9 +106,9 @@ class _TracingIdentityDirectory:
         )
         self._trace_ids = trace_ids
 
-    def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+    async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         self._trace_ids.append(get_trace_id())
-        return self._delegate.resolve(subject_ref=subject_ref)
+        return await self._delegate.resolve(subject_ref=subject_ref)
 
 
 def _principal() -> AuthenticatedPrincipal:
@@ -155,6 +161,13 @@ def _web_app(
         identities=_TracingIdentityDirectory(
             principal=principal,
             trace_ids=oauth.identity_trace_ids,
+        ),
+        activations=IdentityActivationService(
+            activations=InMemoryActivationStore(clock=clock, state=memory_state),
+            directory=InMemoryUserDirectoryStore(clock=clock, state=memory_state),
+            audit=InMemoryAdminAuditStore(clock=clock, state=memory_state),
+            tenant_id="dev-local",
+            environment_id="dev",
         ),
         oauth=oauth,
         public_origin=public_origin,
@@ -343,7 +356,7 @@ async def test_oauth_flow_sets_host_only_secure_cookies_and_protected_shell(
         assert len(me.json()["csrf_token"]) == 64
 
 
-async def test_callback_rejections_clear_state_and_never_set_a_session(
+async def test_unknown_identity_callback_returns_activation_pending_without_session(
     clock, memory_state
 ) -> None:
     app, oauth = _web_app(clock, memory_state, subject_ref="unknown-subject")
@@ -355,8 +368,8 @@ async def test_callback_rejections_clear_state_and_never_set_a_session(
             params={"code": "valid-code", "state": oauth.states[-1]},
         )
 
-        assert callback.status_code == 401
-        assert callback.json() == {"error": {"code": "unauthorized"}}
+        assert callback.status_code == 403
+        assert callback.json() == {"error": {"code": "activation_pending"}}
         cookies = callback.headers.get_list("set-cookie")
         assert any(
             header.startswith(f"{_OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
@@ -365,6 +378,8 @@ async def test_callback_rejections_clear_state_and_never_set_a_session(
         assert not any(
             header.startswith(f"{_SESSION_COOKIE_NAME}=") for header in cookies
         )
+        assert len(memory_state.activation_requests) == 1
+        assert memory_state.web_sessions == {}
 
 
 async def test_duplicate_callback_parameters_are_rejected_before_exchange(

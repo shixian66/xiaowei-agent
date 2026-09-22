@@ -206,7 +206,7 @@ async def test_half_a_port_pair_does_not_assemble_feishu(
         await stack.aclose()
 
 
-async def test_feishu_oauth_assembly_failure_does_not_kill_the_process(
+async def test_static_identity_file_is_not_a_web_runtime_dependency(
     tmp_path: Path, engine: _Engine
 ) -> None:
     stack = await build_postgres_web_stack(
@@ -217,7 +217,9 @@ async def test_feishu_oauth_assembly_failure_does_not_kill_the_process(
         membership=_Membership(),
     )
     try:
-        assert stack.oauth_available is False
+        assert stack.oauth_available is True
+        assert stack.identity_directory is not None
+        assert stack.activation_service is not None
         assert isinstance(stack.local_admin_auth, LocalAdminAuthService)
         assert engine.disposed is False
     finally:

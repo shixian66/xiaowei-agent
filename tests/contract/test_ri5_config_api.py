@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.activation import RecordingActivationRequests
 
 from xiaowei_agent.application.integration_state import SERVICE_WORKER
 from xiaowei_agent.config import Settings
@@ -115,6 +116,7 @@ def _build(
             identities=StaticFeishuIdentityDirectory(
                 principals={"subject-alice": _feishu_admin()}
             ),
+            activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),
             public_origin=_ORIGIN,
             mode=WebMode.HTTPS,

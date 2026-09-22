@@ -280,4 +280,32 @@ def render_feishu_card(projection: FeishuProjectionInput) -> RenderedFeishuCard:
     )
 
 
-__all__ = ["RenderedFeishuCard", "render_feishu_card"]
+def render_activation_card(*, submitted: bool) -> RenderedFeishuCard:
+    """投影不含主体、原始问题、目录信息或交互入口的激活状态卡片。"""
+    title = "身份激活申请已提交" if submitted else "身份激活暂不可用"
+    body = (
+        "申请已记录，请等待管理员处理。"
+        if submitted
+        else "申请暂时无法提交，请稍后重试。"
+    )
+    payload: dict[str, object] = {
+        "config": {
+            "enable_forward": False,
+            "update_multi": True,
+            "wide_screen_mode": True,
+        },
+        "elements": [_text_element(body)],
+        "header": {
+            "template": "blue" if submitted else "orange",
+            "title": _plain_text(title),
+        },
+    }
+    content_json = _serialize(payload)
+    return RenderedFeishuCard(
+        content_json=content_json,
+        payload_digest=content_digest(content_json),
+        truncated=False,
+    )
+
+
+__all__ = ["RenderedFeishuCard", "render_activation_card", "render_feishu_card"]

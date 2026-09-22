@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from tests.fakes.activation import RecordingActivationRequests
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -153,6 +154,7 @@ def _build(
             identities=StaticFeishuIdentityDirectory(
                 principals={"subject-alice": _admin_principal()}
             ),
+            activations=RecordingActivationRequests().as_service(),
             oauth=oauth if oauth is not None else _OAuth(),
             public_origin=_ORIGIN,
             mode=WebMode.HTTPS,

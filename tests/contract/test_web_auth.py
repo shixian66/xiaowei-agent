@@ -12,11 +12,16 @@ from xiaowei_agent.contracts import (
     WebMode,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
-from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
+from xiaowei_agent.interfaces.feishu_identity import (
+    FeishuIdentityDirectory,
+    FeishuIdentityUnavailableError,
+    StaticFeishuIdentityDirectory,
+)
 from xiaowei_agent.interfaces.web_auth import (
     FeishuOAuthCodeError,
     FeishuOAuthIdentity,
     OAuthStart,
+    WebActivationPendingError,
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
@@ -25,6 +30,7 @@ from xiaowei_agent.interfaces.web_auth import (
     WebOAuthUnavailableError,
     WebOriginError,
 )
+from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
 
 
@@ -63,6 +69,24 @@ class _RecordingOAuth:
         if self.code_error:
             raise FeishuOAuthCodeError
         return FeishuOAuthIdentity(subject_ref=self.subject_ref)
+
+
+class _ActivationRequests:
+    def __init__(self, *, capacity: bool = False) -> None:
+        self.capacity = capacity
+        self.subjects: list[str] = []
+
+    async def request_web(self, *, subject_ref: str):
+        self.subjects.append(subject_ref)
+        if self.capacity:
+            raise ActivationCapacityError
+        return object()
+
+
+class _UnavailableIdentityDirectory:
+    async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+        del subject_ref
+        raise FeishuIdentityUnavailableError("feishu identity unavailable")
 
 
 def _principal(subject_ref: str = "subject-alice") -> AuthenticatedPrincipal:
@@ -106,9 +130,10 @@ def _service(
     clock,
     memory_state,
     oauth: _RecordingOAuth | None = None,
-    identities: StaticFeishuIdentityDirectory | None = None,
+    identities: FeishuIdentityDirectory | None = None,
     tokens: tuple[str, ...] = ("state_value_1234567890", "session_value_1234567890"),
     oauth_state_capacity: int = 1024,
+    activations: _ActivationRequests | None = None,
 ) -> tuple[WebAuthService, _RecordingOAuth, InMemoryWebSessionStore]:
     oauth_port = _RecordingOAuth() if oauth is None else oauth
     sessions = InMemoryWebSessionStore(
@@ -124,6 +149,7 @@ def _service(
         WebAuthService(
             sessions=sessions,
             identities=directory,
+            activations=activations or _ActivationRequests(),
             oauth=oauth_port,
             public_origin="https://ops.example.test",
             mode=WebMode.HTTPS,
@@ -246,10 +272,60 @@ async def test_code_failure_consumes_state_before_provider_result(
 
 
 async def test_unknown_identity_never_creates_a_session(clock, memory_state) -> None:
+    activations = _ActivationRequests()
     service, _, _ = _service(
         clock=clock,
         memory_state=memory_state,
         oauth=_RecordingOAuth(subject_ref="unknown-subject"),
+        activations=activations,
+    )
+    start = await service.start_login()
+
+    with pytest.raises(WebActivationPendingError):
+        await service.complete_login(
+            code="valid-code",
+            state=start.state_cookie,
+            state_cookie=start.state_cookie,
+            previous_session_cookie=None,
+        )
+
+    assert memory_state.web_sessions == {}
+    assert activations.subjects == ["unknown-subject"]
+
+
+async def test_activation_capacity_maps_to_unavailable_without_a_session(
+    clock, memory_state
+) -> None:
+    activations = _ActivationRequests(capacity=True)
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth=_RecordingOAuth(subject_ref="unknown-subject"),
+        activations=activations,
+    )
+    start = await service.start_login()
+
+    with pytest.raises(WebOAuthUnavailableError):
+        await service.complete_login(
+            code="valid-code",
+            state=start.state_cookie,
+            state_cookie=start.state_cookie,
+            previous_session_cookie=None,
+        )
+
+    assert memory_state.web_sessions == {}
+    assert activations.subjects == ["unknown-subject"]
+
+
+async def test_bound_but_unavailable_identity_never_reenters_activation(
+    clock, memory_state
+) -> None:
+    activations = _ActivationRequests()
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        identities=_UnavailableIdentityDirectory(),
+        activations=activations,
     )
     start = await service.start_login()
 
@@ -262,6 +338,7 @@ async def test_unknown_identity_never_creates_a_session(clock, memory_state) -> 
         )
 
     assert memory_state.web_sessions == {}
+    assert activations.subjects == []
 
 
 async def test_login_rotates_old_session_and_current_directory_is_authoritative(

@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.activation import RecordingActivationRequests
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 from tests.security.test_task_view_runtime_authority import (
     _TASK_VIEW_PROCESS_ALLOWED_MODULES,
@@ -29,7 +30,7 @@ from xiaowei_agent.interfaces.local_stack import WebStack
 from xiaowei_agent.interfaces.web_app import create_app
 from xiaowei_agent.interfaces.web_auth import (
     FeishuOAuthIdentity,
-    WebAuthenticationError,
+    WebActivationPendingError,
     WebAuthService,
     WebOAuthCodeError,
     WebOAuthStateError,
@@ -192,6 +193,7 @@ def _service(
     *,
     oauth: _OAuth,
     oauth_state_capacity: int = 1024,
+    activations: RecordingActivationRequests | None = None,
 ) -> WebAuthService:
     principal = _principal()
     tokens = _tokens()
@@ -204,6 +206,7 @@ def _service(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal}
         ),
+        activations=(activations or RecordingActivationRequests()).as_service(),
         oauth=oauth,
         public_origin="https://ops.example.test",
         mode=WebMode.HTTPS,
@@ -337,6 +340,7 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal}
         ),
+        activations=RecordingActivationRequests().as_service(),
         oauth=oauth,
         public_origin="https://ops.example.test",
         mode=WebMode.HTTPS,
@@ -371,10 +375,12 @@ async def test_unknown_identity_is_mapped_without_retaining_subject_context(
     clock, memory_state
 ) -> None:
     subject_ref = "external-sensitive-subject"
+    activations = RecordingActivationRequests()
     service = _service(
         clock,
         memory_state,
         oauth=_OAuth(subject_ref=subject_ref),
+        activations=activations,
     )
     start = await service.start_login()
 
@@ -385,7 +391,7 @@ async def test_unknown_identity_is_mapped_without_retaining_subject_context(
             state_cookie=start.state_cookie,
             previous_session_cookie=None,
         )
-    except WebAuthenticationError as exc:
+    except WebActivationPendingError as exc:
         rendered = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
@@ -393,8 +399,9 @@ async def test_unknown_identity_is_mapped_without_retaining_subject_context(
         assert subject_ref not in repr(exc.__dict__)
         assert exc.__cause__ is None
         assert exc.__context__ is None
+        assert activations.web_subjects == [subject_ref]
     else:
-        pytest.fail("expected WebAuthenticationError")
+        pytest.fail("expected WebActivationPendingError")
 
 
 @pytest.mark.parametrize(
@@ -481,6 +488,7 @@ def test_public_origin_is_an_origin_not_a_url_path(
             identities=StaticFeishuIdentityDirectory(
                 principals={principal.subject_ref: principal}
             ),
+            activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),
             public_origin=public_origin,
             mode=WebMode.HTTPS,
@@ -1090,6 +1098,7 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "web_session_store",
         "provider_state",
         "identity_directory",
+        "activation_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -1206,6 +1215,9 @@ assert "lark_oapi" not in sys.modules
     web_only = {
         "xiaowei_agent.application.channel_access",
         "xiaowei_agent.application.channel_submission",
+        "xiaowei_agent.application.identity_activation",
+        "xiaowei_agent.governance.product_roles",
+        "xiaowei_agent.interfaces.directory_identity",
         "xiaowei_agent.interfaces.feishu_identity",
         # RI5：本地管理员登录是 Web 的必备入口，装配时必然加载。
         "xiaowei_agent.interfaces.local_admin_auth",
