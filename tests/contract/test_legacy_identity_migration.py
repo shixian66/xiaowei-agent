@@ -11,12 +11,14 @@ from pathlib import Path
 import pytest
 
 from xiaowei_agent.contracts.admin_audit import AdminOperationContext
-from xiaowei_agent.contracts.enums import ProductRole, UserStatus
+from xiaowei_agent.contracts.base import CONTROLLED_PII_MAX_LENGTH
+from xiaowei_agent.contracts.enums import IdentitySource, ProductRole, UserStatus
 from xiaowei_agent.contracts.identity import (
     AssignRoleCommand,
     BindExternalIdentityCommand,
     CreateUserCommand,
     DirectoryCommand,
+    SetUserStatusCommand,
 )
 from xiaowei_agent.interfaces.legacy_identity_migration import (
     LegacyMigrationConflictError,
@@ -41,14 +43,16 @@ def _entry(subject_ref: str, actor: str, *labels: str) -> dict[str, object]:
     return {"subject_ref": subject_ref, "actor": actor, "labels": list(labels)}
 
 
-def _document(tmp_path: Path, *entries: dict[str, object]) -> str:
+def _document(
+    tmp_path: Path, *entries: dict[str, object], environment_id: str = _ENVIRONMENT
+) -> str:
     path = tmp_path / "identities.json"
     path.write_text(
         json.dumps(
             {
                 "version": 1,
                 "tenant_id": _TENANT,
-                "environment_id": _ENVIRONMENT,
+                "environment_id": environment_id,
                 "entries": list(entries),
             }
         ),
@@ -69,8 +73,6 @@ async def _migrate(path: str, directory) -> LegacyMigrationReport:
 
 
 def _context(operation_id: str) -> AdminOperationContext:
-    from xiaowei_agent.contracts.enums import IdentitySource
-
     return AdminOperationContext(
         operation_id=operation_id,
         actor_user_id=_ACTOR_USER_ID,
@@ -272,17 +274,78 @@ async def test_a_256_character_actor_migrates_whole(
     assert len(facts.account.display_name) == 128
 
 
-async def test_an_actor_beyond_the_contract_bound_writes_zero_rows(
-    tmp_path: Path, directory, memory_state
+async def test_a_subject_ref_at_the_contract_bound_migrates_whole(
+    tmp_path: Path, directory
 ) -> None:
-    path = _document(
-        tmp_path,
-        _entry("subject-alice", "alice", "operator"),
-        _entry("subject-long", "a" * 257, "operator"),
+    """上限之内**完整迁移**。
+
+    这个上限不是随便取的：飞书事件 DTO 与 OAuth 交换结果都按同一个上限收 `open_id`，
+    目录比它们窄一个字符，就会有一批入口收得下、目录绑不进去的真实身份。
+    """
+    subject = "o" * CONTROLLED_PII_MAX_LENGTH
+    path = _document(tmp_path, _entry(subject, "alice", "operator"))
+
+    report = await _migrate(path, directory)
+
+    assert report.created == 1
+    facts = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=_TENANT,
+        environment_id=_ENVIRONMENT,
+        subject_ref=subject,
     )
+    assert facts is not None
+    assert facts.account.user_id == legacy_user_id(actor="alice")
+
+
+@pytest.mark.parametrize(
+    ("name", "make"),
+    [
+        (
+            "actor",
+            lambda tmp: _document(
+                tmp,
+                _entry("subject-alice", "alice", "operator"),
+                _entry("subject-long", "a" * 257, "operator"),
+            ),
+        ),
+        (
+            "subject_ref",
+            lambda tmp: _document(
+                tmp,
+                _entry("subject-alice", "alice", "operator"),
+                _entry("o" * (CONTROLLED_PII_MAX_LENGTH + 1), "bob", "operator"),
+            ),
+        ),
+        (
+            "environment_id",
+            lambda tmp: _document(
+                tmp, _entry("subject-alice", "alice", "operator"), environment_id="e" * 65
+            ),
+        ),
+    ],
+)
+async def test_a_value_beyond_the_contract_bound_writes_zero_rows(
+    tmp_path: Path, directory, memory_state, name: str, make
+) -> None:
+    """三个字段的上限之外都是**整批零写入**，而且都是同一个领域错误。
+
+    ``environment_id`` 那一格是上一轮漏掉的：entry 的组装被收敛了，命令与上下文的
+    组装没有，于是原始的 pydantic ``ValidationError`` 直接漏给调用方——同一件事
+    （这批装不进契约）却有两种错误分类。
+    """
+    path = make(tmp_path)
+    environment_id = "e" * 65 if name == "environment_id" else _ENVIRONMENT
 
     with pytest.raises(LegacyMigrationConflictError):
-        await _migrate(path, directory)
+        await migrate_static_identities(
+            document_path=path,
+            directory=directory,
+            tenant_id=_TENANT,
+            environment_id=environment_id,
+            actor_user_id=_ACTOR_USER_ID,
+            actor=_ACTOR,
+        )
 
     assert _facts(memory_state) == {
         "accounts": 0,
@@ -292,10 +355,35 @@ async def test_an_actor_beyond_the_contract_bound_writes_zero_rows(
     }
 
 
+@pytest.mark.parametrize(
+    ("name", "make"),
+    [
+        (
+            "actor",
+            lambda tmp: _document(tmp, _entry("subject-long", "a" * 257, "operator")),
+        ),
+        (
+            "subject_ref",
+            lambda tmp: _document(
+                tmp, _entry("o" * (CONTROLLED_PII_MAX_LENGTH + 1), "bob", "operator")
+            ),
+        ),
+        (
+            "environment_id",
+            lambda tmp: _document(
+                tmp, _entry("subject-alice", "alice", "operator"), environment_id="e" * 65
+            ),
+        ),
+    ],
+)
 async def test_the_bound_failure_happens_before_any_apply(
-    tmp_path: Path, directory
+    tmp_path: Path, directory, name: str, make
 ) -> None:
-    """上一条红在**命令组装期**，不是"写到一半"。"""
+    """上一条红在**组装期**，不是"写到一半"。
+
+    三个字段各走一遍：entry、command 与 context 的契约拒绝必须都发生在
+    ``apply()`` 之前，否则"整批零写入"靠的就只是事务回滚，而不是根本没开始写。
+    """
 
     class _CountingDirectory:
         def __init__(self, inner) -> None:
@@ -313,10 +401,18 @@ async def test_the_bound_failure_happens_before_any_apply(
             return await self._inner.apply(**kwargs)
 
     counting = _CountingDirectory(directory)
-    path = _document(tmp_path, _entry("subject-long", "a" * 257, "operator"))
+    path = make(tmp_path)
+    environment_id = "e" * 65 if name == "environment_id" else _ENVIRONMENT
 
     with pytest.raises(LegacyMigrationConflictError):
-        await _migrate(path, counting)
+        await migrate_static_identities(
+            document_path=path,
+            directory=counting,
+            tenant_id=_TENANT,
+            environment_id=environment_id,
+            actor_user_id=_ACTOR_USER_ID,
+            actor=_ACTOR,
+        )
 
     assert counting.applied == 0
 
@@ -406,6 +502,191 @@ async def test_a_role_that_no_longer_matches_is_a_conflict(
             role=ProductRole.USER,
         ),
         "seed-role-drift-3",
+    )
+    before = _facts(memory_state)
+    path = _document(
+        tmp_path,
+        _entry("subject-alice", "alice", "operator"),
+        _entry("subject-bob", "bob", "viewer"),
+    )
+
+    with pytest.raises(LegacyMigrationConflictError):
+        await _migrate(path, directory)
+
+    assert _facts(memory_state) == before
+
+
+async def _seed_a_fully_migrated_alice(directory, *, role=ProductRole.OPERATOR) -> str:
+    """把 alice 建成"已经完整迁移过"的样子：五项全部正确。
+
+    三条反例各自只推翻其中**一项**，其余全部留在正确值上；否则它可能是被别的
+    判据挡住的，删掉目标那一项检查它照样绿。
+    """
+    user_id = legacy_user_id(actor="alice")
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id=user_id,
+            actor="alice",
+            display_name="alice",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=role,
+        ),
+        "seed-migrated-1",
+    )
+    await _seed(
+        directory,
+        BindExternalIdentityCommand(
+            user_id=user_id,
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            subject_ref="subject-alice",
+        ),
+        "seed-migrated-2",
+    )
+    return user_id
+
+
+async def test_a_fully_migrated_entry_is_the_positive_control(
+    tmp_path: Path, directory, memory_state
+) -> None:
+    """正常对照：五项全部精确匹配时判 `skipped`，一行都不写。
+
+    没有这一条，下面三条反例证明不了"是那一项让它变成冲突的"——一个永远抛冲突
+    的实现也能让三条反例全绿。
+    """
+    await _seed_a_fully_migrated_alice(directory)
+    before = _facts(memory_state)
+    path = _document(tmp_path, _entry("subject-alice", "alice", "operator"))
+
+    report = await _migrate(path, directory)
+
+    assert report.created == 0 and report.skipped == 1
+    assert _facts(memory_state) == before
+
+
+async def test_an_actor_that_no_longer_matches_is_a_conflict(
+    tmp_path: Path, directory, memory_state
+) -> None:
+    """不变量 2 的"actor 不符"一格：这个 `user_id` 背后是**另一个人**。
+
+    这不是硬摆出来的状态：管理员用 `CreateUserCommand` 自选 `user_id` 时完全可能
+    撞上迁移派生出的那一个。除 actor 外的四项全部按正确值建好。
+    """
+    user_id = legacy_user_id(actor="alice")
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id=user_id,
+            actor="somebody-else",
+            display_name="somebody else",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=ProductRole.OPERATOR,
+        ),
+        "seed-actor-drift-1",
+    )
+    await _seed(
+        directory,
+        BindExternalIdentityCommand(
+            user_id=user_id,
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            subject_ref="subject-alice",
+        ),
+        "seed-actor-drift-2",
+    )
+    before = _facts(memory_state)
+    path = _document(
+        tmp_path,
+        _entry("subject-alice", "alice", "operator"),
+        _entry("subject-bob", "bob", "viewer"),
+    )
+
+    with pytest.raises(LegacyMigrationConflictError):
+        await _migrate(path, directory)
+
+    assert _facts(memory_state) == before
+
+
+async def test_a_disabled_account_is_a_conflict_not_a_skip(
+    tmp_path: Path, directory, memory_state
+) -> None:
+    """不变量 2 的"状态不符"一格：被停用的账号不算迁移完成。
+
+    这一格**不由迁移层自己判**：`load_account` 对停用账号返回 `None`（停用即刻
+    生效），于是该条目落进批次、撞上账号唯一约束，整批零写入。因此这条用例钉的是
+    端到端性质，而它真正依赖的保护在 `load_account` 里——把那里的状态过滤去掉，
+    这条就会变红。
+    """
+    user_id = await _seed_a_fully_migrated_alice(directory)
+    await _seed(
+        directory,
+        SetUserStatusCommand(
+            user_id=user_id,
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            status=UserStatus.DISABLED,
+        ),
+        "seed-disabled",
+    )
+    before = _facts(memory_state)
+    path = _document(
+        tmp_path,
+        _entry("subject-alice", "alice", "operator"),
+        _entry("subject-bob", "bob", "viewer"),
+    )
+
+    with pytest.raises(LegacyMigrationConflictError):
+        await _migrate(path, directory)
+
+    assert _facts(memory_state) == before
+
+
+async def test_a_subject_bound_to_another_account_is_a_conflict(
+    tmp_path: Path, directory, memory_state
+) -> None:
+    """不变量 2 的"绑定指向别人"一格。
+
+    它与"绑定缺失"是**两个**判据：那一格 `resolve_by_subject` 返回 `None`，这一格
+    返回的是一个**别人的**账号。只钉前者时，去掉"必须解析到同一个 user_id"这半句
+    检查仍然全绿。
+    """
+    user_id = legacy_user_id(actor="alice")
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id=user_id,
+            actor="alice",
+            display_name="alice",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=ProductRole.OPERATOR,
+        ),
+        "seed-bound-elsewhere-1",
+    )
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id="impostor",
+            actor="impostor",
+            display_name="impostor",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=ProductRole.USER,
+        ),
+        "seed-bound-elsewhere-2",
+    )
+    await _seed(
+        directory,
+        BindExternalIdentityCommand(
+            user_id="impostor",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            subject_ref="subject-alice",
+        ),
+        "seed-bound-elsewhere-3",
     )
     before = _facts(memory_state)
     path = _document(

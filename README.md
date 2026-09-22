@@ -15,7 +15,7 @@
 > PR #61 合入 `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`，该轮只改 Markdown 与一个
 > 文档契约测试，**没有产品源码**。**W1a 用户、权限与 Admin 审计写内核已离线实现**：按批准计划
 > `docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md` 分三个切片交付——A 契约与
-> `rev_0014` 四张表、B 两个 Store 与审计原子性、C 旧身份一次性迁移。授权事实只有
+> `rev_0014` 四张表、B 两个 Store 与审计原子性均已合入 `main`，C 旧身份一次性迁移在途待复审。授权事实只有
 > `UserDirectoryStore.apply()` 一条写路径，审计由 store 从命令派生并与授权改变同事务提交。
 > 证据等级到 `tests` 为止：**没有**激活流程、登录页、Admin 页面、审计查询 API、真实飞书调用、
 > 部署或用户验收。下一步是 W1b 身份激活与通知。I3 受治理资料查询**延期但未取消**。

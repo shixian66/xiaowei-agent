@@ -13,15 +13,16 @@ labels 映射成角色、把剩余条目装成**一个** :class:`MigrateLegacyId
 旧静态文件在迁移成功后**保留只读**一个发布周期：本模块不删除它，也不回头写它。
 """
 
+import contextlib
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Final
 
 from pydantic import StrictInt, StrictStr, ValidationError
 
 from xiaowei_agent.contracts.admin_audit import AdminOperationContext
 from xiaowei_agent.contracts.base import Contract
-from xiaowei_agent.contracts.enums import IdentitySource, ProductRole, UserStatus
+from xiaowei_agent.contracts.enums import IdentitySource, ProductRole
 from xiaowei_agent.contracts.identity import (
     LegacyIdentityMigrationEntry,
     MigrateLegacyIdentitiesCommand,
@@ -76,13 +77,34 @@ _ROLE_RANK: Final[Mapping[ProductRole, int]] = {
 class LegacyMigrationConflictError(RuntimeError):
     """整批零写入。
 
-    它是**唯一**会从本模块漏出去的失败形状：目录错误、审计不可写、以及组装命令时
-    的契约拒绝全部收敛到它。理由是这三种情况对调用方是同一件事——"这批没迁成，库
-    里一行都没变"；而让 pydantic 的 ``ValidationError`` 直接漏出去，还会把被拒绝的
-    那一行原样带进异常正文。
+    它是**唯一**会从本模块漏出去的失败形状：目录错误、审计不可写、以及组装 entry、
+    命令与上下文时的契约拒绝全部收敛到它。理由是这几种情况对调用方是同一件事——
+    "这批没迁成，库里一行都没变"。
 
     消息只取自闭集字面量，不拼接 actor、subject 或文件内容。
     """
+
+
+@contextlib.contextmanager
+def _contract_rejection_is_a_conflict() -> Iterator[None]:
+    """契约拒绝的**唯一**收敛点。
+
+    上一版只收敛了 entry 的组装，命令与上下文的组装没有，于是一个超出
+    ``BoundedId`` 的 ``environment_id`` 会让原始的 pydantic ``ValidationError``
+    直接漏给调用方：同一件事（这批装不进契约）却有两种错误分类，而调用方只
+    ``except LegacyMigrationConflictError`` 时它会一路冒泡成未处理异常。
+
+    收敛点做成一个，不是在两处各写一份 ``except``：各写一份就是两份判断，第三处
+    组装出现时不会有任何东西提醒它也需要一份。
+    """
+    try:
+        yield
+    except ValidationError:
+        # 不串接原因：分类错误的修复点是"它是不是一次整批失败"，而 pydantic 的
+        # 内部错误结构不属于本模块的公开契约。
+        raise LegacyMigrationConflictError(
+            "a legacy entry does not fit the directory contract"
+        ) from None
 
 
 class LegacyMigrationReport(Contract):
@@ -141,12 +163,15 @@ async def _is_already_migrated(
         user_id=user_id, tenant_id=tenant_id, environment_id=environment_id
     )
     if facts is None:
-        # 账号不在，或账号在而该作用域没有角色。前者进批次，后者会在批次里撞上
-        # 账号唯一约束——两种情况都由那一个事务给答案。
+        # 三种情况落在这里：账号不在、账号在而该作用域没有角色、账号**被停用**。
+        # `load_account` 对停用账号返回 `None`（"停用即刻生效"，由共享套件的
+        # `test_disabled_account_stops_resolving_on_the_next_request` 在两个实现上
+        # 各钉一遍），所以状态那一项不在下面**再判一次**——`facts` 非空时它必然是
+        # ACTIVE，写在下面就是一条永远为假的分支。后两种情况会在批次里撞上账号
+        # 唯一约束，由那一个事务给答案，仍然是整批零写入。
         return False
     if (
         facts.account.actor != entry.actor
-        or facts.account.status is not UserStatus.ACTIVE
         or facts.assignment.role is not role
     ):
         raise LegacyMigrationConflictError(
@@ -203,7 +228,9 @@ async def migrate_static_identities(
         ):
             skipped += 1
             continue
-        try:
+        # 超出契约上限的取值在这里就被拒，发生在任何 apply() 之前，因此不存在
+        # "写了一半"的状态。
+        with _contract_rejection_is_a_conflict():
             pending.append(
                 LegacyIdentityMigrationEntry(
                     user_id=user_id,
@@ -213,13 +240,6 @@ async def migrate_static_identities(
                     subject_ref=entry.subject_ref,
                 )
             )
-        except ValidationError:
-            # 超出 `BoundedActor` 的 actor 在这里就被拒，发生在任何 apply() 之前，
-            # 因此不存在"写了一半"的状态。不让 pydantic 的异常漏出去：它会把被拒
-            # 绝的那一行原样带进正文。
-            raise LegacyMigrationConflictError(
-                "a legacy entry does not fit the directory contract"
-            ) from None
 
     if not pending:
         return LegacyMigrationReport(
@@ -229,17 +249,20 @@ async def migrate_static_identities(
             audit_event_ids=(),
         )
 
-    command = MigrateLegacyIdentitiesCommand(
-        tenant_id=tenant_id,
-        environment_id=environment_id,
-        entries=tuple(pending),
-    )
-    context = AdminOperationContext(
-        operation_id=_operation_id(tuple(item.user_id for item in pending)),
-        actor_user_id=actor_user_id,
-        actor=actor,
-        auth_source=IdentitySource.LOCAL_ADMIN,
-    )
+    # 作用域与操作者同样要过契约边界，走**同一个**收敛点：它们超限时也是一次
+    # 整批零写入，不是另一类错误。
+    with _contract_rejection_is_a_conflict():
+        command = MigrateLegacyIdentitiesCommand(
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            entries=tuple(pending),
+        )
+        context = AdminOperationContext(
+            operation_id=_operation_id(tuple(item.user_id for item in pending)),
+            actor_user_id=actor_user_id,
+            actor=actor,
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        )
     try:
         events = await directory.apply(command=command, context=context)
     except (UserDirectoryConflictError, AdminAuditUnwritableError) as error:

@@ -21,6 +21,7 @@ from xiaowei_agent.contracts.admin_audit import (
 from xiaowei_agent.contracts.answerability import AnswerabilityVerdict, MissingItem
 from xiaowei_agent.contracts.approval import AdmissionCertificate, ApprovalRequest
 from xiaowei_agent.contracts.base import (
+    CONTROLLED_PII_MAX_LENGTH,
     AlwaysTrue,
     AwareDatetime,
     Contract,
@@ -232,6 +233,7 @@ from xiaowei_agent.contracts.trace_events import ModelCallObservation, TraceEven
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "CONTROLLED_PII_MAX_LENGTH",
     "DIRECTORY_ACTIONS",
     "LOCAL_ADMIN_ACTOR",
     "LOCAL_ADMIN_DISPLAY_NAME",

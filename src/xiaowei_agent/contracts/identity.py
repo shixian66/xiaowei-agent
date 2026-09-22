@@ -20,6 +20,7 @@ from typing import Annotated, Final, Literal, TypeAlias
 from pydantic import Field
 
 from xiaowei_agent.contracts.base import (
+    CONTROLLED_PII_MAX_LENGTH,
     AwareDatetime,
     Contract,
     ControlledPii,
@@ -47,12 +48,22 @@ BoundedActor: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=25
 """
 
 ControlledPiiField: TypeAlias = Annotated[
-    ControlledPii, Field(min_length=1, max_length=128, exclude=True, repr=False)
+    ControlledPii,
+    Field(
+        min_length=1,
+        max_length=CONTROLLED_PII_MAX_LENGTH,
+        exclude=True,
+        repr=False,
+    ),
 ]
 """受控 PII 字段的完整标注：有界 + 两条外泄通道都关。
 
 ``exclude=True`` 只作用于 ``model_dump()``，``repr=False`` 只作用于 ``repr()``；
 两条是独立通道，少写一条不会有任何反馈。
+
+上限**不在这里另写一个数**，而是引用
+:data:`~xiaowei_agent.contracts.base.CONTROLLED_PII_MAX_LENGTH`：同一个 ``open_id``
+的上限在飞书入口、OAuth 入口和目录各写一份时，最窄的那一份会变成一道静默的兼容墙。
 """
 
 LOCAL_ADMIN_TENANT_ID: Final[str] = "dev-local"

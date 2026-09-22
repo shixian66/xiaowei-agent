@@ -315,3 +315,73 @@ def test_the_local_admin_principal_consumes_the_contract_constants() -> None:
     ).read_text(encoding="utf-8")
     for literal in (LOCAL_ADMIN_TENANT_ID, LOCAL_ADMIN_ENVIRONMENT_ID, LOCAL_ADMIN_ACTOR):
         assert f'"{literal}"' not in source, f"{literal} 仍以字面量留在 local_admin_auth.py"
+
+
+# --- subject_ref 的上限必须只有一个 ----------------------------------------
+#
+# 同一个飞书 `open_id` 会经过三条链路：旧静态文档、飞书事件 DTO、OAuth 交换结果。
+# 它们各写一份上限时，最窄的那一份就是一道**静默的兼容墙**：入口接得下的身份，
+# 目录绑不进去，而两边单独看都言之成理。因此上限只允许有一处定义，其余全部引用它。
+
+
+def _max_length(model: type, field: str) -> int | None:
+    """从 pydantic 字段元数据里读出 `max_length`，而不是按拼写找字面量。"""
+    for constraint in model.model_fields[field].metadata:
+        bound = getattr(constraint, "max_length", None)
+        if bound is not None:
+            return int(bound)
+    return None
+
+
+_SUBJECT_REF_BOUND: int = 256
+"""上限的值在这里**独立写死一次**。
+
+只断"各处相等"是不够的：它们现在全都引用同一个常量，于是把那个常量改成 1 时它们
+依然相等，而目录会再也绑不进任何一个真实 `open_id`。256 取自本次改动前飞书事件
+DTO 与 OAuth 交换结果各自接受的取值——上限的职责是收得下每一个生产者。
+"""
+
+
+def test_every_subject_ref_on_the_identity_chain_shares_one_bound() -> None:
+    from xiaowei_agent.contracts.base import CONTROLLED_PII_MAX_LENGTH
+    from xiaowei_agent.interfaces.feishu_sdk import FeishuMention, FeishuMessageEvent
+    from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity
+
+    assert CONTROLLED_PII_MAX_LENGTH == _SUBJECT_REF_BOUND
+
+    bounds = {
+        "ExternalIdentity.subject_ref": _max_length(ExternalIdentity, "subject_ref"),
+        "BindExternalIdentityCommand.subject_ref": _max_length(
+            BindExternalIdentityCommand, "subject_ref"
+        ),
+        "LegacyIdentityMigrationEntry.subject_ref": _max_length(
+            LegacyIdentityMigrationEntry, "subject_ref"
+        ),
+        "FeishuMention.subject_ref": _max_length(FeishuMention, "subject_ref"),
+        "FeishuMessageEvent.sender_subject_ref": _max_length(
+            FeishuMessageEvent, "sender_subject_ref"
+        ),
+        "FeishuOAuthIdentity.subject_ref": _max_length(
+            FeishuOAuthIdentity, "subject_ref"
+        ),
+    }
+    assert set(bounds.values()) == {_SUBJECT_REF_BOUND}, (
+        f"身份链上的 subject_ref 上限不一致：{bounds}"
+    )
+
+
+def test_the_shared_subject_ref_bound_covers_every_producer() -> None:
+    """正对照：上限必须**收得下**每一个生产者接受的取值，而不只是彼此相等。
+
+    只断"三处相等"是不够的——把三处一起改成 1 也照样相等，而那样目录就再也绑不进
+    任何一个真实 `open_id`。
+    """
+    from xiaowei_agent.interfaces.web_auth import FeishuOAuthIdentity
+
+    widest = "o" * _SUBJECT_REF_BOUND
+    # 入口收得下它。
+    assert FeishuOAuthIdentity(subject_ref=widest).subject_ref == widest
+    # 目录也收得下同一个值——这一对才是"两端闭合"。
+    BindExternalIdentityCommand(
+        user_id="u-1", tenant_id="t-1", environment_id="dev", subject_ref=widest
+    )
