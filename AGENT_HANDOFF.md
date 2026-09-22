@@ -61,7 +61,9 @@
   `1497 passed, 83 skipped`；`ruff check .` 与 `mypy src`（199 个源文件）通过；一次性 PostgreSQL
   16.15 容器内 `tests/integration` 为 `348 passed`、零 skip。容量 advisory lock、fake 激活快照恢复、
   激活动作单阶段审计、待办 partial unique index 四项保护均做了隔离变异并按预期转红后还原。
-  这些不是 CI、部署、真实飞书、canary 或用户验收证据。
+  PR #67 首轮 CI run `35705507266` 精确绑定 `f88933dd9be084056a24a9f71c91bf0501e1f774`，
+  八项全绿且均有真实 steps（tests/integration/compose-smoke/security-gate/types/lint/secret-scan 为
+  8/10/8/8/8/8/8 steps，deps-audit 为 9 steps）。这些仍不是部署、真实飞书、canary 或用户验收证据。
 - 计划中的 1024 上限只约束活跃待办；终态申请的受控 PII 保留/清理是 W5 部署硬门，未完成前
   不得部署启用。
 - **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理
