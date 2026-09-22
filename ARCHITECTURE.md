@@ -734,11 +734,29 @@ this topology must not be described as an activated channel or model.
 `append_denied` / `load` 四个窄方法，`persistence/` 里不存在针对 `admin_audit_events` 的
 `UPDATE` / `DELETE`。飞书 `open_id` 只以 domain-separated 摘要落库。旧静态身份文档由一次性、
 整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。
-**证据等级到 `tests` 为止**：这是离线写内核，**不是**激活流程、登录改造、Admin 页面、审计查询
-API、真实飞书调用、部署或用户验收。
+**证据等级到 `tests` 为止**：这是离线写内核，不是 Admin 页面、审计查询 API、真实飞书调用、
+部署或用户验收。
 
-**仍无实现载体的未来产品目标**：W1b 的激活请求与通知、W2 的登录改造与 `LocalCredential.username`、
-W3 的值班绑定、**W4a** 的三域配置文件与进程挂载矩阵、**W5** 的 release override 与边缘限流。
+**W1b 激活流程的实现状态**：身份激活的两个切片已离线实现。`rev_0015` 建立
+`activation_requests`，申请创建/过期由 `ActivationStore` 承载，批准或拒绝仍只经
+`UserDirectoryStore.apply()`，使申请终态、目录授权与审计保持同事务。入口层通过
+`IdentityActivationService` 复用该写路径，并以 `DirectoryFeishuIdentityDirectory` 每次从
+**数据库目录**重建主体；静态身份文件只保留为一次性迁移输入，不是运行时 fallback。
+
+Web OAuth 对真正未登记的身份创建或复用申请，返回闭集 `403` / `activation_pending`，不签发
+Session；已经绑定但停用或失去当前作用域角色的身份仍按普通认证失败处理，不能借激活重新进入。
+群入口只在未知群成员当次事件中创建申请，并由 `ActivationNotificationService` **单次**发送不含
+正文、链接、按钮、Admin 名单或 @ 的通用卡片；私聊未知身份继续 fail-closed。批准/拒绝当前只有
+模块级一次性入口，W1b 不建设管理页面、通知人绑定或可靠投递队列。
+
+**证据等级仍到 `tests` 为止**：离线与一次性 PostgreSQL 16.15 测试验证了申请幂等、拒绝后新建、
+批准后重新登录和群卡片路径；没有连接**真实飞书**，没有真实应用/凭据/网络证据，也没有**部署**、
+**canary** 或**用户验收**。部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时
+自动迁移。
+
+**仍无实现载体的未来产品目标**：W2 的登录改造与 `LocalCredential.username`、
+W3 的 Admin 待办/用户职责/审计 UI 与可靠通知、**W4a** 的三域配置文件与进程挂载矩阵、
+**W5** 的 release override 与边缘限流。
 字段级定义见
 [Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
 与修订后的 ADR-007/013/014/015，本节不复制。这些目标当前**没有**源码、迁移、运行、部署或

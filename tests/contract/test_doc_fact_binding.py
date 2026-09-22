@@ -1111,8 +1111,6 @@ def test_w0_stable_doc_bindings_are_discriminating() -> None:
 # 什么」分开钉死，并要求批准来源是评论永久链接而不是 merge 事实本身。
 
 _W0_FORBIDDEN_HANDOFF_CLAIMS: Final[tuple[str, ...]] = (
-    "W1b 已实现",
-    "W1b 已开始",
     "真实飞书已可用",
     "Web 产品已部署",
     "已用户验收",
@@ -1490,6 +1488,54 @@ def test_naming_a_future_component_with_its_phase_is_allowed() -> None:
     assert not _activation_existence_claims("激活流程尚未实现，留给 W1b。")
 
 
+# --- W1b 离线激活流程：实现状态与真实渠道硬门 ------------------------------
+
+_W1B_ARCHITECTURE_FACTS: Final[tuple[str, ...]] = (
+    "`activation_requests`",
+    "`rev_0015`",
+    "`IdentityActivationService`",
+    "`DirectoryFeishuIdentityDirectory`",
+    "`activation_pending`",
+    "`ActivationNotificationService`",
+)
+_W1B_SECTION_START: Final[str] = "**W1b 激活流程的实现状态**"
+_W1B_SECTION_END: Final[str] = "**仍无实现载体的未来产品目标**"
+
+
+def _w1b_architecture_section() -> str:
+    return _section_between(
+        _truth_doc_text("ARCHITECTURE.md"),
+        start=_W1B_SECTION_START,
+        end=_W1B_SECTION_END,
+    )
+
+
+def test_architecture_records_w1b_as_offline_implemented_without_live_claims() -> None:
+    section = _w1b_architecture_section()
+    for fact in _W1B_ARCHITECTURE_FACTS:
+        assert fact in section, f"ARCHITECTURE.md 的 W1b 段落缺少承重事实：{fact}"
+    assert "已离线实现" in section
+    assert "数据库目录" in section
+    assert "单次" in section
+    assert "`tests`" in section
+    for unverified in ("真实飞书", "部署", "canary", "用户验收"):
+        assert unverified in section
+
+
+def test_readme_and_handoff_advance_from_w1b_to_w2_without_overclaiming() -> None:
+    status = _readme_status()
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+
+    assert "W1b" in status and "已离线实现" in status
+    assert "激活流程" in status and "单次群通知" in status
+    assert "尚未获批" not in status
+    assert "没有**激活流程" not in status
+
+    assert "W1b 两个切片已离线实现" in handoff
+    for statement in _next_step_statements(handoff):
+        assert "W2" in statement, f"W1b 收口后的下一步没有指向 W2：{statement}"
+
+
 _RETIRED_README_W1A_PHRASES: Final[tuple[str, ...]] = (
     "W1a 详细实施计划送审",
     "计划获批后才可开始",
@@ -1554,13 +1600,13 @@ def test_development_plan_carries_no_implementation_progress() -> None:
     assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
 
 
-def test_handoff_names_w1b_as_the_only_post_merge_next_step() -> None:
-    """W1a 三个切片合入后，唯一获准的下一步是 W1b，不再是"实现 W1a"。"""
+def test_handoff_names_w2_as_the_only_post_w1b_next_step() -> None:
+    """W1b 两个切片实现后，唯一获准的下一步是 W2，不再重复实现 W1b。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     statements = _next_step_statements(handoff)
     assert statements, "handoff 没有任何可解析的下一步声明"
     for statement in statements:
-        assert "W1b" in statement, f"下一步声明没有指向 W1b：{statement}"
+        assert "W2" in statement, f"下一步声明没有指向 W2：{statement}"
         if "I3" in statement:
             assert "延期" in statement or "未取消" in statement, (
                 f"下一步仍把 I3 写成当前动作：{statement}"
