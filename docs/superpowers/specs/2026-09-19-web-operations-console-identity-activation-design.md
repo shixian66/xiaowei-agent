@@ -62,8 +62,8 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
 - 飞书 OAuth 自动取得飞书 `open_id`，不要求管理员或用户手工填写 `user_id/open_id`。
 - 未登记身份必须进入待激活流程，不能自动成为 `USER`、`OPERATOR` 或 `ADMIN`。
 - 小维负责通知，Admin 负责决定；模型和系统都不能自动批准。
-- 群内触发时，小维可以在群内使用不含原始问题和结果信息的通用卡片 @ 当前群内可识别的 Admin；没有
-  可 @ 的 Admin 时，申请仍进入 Admin 待办，并在真实私聊通知已获授权时发送通用通知。
+- 群内触发时，W1b 只在当次事件里返回不含原始问题、结果信息、链接或 Admin 名单的通用卡片；不解析、
+  不 @ 具体 Admin。W3 交付激活通知人绑定后，才允许按明确绑定 @/私聊收件人并提供可恢复投递。
 - 激活状态复用登录页壳，不建设独立 `/activation/pending` 前端应用。
 - 激活完成后，群内用户重新提交原请求；系统不保存或自动执行激活前的原始任务。
 - 未来数据库结果链接若成为首次入口，仍复用同一激活服务；在结果域落地前只保留这条规则，不注册结果路由。
@@ -341,8 +341,8 @@ OAuth 回调取得 open_id
 → 查不到 ExternalIdentity
 → 幂等创建或复用 PENDING ActivationRequest
 → 不签发业务 Session
-→ 用 login shell 显示“激活申请已提交”
-→ Admin 管理中心出现待办，并发送安全通知
+→ W1b 返回闭集 activation_pending；W2 才用 login shell 显示“激活申请已提交”
+→ W3 Admin 管理中心才显示待办并按已绑定通知人发送安全通知
 → Admin 明确批准/拒绝
 → 用户重新飞书登录；批准者得到正常 Session
 ```
@@ -354,7 +354,7 @@ request_id                      不可枚举随机 ID
 tenant_id / environment_id
 provider                        FEISHU
 subject_ref                     OAuth 或已验证事件所得 open_id；受控 PII
-source_kind                     WEB_LOGIN | SAFE_TASK_LINK | FEISHU_GROUP
+source_kind                     W1b: WEB_LOGIN | FEISHU_GROUP；SAFE_TASK_LINK 随 W2 return intent 加入
 source_conversation_ref_digest  群入口才有
 source_event_ref_digest         群入口才有
 return_intent                   第 7.1 节闭集；**由 W2 随 `web_oauth_login_contexts` 一起添加**
@@ -374,11 +374,16 @@ approved_role                   APPROVED 时为 USER 或 OPERATOR
 
 - `PENDING` 默认 24 小时过期；创建/复用前在同一串行化临界区把已过期项转成 `EXPIRED`；
 - 全库最多 1024 个有效 `PENDING`，不是“每个请求自己记得检查”；
-- 到达容量时 fail-closed，返回统一“暂时无法提交激活申请”，不泄露 subject 是否已经存在；
-- 容量是数据库无界增长保护，不冒充 HTTP 防滥用。正式发布的边缘限流要求见第 13 节。
+- 到达容量时 fail-closed，并且在同一临界区内先收割、再判容量、容量未满才按 subject 复用/创建；
+  满载时不得先查 subject，已有与不存在的 subject 都返回统一“暂时无法提交激活申请”；
+- 容量只约束**有效待办积压**，不冒充 HTTP 防滥用，也不冒充终态数据保留策略。`APPROVED / REJECTED /
+  EXPIRED` 行（含受控 PII）的保留期与清理机制必须在 W5 部署前明确并验证；未完成时不得部署启用。
+  正式发布的边缘限流要求见第 13 节。
 
 Admin 审批时默认角色为 `USER`；提升为 `OPERATOR` 必须显式选择并可审计。任何 Web/群激活路径都不能
 授予 `ADMIN`；新增 Admin 只允许当前本地 Admin 认证在管理中心执行独立高风险操作，并写 Admin 审计。
+若批准时复用已有账号，当前作用域无角色才新增所选角色；已有角色必须与所选角色精确一致，不能借激活
+静默升降级。已有 `ADMIN` 账号的飞书身份绑定同样属于独立高风险操作，不走普通激活审批。
 
 ### 7.3 未登记用户在群里 @ 小维
 
@@ -386,14 +391,15 @@ Admin 审批时默认角色为 `USER`；提升为 `OPERATOR` 必须显式选择�
 飞书 listener 验证事件与 sender open_id
 → 身份目录无记录
 → 创建/复用 ActivationRequest
-→ 返回通用激活卡片：@申请人 + 可识别且在群内的 Admin
-→ 卡片只写“需要管理员激活”，可附申请人登录/查看状态链接
+→ 返回通用激活卡片，不解析或 @ Admin
+→ W1b 卡片只写“激活申请已提交、等待管理员处理”，不含链接/按钮
 → 申请人后续 OAuth 所得 open_id 必须与申请中 subject_ref 一致
 → Admin 审批后，申请人重新提交原任务
 ```
 
-群卡片不得包含原始提问、SQL、数据库名、结果是否存在或 Admin 私人联系方式。群内没有可 @ 的飞书
-Admin 时不报错、不泄露目录，只提示“已提交管理员处理”，同时保留 Admin 中心待办。群事件创建申请时，
+群卡片不得包含原始提问、SQL、数据库名、结果是否存在、Admin 私人联系方式或尚未由 W2 交付的状态
+链接。W1b 不查询群内 Admin，因此有没有 Admin 都不影响申请，只提示“已提交管理员处理”。W3 有明确
+激活通知人绑定后才增加 @/私聊；Admin 中心待办也随 W3 UI 交付。群事件创建申请时，
 必须把经过 SDK 验证的 sender `open_id` 作为受控 `subject_ref`，并保存 event/conversation digest；不能只靠
 卡片 URL 里的 request ID 认人。
 
@@ -406,6 +412,8 @@ Admin 时不报错、不泄露目录，只提示“已提交管理员处理”�
 - 为避免激活前请求在事后意外执行，群任务不排队、不自动重放；安全任务深链由用户主动重新打开。
 - 用户状态、作用域角色或外部身份发生改变时，旧 Session 在下一次请求重新解析后 fail-closed；不能把登录时
   的角色快照当长期授权。
+- “从未绑定”与“已绑定但账号停用/当前作用域角色已撤销”必须是两个内部闭集结果：只有前者创建激活申请；
+  后者继续按普通认证/提交失败处理，零申请且不向用户暴露账号状态。不能把撤权后的 `None` 当成新用户重新激活。
 
 ## 8. 飞书连接测试与用户登录彻底分开
 
@@ -444,8 +452,9 @@ digest domain 互不相认：
 - 首版用户名固定为 `admin`，但仍使用正常标签/自动填充语义，不把密码框孤零零放在页面上；
 - 首次密码为默认值时，登录后只进入强制改密页；改密完成前不能访问工作台和管理中心；
 - 飞书身份未知时仍使用同一个登录壳显示“激活申请已提交、等待管理员处理”，不显示 Admin 名单、用户角色、
-  原目标详情或结果是否存在；
-- 错误只用闭集文案，不区分账号不存在、密码错误、身份未激活等可被枚举的信息；
+  原目标详情或结果是否存在；W1b 在成熟登录壳交付前只返回闭集 `activation_pending` 语义；
+- 本地账号不存在、密码错误等未认证失败继续使用同一个闭集错误；只有在 OAuth state/code 已验证、用户已
+  证明自己持有该飞书主体后，才可返回“身份待激活”，它不能作为枚举其他用户的接口；
 - 连接状态只显示“系统可用/暂不可用”，不暴露数据库、主机、版本或异常正文；
 - 窄屏仍可完成登录和改密。
 
@@ -681,8 +690,9 @@ result_ref
 | 组件 | 责任 | 禁止 |
 | --- | --- | --- |
 | `UserDirectory` | 用户、角色、状态与外部身份读取 | 任务执行、结果 ACL 推断 |
-| `ActivationStore` | 待激活事实、CAS 审批、去重/过期 | 自动决定角色、保存原始请求 |
-| `IdentityActivationService` | 创建申请、审批、绑定、撤权 | 飞书网络、Task/Tool 调用 |
+| `ActivationStore` | `PENDING` 创建/复用、scope 读取与过期收割 | 写批准/拒绝终态、自动决定角色、保存原始请求 |
+| `UserDirectoryStore.apply()` | 批准/拒绝 CAS；批准时目录事实、申请终态与审计同事务 | 第二条授权写路径、事务外终态更新 |
+| `IdentityActivationService` | 创建申请、编排批准/拒绝、闭集拒绝审计 | 飞书网络、Task/Tool 调用、只在事务外预读 Admin 后授权 |
 | `WebAuthService` | OAuth state、Session、认证来源 | 自动注册或提权 |
 | `RoleAndDutyService` | 当前交付作用域角色、DBA/值班与激活通知绑定；R1 才扩展 requester/approver | 自定义策略表达式、结果 ACL 猜测 |
 | `IntegrationConfigService` | 三域类型化配置、Secret 保留/清除、加载状态 | capability/Policy/SQL 编辑、目标网络调用 |
@@ -795,7 +805,9 @@ created_at
 3. `ChannelPermission` 与 `AdminCapability` 是两个闭集；产品角色、认证来源、资源职责和结果 ACL 不互相替代。
 4. 链接、OAuth 成功、群成员身份、Admin 角色和激活批准都不能单独授予未来数据库结果权限。
 5. OAuth 登录/激活与连接测试使用隔离 state domain，但共用备案 callback；测试永不签发用户 Session。
-6. `ActivationStore` 的单 subject 去重、24 小时过期、CAS 与 1024 全局 pending 上限由存储层承重。
+6. 激活持久化层承重单 subject 去重、24 小时过期、CAS 与 1024 全局 pending 上限：
+   `ActivationStore` 只写 `PENDING/EXPIRED`，`UserDirectoryStore.apply()` 只写
+   `APPROVED/REJECTED`，后者与目录/审计共用一个事务。
 7. 所有 Session/state/一次性票据只在浏览器保存原文，服务端保存 domain-separated digest 与必要时效事实；
    激活所需 `subject_ref` 是受控 PII，不进普通日志。
 8. Secret 只写不回显，不进数据库、环境明文、日志、trace、异常、DOM、测试夹具和 Git；消费者只能看到
@@ -896,10 +908,13 @@ fake 结果页提前勾掉该验收项。
 **W1b 计划复审修订（2026-09-22）。** 本节此前把登录 context 表放在 W1b，而
 `DEVELOPMENT_PLAN.md` 的 Web 序列把它放在 W2；两份都是已批准真源，实现者按哪一份做都能自称
 合规。现按 `DEVELOPMENT_PLAN.md` 收敛：该表与闭集 return intent 属于 W2，第 7.2 节
-`ActivationRequest` 的对应字段也随 W2 添加。同一轮把私聊 Admin 激活通知与可恢复投递重试移到
+`ActivationRequest` 的对应字段和 `SAFE_TASK_LINK` 来源成员也随 W2 添加。同一轮把私聊 Admin 激活通知与可恢复投递重试移到
 W3：它们的收件人真源是 W3 的激活通知人绑定，而当前 `external_identities` 只保存不可逆的
 `subject_ref_digest`，`UserDirectoryStore` 也没有列出 Admin 的读路径——W1b 没有能力把通知投到
-具体的人。W1b 保留群事件当次响应内的通用激活卡片，这条不依赖任何持久化收件人。**本修订需负责人确认。**
+具体的人。W1b 保留群事件当次响应内、不带链接且不 @ Admin 的通用激活卡片，这条不依赖任何持久化
+收件人。W1b 的终态写也收敛到 `UserDirectoryStore.apply()`：`ActivationStore` 只写
+`PENDING/EXPIRED`，避免批准时在目录事务之外再开第二条 CAS 写路径。负责人已在
+W1b 计划收口轮确认该阶段归属；这不等于 W1b 实施计划已经通过最终复审或获得开工授权。
 
 ### 17.2 独立阻塞门
 
