@@ -385,6 +385,28 @@ async def test_login_rotates_old_session_and_current_directory_is_authoritative(
         await revoked_service.authenticate(session_cookie=second.session_cookie)
 
 
+async def test_current_session_rejects_an_identity_that_becomes_unavailable(
+    clock, memory_state
+) -> None:
+    service, _, _ = _service(clock=clock, memory_state=memory_state)
+    start = await service.start_login()
+    session = await service.complete_login(
+        code="valid-code",
+        state=start.state_cookie,
+        state_cookie=start.state_cookie,
+        previous_session_cookie=None,
+    )
+    unavailable_service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        identities=_UnavailableIdentityDirectory(),
+        tokens=("unused_state_value_1234567890",),
+    )
+
+    with pytest.raises(WebAuthenticationError):
+        await unavailable_service.authenticate(session_cookie=session.session_cookie)
+
+
 async def test_session_expiry_logout_origin_and_csrf_fail_closed(
     clock, memory_state
 ) -> None:
