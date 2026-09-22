@@ -46,6 +46,41 @@ from xiaowei_agent.contracts import (
     TraceEvent,
     TransitionResult,
 )
+from xiaowei_agent.contracts.admin_audit import (
+    AdminAuditCandidate,
+    AdminAuditDenial,
+    AdminAuditEvent,
+    AdminAuditStart,
+    AdminAuditTerminal,
+    AdminOperationContext,
+)
+from xiaowei_agent.contracts.enums import (
+    AdminAuditOutcome,
+    ProductRole,
+    UserStatus,
+)
+from xiaowei_agent.contracts.identity import (
+    AssignRoleCommand,
+    BindExternalIdentityCommand,
+    BootstrapLocalAdminCommand,
+    CreateUserCommand,
+    DirectoryCommand,
+    DirectoryPrincipalFacts,
+    ExternalIdentity,
+    MigrateLegacyIdentitiesCommand,
+    RevokeRoleCommand,
+    SetUserStatusCommand,
+    UnbindExternalIdentityCommand,
+    UserAccount,
+    UserRoleAssignment,
+)
+from xiaowei_agent.persistence.admin_audit import (
+    AdminAuditConflictError,
+    AdminAuditMissingStartError,
+    AuditStage,
+    audit_stage_key,
+    seal,
+)
 from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
     ChannelBinding,
@@ -93,11 +128,21 @@ from xiaowei_agent.persistence.decisions import (
     may_renew_lease,
     stale_lease_sort_key,
 )
+from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
+    UserDirectoryConflictError,
+    UserDirectoryNotFoundError,
+    batch_operation_id,
+    derive_audit,
+    external_subject_digest,
+)
 from xiaowei_agent.persistence.local_admin import (
     LOCAL_ADMIN_SUBJECT_REF,
     ChangePasswordCommand,
     LocalAdminNotFoundError,
     LocalAdminRecord,
+    bootstrap_local_admin_command,
+    bootstrap_operation_context,
 )
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.provider_state import (
@@ -495,6 +540,571 @@ class InMemoryProviderStateStore:
             )
 
 
+class InMemoryAdminAuditStore:
+    """``AdminAuditStore`` 的单进程实现；与目录 store **共用同一把锁和同一份事实**。
+
+    共用是承重的：授权改变与它的审计必须在同一个临界区里提交，两边各持一份状态
+    就复现不出这条不变量，而它恰好是 W1a 的核心。
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    def _append_locked(
+        self, candidate: AdminAuditCandidate, *, now: _dt.datetime
+    ) -> AdminAuditEvent | None:
+        """**唯一**往内存审计事实里写的地方；阶段已被占用时返回 ``None``。
+
+        返回 ``None`` 而不是自己抛：同一个事实经两个公开入口暴露时是两个错误族
+        （``AdminAuditConflictError`` 与 ``AdminAuditUnwritableError``），由调用者
+        按自己的入口决定抛哪个。这与 PostgreSQL 侧 ``_insert_audit_event`` 的
+        ``ON CONFLICT DO NOTHING ... RETURNING`` 拿到空结果是同一个形状。
+        """
+        key = audit_stage_key(
+            operation_id=candidate.operation_id, outcome=candidate.outcome
+        )
+        if key in self._state.admin_audit_stage_keys:
+            return None
+        event = seal(candidate, now=now)
+        if event.event_id in self._state.admin_audit_events:
+            return None
+        self._state.admin_audit_stage_keys[key] = event.event_id
+        self._state.admin_audit_events[event.event_id] = event
+        return event
+
+    async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
+        candidate = AdminAuditCandidate(
+            operation_id=start.operation_id,
+            tenant_id=start.tenant_id,
+            environment_id=start.environment_id,
+            actor_user_id=start.actor_user_id,
+            actor=start.actor,
+            auth_source=start.auth_source,
+            action=start.action,
+            target_kind=start.target_kind,
+            target_ref_digest=start.target_ref_digest,
+            outcome=AdminAuditOutcome.STARTED,
+        )
+        async with self._lock:
+            event = self._append_locked(candidate, now=self._clock())
+        if event is None:
+            raise AdminAuditConflictError
+        return event
+
+    async def append_terminal(
+        self, *, terminal: AdminAuditTerminal
+    ) -> AdminAuditEvent:
+        async with self._lock:
+            started_id = self._state.admin_audit_stage_keys.get(
+                audit_stage_key(
+                    operation_id=terminal.operation_id,
+                    outcome=AdminAuditOutcome.STARTED,
+                )
+            )
+            if started_id is None:
+                raise AdminAuditMissingStartError
+            started = self._state.admin_audit_events[started_id]
+            # 稳定字段从已存的 STARTED 读回，不由调用方再传一遍——再传一遍就等于
+            # 给了调用方一次改写租户、操作者或目标的机会。
+            candidate = AdminAuditCandidate(
+                operation_id=started.operation_id,
+                tenant_id=started.tenant_id,
+                environment_id=started.environment_id,
+                actor_user_id=started.actor_user_id,
+                actor=started.actor,
+                auth_source=started.auth_source,
+                action=started.action,
+                target_kind=started.target_kind,
+                target_ref_digest=started.target_ref_digest,
+                outcome=terminal.outcome,
+                reason_code=terminal.reason_code,
+                effect=terminal.effect,
+            )
+            event = self._append_locked(candidate, now=self._clock())
+        if event is None:
+            raise AdminAuditConflictError
+        return event
+
+    async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
+        candidate = AdminAuditCandidate(
+            operation_id=denial.operation_id,
+            tenant_id=denial.tenant_id,
+            environment_id=denial.environment_id,
+            actor_user_id=denial.actor_user_id,
+            actor=denial.actor,
+            auth_source=denial.auth_source,
+            action=denial.action,
+            target_kind=denial.target_kind,
+            target_ref_digest=denial.target_ref_digest,
+            outcome=AdminAuditOutcome.DENIED,
+            reason_code=denial.reason_code,
+        )
+        async with self._lock:
+            event = self._append_locked(candidate, now=self._clock())
+        if event is None:
+            raise AdminAuditConflictError
+        return event
+
+    async def load(self, *, event_id: str) -> AdminAuditEvent | None:
+        async with self._lock:
+            return self._state.admin_audit_events.get(event_id)
+
+
+_DirectorySnapshot = tuple[
+    dict[str, UserAccount],
+    dict[tuple[str, str, str], UserRoleAssignment],
+    dict[tuple[str, str, str, str], ExternalIdentity],
+    dict[str, AdminAuditEvent],
+    dict[tuple[str, AuditStage], str],
+    object,
+]
+
+
+class InMemoryUserDirectoryStore:
+    """``UserDirectoryStore`` 的单进程实现。
+
+    没有事务，用"进临界区先拍快照、**任何**异常先恢复再决定抛什么"表达回滚那一列。
+    不挑异常类型恢复：只在两三种异常上恢复，审计派生、契约校验或 helper 抛出的
+    别的异常就会留下"授权已改、审计没写"的半状态，两个实现在共享套件**之外**分叉。
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+        self._audit = InMemoryAdminAuditStore(clock=clock, state=self._state)
+
+    async def load_account(
+        self, *, user_id: str, tenant_id: str, environment_id: str
+    ) -> DirectoryPrincipalFacts | None:
+        async with self._lock:
+            return self._facts(user_id, tenant_id, environment_id)
+
+    async def resolve_by_subject(
+        self,
+        *,
+        provider: IdentitySource,
+        tenant_id: str,
+        environment_id: str,
+        subject_ref: str,
+    ) -> DirectoryPrincipalFacts | None:
+        digest = external_subject_digest(
+            provider=provider,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            subject_ref=subject_ref,
+        )
+        async with self._lock:
+            binding = self._state.external_identities.get(
+                (provider.value, tenant_id, environment_id, digest)
+            )
+            if binding is None:
+                return None
+            return self._facts(binding.user_id, tenant_id, environment_id)
+
+    async def apply(
+        self, *, command: DirectoryCommand, context: AdminOperationContext
+    ) -> tuple[AdminAuditEvent, ...]:
+        async with self._lock:
+            snapshot = self._snapshot()
+            try:
+                return self._apply_locked(command=command, context=context)
+            except BaseException:
+                self._restore(snapshot)
+                raise
+
+    # ---- 读 ----------------------------------------------------------------
+
+    def _facts(
+        self, user_id: str, tenant_id: str, environment_id: str
+    ) -> DirectoryPrincipalFacts | None:
+        """停用的账号解析不出任何授权事实——停用即刻生效，不等下一次登录。"""
+        account = self._state.user_accounts.get(user_id)
+        if account is None or account.status is not UserStatus.ACTIVE:
+            return None
+        assignment = self._state.user_role_assignments.get(
+            (user_id, tenant_id, environment_id)
+        )
+        if assignment is None:
+            return None
+        return DirectoryPrincipalFacts(account=account, assignment=assignment)
+
+    # ---- 快照 --------------------------------------------------------------
+
+    def _snapshot(self) -> _DirectorySnapshot:
+        """四张目录表 **加上** 凭据行。
+
+        漏掉凭据行时，一次失败的 bootstrap 会留下一行 ``user_id IS NULL`` 的凭据，
+        而那正好落进四态表第二行（backfill）而不是第四行（fail-closed）——于是它
+        看起来像一次"还没升级"的正常状态。
+        """
+        state = self._state
+        return (
+            dict(state.user_accounts),
+            dict(state.user_role_assignments),
+            dict(state.external_identities),
+            dict(state.admin_audit_events),
+            dict(state.admin_audit_stage_keys),
+            state.local_admin,
+        )
+
+    def _restore(self, snapshot: _DirectorySnapshot) -> None:
+        state = self._state
+        accounts, assignments, identities, events, stage_keys, local_admin = snapshot
+        # 逐个写而不是在一个循环里遍历：五张表的键值类型各不相同，塞进一个循环
+        # 就只能靠一条静音注释把类型错误压下去，而被压下去的那一条正是"恢复错了
+        # 表"这种缺陷唯一会留下的信号。
+        state.user_accounts.clear()
+        state.user_accounts.update(accounts)
+        state.user_role_assignments.clear()
+        state.user_role_assignments.update(assignments)
+        state.external_identities.clear()
+        state.external_identities.update(identities)
+        state.admin_audit_events.clear()
+        state.admin_audit_events.update(events)
+        state.admin_audit_stage_keys.clear()
+        state.admin_audit_stage_keys.update(stage_keys)
+        state.local_admin = local_admin
+
+    # ---- 写 ----------------------------------------------------------------
+
+    def _apply_locked(
+        self, *, command: DirectoryCommand, context: AdminOperationContext
+    ) -> tuple[AdminAuditEvent, ...]:
+        now = self._clock()
+        if isinstance(command, CreateUserCommand):
+            return self._create_user(command, context, now)
+        if isinstance(command, SetUserStatusCommand):
+            return self._set_status(command, context, now)
+        if isinstance(command, AssignRoleCommand):
+            return self._assign_role(command, context, now)
+        if isinstance(command, RevokeRoleCommand):
+            return self._revoke_role(command, context, now)
+        if isinstance(command, BindExternalIdentityCommand):
+            return self._bind_identity(command, context, now)
+        if isinstance(command, UnbindExternalIdentityCommand):
+            return self._unbind_identity(command, context, now)
+        if isinstance(command, BootstrapLocalAdminCommand):
+            return self._bootstrap(command, context, now)
+        return self._migrate(command, context, now)
+
+    def _write_audit(
+        self, candidate: AdminAuditCandidate, *, now: _dt.datetime
+    ) -> AdminAuditEvent:
+        event = self._audit._append_locked(candidate, now=now)
+        if event is None:
+            raise AdminAuditUnwritableError
+        return event
+
+    def _insert_account(
+        self,
+        *,
+        user_id: str,
+        actor: str,
+        display_name: str,
+        now: _dt.datetime,
+    ) -> None:
+        if user_id in self._state.user_accounts:
+            raise UserDirectoryConflictError("the account already exists")
+        if any(
+            account.actor == actor for account in self._state.user_accounts.values()
+        ):
+            raise UserDirectoryConflictError("the actor is already claimed")
+        self._state.user_accounts[user_id] = UserAccount(
+            user_id=user_id,
+            actor=actor,
+            display_name=display_name,
+            status=UserStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _upsert_role(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+        role: ProductRole,
+        created_by: str,
+        now: _dt.datetime,
+    ) -> None:
+        key = (user_id, tenant_id, environment_id)
+        existing = self._state.user_role_assignments.get(key)
+        self._state.user_role_assignments[key] = UserRoleAssignment(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            role=role,
+            created_by=created_by if existing is None else existing.created_by,
+            created_at=now if existing is None else existing.created_at,
+            updated_at=now,
+        )
+
+    def _bind_subject(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+        subject_ref: str,
+        now: _dt.datetime,
+    ) -> None:
+        digest = external_subject_digest(
+            provider=IdentitySource.FEISHU,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            subject_ref=subject_ref,
+        )
+        key = (IdentitySource.FEISHU.value, tenant_id, environment_id, digest)
+        if key in self._state.external_identities:
+            raise UserDirectoryConflictError("the subject is already bound")
+        # 反方向也要挡：一个账号在同作用域最多绑一个主体。只挡主键时，一个账号
+        # 可以绑上任意多个 open_id，于是"撤销这个人"要撤几次没有定论。
+        if self._binding_key_of(user_id, tenant_id, environment_id) is not None:
+            raise UserDirectoryConflictError("the account is already bound")
+        self._state.external_identities[key] = ExternalIdentity(
+            user_id=user_id,
+            provider=IdentitySource.FEISHU,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            subject_ref=subject_ref,
+            created_at=now,
+            last_seen_at=now,
+        )
+
+    def _binding_key_of(
+        self, user_id: str, tenant_id: str, environment_id: str
+    ) -> tuple[str, str, str, str] | None:
+        for key, binding in self._state.external_identities.items():
+            if (
+                binding.user_id == user_id
+                and key[1] == tenant_id
+                and key[2] == environment_id
+            ):
+                return key
+        return None
+
+    def _require_account(self, user_id: str) -> UserAccount:
+        account = self._state.user_accounts.get(user_id)
+        if account is None:
+            raise UserDirectoryNotFoundError("no such account")
+        return account
+
+    def _create_user(
+        self,
+        command: CreateUserCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._insert_account(
+            user_id=command.user_id,
+            actor=command.actor,
+            display_name=command.display_name,
+            now=now,
+        )
+        self._upsert_role(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            role=command.role,
+            created_by=context.actor_user_id,
+            now=now,
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _set_status(
+        self,
+        command: SetUserStatusCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        account = self._require_account(command.user_id)
+        # 作用域里没有角色的账号在这个作用域根本不可见，改它的状态等于隔着作用域
+        # 动一个看不到的人。
+        if (
+            command.user_id,
+            command.tenant_id,
+            command.environment_id,
+        ) not in self._state.user_role_assignments:
+            raise UserDirectoryNotFoundError("no role in this scope")
+        self._state.user_accounts[command.user_id] = account.model_copy(
+            update={"status": command.status, "updated_at": now}
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _assign_role(
+        self,
+        command: AssignRoleCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_account(command.user_id)
+        self._upsert_role(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            role=command.role,
+            created_by=context.actor_user_id,
+            now=now,
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _revoke_role(
+        self,
+        command: RevokeRoleCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_account(command.user_id)
+        key = (command.user_id, command.tenant_id, command.environment_id)
+        if key not in self._state.user_role_assignments:
+            raise UserDirectoryNotFoundError("no role in this scope")
+        del self._state.user_role_assignments[key]
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _bind_identity(
+        self,
+        command: BindExternalIdentityCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_account(command.user_id)
+        self._bind_subject(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            subject_ref=command.subject_ref,
+            now=now,
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _unbind_identity(
+        self,
+        command: UnbindExternalIdentityCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_account(command.user_id)
+        key = self._binding_key_of(
+            command.user_id, command.tenant_id, command.environment_id
+        )
+        if key is None:
+            raise UserDirectoryNotFoundError("no binding in this scope")
+        del self._state.external_identities[key]
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _bootstrap(
+        self,
+        command: BootstrapLocalAdminCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        """四态表的四行都在这里；判定读的是**目录链接是否完整**，不是凭据行在不在。
+
+        按"已有凭据行即 no-op"实现，任何跑过 RI5 的库升级之后 ``user_id`` 永远是
+        ``NULL``、``user_accounts`` 不会出现、ADMIN 角色不会出现——而全新安装的
+        测试全绿，因为全新安装走的是第一行。
+        """
+        record = self._state.local_admin
+        if record is not None and record.user_id is not None:
+            account = self._state.user_accounts.get(record.user_id)
+            assignment = self._state.user_role_assignments.get(
+                (record.user_id, command.tenant_id, command.environment_id)
+            )
+            if (
+                account is None
+                or assignment is None
+                or assignment.role is not ProductRole.ADMIN
+            ):
+                raise UserDirectoryConflictError("the credential link is broken")
+            return ()
+        self._insert_account(
+            user_id=command.user_id,
+            actor=command.actor,
+            display_name=command.display_name,
+            now=now,
+        )
+        self._upsert_role(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            role=ProductRole.ADMIN,
+            created_by=context.actor_user_id,
+            now=now,
+        )
+        # backfill 时**保留原 password_hash**：管理员可能早就改过密码，拿传进来的
+        # 初始口令覆盖回去等于一次静默的凭据回滚。命令里的口令只在第一行被使用。
+        self._state.local_admin = LocalAdminRecord(
+            password_hash=(
+                command.password_hash if record is None else record.password_hash
+            ),
+            must_change_password=(
+                True if record is None else record.must_change_password
+            ),
+            user_id=command.user_id,
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _migrate(
+        self,
+        command: MigrateLegacyIdentitiesCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        events: list[AdminAuditEvent] = []
+        for index, entry in enumerate(command.entries, start=1):
+            self._insert_account(
+                user_id=entry.user_id,
+                actor=entry.actor,
+                display_name=entry.display_name,
+                now=now,
+            )
+            self._upsert_role(
+                user_id=entry.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                role=entry.role,
+                created_by=context.actor_user_id,
+                now=now,
+            )
+            self._bind_subject(
+                user_id=entry.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                subject_ref=entry.subject_ref,
+                now=now,
+            )
+            candidate = derive_audit(
+                command,
+                context,
+                target_ref=entry.user_id,
+                operation_id=batch_operation_id(context, index),
+                entry=entry,
+            )
+            events.append(self._write_audit(candidate, now=now))
+        return tuple(events)
+
+
 class InMemoryLocalAdminStore:
     """与 session 存储**共用同一把锁和同一份事实**的本地管理员实现。
 
@@ -513,13 +1123,17 @@ class InMemoryLocalAdminStore:
         self._lock = self._state.lock
 
     async def seed_if_absent(self, *, password_hash: str) -> bool:
-        async with self._lock:
-            if self._state.local_admin is not None:
-                return False
-            self._state.local_admin = LocalAdminRecord(
-                password_hash=password_hash, must_change_password=True
-            )
-            return True
+        """委托给 ``apply()``，不再自己构造这一行。
+
+        ``local_admins.user_id`` 是授权事实，而授权事实只有一条写路径；凭据行与
+        目录账号也必须一起出现，否则失败会留下一行无人链接的凭据。
+        """
+        directory = InMemoryUserDirectoryStore(clock=self._clock, state=self._state)
+        events = await directory.apply(
+            command=bootstrap_local_admin_command(password_hash=password_hash),
+            context=bootstrap_operation_context(),
+        )
+        return bool(events)
 
     async def get(self) -> LocalAdminRecord:
         async with self._lock:
@@ -535,8 +1149,12 @@ class InMemoryLocalAdminStore:
             if self._state.local_admin is None:
                 raise LocalAdminNotFoundError
             now = self._clock()
+            previous = self._state.local_admin
             record = LocalAdminRecord(
-                password_hash=command.password_hash, must_change_password=False
+                password_hash=command.password_hash,
+                must_change_password=False,
+                # 带上原记录的链接：改密改的是凭据，不是授权，不能顺手把链接清掉。
+                user_id=None if previous is None else previous.user_id,
             )
             self._state.local_admin = record
             # 先撤销全部旧的，再插入新的——顺序反过来会把刚签发的一起撤掉。

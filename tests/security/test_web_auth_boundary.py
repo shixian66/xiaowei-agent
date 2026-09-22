@@ -1115,12 +1115,24 @@ from xiaowei_agent.interfaces.local_stack import build_postgres_web_stack
 
 # 本探针只看"装配会 import 哪些模块"。RI5 之后装配会真的往库里 seed 一行本地
 # 管理员，而这里没有 PostgreSQL；替换 engine 工厂即可保持探针原本的语义。
-class FakeConnection:
-    async def execute(self, *args, **kwargs):
+class FakeResult:
+    def mappings(self):
+        return self
+
+    def first(self):
         return None
 
+    def all(self):
+        return []
+
+class FakeConnection:
+    # W1a 之后 seed 是一次完整 bootstrap：读要读不到行，写要拿得到 RETURNING
+    # 的那一行，否则装配会被判成一次主键冲突。
+    async def execute(self, *args, **kwargs):
+        return FakeResult()
+
     async def scalar(self, *args, **kwargs):
-        return None
+        return "inserted"
 
 class FakeTransaction:
     async def __aenter__(self):

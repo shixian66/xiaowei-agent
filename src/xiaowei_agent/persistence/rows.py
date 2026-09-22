@@ -26,6 +26,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from pydantic import TypeAdapter
 
 from xiaowei_agent.contracts import (
+    AdminAuditAction,
+    AdminAuditOutcome,
+    AdminAuditReasonCode,
+    AdminAuditTargetKind,
     ChannelKind,
     ClarificationRecord,
     ClarificationSubject,
@@ -35,15 +39,18 @@ from xiaowei_agent.contracts import (
     InteractionDraft,
     ModelAdvisory,
     ModelUsage,
+    ProductRole,
     ProjectionErrorCode,
     ProjectionState,
     StepOutcomeKind,
     StepResultStatus,
     TaskRecord,
     TaskStatus,
+    UserStatus,
 )
 
 if TYPE_CHECKING:
+    from xiaowei_agent.contracts.admin_audit import AdminAuditEvent
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.model_artifacts import (
         AcceptedInteractionArtifact,
@@ -431,4 +438,63 @@ def row_to_step_execution(row: Mapping[Any, Any]) -> "StepExecutionRecord":
         commit_digest=row["commit_digest"],
         started_at=row["started_at"],
         committed_at=row["committed_at"],
+    )
+
+
+def admin_audit_event_to_row(event: "AdminAuditEvent") -> dict[str, Any]:
+    """审计事件契约到列。
+
+    effect 在行里是**平铺的两列**而不是嵌套对象：嵌套要么变成 JSON 列，要么变成
+    一份只有这里知道的编码，而审计表明确不留任何自由文本通道。
+    """
+    return {
+        "event_id": event.event_id,
+        "operation_id": event.operation_id,
+        "tenant_id": event.tenant_id,
+        "environment_id": event.environment_id,
+        "actor_user_id": event.actor_user_id,
+        "actor": event.actor,
+        "auth_source": event.auth_source.value,
+        "action": event.action.value,
+        "target_kind": event.target_kind.value,
+        "target_ref_digest": event.target_ref_digest,
+        "outcome": event.outcome.value,
+        "reason_code": None if event.reason_code is None else event.reason_code.value,
+        "effect_role": None if event.effect.role is None else event.effect.role.value,
+        "effect_status": (
+            None if event.effect.status is None else event.effect.status.value
+        ),
+        "created_at": event.created_at,
+    }
+
+
+def row_to_admin_audit_event(row: Mapping[Any, Any]) -> "AdminAuditEvent":
+    """数据库列到审计事件契约；枚举**显式构造**。
+
+    ``Contract`` 是 strict 模式，``str`` 不会自动变成 ``StrEnum``；漏一个显式构造
+    就会在读回时炸，而读回发生在事后查证的那一刻。
+    """
+    from xiaowei_agent.contracts.admin_audit import AdminAuditEffect, AdminAuditEvent
+
+    reason_code = row["reason_code"]
+    effect_role = row["effect_role"]
+    effect_status = row["effect_status"]
+    return AdminAuditEvent(
+        event_id=row["event_id"],
+        operation_id=row["operation_id"],
+        tenant_id=row["tenant_id"],
+        environment_id=row["environment_id"],
+        actor_user_id=row["actor_user_id"],
+        actor=row["actor"],
+        auth_source=IdentitySource(row["auth_source"]),
+        action=AdminAuditAction(row["action"]),
+        target_kind=AdminAuditTargetKind(row["target_kind"]),
+        target_ref_digest=row["target_ref_digest"],
+        outcome=AdminAuditOutcome(row["outcome"]),
+        reason_code=None if reason_code is None else AdminAuditReasonCode(reason_code),
+        effect=AdminAuditEffect(
+            role=None if effect_role is None else ProductRole(effect_role),
+            status=None if effect_status is None else UserStatus(effect_status),
+        ),
+        created_at=row["created_at"],
     )

@@ -27,6 +27,7 @@ from types import ModuleType
 from tests.suites import channel_store as channel_suite
 from tests.suites import clarification_records as clarification_suite
 from tests.suites import evidence_ledger as evidence_suite
+from tests.suites import identity_directory as identity_suite
 from tests.suites import model_artifacts as model_artifact_suite
 from tests.suites import plan_store as plan_suite
 from tests.suites import task_store as task_suite
@@ -42,6 +43,7 @@ _SUITES: dict[str, ModuleType] = {
     "model_artifacts": model_artifact_suite,
     "evidence_ledger": evidence_suite,
     "web_session_store": web_session_suite,
+    "identity_directory": identity_suite,
 }
 
 # 绑定登记表：模块路径 → (套件, 分组, 实现种类)。
@@ -149,6 +151,16 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
     "tests.integration.test_clarification_record_store_postgres": (
         "clarification_records",
         "clarification_records",
+        "postgres",
+    ),
+    "tests.contract.test_identity_store": (
+        "identity_directory",
+        "identity_directory",
+        "memory",
+    ),
+    "tests.integration.test_identity_directory_postgres": (
+        "identity_directory",
+        "identity_directory",
         "postgres",
     ),
 }

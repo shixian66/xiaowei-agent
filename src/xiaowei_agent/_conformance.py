@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
+    from xiaowei_agent.persistence.admin_audit import AdminAuditStore
     from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.clarification_records import (
         ClarificationRecordStore,
@@ -70,22 +71,27 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import (
+        InMemoryAdminAuditStore,
         InMemoryChannelStore,
         InMemoryTaskStore,
+        InMemoryUserDirectoryStore,
         InMemoryWebSessionStore,
     )
+    from xiaowei_agent.persistence.identity import UserDirectoryStore
     from xiaowei_agent.persistence.model_artifacts import (
         InMemoryModelArtifactStore,
         ModelArtifactStore,
     )
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
+        PostgresAdminAuditStore,
         PostgresChannelStore,
         PostgresClarificationRecordStore,
         PostgresEvidenceLedger,
         PostgresModelArtifactStore,
         PostgresPlanStore,
         PostgresTaskStore,
+        PostgresUserDirectoryStore,
         PostgresWebSessionStore,
     )
     from xiaowei_agent.persistence.store import Clock, TaskStore
@@ -156,6 +162,28 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """两种澄清事实存储都必须保持同一 grant-fenced 窄协议。"""
         memory_port: ClarificationRecordStore = memory
         postgres_port: ClarificationRecordStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _identity_directory_anchors(
+        memory: "InMemoryUserDirectoryStore",
+        postgres: "PostgresUserDirectoryStore",
+    ) -> None:
+        """两种身份目录实现都必须保持同一条**单写入口**协议。
+
+        只锚一个实现时，另一个多长出一个公开写方法不会有任何静态检查失败——而多
+        出来的那个正是绕过"授权改变必带同事务审计"的唯一途径。
+        """
+        memory_port: UserDirectoryStore = memory
+        postgres_port: UserDirectoryStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _admin_audit_store_anchors(
+        memory: "InMemoryAdminAuditStore",
+        postgres: "PostgresAdminAuditStore",
+    ) -> None:
+        """两种审计实现都必须保持同一套 append-only 窄写协议。"""
+        memory_port: AdminAuditStore = memory
+        postgres_port: AdminAuditStore = postgres
         _ = (memory_port, postgres_port)
 
     def _lease_renewal_anchor(store: "PostgresTaskStore") -> None:

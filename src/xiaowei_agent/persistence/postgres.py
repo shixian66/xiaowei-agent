@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ActorTaskPageQuery,
+    AdminAuditOutcome,
     ApprovalRequest,
     AttemptIntent,
     ChannelKind,
@@ -45,7 +46,9 @@ from xiaowei_agent.contracts import (
     EvidenceEnvelope,
     ExecutionPlan,
     GrantRejection,
+    IdentitySource,
     LeaseGrant,
+    ProductRole,
     ProjectionState,
     RequestContext,
     RequestEnvelope,
@@ -63,6 +66,33 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
     TraceEvent,
     TransitionResult,
+    UserStatus,
+)
+from xiaowei_agent.contracts.admin_audit import (
+    AdminAuditCandidate,
+    AdminAuditDenial,
+    AdminAuditEvent,
+    AdminAuditStart,
+    AdminAuditTerminal,
+    AdminOperationContext,
+)
+from xiaowei_agent.contracts.identity import (
+    AssignRoleCommand,
+    BindExternalIdentityCommand,
+    BootstrapLocalAdminCommand,
+    CreateUserCommand,
+    DirectoryCommand,
+    DirectoryPrincipalFacts,
+    MigrateLegacyIdentitiesCommand,
+    RevokeRoleCommand,
+    SetUserStatusCommand,
+    UserAccount,
+    UserRoleAssignment,
+)
+from xiaowei_agent.persistence.admin_audit import (
+    AdminAuditConflictError,
+    AdminAuditMissingStartError,
+    seal,
 )
 from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
@@ -129,6 +159,15 @@ from xiaowei_agent.persistence.evidence import (
     EvidenceConflictError,
     EvidenceNotFoundError,
 )
+from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
+    UserDirectoryConflictError,
+    UserDirectoryNotFoundError,
+    batch_operation_id,
+    derive_audit,
+    external_subject_digest,
+)
+from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SINGLETON_ID
 from xiaowei_agent.persistence.model_artifacts import (
     AcceptedInteractionArtifact,
     AdvisoryArtifactCandidate,
@@ -145,6 +184,7 @@ from xiaowei_agent.persistence.plans import (
     reject_unsupported_plan_schema,
 )
 from xiaowei_agent.persistence.rows import (
+    admin_audit_event_to_row,
     channel_binding_to_row,
     clarification_record_to_row,
     dump_contract,
@@ -154,6 +194,7 @@ from xiaowei_agent.persistence.rows import (
     oauth_state_to_row,
     projection_subscription_to_row,
     record_to_row,
+    row_to_admin_audit_event,
     row_to_channel_binding,
     row_to_clarification_record,
     row_to_interaction_artifact,
@@ -167,9 +208,12 @@ from xiaowei_agent.persistence.rows import (
     web_session_to_row,
 )
 from xiaowei_agent.persistence.schema import (
+    ADMIN_AUDIT_EVENTS,
     CHANNEL_BINDINGS,
     CREATED_SEQUENCE,
+    EXTERNAL_IDENTITIES,
     FENCING_SEQUENCE,
+    LOCAL_ADMINS,
     PROJECTION_FENCING_SEQUENCE,
     PROJECTION_SUBSCRIPTIONS,
     TASK_APPROVALS,
@@ -182,6 +226,8 @@ from xiaowei_agent.persistence.schema import (
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
     TASKS,
+    USER_ACCOUNTS,
+    USER_ROLE_ASSIGNMENTS,
     WEB_OAUTH_STATES,
     WEB_SESSIONS,
 )
@@ -2598,3 +2644,664 @@ class PostgresClarificationRecordStore:
                     task_id=grant.task_id,
                 )
             return existing
+
+
+BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY: Final[int] = 2026092101
+"""bootstrap advisory lock 的键。
+
+公开导出，好让并发用例去**真的抢这把锁**而不是在测试里抄一遍字面量——抄出来的那
+一份不会跟着这里改，于是有朝一日换了键值，用例会去抢一把没人用的锁并安静地通过。
+"""
+
+_BOOTSTRAP_LOCAL_ADMIN_LOCK: Final = sa.text(
+    "SELECT pg_advisory_xact_lock(:lock_key)"
+).bindparams(lock_key=BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY)
+"""bootstrap 的事务级 advisory lock。
+
+比 ``SELECT ... FOR UPDATE`` 严格强一档，而且强的正是需要的那一档：凭据行还不存在
+时 ``FOR UPDATE`` 一行都锁不到，两个同时装配的 Web 进程会双双读到"没有这一行"、
+双双去建账号，第二个撞 ``user_accounts`` 主键——一次正常的并发启动变成一次启动失败。
+拿到锁之后仍然 ``FOR UPDATE`` 那一行，因为四态判定读的就是它。
+"""
+
+
+async def _insert_audit_event(
+    connection: AsyncConnection, candidate: AdminAuditCandidate, *, now: _dt.datetime
+) -> AdminAuditEvent | None:
+    """``admin_audit_events`` 的**唯一**落库口；同阶段事实已存在时返回 ``None``。
+
+    目录路径与 ``PostgresAdminAuditStore._write`` 都经过这里。两条路径各写一份
+    INSERT，就是两份列映射，而两份列映射迟早分叉——分叉之后审计表里会同时存在
+    两种形状的行，且没有任何东西会报错。
+
+    ``ON CONFLICT DO NOTHING`` **不带推断目标**：一条 INSERT 可能撞上主键，也可能
+    撞上两条偏唯一索引中的一条，带目标时只推断一条。它吞掉的只有唯一/主键/偏唯一
+    三种冲突；CHECK、外键、NOT NULL 一律照抛，由 ``_write_transaction`` 收敛。
+
+    返回 ``None`` 而不是自己抛：同一个事实经两个公开入口暴露时是两个错误族，由
+    调用者按自己的入口决定抛哪个。
+    """
+    event = seal(candidate, now=now)
+    inserted = await connection.scalar(
+        sa.dialects.postgresql.insert(ADMIN_AUDIT_EVENTS)
+        .values(**admin_audit_event_to_row(event))
+        .on_conflict_do_nothing()
+        .returning(ADMIN_AUDIT_EVENTS.c.event_id)
+    )
+    return None if inserted is None else event
+
+
+class PostgresAdminAuditStore:
+    """``AdminAuditStore`` 的 PostgreSQL 实现；三个窄写方法 + 一个按 id 读。
+
+    ``persistence`` 里针对 ``admin_audit_events`` 的 ``sa.update`` / ``sa.delete``
+    一律不存在，由 ``tests/security/test_admin_audit_append_only.py`` 钉住。
+    """
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    async def _append_candidate(
+        self, candidate: AdminAuditCandidate
+    ) -> AdminAuditEvent:
+        """``append_started`` 与 ``append_denied`` 共用的落库包装。
+
+        名字取得具体而不是叫 ``_write``：调用点冻结按函数名匹配，一个泛用名会把
+        将来任何一个无关的 ``_write`` 都拖进违规名单，而噪音会让名单没人看。
+        """
+        async with _write_transaction(self._engine) as connection:
+            event = await _insert_audit_event(
+                connection, candidate, now=self._clock()
+            )
+            if event is None:
+                raise AdminAuditConflictError
+            return event
+        raise AdminAuditConflictError  # pragma: no cover - 事务体必然 return 或抛
+
+    @_persistence_boundary(write=True)
+    async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
+        return await self._append_candidate(
+            AdminAuditCandidate(
+                operation_id=start.operation_id,
+                tenant_id=start.tenant_id,
+                environment_id=start.environment_id,
+                actor_user_id=start.actor_user_id,
+                actor=start.actor,
+                auth_source=start.auth_source,
+                action=start.action,
+                target_kind=start.target_kind,
+                target_ref_digest=start.target_ref_digest,
+                outcome=AdminAuditOutcome.STARTED,
+            )
+        )
+
+    @_persistence_boundary(write=True)
+    async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
+        return await self._append_candidate(
+            AdminAuditCandidate(
+                operation_id=denial.operation_id,
+                tenant_id=denial.tenant_id,
+                environment_id=denial.environment_id,
+                actor_user_id=denial.actor_user_id,
+                actor=denial.actor,
+                auth_source=denial.auth_source,
+                action=denial.action,
+                target_kind=denial.target_kind,
+                target_ref_digest=denial.target_ref_digest,
+                outcome=AdminAuditOutcome.DENIED,
+                reason_code=denial.reason_code,
+            )
+        )
+
+    @_persistence_boundary(write=True)
+    async def append_terminal(
+        self, *, terminal: AdminAuditTerminal
+    ) -> AdminAuditEvent:
+        async with _write_transaction(self._engine) as connection:
+            started = (
+                (
+                    await connection.execute(
+                        sa.select(ADMIN_AUDIT_EVENTS).where(
+                            ADMIN_AUDIT_EVENTS.c.operation_id == terminal.operation_id,
+                            ADMIN_AUDIT_EVENTS.c.outcome
+                            == AdminAuditOutcome.STARTED.value,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if started is None:
+                raise AdminAuditMissingStartError
+            origin = row_to_admin_audit_event(started)
+            # 稳定字段从已存的 STARTED 读回，不由调用方再传一遍。
+            event = await _insert_audit_event(
+                connection,
+                AdminAuditCandidate(
+                    operation_id=origin.operation_id,
+                    tenant_id=origin.tenant_id,
+                    environment_id=origin.environment_id,
+                    actor_user_id=origin.actor_user_id,
+                    actor=origin.actor,
+                    auth_source=origin.auth_source,
+                    action=origin.action,
+                    target_kind=origin.target_kind,
+                    target_ref_digest=origin.target_ref_digest,
+                    outcome=terminal.outcome,
+                    reason_code=terminal.reason_code,
+                    effect=terminal.effect,
+                ),
+                now=self._clock(),
+            )
+            if event is None:
+                raise AdminAuditConflictError
+            return event
+        raise AdminAuditConflictError  # pragma: no cover - 同上
+
+    @_persistence_boundary(write=False)
+    async def load(self, *, event_id: str) -> AdminAuditEvent | None:
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.select(ADMIN_AUDIT_EVENTS).where(
+                            ADMIN_AUDIT_EVENTS.c.event_id == event_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else row_to_admin_audit_event(row)
+
+
+class PostgresUserDirectoryStore:
+    """``UserDirectoryStore`` 的 PostgreSQL 实现。
+
+    授权改变与它的审计在**一个** ``_write_transaction`` 里提交：审计写不进去，
+    整个授权改变回滚，一行不留。已知冲突用 ``ON CONFLICT DO NOTHING ... RETURNING``
+    在事务体内探测，不捕获 ``IntegrityError``、不读约束名——那是仓库既有做法，也是
+    唯一能把"未知约束"与"业务冲突"分开的做法。
+    """
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    @_persistence_boundary(write=False)
+    async def load_account(
+        self, *, user_id: str, tenant_id: str, environment_id: str
+    ) -> DirectoryPrincipalFacts | None:
+        async with self._engine.connect() as connection:
+            return await self._facts(
+                connection,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                environment_id=environment_id,
+            )
+
+    @_persistence_boundary(write=False)
+    async def resolve_by_subject(
+        self,
+        *,
+        provider: IdentitySource,
+        tenant_id: str,
+        environment_id: str,
+        subject_ref: str,
+    ) -> DirectoryPrincipalFacts | None:
+        digest = external_subject_digest(
+            provider=provider,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            subject_ref=subject_ref,
+        )
+        async with self._engine.connect() as connection:
+            user_id = await connection.scalar(
+                sa.select(EXTERNAL_IDENTITIES.c.user_id).where(
+                    EXTERNAL_IDENTITIES.c.provider == provider.value,
+                    EXTERNAL_IDENTITIES.c.tenant_id == tenant_id,
+                    EXTERNAL_IDENTITIES.c.environment_id == environment_id,
+                    EXTERNAL_IDENTITIES.c.subject_ref_digest == digest,
+                )
+            )
+            if user_id is None:
+                return None
+            return await self._facts(
+                connection,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                environment_id=environment_id,
+            )
+
+    @_persistence_boundary(write=True)
+    async def apply(
+        self, *, command: DirectoryCommand, context: AdminOperationContext
+    ) -> tuple[AdminAuditEvent, ...]:
+        async with _write_transaction(self._engine) as connection:
+            return await self._apply_in_transaction(
+                connection, command=command, context=context
+            )
+        return ()  # pragma: no cover - 事务体必然 return 或抛
+
+    # ---- 读 ----------------------------------------------------------------
+
+    async def _facts(
+        self,
+        connection: AsyncConnection,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> DirectoryPrincipalFacts | None:
+        """停用的账号解析不出任何授权事实——停用即刻生效。"""
+        account_row = (
+            (
+                await connection.execute(
+                    sa.select(USER_ACCOUNTS).where(
+                        USER_ACCOUNTS.c.user_id == user_id,
+                        USER_ACCOUNTS.c.status == UserStatus.ACTIVE.value,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if account_row is None:
+            return None
+        assignment_row = (
+            (
+                await connection.execute(
+                    sa.select(USER_ROLE_ASSIGNMENTS).where(
+                        USER_ROLE_ASSIGNMENTS.c.user_id == user_id,
+                        USER_ROLE_ASSIGNMENTS.c.tenant_id == tenant_id,
+                        USER_ROLE_ASSIGNMENTS.c.environment_id == environment_id,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if assignment_row is None:
+            return None
+        return DirectoryPrincipalFacts(
+            account=UserAccount(
+                user_id=account_row["user_id"],
+                actor=account_row["actor"],
+                display_name=account_row["display_name"],
+                status=UserStatus(account_row["status"]),
+                created_at=account_row["created_at"],
+                updated_at=account_row["updated_at"],
+            ),
+            assignment=UserRoleAssignment(
+                user_id=assignment_row["user_id"],
+                tenant_id=assignment_row["tenant_id"],
+                environment_id=assignment_row["environment_id"],
+                role=ProductRole(assignment_row["role"]),
+                created_by=assignment_row["created_by"],
+                created_at=assignment_row["created_at"],
+                updated_at=assignment_row["updated_at"],
+            ),
+        )
+
+    async def _account_exists(
+        self, connection: AsyncConnection, user_id: str
+    ) -> bool:
+        return (
+            await connection.scalar(
+                sa.select(USER_ACCOUNTS.c.user_id).where(
+                    USER_ACCOUNTS.c.user_id == user_id
+                )
+            )
+        ) is not None
+
+    async def _role_exists(
+        self,
+        connection: AsyncConnection,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> bool:
+        return (
+            await connection.scalar(
+                sa.select(USER_ROLE_ASSIGNMENTS.c.role).where(
+                    USER_ROLE_ASSIGNMENTS.c.user_id == user_id,
+                    USER_ROLE_ASSIGNMENTS.c.tenant_id == tenant_id,
+                    USER_ROLE_ASSIGNMENTS.c.environment_id == environment_id,
+                )
+            )
+        ) is not None
+
+    # ---- 写：本方法与 ``_bootstrap_in_transaction`` 是四类授权事实的全部写入口 ----
+
+    async def _apply_in_transaction(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: DirectoryCommand,
+        context: AdminOperationContext,
+    ) -> tuple[AdminAuditEvent, ...]:
+        now = self._clock()
+        if isinstance(command, BootstrapLocalAdminCommand):
+            return await self._bootstrap_in_transaction(
+                connection, command=command, context=context, now=now
+            )
+        if isinstance(command, MigrateLegacyIdentitiesCommand):
+            events: list[AdminAuditEvent] = []
+            for index, entry in enumerate(command.entries, start=1):
+                await self._insert_account(
+                    connection,
+                    user_id=entry.user_id,
+                    actor=entry.actor,
+                    display_name=entry.display_name,
+                    now=now,
+                )
+                await self._upsert_role(
+                    connection,
+                    user_id=entry.user_id,
+                    tenant_id=command.tenant_id,
+                    environment_id=command.environment_id,
+                    role=entry.role,
+                    created_by=context.actor_user_id,
+                    now=now,
+                )
+                await self._bind_subject(
+                    connection,
+                    user_id=entry.user_id,
+                    tenant_id=command.tenant_id,
+                    environment_id=command.environment_id,
+                    subject_ref=entry.subject_ref,
+                    now=now,
+                )
+                events.append(
+                    await self._audit(
+                        connection,
+                        derive_audit(
+                            command,
+                            context,
+                            target_ref=entry.user_id,
+                            operation_id=batch_operation_id(context, index),
+                            entry=entry,
+                        ),
+                        now=now,
+                    )
+                )
+            return tuple(events)
+        if isinstance(command, CreateUserCommand):
+            await self._insert_account(
+                connection,
+                user_id=command.user_id,
+                actor=command.actor,
+                display_name=command.display_name,
+                now=now,
+            )
+            await self._upsert_role(
+                connection,
+                user_id=command.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                role=command.role,
+                created_by=context.actor_user_id,
+                now=now,
+            )
+        elif isinstance(command, SetUserStatusCommand):
+            if not await self._account_exists(connection, command.user_id):
+                raise UserDirectoryNotFoundError("no such account")
+            # 作用域里没有角色的账号在这个作用域根本不可见，改它的状态等于隔着
+            # 作用域动一个看不到的人。
+            if not await self._role_exists(
+                connection,
+                user_id=command.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+            ):
+                raise UserDirectoryNotFoundError("no role in this scope")
+            await connection.execute(
+                sa.update(USER_ACCOUNTS)
+                .where(USER_ACCOUNTS.c.user_id == command.user_id)
+                .values(status=command.status.value, updated_at=now)
+            )
+        elif isinstance(command, AssignRoleCommand):
+            if not await self._account_exists(connection, command.user_id):
+                raise UserDirectoryNotFoundError("no such account")
+            await self._upsert_role(
+                connection,
+                user_id=command.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                role=command.role,
+                created_by=context.actor_user_id,
+                now=now,
+            )
+        elif isinstance(command, RevokeRoleCommand):
+            if not await self._account_exists(connection, command.user_id):
+                raise UserDirectoryNotFoundError("no such account")
+            deleted = await connection.scalar(
+                sa.delete(USER_ROLE_ASSIGNMENTS)
+                .where(
+                    USER_ROLE_ASSIGNMENTS.c.user_id == command.user_id,
+                    USER_ROLE_ASSIGNMENTS.c.tenant_id == command.tenant_id,
+                    USER_ROLE_ASSIGNMENTS.c.environment_id == command.environment_id,
+                )
+                .returning(USER_ROLE_ASSIGNMENTS.c.user_id)
+            )
+            if deleted is None:
+                raise UserDirectoryNotFoundError("no role in this scope")
+        elif isinstance(command, BindExternalIdentityCommand):
+            if not await self._account_exists(connection, command.user_id):
+                raise UserDirectoryNotFoundError("no such account")
+            await self._bind_subject(
+                connection,
+                user_id=command.user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                subject_ref=command.subject_ref,
+                now=now,
+            )
+        else:
+            if not await self._account_exists(connection, command.user_id):
+                raise UserDirectoryNotFoundError("no such account")
+            # 前置判定**就是**这条写语句，不是它前面的一次 SELECT。
+            #
+            # 先 SELECT 出摘要、再发一条不看结果的 DELETE，中间就有一个窗口：另一个
+            # 事务在这两步之间解绑并提交之后，我们的 DELETE 影响 0 行，而下面那条
+            # 审计照样记 SUCCEEDED——一次没有发生的授权改变，在审计里留下了发生过的
+            # 证据。这与 ``RevokeRoleCommand`` 是同一条写法，不是两套。
+            removed = await connection.scalar(
+                sa.delete(EXTERNAL_IDENTITIES)
+                .where(
+                    EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
+                    EXTERNAL_IDENTITIES.c.tenant_id == command.tenant_id,
+                    EXTERNAL_IDENTITIES.c.environment_id == command.environment_id,
+                    EXTERNAL_IDENTITIES.c.user_id == command.user_id,
+                )
+                .returning(EXTERNAL_IDENTITIES.c.subject_ref_digest)
+            )
+            if removed is None:
+                raise UserDirectoryNotFoundError("no binding in this scope")
+        return (
+            await self._audit(
+                connection,
+                derive_audit(command, context, target_ref=command.user_id),
+                now=now,
+            ),
+        )
+
+    async def _bootstrap_in_transaction(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: BootstrapLocalAdminCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        """四态表的四行都在这里；判定读的是**目录链接是否完整**，不是凭据行在不在。
+
+        按"已有凭据行即 no-op"实现，任何跑过 RI5 的库升级之后 ``user_id`` 永远是
+        ``NULL``、``user_accounts`` 不会出现、ADMIN 角色不会出现——而全新安装的
+        测试全绿，因为全新安装走的是第一行。
+        """
+        await connection.execute(_BOOTSTRAP_LOCAL_ADMIN_LOCK)
+        credential = (
+            (
+                await connection.execute(
+                    sa.select(LOCAL_ADMINS.c.id, LOCAL_ADMINS.c.user_id)
+                    .where(LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if credential is not None and credential["user_id"] is not None:
+            linked = credential["user_id"]
+            role = await connection.scalar(
+                sa.select(USER_ROLE_ASSIGNMENTS.c.role).where(
+                    USER_ROLE_ASSIGNMENTS.c.user_id == linked,
+                    USER_ROLE_ASSIGNMENTS.c.tenant_id == command.tenant_id,
+                    USER_ROLE_ASSIGNMENTS.c.environment_id == command.environment_id,
+                )
+            )
+            if not await self._account_exists(connection, linked):
+                raise UserDirectoryConflictError("the credential link is broken")
+            if role != ProductRole.ADMIN.value:
+                raise UserDirectoryConflictError("the credential link is broken")
+            return ()
+        await self._insert_account(
+            connection,
+            user_id=command.user_id,
+            actor=command.actor,
+            display_name=command.display_name,
+            now=now,
+        )
+        await self._upsert_role(
+            connection,
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            role=ProductRole.ADMIN,
+            created_by=context.actor_user_id,
+            now=now,
+        )
+        if credential is None:
+            await connection.execute(
+                sa.insert(LOCAL_ADMINS).values(
+                    id=LOCAL_ADMIN_SINGLETON_ID,
+                    password_hash=command.password_hash,
+                    must_change_password=True,
+                    updated_at=now,
+                    user_id=command.user_id,
+                )
+            )
+        else:
+            # backfill **保留原 password_hash 与原 must_change_password**：管理员
+            # 可能早就改过密码，拿传进来的初始口令覆盖回去等于一次静默的凭据回滚。
+            await connection.execute(
+                sa.update(LOCAL_ADMINS)
+                .where(LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID)
+                .values(user_id=command.user_id, updated_at=now)
+            )
+        return (
+            await self._audit(
+                connection,
+                derive_audit(command, context, target_ref=command.user_id),
+                now=now,
+            ),
+        )
+
+    async def _audit(
+        self,
+        connection: AsyncConnection,
+        candidate: AdminAuditCandidate,
+        *,
+        now: _dt.datetime,
+    ) -> AdminAuditEvent:
+        event = await _insert_audit_event(connection, candidate, now=now)
+        if event is None:
+            raise AdminAuditUnwritableError
+        return event
+
+    async def _insert_account(
+        self,
+        connection: AsyncConnection,
+        *,
+        user_id: str,
+        actor: str,
+        display_name: str,
+        now: _dt.datetime,
+    ) -> None:
+        inserted = await connection.scalar(
+            sa.dialects.postgresql.insert(USER_ACCOUNTS)
+            .values(
+                user_id=user_id,
+                actor=actor,
+                display_name=display_name,
+                status=UserStatus.ACTIVE.value,
+                created_at=now,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing()
+            .returning(USER_ACCOUNTS.c.user_id)
+        )
+        if inserted is None:
+            raise UserDirectoryConflictError("the account or actor is already taken")
+
+    async def _upsert_role(
+        self,
+        connection: AsyncConnection,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+        role: ProductRole,
+        created_by: str,
+        now: _dt.datetime,
+    ) -> None:
+        statement = sa.dialects.postgresql.insert(USER_ROLE_ASSIGNMENTS).values(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            role=role.value,
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+        )
+        await connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["user_id", "tenant_id", "environment_id"],
+                set_={"role": role.value, "updated_at": now},
+            )
+        )
+
+    async def _bind_subject(
+        self,
+        connection: AsyncConnection,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+        subject_ref: str,
+        now: _dt.datetime,
+    ) -> None:
+        inserted = await connection.scalar(
+            sa.dialects.postgresql.insert(EXTERNAL_IDENTITIES)
+            .values(
+                provider=IdentitySource.FEISHU.value,
+                tenant_id=tenant_id,
+                environment_id=environment_id,
+                subject_ref_digest=external_subject_digest(
+                    provider=IdentitySource.FEISHU,
+                    tenant_id=tenant_id,
+                    environment_id=environment_id,
+                    subject_ref=subject_ref,
+                ),
+                user_id=user_id,
+                created_at=now,
+                last_seen_at=now,
+            )
+            .on_conflict_do_nothing()
+            .returning(EXTERNAL_IDENTITIES.c.user_id)
+        )
+        if inserted is None:
+            raise UserDirectoryConflictError("the subject or the account is bound")

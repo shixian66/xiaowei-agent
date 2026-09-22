@@ -22,9 +22,19 @@ from xiaowei_agent.application.model_ports import (
 from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
+from xiaowei_agent.persistence.admin_audit import AdminAuditStore
 from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.clarification_records import ClarificationRecordStore
+from xiaowei_agent.persistence.fake import (
+    InMemoryAdminAuditStore,
+    InMemoryUserDirectoryStore,
+)
+from xiaowei_agent.persistence.identity import UserDirectoryStore
 from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
+from xiaowei_agent.persistence.postgres import (
+    PostgresAdminAuditStore,
+    PostgresUserDirectoryStore,
+)
 from xiaowei_agent.persistence.store import TaskStore
 from xiaowei_agent.persistence.web_session import WebSessionStore
 from xiaowei_agent.runners.binding import ExecutionBindingProvider, StepEvidenceBuilder
@@ -57,6 +67,8 @@ _ANCHORED = {
     "ClarificationRecordStore",
     "ModelArtifactStore",
     "SlowQueryAdvisoryPort",
+    "UserDirectoryStore",
+    "AdminAuditStore",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
@@ -405,3 +417,53 @@ def test_every_provider_state_store_implementation_keeps_protocol_keywords(
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ProviderStateStore, method)
         ), f"{class_name}.{method}"
+
+
+_IDENTITY_SURFACES = (
+    (UserDirectoryStore, InMemoryUserDirectoryStore, PostgresUserDirectoryStore),
+    (AdminAuditStore, InMemoryAdminAuditStore, PostgresAdminAuditStore),
+)
+
+
+def _public_surface(target: type) -> frozenset[str]:
+    return frozenset(
+        name
+        for name in dir(target)
+        if not name.startswith("_") and callable(getattr(target, name, None))
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "memory", "postgres"),
+    _IDENTITY_SURFACES,
+    ids=lambda item: getattr(item, "__name__", str(item)),
+)
+def test_the_implementation_surface_equals_the_protocol_surface(
+    protocol: type, memory: type, postgres: type
+) -> None:
+    """公开表面必须**精确等于** Protocol，用 ``==`` 而不是 ``>=``。
+
+    ``isinstance`` 式的 Protocol 检查只保证实现**不少于**协议，方向正好相反：
+    它对"多出来一个公开写方法"完全无感。而对身份目录来说，多出来的那个公开写
+    方法就是绕过"授权改变必带同事务审计"的唯一途径；对审计来说，就是那个能写出
+    任意候选的 ``append``。
+    """
+    expected = _public_surface(protocol)
+    assert _public_surface(memory) == expected
+    assert _public_surface(postgres) == expected
+
+
+@pytest.mark.parametrize(
+    ("protocol", "memory", "postgres"),
+    _IDENTITY_SURFACES,
+    ids=lambda item: getattr(item, "__name__", str(item)),
+)
+def test_identity_implementations_keep_the_protocol_keyword_arguments(
+    protocol: type, memory: type, postgres: type
+) -> None:
+    """结构兼容性不看关键字名，但调用点会因此炸掉。"""
+    for name in _public_surface(protocol):
+        expected = set(inspect.signature(getattr(protocol, name)).parameters)
+        for implementation in (memory, postgres):
+            actual = set(inspect.signature(getattr(implementation, name)).parameters)
+            assert actual == expected, f"{implementation.__name__}.{name}"
