@@ -2,9 +2,9 @@
 
 > 这是当前有效口径，不是按日期堆叠的变更流水。历史变更由 Git 提交承载；详细复盘放到 `docs/handoff/archive/`。完整的命令、exit code 和逐步输出放在里程碑验收报告中，不写入本文件。
 
-## 0. 当前事实：W1b 两个切片已离线实现，切片 2 等待精确 SHA 复审
+## 0. 当前事实：W1b 两个切片已离线实现并合入，下一步是 W2
 
-- **当前基线**：`main@c05068f8021b167d32273e569c9a27ea68f9982b`（PR #67 squash 合入）。
+- **当前基线**：`main@dfa7a5c9d507d7793b876d39b530519615f73f12`（PR #68 squash 合入）。
   本行是当前基线的**唯一**规范出处；本文件其余位置出现的 `main@` SHA 都是历史记录，
   不得用来回答『现在从哪开工』。第 1 节基线表必须引用本行这一个 SHA。
 
@@ -69,16 +69,20 @@
   [`35706192765`](https://github.com/shixian66/xiaowei-agent/actions/runs/35706192765)
   也为八项全绿、全部包含真实 steps，其中 integration 为 `4635 passed`、零 skip。
   这些仍不是部署、真实飞书、canary 或用户验收证据。
-- **W1b 切片 2 已在 PR #68 / 分支 `codex/w1b-entry-wiring` 离线实现，等待精确 SHA 复审与合入。**
-  实现提交为 `f4709ce8669c1af1ad77e44463328d83457ce1e7`。
+- **W1b 切片 2 已由 PR #68 squash 合入**
+  `main@dfa7a5c9d507d7793b876d39b530519615f73f12`；最终受审 head 为
+  `e6fee708068bd46671d473f0a9fd7f933ed4ed37`。
   Web OAuth 未知身份现在只创建/复用申请并返回 `403 activation_pending`，不签发 Session；群未知
   身份只创建申请并单次发送通用卡片，私聊未知身份继续 fail-closed。两个入口均通过数据库目录
   adapter 实时重建权限，已绑定但停用/撤权不会被误路由成重新激活。静态身份文件只保留为 W5
-  发布前的一次性迁移输入，不是运行时 fallback。本机四门为离线全量 `4324 passed, 349 skipped`、
-  security `1505 passed, 83 skipped, 3085 deselected`、Ruff 通过、mypy `202 source files` 通过；
+  发布前的一次性迁移输入，不是运行时 fallback。本机四门为离线全量 `4325 passed, 349 skipped`、
+  security `1505 passed, 83 skipped, 3086 deselected`、Ruff 通过、mypy `202 source files` 通过；
   一次性 PostgreSQL 16.15 容器内完整 `tests/integration` 为 `351 passed`、零 skip，容器已删除。
-  四项隔离变异分别证明不可用身份分流、异步 await、通知幂等引用与窄异常捕获不是假绿。
-  当前没有真实飞书调用、部署、canary 或用户验收；GitHub CI 需以最终 PR head 的实际结果为准。
+  五项隔离变异分别证明不可用身份分流、异步 await、通知幂等引用、窄异常捕获与会话再认证撤权
+  收敛不是假绿。最终 CI run
+  [`35728218343`](https://github.com/shixian66/xiaowei-agent/actions/runs/35728218343)
+  精确绑定最终受审 head，八项全绿且每个 job 都有实际 step，其中真实 PostgreSQL 全量
+  `4674 passed`、零 skip。当前仍没有真实飞书调用、部署、canary 或用户验收。
 - 计划中的 1024 上限只约束活跃待办；终态申请的受控 PII 保留/清理是 W5 部署硬门，未完成前
   不得部署启用。
 - **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理
@@ -186,9 +190,9 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `codex/w1b-entry-wiring`（切片 2 实现待复审），基线 `main@c05068f8021b167d32273e569c9a27ea68f9982b`。不记录机器专属 worktree 路径——它对下一位实现者没有意义且必然过期 |
+| 项目目录 | 当前开发分支：无；下一轮从 `main@dfa7a5c9d507d7793b876d39b530519615f73f12` 开始 W2。这里不记录机器专属 worktree 路径——它对下一位实现者没有意义且必然过期 |
 | 截止时间 | 2026-09-22（Asia/Shanghai） |
-| 阶段 | **W1a 三个切片与 W1b 切片 1 已合入；W1b 两个切片已离线实现，切片 2 正等待精确 SHA 复审与合入。合入后下一步是 W2 详细计划与实现。I3 延期未取消。真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
+| 阶段 | **W1a 三个切片与 W1b 两个切片均已离线实现并合入。下一步是 W2 详细计划与实现；I3 延期未取消。真实模型/飞书/StarRocks、部署、canary 与用户验收仍未开放。最强证据仍为 `tests`。** |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5（2026-09-20 增加 `W0 → W5` 序列与优先级切换）；RI3 V7.1/ADR-015 已批准按 5 个 PR 顺序离线实现，真实调用现场 GO 仍未下达 |
 | M0 验收状态 | **已通过**，验收对象 `a1a8c888010abb8bbe1af28d792e760e3b229e5d` |
 | 文档是否已入 `main` | **是**——I0-DOC 已以 squash commit `033f3c60be273e5e99d0f371020f123b85692e06` 合入 `main` |
@@ -238,7 +242,7 @@
 | RI5 设计与 ADR 接受 | 受审对象 `abb00a1bc13552e1dae5a0dfc9e8b5b4b9a6ae7f`，状态翻转 `28f193200651ea4df4925b1481b971687f1003a5`；PR [#40](https://github.com/shixian66/xiaowei-agent/pull/40) 以 fast-forward 合入 `main`（`mergeCommit` 与 `28f1932` 同一提交，无合并提交，11 个受审提交原样保留）。项目负责人于 2026-09-14 成套接受 ADR-007 §RI5 Amendment、ADR-014/ADR-015 §RI5 修订与总体 spec 的 RI5 修订，以及 RI5 简化设计、ARCHITECTURE 与 DEVELOPMENT_PLAN 的同步。**该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO** |
 | RI5 实现计划 | [docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md](docs/superpowers/plans/2026-09-14-ri5-local-web-admin.md)，Task 0–9 共 10 个。计划文档内含逐 Task 执行记录：每一处偏离计划的自主判断、反证清单（逐条改坏源码验证测试变红后恢复），以及三条**没有变红**的反证与原因 |
 | RI5 实现基线 | 分支 `claude/ri5-implementation`，PR [#42](https://github.com/shixian66/xiaowei-agent/pull/42)，基于 `origin/main@c9b3cae898f7090d3f29c9fc64b7a9b551a77c55`，包含 Task 0–9 与 PR CI 暴露的 Alembic revision 长度、smoke 飞书 app_id/enablement 夹具漂移、listener fake transport 凭据旁路、smoke 配置目录容器可遍历性补修。证据等级 **`tests`**：`python -m pytest -q` 3787 passed / 237 skipped；`-m security` 1402 passed / 80 skipped；`ruff check .` 通过；`mypy src` 175 个源文件通过。PR CI 与合入状态请以 GitHub 实时状态为准 |
-| 下一步 | 先按精确 SHA 复审并合入 **W1b 切片 2**；合入后进入 **W2 详细计划与实现**，不在本切片提前建设登录 context 表、多 shell 或 Admin UI。I3 受治理资料查询延期但未取消，恢复时仍需先拍板资料源形态（仓库内文档 / 独立 store / 外部系统）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
+| 下一步 | 从最新 `main` 开始 **W2 详细计划与实现**；W2 之前不提前建设登录 context 表、多 shell 或 Admin UI。I3 受治理资料查询延期但未取消，恢复时仍需先拍板资料源形态（仓库内文档 / 独立 store / 外部系统）。真实 Gemini/飞书/StarRocks、部署、canary、UAT、RI3 test-env GO 与 E1 仍保持各自独立硬门 |
 | 本机工具链 | Python **3.11.16**（uv 独立分发）；项目依赖由 `uv.lock` 锁定，`uv sync --extra dev --frozen` 后在 `.venv` 中可原样执行 ADR-008 四条命令 |
 | 运行状态 | `main` 已包含 I0-DOC、I1-A Task 1.1–1.5、I1-B typed SlotVerifier/可信槽位升级、I1-C ReadClass/Plan schema V2、I1-D ExecutionDisclosure、I1-D Eval/closure（PR #52）与完整 I2（PR #53/#54/#55/#56，已归档）。仍未连接任何真实运维目标或模型服务 |
 | 生产状态 | 未部署、未 canary、未用户验收 |
@@ -376,8 +380,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 
 ## 5. 下一步顺序
 
-> **当前唯一在途项**：W1b 切片 2 Web/OAuth、飞书入口与单次群通知的精确 SHA 复审与合入。
-> 合入后下一步是 W2；不得在本切片提前建设登录 context 表、多 shell 或 Admin UI。
+> **当前没有在途实现分支**。下一步从最新 `main` 开始 W2 详细计划与实现；
+> 不得提前建设 W3 或后续范围。
 > 下面的历史清单只作为已完成里程碑索引，不代表当前待办。
 
 
