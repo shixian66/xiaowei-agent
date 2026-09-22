@@ -1111,8 +1111,8 @@ def test_w0_stable_doc_bindings_are_discriminating() -> None:
 # 什么」分开钉死，并要求批准来源是评论永久链接而不是 merge 事实本身。
 
 _W0_FORBIDDEN_HANDOFF_CLAIMS: Final[tuple[str, ...]] = (
-    "W1a 已实现",
-    "W1a 已开始",
+    "W1b 已实现",
+    "W1b 已开始",
     "真实飞书已可用",
     "Web 产品已部署",
     "已用户验收",
@@ -1169,22 +1169,6 @@ def _next_step_statements(text: str) -> list[str]:
         if re.search(r"(下一步|下一件事)是", line):
             statements.append(line)
     return statements
-
-
-def test_w0_handoff_names_w1a_plan_as_the_only_post_merge_next_step() -> None:
-    handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    statements = _next_step_statements(handoff)
-    assert statements, "handoff 没有任何可解析的下一步声明"
-    for statement in statements:
-        assert "W1a" in statement or "W0" in statement, (
-            f"下一步声明没有指向 W0/W1a：{statement}"
-        )
-        if "I3" in statement:
-            assert "延期" in statement or "未取消" in statement, (
-                f"下一步仍把 I3 写成当前动作：{statement}"
-            )
-    assert "W1a" in handoff and "计划" in handoff
-    assert "没有产品源码" in handoff or "未产生产品源码" in handoff
 
 
 def test_handoff_baseline_table_agrees_with_the_recorded_merge() -> None:
@@ -1377,3 +1361,207 @@ def test_credential_scope_binding_is_discriminating() -> None:
 
     without_web_role = _replace_once(architecture, "`web-app` 读写挂载该目录", "该目录只读挂载")
     assert "`web-app` 读写挂载该目录" not in without_web_role
+
+
+# --- W1a 写内核：实现状态与它的天花板 --------------------------------------
+#
+# 三个切片全部合入之后，真源文档里"W1a 还没有源码"那句话就是**假的**，而四门
+# 依旧全绿——这正是验收假绿的形状：代码变了、文档没变，没有任何东西会失败。
+# 所以这一组同时钉两头：已经成立的事实必须写出来（否则下一位实现者会重做一遍），
+# 还没成立的事实不许被写成已经成立（否则 W1b 会被当作已交付）。
+
+_W1A_ARCHITECTURE_FACTS: Final[tuple[str, ...]] = (
+    "`user_accounts`",
+    "`user_role_assignments`",
+    "`external_identities`",
+    "`admin_audit_events`",
+    "`rev_0014`",
+    "`UserDirectoryStore.apply()`",
+    "`AdminAuditStore`",
+)
+_W1A_SECTION_START: Final[str] = "**W1a 写内核的实现状态**"
+_W1A_SECTION_END: Final[str] = "`.gitignore` 与 `.dockerignore`"
+
+
+def _w1a_architecture_section() -> str:
+    return _section_between(
+        _truth_doc_text("ARCHITECTURE.md"),
+        start=_W1A_SECTION_START,
+        end=_W1A_SECTION_END,
+    )
+
+
+def test_architecture_records_the_w1a_write_kernel_as_implemented() -> None:
+    section = _w1a_architecture_section()
+    for fact in _W1A_ARCHITECTURE_FACTS:
+        assert fact in section, f"ARCHITECTURE.md 的 W1a 段落缺少承重事实：{fact}"
+    assert "已离线实现" in section
+    # 证据等级必须同时写出来：离线实现不是部署、canary 或用户验收。
+    assert "`tests`" in section
+
+
+def test_architecture_states_the_single_write_path_invariant() -> None:
+    """单一写路径与同事务审计是 W1a 的目的本身，不能只留在计划里。"""
+    section = _w1a_architecture_section()
+    assert "唯一写入口" in section
+    assert "同一个事务" in section
+    assert "从命令派生" in section
+
+
+_ACTIVATION_NOUNS: Final[tuple[str, ...]] = (
+    "激活流程",
+    "激活请求",
+    "ActivationRequest",
+    "ActivationStore",
+    "IdentityActivationService",
+    "web_oauth_login_contexts",
+    "登录改造",
+    "登录页",
+    "Admin 页面",
+    "审计查询 API",
+)
+_EXISTENCE_MARKERS: Final[tuple[str, ...]] = (
+    "已实现",
+    "已交付",
+    "已上线",
+    "已可用",
+    "已部署",
+    "已验收",
+    "已完成",
+)
+# 带阶段名或否定词的句子讲的是**未来**或**不存在**，不是声称它已经在跑。
+# 没有这条豁免，真源就写不出「W1a 已实现，W1b 的激活流程尚未开始」这句真话。
+_FUTURE_SCOPE_MARKERS: Final[tuple[str, ...]] = (
+    "W1b",
+    "W2",
+    "W3",
+    "W4a",
+    "W4b",
+    "W5",
+    "尚未",
+    "未开始",
+    "未授权",
+    "不得",
+    "没有",
+    "不是",
+    "将",
+    "留给",
+)
+
+
+def _activation_existence_claims(text: str) -> list[str]:
+    """找出把激活流程 / 登录改造 / Admin 页面写成已经存在的句子。
+
+    按**性质**判而不是按拼写：任一激活面名词 + 任一存在标记 = 声称它在跑，除非
+    同一句里带着阶段名或否定词。黑名单式的"禁止短语闭集"挡不住新造的说法。
+    """
+    claims: list[str] = []
+    for line in text.splitlines():
+        if not any(noun in line for noun in _ACTIVATION_NOUNS):
+            continue
+        if not any(marker in line for marker in _EXISTENCE_MARKERS):
+            continue
+        if any(marker in line for marker in _FUTURE_SCOPE_MARKERS):
+            continue
+        claims.append(line.strip())
+    return claims
+
+
+def test_truth_docs_do_not_claim_activation_or_admin_ui_exists() -> None:
+    for name in _CURRENT_TRUTH_DOCS:
+        claims = _activation_existence_claims(_truth_doc_text(name))
+        assert not claims, (
+            f"{name} 把 W1b/W2 的激活面写成了已经存在：{claims}"
+        )
+
+
+def test_the_activation_claim_guard_is_discriminating() -> None:
+    """反例：那条守卫不能宽到什么都抓不到。"""
+    assert _activation_existence_claims("Admin 页面已上线，管理员可以直接改角色。")
+    # 新造的说法照样抓，不依赖已知短语闭集。
+    assert _activation_existence_claims("身份激活流程已完成并对全部租户可用。")
+
+
+def test_naming_a_future_component_with_its_phase_is_allowed() -> None:
+    """正常对照：写"W1b 将提供 X"合法，否则真源根本无法描述下一步。"""
+    assert not _activation_existence_claims(
+        "W1a 写内核已实现；W1b 将提供激活流程，本阶段没有它的源码。"
+    )
+    assert not _activation_existence_claims("激活流程尚未实现，留给 W1b。")
+
+
+_RETIRED_README_W1A_PHRASES: Final[tuple[str, ...]] = (
+    "W1a 详细实施计划送审",
+    "计划获批后才可开始",
+    "没有 `UserAccount`",
+    "任何 W1a 源码",
+)
+
+
+def _readme_status() -> str:
+    return _section_between(
+        _truth_doc_text("README.md"), start="> 当前状态：", end="## 先看什么"
+    )
+
+
+def test_readme_no_longer_says_w1a_has_no_source() -> None:
+    status = _readme_status()
+    for phrase in _RETIRED_README_W1A_PHRASES:
+        assert phrase not in status, f"README 顶部仍写着 W1a 没有源码：{phrase}"
+    assert "W1a" in status and "写内核" in status and "已离线实现" in status
+    assert "W1b" in status
+
+
+def test_the_readme_guard_is_discriminating() -> None:
+    """反例：把 README 那段改回旧措辞，上一条必须能看见它。
+
+    反例走的是真正的取段函数，不是断言自己刚拼上去的字符串——后者在取段函数
+    写错时同样全绿。
+    """
+    readme = _truth_doc_text("README.md")
+    status = _readme_status()
+    reverted_status = status + "> 当前阶段是 W1a 详细实施计划送审，计划获批后才可开始实现。\n"
+    reverted = _replace_once(readme, status, reverted_status)
+
+    refetched = _section_between(
+        reverted, start="> 当前状态：", end="## 先看什么"
+    )
+    present = [
+        phrase for phrase in _RETIRED_README_W1A_PHRASES if phrase in refetched
+    ]
+    assert present, "改回旧措辞之后，README 守卫必须能看见退回的字面量"
+
+
+_HANDOFF_PROGRESS_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"main@[0-9a-f]{40}"),
+    re.compile(r"PR #\d+"),
+    re.compile(r"\d+ passed"),
+)
+
+
+def test_development_plan_carries_no_implementation_progress() -> None:
+    """`AGENTS.md:155`：进度与证据只放 handoff，计划只写顺序、门与退出标准。
+
+    这一条同时说明本切片为什么**不**改 `DEVELOPMENT_PLAN.md`：W1a 没有改变任何
+    交付物或退出标准，它一行不动才是对的。
+    """
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    for pattern in _HANDOFF_PROGRESS_PATTERNS:
+        found = pattern.findall(plan)
+        assert not found, f"DEVELOPMENT_PLAN.md 出现只应放 handoff 的进度证据：{found}"
+    # 同一批证据在 handoff 里必须找得到，否则这条守卫只是在禁止一类空模式。
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
+
+
+def test_handoff_names_w1b_as_the_only_post_merge_next_step() -> None:
+    """W1a 三个切片合入后，唯一获准的下一步是 W1b，不再是"实现 W1a"。"""
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    statements = _next_step_statements(handoff)
+    assert statements, "handoff 没有任何可解析的下一步声明"
+    for statement in statements:
+        assert "W1b" in statement, f"下一步声明没有指向 W1b：{statement}"
+        if "I3" in statement:
+            assert "延期" in statement or "未取消" in statement, (
+                f"下一步仍把 I3 写成当前动作：{statement}"
+            )

@@ -724,9 +724,22 @@ this topology must not be described as an activated channel or model.
 的先后硬门；`WebMode.LAN_HTTP` 只接受 loopback/RFC1918 Host 的形态约束不在替代范围内，
 继续生效。
 
-**W0 接受的未来产品目标（尚无实现载体）**：持久用户目录（`UserAccount` / `UserRoleAssignment` /
-`ExternalIdentity` / `LocalCredential`）、独立 `AdminCapability` 与 `AdminAuditStore`、
-**W4a** 的三域配置文件与进程挂载矩阵、**W5** 的 release override 与边缘限流。字段级定义见
+**W1a 写内核的实现状态**：持久用户目录与 Admin 审计的**写内核已离线实现**。迁移 `rev_0014`
+建了 `user_accounts`、`user_role_assignments`、`external_identities` 与 `admin_audit_events` 四张表，
+并给 `local_admins` 补上 `user_id` 外键。`UserDirectoryStore.apply()` 是前三张表与
+`local_admins.user_id` 的**唯一写入口**：本地管理员 bootstrap 与旧身份迁移都是它的命令成员，
+不另开写方法、不另开事务。每一次授权改变都在**同一个事务**里带上一条审计事件，而那条事件的
+`action`、`target_kind`、`target_ref_digest`、`outcome` 与闭集 effect 全部由 store **从命令派生**，
+调用方没有任何参数能指定它们。`AdminAuditStore` 只有 `append_started` / `append_terminal` /
+`append_denied` / `load` 四个窄方法，`persistence/` 里不存在针对 `admin_audit_events` 的
+`UPDATE` / `DELETE`。飞书 `open_id` 只以 domain-separated 摘要落库。旧静态身份文档由一次性、
+整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。
+**证据等级到 `tests` 为止**：这是离线写内核，**不是**激活流程、登录改造、Admin 页面、审计查询
+API、真实飞书调用、部署或用户验收。
+
+**仍无实现载体的未来产品目标**：W1b 的激活请求与通知、W2 的登录改造与 `LocalCredential.username`、
+W3 的值班绑定、**W4a** 的三域配置文件与进程挂载矩阵、**W5** 的 release override 与边缘限流。
+字段级定义见
 [Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
 与修订后的 ADR-007/013/014/015，本节不复制。这些目标当前**没有**源码、迁移、运行、部署或
 用户验收证据。

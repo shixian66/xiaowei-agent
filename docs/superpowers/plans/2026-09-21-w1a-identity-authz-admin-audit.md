@@ -204,7 +204,7 @@ README.md
   所以真源必须下沉到契约层。
 - `interfaces/feishu_identity.py`：切片 C 需要一份**保留原始 labels** 的公开只读解析契约，而
   当前的 `load_feishu_identity_directory()` 已经把 labels 压成了 `frozenset[ChannelPermission]`
-  （`feishu_identity.py:125`），原始标签在返回值里不复存在。切片 C 只**抽出**已有的解析逻辑并
+  （`feishu_identity.py:180`），原始标签在返回值里不复存在。切片 C 只**抽出**已有的解析逻辑并
   把它公开，不改变校验规则、大小上限、权限位检查，也不改变任何现有调用方的行为。
 
 任何超出该列表的文件出现在 `git status` 里，都必须先停下来说明理由。
@@ -355,7 +355,7 @@ def channel_permissions(*, role: ProductRole) -> frozenset[ChannelPermission]: .
 对应关系是固定的：`user_id` / `tenant_id` / `environment_id` / `created_by` 用 `_ID`，`actor` 用
 `_ACTOR`，`display_name` 用 `_NAME`，`subject_ref` 用 `_PII`。`_ACTOR` 比 `_NAME` 宽，是因为 `actor`
 是**身份**、不可截断，而它要接收的旧静态文档对 actor 没有任何长度上限
-（`src/xiaowei_agent/interfaces/feishu_identity.py:40`）；256 这个数怎么落到旧数据上，见切片 C.1 的转换策略。
+（`src/xiaowei_agent/interfaces/feishu_identity.py:56`）；256 这个数怎么落到旧数据上，见切片 C.1 的转换策略。
 
 ```python
 class UserAccount(Contract):
@@ -1004,12 +1004,18 @@ test -z "$(git status --porcelain)" || {
 - Modify: `AGENT_HANDOFF.md`
 - Modify: `README.md`
 - Modify: `tests/contract/test_doc_fact_binding.py`
+- Modify: `tests/security/test_module_layering.py`
+
+`test_module_layering.py` 不是本切片的设计内容，是它的**注册表**：
+`test_every_interface_file_is_registered_exactly_once` 要求 `interfaces/` 下每个文件都在
+逐文件导入 allowlist 里恰好登记一次，新增一个模块而不登记会直接让它变红。登记项按本模块
+真实需要的三层给（`contracts` / `interfaces` / `persistence`），不给整包放行。
 
 ### C.1 接口形状
 
 **为什么要动 `feishu_identity.py`：** 当前唯一的公开读取入口 `load_feishu_identity_directory()`
 返回 `StaticFeishuIdentityDirectory`，其中的 `AuthenticatedPrincipal` 已经把 labels 压成了
-`frozenset[ChannelPermission]`（`feishu_identity.py:125`）。`viewer` 与 `approver`、`operator` 与
+`frozenset[ChannelPermission]`（`feishu_identity.py:180`）。`viewer` 与 `approver`、`operator` 与
 `dba`/`oncall` 压完之后完全一样，而规格 §6.6 的迁移表恰恰要按**原始 label** 分流。
 `_IdentityDocument` 与 `_read_identity_file` 都是私有的。因此本切片**抽出**一份公开的、保留原始
 labels 的只读解析契约，让两条路径共用同一个解析器——不是第二次实现解析。抽出时不改变它的校验
@@ -1159,6 +1165,7 @@ git add src/xiaowei_agent/interfaces/feishu_identity.py \
         tests/contract/test_legacy_identity_document.py \
         tests/contract/test_legacy_identity_migration.py \
         tests/contract/test_doc_fact_binding.py \
+        tests/security/test_module_layering.py \
         ARCHITECTURE.md AGENT_HANDOFF.md README.md
 git commit -m "feat(w1a): migrate legacy identity labels in one atomic command
 
