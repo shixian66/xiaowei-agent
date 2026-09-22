@@ -357,7 +357,7 @@ subject_ref                     OAuth 或已验证事件所得 open_id；受控 
 source_kind                     WEB_LOGIN | SAFE_TASK_LINK | FEISHU_GROUP
 source_conversation_ref_digest  群入口才有
 source_event_ref_digest         群入口才有
-return_intent                   第 7.1 节闭集
+return_intent                   第 7.1 节闭集；**由 W2 随 `web_oauth_login_contexts` 一起添加**
 status                          PENDING | APPROVED | REJECTED | EXPIRED
 requested_at / expires_at
 decided_at / decided_by         终态时成对出现
@@ -818,8 +818,8 @@ created_at
 - 旧标签迁移、重复 actor/open_id、跨租户/环境冲突；
 - 激活申请去重、24 小时过期、1024 容量、过期清理、容量失败、拒绝、并发审批、重放和半事务失败；
 - 群事件 sender 与 OAuth 返回 open_id 不一致时拒绝；
-- `web_oauth_login_contexts` 与登录 state 同事务签发/消费、`return intent` 闭集、外部 URL/路径穿越反例，
-  以及连接测试 state 无 context 行的对照；
+- （**W2**）`web_oauth_login_contexts` 与登录 state 同事务签发/消费、`return intent` 闭集、外部 URL/路径
+  穿越反例，以及连接测试 state 无 context 行的对照；
 - callback 登录域优先、测试域安全回落，以及身份未知不会误入测试域；
 - 飞书连接测试不访问身份目录、不签 Session、不创建激活申请；
 - 本地 Admin 首次改密前的路由闭集；
@@ -878,12 +878,13 @@ fake 结果页提前勾掉该验收项。
 2. **W1a 用户、权限与审计写内核**：`UserAccount`、作用域 `UserRoleAssignment`、
    `ExternalIdentity`、`LocalCredential`、`AdminCapability`、旧标签迁移，以及 `AdminAuditStore` 持久化与
    append-only 写入契约；用 PostgreSQL/fake 共享套件证明角色/账号改变与审计同事务、审计失败时回滚。
-3. **W1b 激活内核**：`ActivationRequest/ActivationStore/IdentityActivationService`、
-   `web_oauth_login_contexts`、24 小时过期、全局容量、CAS 审批、群事件绑定和通知 Port；审批必须复用 W1a 的
+3. **W1b 激活内核**：`ActivationRequest/ActivationStore/IdentityActivationService`、24 小时过期、
+   全局容量、CAS 审批、群事件绑定，以及**群事件当次响应内**的通用激活卡片；审批必须复用 W1a 的
    审计写契约并 fail-closed；不改页面。
-4. **W2 登录与页面壳**：成熟登录/改密/激活状态，拆分工作台和 Admin shell，并把当前 I2 统一
-   Runtime/RenderPayload 接进新工作台；不新增聊天路由。
-5. **W3 用户、职责与审计界面**：Admin 用户/激活/角色、DBA/值班/激活通知管理，
+4. **W2 登录与页面壳**：成熟登录/改密/激活状态，`web_oauth_login_contexts` 与闭集 return intent，
+   拆分工作台和 Admin shell，并把当前 I2 统一 Runtime/RenderPayload 接进新工作台；不新增聊天路由。
+5. **W3 用户、职责与审计界面**：Admin 用户/激活/角色、DBA/值班/激活通知管理（含私聊 Admin 激活
+   通知与可恢复投递重试），
    `AdminAuditStore` 查询 API/UI 与敏感查看审计；不在此阶段才补审计写底座，也不提前建 requester/approver 名单。
 6. **W4a AI/飞书配置迁移**：把当前 RI5 Gemini/飞书配置迁入 Admin shell，拆分 AI/飞书文件与挂载；
    固定 model/origin 只读，保留现有探针语义和现场 GO。
@@ -891,6 +892,14 @@ fake 结果页提前勾掉该验收项。
    task-worker-only 挂载；只做本地校验，真实目标网络调用次数为 0，不建 requester/approver 数据。
 8. **W5 产品部署**：release override、listener/channel-worker 可审计开关、边缘限流、配置目录预检、
    明确重启、加载回执、浏览器视觉和分级运行证据。W5 只依赖 W2–W4b，不以 W4c 或 R1 为必经前置。
+
+**W1b 计划复审修订（2026-09-22）。** 本节此前把登录 context 表放在 W1b，而
+`DEVELOPMENT_PLAN.md` 的 Web 序列把它放在 W2；两份都是已批准真源，实现者按哪一份做都能自称
+合规。现按 `DEVELOPMENT_PLAN.md` 收敛：该表与闭集 return intent 属于 W2，第 7.2 节
+`ActivationRequest` 的对应字段也随 W2 添加。同一轮把私聊 Admin 激活通知与可恢复投递重试移到
+W3：它们的收件人真源是 W3 的激活通知人绑定，而当前 `external_identities` 只保存不可逆的
+`subject_ref_digest`，`UserDirectoryStore` 也没有列出 Admin 的读路径——W1b 没有能力把通知投到
+具体的人。W1b 保留群事件当次响应内的通用激活卡片，这条不依赖任何持久化收件人。**本修订需负责人确认。**
 
 ### 17.2 独立阻塞门
 

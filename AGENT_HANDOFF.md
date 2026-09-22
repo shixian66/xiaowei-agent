@@ -49,6 +49,10 @@
   没有激活相关的表或 migration、没有通知路径。它的详细计划见
   `docs/superpowers/plans/2026-09-22-w1b-identity-activation-and-notification.md`，
   **该计划本身也还没有获批**；获批前不得写它的测试、migration 或源码。
+  该轮复审同时暴露一处真源冲突：登录 context 表 `web_oauth_login_contexts` 在详细规格 §17.1 属于
+  W1b，在 `DEVELOPMENT_PLAN.md:182` 属于 W2。已按 `DEVELOPMENT_PLAN.md` 收敛，并在规格 §17.1
+  留下署名修订（同一处把私聊 Admin 通知与可恢复投递重试移到 W3）。**该修订改的是已批准文档，
+  需负责人确认**；`tests/contract/test_doc_fact_binding.py` 新增守卫使这处归属不能再静默分叉。
 - **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理
   资料的源是什么形态（仓库内文档 / 独立 store / 外部系统）。恢复 I3 时另起计划，
   不与 Web 产品线并行修改同一真源。

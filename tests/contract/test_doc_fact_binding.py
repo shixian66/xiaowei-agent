@@ -1565,3 +1565,76 @@ def test_handoff_names_w1b_as_the_only_post_merge_next_step() -> None:
             assert "延期" in statement or "未取消" in statement, (
                 f"下一步仍把 I3 写成当前动作：{statement}"
             )
+
+
+# ---------------------------------------------------------------------------
+# W1b 计划送审期间暴露的真源冲突：同一张表被两份已批准文档分给了不同阶段。
+# 两处单独看都言之成理，而实现者只会读到其中一份——这正是切片 C 那一组
+# `subject_ref` 上限的同一个形状：**同一件事被写了两遍，副本可以静默分叉**。
+# ---------------------------------------------------------------------------
+
+_LOGIN_CONTEXT_TABLE: Final[str] = "web_oauth_login_contexts"
+_STAGE_LABEL = re.compile(r"\*\*(W[0-9][ab]?)\b")
+
+
+def _stage_owning(text: str, token: str) -> set[str]:
+    """取全部"阶段清单条目"里提到 ``token`` 的那些条目的阶段号。
+
+    只认以 `- **W…**` 或 `N. **W…**` 开头的清单条目，散文提及不算——散文里
+    自然会同时出现多个阶段名。条目常常换行续写，因此必须先把续行并回条目，
+    再判断 ``token`` 落在哪一条：按行判断会漏掉写在第二行的那一半。
+    """
+    items: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^(?:-|\d+\.)\s+\*\*W[0-9]", stripped):
+            items.append(stripped)
+        elif items and line.startswith((" ", "\t")) and stripped:
+            items[-1] += " " + stripped
+        elif not stripped:
+            continue
+        else:
+            items.append("")
+    owners: set[str] = set()
+    for item in items:
+        if not item or token not in item:
+            continue
+        label = _STAGE_LABEL.search(item)
+        assert label is not None, f"阶段条目没有可解析的阶段号：{item}"
+        owners.add(label.group(1))
+    return owners
+
+
+def test_the_login_context_table_belongs_to_exactly_one_stage() -> None:
+    """`web_oauth_login_contexts` 在两份真源里必须属于同一个阶段。
+
+    冲突的代价不是措辞难看：实现者按详细规格做就会在 W1b 建这张表，按
+    `DEVELOPMENT_PLAN.md` 做就不会，而两边都能自称照批准文档执行。
+    """
+    plan_owners = _stage_owning(
+        _truth_doc_text("DEVELOPMENT_PLAN.md"), _LOGIN_CONTEXT_TABLE
+    )
+    spec_owners = _stage_owning(
+        _WEB_PRODUCT_SPEC.read_text(encoding="utf-8"), _LOGIN_CONTEXT_TABLE
+    )
+    assert plan_owners, "DEVELOPMENT_PLAN.md 的阶段清单不再提到登录 context 表"
+    assert spec_owners, "详细规格的交付序列不再提到登录 context 表"
+    assert plan_owners == spec_owners == {"W2"}, (
+        f"登录 context 表的阶段归属分叉：DEVELOPMENT_PLAN={sorted(plan_owners)}、"
+        f"规格={sorted(spec_owners)}"
+    )
+
+
+def test_the_stage_ownership_guard_is_discriminating() -> None:
+    """反例：把规格里的归属改回 W1b，上一条必须看得见。
+
+    反例走的是真正的取值函数，而不是断言刚拼出来的字符串——后者在取值函数
+    写错时同样全绿。
+    """
+    spec = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    owners = _stage_owning(spec, _LOGIN_CONTEXT_TABLE)
+    assert owners == {"W2"}
+
+    drifted = spec.replace("**W2 登录与页面壳**", "**W1b 激活内核**")
+    assert drifted != spec, "反例没有改动任何阶段条目"
+    assert _stage_owning(drifted, _LOGIN_CONTEXT_TABLE) != {"W2"}
