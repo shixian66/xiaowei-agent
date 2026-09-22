@@ -18,6 +18,7 @@ import datetime as dt
 import pytest
 import sqlalchemy as sa
 
+from xiaowei_agent.contracts.activation import ActivationSource, ActivationStatus
 from xiaowei_agent.contracts.admin_audit import (
     DIRECTORY_ACTIONS,
     AdminAuditEffect,
@@ -48,6 +49,7 @@ from xiaowei_agent.persistence.rows import (
     row_to_admin_audit_event,
 )
 from xiaowei_agent.persistence.schema import (
+    ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     ALL_TABLES,
     EXTERNAL_IDENTITIES,
@@ -119,11 +121,53 @@ def test_new_tables_are_registered_in_all_tables() -> None:
     做 TRUNCATE，漏掉一张表就会让上一条用例的授权事实留给下一条用例。
     """
     assert {
+        ACTIVATION_REQUESTS,
         USER_ACCOUNTS,
         USER_ROLE_ASSIGNMENTS,
         EXTERNAL_IDENTITIES,
         ADMIN_AUDIT_EVENTS,
     } <= set(ALL_TABLES)
+
+
+def test_activation_request_table_has_closed_scope_and_state_constraints() -> None:
+    assert _primary_key(ACTIVATION_REQUESTS) == ("request_id",)
+    assert {
+        "request_id",
+        "tenant_id",
+        "environment_id",
+        "provider",
+        "subject_ref",
+        "subject_ref_digest",
+        "source",
+        "source_event_digest",
+        "source_chat_digest",
+        "requested_at",
+        "expires_at",
+        "status",
+        "decided_at",
+        "decided_by",
+        "approved_role",
+    } == set(ACTIVATION_REQUESTS.c.keys())
+    source_check = _check_text(
+        ACTIVATION_REQUESTS, "ck_activation_requests_source_closed"
+    )
+    assert all(member.value in source_check for member in ActivationSource)
+    status_check = _check_text(
+        ACTIVATION_REQUESTS, "ck_activation_requests_status_closed"
+    )
+    assert all(member.value in status_check for member in ActivationStatus)
+
+
+def test_activation_request_has_one_pending_subject_per_scope() -> None:
+    partial = _partial_unique_indexes(ACTIVATION_REQUESTS)
+    columns, where = partial["uq_activation_requests_pending_subject"]
+    assert columns == (
+        "tenant_id",
+        "environment_id",
+        "provider",
+        "subject_ref_digest",
+    )
+    assert "status" in where and "pending" in where
 
 
 def test_actor_is_unique_so_two_accounts_cannot_claim_the_same_identity() -> None:

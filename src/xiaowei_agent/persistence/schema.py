@@ -22,6 +22,7 @@ from typing import Final
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
+from xiaowei_agent.contracts.activation import ActivationSource, ActivationStatus
 from xiaowei_agent.contracts.admin_audit import (
     DIRECTORY_ACTIONS,
     ROLE_EFFECT_ACTIONS,
@@ -737,6 +738,76 @@ EXTERNAL_IDENTITIES: Final = sa.Table(
 "撤销这个人"要撤几次没有定论。
 """
 
+ACTIVATION_REQUESTS: Final = sa.Table(
+    "activation_requests",
+    METADATA,
+    sa.Column("request_id", sa.Text, primary_key=True),
+    sa.Column("tenant_id", sa.Text, nullable=False),
+    sa.Column("environment_id", sa.Text, nullable=False),
+    sa.Column("provider", sa.Text, nullable=False),
+    sa.Column("subject_ref", sa.Text, nullable=False),
+    sa.Column("subject_ref_digest", sa.CHAR(64), nullable=False),
+    sa.Column("source", sa.Text, nullable=False),
+    sa.Column("source_event_digest", sa.CHAR(64), nullable=True),
+    sa.Column("source_chat_digest", sa.CHAR(64), nullable=True),
+    sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("decided_by", sa.Text, nullable=True),
+    sa.Column("approved_role", sa.Text, nullable=True),
+    sa.CheckConstraint(
+        _closed_set("provider", (IdentitySource.FEISHU.value,)),
+        name="ck_activation_requests_provider_closed",
+    ),
+    sa.CheckConstraint(
+        _closed_set("source", (member.value for member in ActivationSource)),
+        name="ck_activation_requests_source_closed",
+    ),
+    sa.CheckConstraint(
+        _closed_set("status", (member.value for member in ActivationStatus)),
+        name="ck_activation_requests_status_closed",
+    ),
+    sa.CheckConstraint(
+        _nullable_closed_set(
+            "approved_role", (ProductRole.USER.value, ProductRole.OPERATOR.value)
+        ),
+        name="ck_activation_requests_approved_role_closed",
+    ),
+    sa.CheckConstraint(
+        "expires_at > requested_at",
+        name="ck_activation_requests_expiration_after_request",
+    ),
+    sa.CheckConstraint(
+        "(source = 'web_login' AND source_event_digest IS NULL"
+        " AND source_chat_digest IS NULL)"
+        " OR (source = 'feishu_group' AND source_event_digest IS NOT NULL"
+        " AND source_chat_digest IS NOT NULL)",
+        name="ck_activation_requests_source_digests_match",
+    ),
+    sa.CheckConstraint(
+        "(status IN ('pending', 'expired') AND decided_at IS NULL"
+        " AND decided_by IS NULL AND approved_role IS NULL)"
+        " OR (status = 'rejected' AND decided_at IS NOT NULL"
+        " AND decided_by IS NOT NULL AND approved_role IS NULL)"
+        " OR (status = 'approved' AND decided_at IS NOT NULL"
+        " AND decided_by IS NOT NULL AND approved_role IS NOT NULL)",
+        name="ck_activation_requests_decision_fields_match_status",
+    ),
+)
+"""未知飞书主体的短期激活事实；事件与群引用只保存独立摘要。"""
+
+ACTIVATION_PENDING_SUBJECT_INDEX: Final = sa.Index(
+    "uq_activation_requests_pending_subject",
+    ACTIVATION_REQUESTS.c.tenant_id,
+    ACTIVATION_REQUESTS.c.environment_id,
+    ACTIVATION_REQUESTS.c.provider,
+    ACTIVATION_REQUESTS.c.subject_ref_digest,
+    unique=True,
+    postgresql_where=ACTIVATION_REQUESTS.c.status == ActivationStatus.PENDING.value,
+)
+"""同一作用域和外部主体最多一个有效待办。"""
+
 ADMIN_AUDIT_EVENTS: Final = sa.Table(
     "admin_audit_events",
     METADATA,
@@ -875,5 +946,6 @@ ALL_TABLES: Final = (
     USER_ACCOUNTS,
     USER_ROLE_ASSIGNMENTS,
     EXTERNAL_IDENTITIES,
+    ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
 )

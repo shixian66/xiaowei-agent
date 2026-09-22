@@ -2,7 +2,7 @@
 
 **本模块只描述"是什么"和"要做什么"，不描述"发生了什么"。** 后者是审计，由
 ``UserDirectoryStore`` 从命令派生（见 ``contracts/admin_audit.py``）。因此这里的
-八个命令一律没有 ``action`` / ``target_kind`` / ``outcome`` / ``effect``，也没有
+十个命令一律没有 ``action`` / ``target_kind`` / ``outcome`` / ``effect``，也没有
 ``created_at`` / ``created_by`` / ``event_id`` —— 能被调用方指定，就能被调用方写错，
 而"校验它有没有写错"永远弱于"它根本没有机会写"。
 
@@ -210,6 +210,27 @@ class UnbindExternalIdentityCommand(Contract):
     environment_id: BoundedId
 
 
+class ApproveActivationCommand(Contract):
+    """批准待办并显式提供要创建的账号展示事实。"""
+
+    kind: Literal["approve_activation"] = "approve_activation"
+    request_id: BoundedId
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    actor: BoundedActor
+    display_name: BoundedName
+    approved_role: Literal[ProductRole.USER, ProductRole.OPERATOR] = ProductRole.USER
+
+
+class RejectActivationCommand(Contract):
+    """拒绝待办；没有账号或角色字段，因而不能顺带改变授权。"""
+
+    kind: Literal["reject_activation"] = "reject_activation"
+    request_id: BoundedId
+    tenant_id: BoundedId
+    environment_id: BoundedId
+
+
 class BootstrapLocalAdminCommand(Contract):
     """首次把本地管理员凭据挂到一个目录账号上。
 
@@ -249,11 +270,13 @@ DirectoryCommand: TypeAlias = Annotated[
     | RevokeRoleCommand
     | BindExternalIdentityCommand
     | UnbindExternalIdentityCommand
+    | ApproveActivationCommand
+    | RejectActivationCommand
     | BootstrapLocalAdminCommand
     | MigrateLegacyIdentitiesCommand,
     Field(discriminator="kind"),
 ]
-"""八个写命令的判别联合。
+"""十个写命令的判别联合。
 
 它是 ``UserDirectoryStore.apply()`` 的**唯一**入参形状：本地管理员 bootstrap 与旧
 身份迁移都必须是它的成员，不得另开写方法、另开事务或另写一份 SQL。

@@ -22,16 +22,19 @@ from xiaowei_agent.application.model_ports import (
 from xiaowei_agent.interfaces.feishu_oauth import FeishuOAuthAdapter
 from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
 from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
+from xiaowei_agent.persistence.activation import ActivationStore
 from xiaowei_agent.persistence.admin_audit import AdminAuditStore
 from xiaowei_agent.persistence.channel import ChannelStore
 from xiaowei_agent.persistence.clarification_records import ClarificationRecordStore
 from xiaowei_agent.persistence.fake import (
+    InMemoryActivationStore,
     InMemoryAdminAuditStore,
     InMemoryUserDirectoryStore,
 )
 from xiaowei_agent.persistence.identity import UserDirectoryStore
 from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
 from xiaowei_agent.persistence.postgres import (
+    PostgresActivationStore,
     PostgresAdminAuditStore,
     PostgresUserDirectoryStore,
 )
@@ -69,6 +72,7 @@ _ANCHORED = {
     "SlowQueryAdvisoryPort",
     "UserDirectoryStore",
     "AdminAuditStore",
+    "ActivationStore",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
@@ -420,6 +424,7 @@ def test_every_provider_state_store_implementation_keeps_protocol_keywords(
 
 
 _IDENTITY_SURFACES = (
+    (ActivationStore, InMemoryActivationStore, PostgresActivationStore),
     (UserDirectoryStore, InMemoryUserDirectoryStore, PostgresUserDirectoryStore),
     (AdminAuditStore, InMemoryAdminAuditStore, PostgresAdminAuditStore),
 )

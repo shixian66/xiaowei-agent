@@ -44,6 +44,10 @@ def test_load_from_explicit_mapping() -> None:
     assert s.log_level == "DEBUG"
 
 
+def test_environment_id_accepts_the_shared_bounded_id_limit() -> None:
+    assert Settings(environment_id="e" * 64).environment_id == "e" * 64
+
+
 def test_log_level_defaults_to_info() -> None:
     assert load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev"}).log_level == "INFO"
 

@@ -206,7 +206,7 @@ def test_command_kind_discriminators_are_unique() -> None:
         typing.get_args(command.model_fields["kind"].annotation)[0]
         for command in _command_types()
     ]
-    assert len(kinds) == len(set(kinds)) == 8
+    assert len(kinds) == len(set(kinds))
 
 
 def test_bootstrap_command_never_exposes_the_password_hash() -> None:

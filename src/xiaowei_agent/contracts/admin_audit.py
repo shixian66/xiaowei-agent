@@ -65,13 +65,29 @@ AuditOperationId: TypeAlias = BoundedId
 
 _DIGEST_DOMAIN: Final[str] = "xiaowei.admin_audit.target.v1"
 
-DIRECTORY_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(AdminAuditAction)
+DIRECTORY_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
+    {
+        AdminAuditAction.USER_CREATED,
+        AdminAuditAction.USER_STATUS_CHANGED,
+        AdminAuditAction.ROLE_ASSIGNED,
+        AdminAuditAction.ROLE_REVOKED,
+        AdminAuditAction.EXTERNAL_IDENTITY_BOUND,
+        AdminAuditAction.EXTERNAL_IDENTITY_UNBOUND,
+        AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED,
+        AdminAuditAction.LEGACY_IDENTITY_MIGRATED,
+        AdminAuditAction.ACTIVATION_APPROVED,
+        AdminAuditAction.ACTIVATION_REJECTED,
+    }
+)
 """同库、单事务的目录动作。
 
-W1a 阶段它**等于全部 action**：本阶段写的每一件事都是同库事实，因此授权改变与
+W1b 阶段它**等于当前全部 action**：本阶段写的每一件事都是同库事实，因此授权改变与
 成功审计在同一个事务里提交，不存在"先写 STARTED、再补终态"的中间态。两阶段留给
 规格 §14.2 的文件配置操作（W4a），那时会有非目录动作加进来。
 """
+
+STARTABLE_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset()
+"""W1b 没有两阶段动作；W4a 的配置动作必须在这里显式开门。"""
 
 ROLE_EFFECT_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
     {
@@ -79,6 +95,7 @@ ROLE_EFFECT_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
         AdminAuditAction.ROLE_ASSIGNED,
         AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED,
         AdminAuditAction.LEGACY_IDENTITY_MIGRATED,
+        AdminAuditAction.ACTIVATION_APPROVED,
     }
 )
 """成功时必须记下"授予了哪个角色"的动作。
@@ -92,6 +109,7 @@ STATUS_EFFECT_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
         AdminAuditAction.USER_STATUS_CHANGED,
         AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED,
         AdminAuditAction.LEGACY_IDENTITY_MIGRATED,
+        AdminAuditAction.ACTIVATION_APPROVED,
     }
 )
 """成功时必须记下"账号处于哪个状态"的动作。"""
@@ -243,8 +261,8 @@ class AdminAuditStart(Contract):
 
     @model_validator(mode="after")
     def _refuses_directory_actions(self) -> Self:
-        if self.action in DIRECTORY_ACTIONS:
-            raise ValueError("a directory action is single-phase and has no STARTED")
+        if self.action not in STARTABLE_ACTIONS:
+            raise ValueError("this action is not allowed to write STARTED")
         return self
 
 

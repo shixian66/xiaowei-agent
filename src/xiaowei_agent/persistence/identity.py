@@ -6,7 +6,7 @@
 只是一段与事实无关的文本，而且**不会有任何东西报错**。
 
 ``persistence`` 不能反向依赖 ``interfaces``（``tests/security/test_module_layering.py``），
-因此这一层只认识契约里的八个命令，不认识飞书标签这类外部词汇。
+因此这一层只认识契约里的十个命令，不认识飞书标签这类外部词汇。
 """
 
 import hashlib
@@ -23,12 +23,14 @@ from xiaowei_agent.contracts.admin_audit import (
 from xiaowei_agent.contracts.enums import (
     AdminAuditAction,
     AdminAuditOutcome,
+    AdminAuditReasonCode,
     AdminAuditTargetKind,
     IdentitySource,
     ProductRole,
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
@@ -37,6 +39,7 @@ from xiaowei_agent.contracts.identity import (
     DirectoryPrincipalFacts,
     LegacyIdentityMigrationEntry,
     MigrateLegacyIdentitiesCommand,
+    RejectActivationCommand,
     RevokeRoleCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
@@ -58,6 +61,7 @@ BOOTSTRAP_OPERATION_ID: Final[str] = "bootstrap-local-admin"
 """
 
 _SUBJECT_DIGEST_DOMAIN: Final[str] = "xiaowei.identity.external_subject.v1"
+_ACTIVATION_USER_ID_DOMAIN: Final[str] = "xiaowei.identity.activation_user.v1"
 
 ACTION_FOR_COMMAND: Final[dict[type, AdminAuditAction]] = {
     CreateUserCommand: AdminAuditAction.USER_CREATED,
@@ -68,6 +72,8 @@ ACTION_FOR_COMMAND: Final[dict[type, AdminAuditAction]] = {
     UnbindExternalIdentityCommand: AdminAuditAction.EXTERNAL_IDENTITY_UNBOUND,
     BootstrapLocalAdminCommand: AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED,
     MigrateLegacyIdentitiesCommand: AdminAuditAction.LEGACY_IDENTITY_MIGRATED,
+    ApproveActivationCommand: AdminAuditAction.ACTIVATION_APPROVED,
+    RejectActivationCommand: AdminAuditAction.ACTIVATION_REJECTED,
 }
 """命令类型 → 它必然记录的动作。绑死，不让调用方传。"""
 
@@ -119,6 +125,13 @@ def _migration_effect(
     return AdminAuditEffect(role=entry.role, status=UserStatus.ACTIVE)
 
 
+def _approve_activation_effect(
+    command: ApproveActivationCommand,
+    entry: LegacyIdentityMigrationEntry | None,
+) -> AdminAuditEffect:
+    return AdminAuditEffect(role=command.approved_role, status=UserStatus.ACTIVE)
+
+
 EFFECT_FOR_COMMAND: Final[dict[type, Callable[..., AdminAuditEffect]]] = {
     CreateUserCommand: _create_user_effect,
     SetUserStatusCommand: _status_effect,
@@ -128,6 +141,8 @@ EFFECT_FOR_COMMAND: Final[dict[type, Callable[..., AdminAuditEffect]]] = {
     UnbindExternalIdentityCommand: _no_effect,
     BootstrapLocalAdminCommand: _bootstrap_effect,
     MigrateLegacyIdentitiesCommand: _migration_effect,
+    ApproveActivationCommand: _approve_activation_effect,
+    RejectActivationCommand: _no_effect,
 }
 """命令类型 → 算出成功时该记什么结果的纯函数。
 
@@ -159,6 +174,13 @@ def external_subject_digest(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def activation_user_id(*, subject_ref_digest: str) -> str:
+    """从已作用域化的主体摘要派生固定长度账号 ID，不拼接外部明文。"""
+    material = f"{_ACTIVATION_USER_ID_DOMAIN}\x1f{subject_ref_digest}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"feishu-{digest[:32]}"
+
+
 def batch_operation_id(context: AdminOperationContext, index: int) -> str:
     """批量迁移里第 ``index`` 条的子 operation id（``index`` 从 1 开始）。
 
@@ -186,6 +208,12 @@ def derive_audit(
     ``AdminAuditStore.append_denied``，那是另一条路径。
     """
     command_type = type(command)
+    if isinstance(command, (ApproveActivationCommand, RejectActivationCommand)):
+        target_kind = AdminAuditTargetKind.ACTIVATION
+        derived_target_ref = command.request_id
+    else:
+        target_kind = AdminAuditTargetKind.USER
+        derived_target_ref = target_ref
     return AdminAuditCandidate(
         operation_id=context.operation_id if operation_id is None else operation_id,
         tenant_id=command.tenant_id,
@@ -194,9 +222,9 @@ def derive_audit(
         actor=context.actor,
         auth_source=context.auth_source,
         action=ACTION_FOR_COMMAND[command_type],
-        target_kind=AdminAuditTargetKind.USER,
+        target_kind=target_kind,
         target_ref_digest=admin_audit_target_digest(
-            target_kind=AdminAuditTargetKind.USER, target_ref=target_ref
+            target_kind=target_kind, target_ref=derived_target_ref
         ),
         outcome=AdminAuditOutcome.SUCCEEDED,
         reason_code=None,
@@ -214,6 +242,18 @@ class UserDirectoryConflictError(UserDirectoryError):
 
 class UserDirectoryNotFoundError(UserDirectoryError):
     """命令的目标账号或角色不存在。"""
+
+
+class UserDirectoryDecisionDeniedError(UserDirectoryError):
+    """激活决定被事务内权限/作用域校验拒绝。"""
+
+    def __init__(self, reason_code: AdminAuditReasonCode) -> None:
+        super().__init__("activation decision denied")
+        self.reason_code = reason_code
+
+
+class UserDirectorySubjectUnavailableError(UserDirectoryError):
+    """主体已经绑定，但账号停用或当前作用域角色已撤销。"""
 
 
 class AdminAuditUnwritableError(UserDirectoryError):
@@ -272,9 +312,12 @@ __all__ = [
     "EFFECT_FOR_COMMAND",
     "AdminAuditUnwritableError",
     "UserDirectoryConflictError",
+    "UserDirectoryDecisionDeniedError",
     "UserDirectoryError",
     "UserDirectoryNotFoundError",
     "UserDirectoryStore",
+    "UserDirectorySubjectUnavailableError",
+    "activation_user_id",
     "batch_operation_id",
     "derive_audit",
     "external_subject_digest",

@@ -31,6 +31,7 @@ from xiaowei_agent.contracts.admin_audit import (
     _OPERATION_ID_MAX_LENGTH,
     DIRECTORY_ACTIONS,
     ROLE_EFFECT_ACTIONS,
+    STARTABLE_ACTIONS,
     STATUS_EFFECT_ACTIONS,
     AdminAuditCandidate,
     AdminAuditDenial,
@@ -250,7 +251,7 @@ def test_outcome_is_the_spec_four_member_closed_set() -> None:
     }
 
 
-def test_w1a_actions_cover_only_what_this_stage_actually_writes() -> None:
+def test_w1b_actions_cover_only_what_this_stage_actually_writes() -> None:
     """action 闭集不含本阶段写不出的动作。
 
     提前塞进 ``ACTIVATION_APPROVED`` 这类成员，会让"这个阶段能做什么"在枚举上
@@ -265,7 +266,14 @@ def test_w1a_actions_cover_only_what_this_stage_actually_writes() -> None:
         "external_identity_unbound",
         "local_admin_bootstrapped",
         "legacy_identity_migrated",
+        "activation_approved",
+        "activation_rejected",
     }
+
+
+def test_all_w1b_actions_are_single_phase_and_none_are_startable() -> None:
+    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction)
+    assert STARTABLE_ACTIONS == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -399,8 +407,8 @@ def test_binding_actions_carry_no_effect(action: AdminAuditAction) -> None:
         _candidate(action=action, effect=AdminAuditEffect(status=UserStatus.ACTIVE))
 
 
-def test_every_w1a_action_is_a_directory_action() -> None:
-    """W1a 的八个 action 恰好就是目录动作全集。
+def test_every_w1b_action_is_a_directory_action() -> None:
+    """W1b 的十个 action 恰好就是目录动作全集。
 
     这条同时解释了 ``append_started`` 在本阶段**没有可用 action**：目录动作一律
     单阶段。不要为了让某条用例跑通而放宽那个校验。
@@ -424,6 +432,27 @@ def test_two_phase_start_refuses_a_directory_action() -> None:
             auth_source=IdentitySource.LOCAL_ADMIN,
             action=AdminAuditAction.ROLE_ASSIGNED,
             target_kind=AdminAuditTargetKind.USER,
+            target_ref_digest=_DIGEST,
+        )
+
+
+@pytest.mark.parametrize(
+    "action",
+    [AdminAuditAction.ACTIVATION_APPROVED, AdminAuditAction.ACTIVATION_REJECTED],
+)
+def test_activation_decisions_cannot_claim_a_started_phase(
+    action: AdminAuditAction,
+) -> None:
+    with pytest.raises(ValidationError):
+        AdminAuditStart(
+            operation_id="op-activation-start",
+            tenant_id="t-1",
+            environment_id="dev",
+            actor_user_id="admin-1",
+            actor="admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+            action=action,
+            target_kind=AdminAuditTargetKind.ACTIVATION,
             target_ref_digest=_DIGEST,
         )
 

@@ -70,6 +70,22 @@ class IdentitySource(StrEnum):
     LOCAL_ADMIN = "local_admin"
 
 
+class ActivationSource(StrEnum):
+    """W1b 允许创建申请的入口闭集。"""
+
+    WEB_LOGIN = "web_login"
+    FEISHU_GROUP = "feishu_group"
+
+
+class ActivationStatus(StrEnum):
+    """激活申请状态；三个终态都不可再次迁移。"""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 class ProductRole(StrEnum):
     """身份目录里的作用域角色闭集（规格 §6.1）。
 
@@ -126,14 +142,15 @@ class AdminAuditAction(StrEnum):
     EXTERNAL_IDENTITY_UNBOUND = "external_identity_unbound"
     LOCAL_ADMIN_BOOTSTRAPPED = "local_admin_bootstrapped"
     LEGACY_IDENTITY_MIGRATED = "legacy_identity_migrated"
+    ACTIVATION_APPROVED = "activation_approved"
+    ACTIVATION_REJECTED = "activation_rejected"
 
 
 class AdminAuditTargetKind(StrEnum):
     """审计目标类别闭集（规格 §14.2）。
 
-    ``ACTIVATION`` / ``DUTY_BINDING`` / ``CONFIG`` / ``TASK_CONTENT`` 在 W1a 没有
-    任何命令能产生，但它们是规格逐字列出的**值域**，留在闭集里与"提前建一张没有
-    消费者的表"是两回事。
+    W1b 开始由激活决策产生 ``ACTIVATION``；``DUTY_BINDING`` / ``CONFIG`` /
+    ``TASK_CONTENT`` 仍只是规格逐字列出的值域，没有对应写命令。
     """
 
     USER = "user"
@@ -146,7 +163,7 @@ class AdminAuditTargetKind(StrEnum):
 class AdminAuditOutcome(StrEnum):
     """审计结果闭集。
 
-    ``STARTED`` 属于规格 §14.2 的两阶段配置审计，W1a 的目录动作一律单阶段——
+    ``STARTED`` 属于规格 §14.2 的两阶段配置审计，W1b 的目录动作一律单阶段——
     这条差别由契约与数据库 CHECK 同时强制。
     """
 
