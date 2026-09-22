@@ -6,10 +6,12 @@
 就是为了让这件事没法安静发生。
 """
 
+import asyncio
 import datetime as dt
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine
 from tests.suites.identity_directory import (
     IDENTITY_DIRECTORY_CASES,
     TENANT,
@@ -29,21 +31,28 @@ from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_ENVIRONMENT_ID,
     LOCAL_ADMIN_TENANT_ID,
     LOCAL_ADMIN_USER_ID,
+    BindExternalIdentityCommand,
+    UnbindExternalIdentityCommand,
 )
 from xiaowei_agent.persistence import postgres
 from xiaowei_agent.persistence.errors import PersistenceIntegrityError
-from xiaowei_agent.persistence.identity import AdminAuditUnwritableError
+from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
+    UserDirectoryNotFoundError,
+)
 from xiaowei_agent.persistence.local_admin import (
     LOCAL_ADMIN_SINGLETON_ID,
     ChangePasswordCommand,
     PostgresLocalAdminStore,
 )
 from xiaowei_agent.persistence.postgres import (
+    BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY,
     PostgresAdminAuditStore,
     PostgresUserDirectoryStore,
 )
 from xiaowei_agent.persistence.schema import (
     ADMIN_AUDIT_EVENTS,
+    EXTERNAL_IDENTITIES,
     LOCAL_ADMINS,
     USER_ACCOUNTS,
     USER_ROLE_ASSIGNMENTS,
@@ -119,6 +128,48 @@ def admin_probe(clean_database):
                     )
                 )
             return str(value)
+
+    return _Probe()
+
+
+@pytest.fixture
+def directory_probe(clean_database):
+    """PostgreSQL 侧的逐类事实读；键的形状与内存侧**逐列相同**。
+
+    形状不一致时，同一条共享用例会在两个实现上比较两种东西，而那正是共享套件要
+    排除的分叉。
+    """
+
+    class _Probe:
+        async def facts(self) -> dict[str, frozenset]:
+            async with clean_database.connect() as connection:
+                accounts = await connection.execute(
+                    sa.select(USER_ACCOUNTS.c.user_id)
+                )
+                roles = await connection.execute(
+                    sa.select(
+                        USER_ROLE_ASSIGNMENTS.c.user_id,
+                        USER_ROLE_ASSIGNMENTS.c.tenant_id,
+                        USER_ROLE_ASSIGNMENTS.c.environment_id,
+                    )
+                )
+                bindings = await connection.execute(
+                    sa.select(
+                        EXTERNAL_IDENTITIES.c.provider,
+                        EXTERNAL_IDENTITIES.c.tenant_id,
+                        EXTERNAL_IDENTITIES.c.environment_id,
+                        EXTERNAL_IDENTITIES.c.subject_ref_digest,
+                    )
+                )
+                audits = await connection.execute(
+                    sa.select(ADMIN_AUDIT_EVENTS.c.event_id)
+                )
+                return {
+                    "accounts": frozenset(accounts.scalars()),
+                    "roles": frozenset(tuple(row) for row in roles),
+                    "bindings": frozenset(tuple(row) for row in bindings),
+                    "audits": frozenset(audits.scalars()),
+                }
 
     return _Probe()
 
@@ -352,3 +403,208 @@ async def test_changing_the_password_keeps_the_directory_link(
     assert stored == LOCAL_ADMIN_USER_ID
     assert rotated.user_id == LOCAL_ADMIN_USER_ID
     assert (await admins.get()).user_id == LOCAL_ADMIN_USER_ID
+
+
+async def _wait_until_a_backend_blocks(engine, *, timeout: float = 5.0) -> bool:
+    """轮询到确实有后端在等锁为止。
+
+    不用固定 ``sleep``：固定等待要么太短（还没进到那条语句，窗口根本没打开，用例
+    会在**有缺陷的代码上也通过**），要么太长（白白拖慢每一次运行）。这里等的是一个
+    可观测的事实——"有人被锁挡住了"。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        async with engine.connect() as connection:
+            blocked = await connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE state = 'active' AND wait_event_type = 'Lock'"
+                )
+            )
+        if blocked:
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def _wait_until_a_backend_waits_for_an_advisory_lock(
+    engine, *, timeout: float = 5.0
+) -> bool:
+    """轮询到确实有后端在等一把 **advisory** 锁为止。
+
+    比"等任意一把锁"更窄：行锁、表锁都会让上一个 helper 返回真，而这里要证明的
+    恰恰是 bootstrap 走了 advisory 这条路。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        async with engine.connect() as connection:
+            blocked = await connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE state = 'active' AND wait_event_type = 'Lock'"
+                    " AND wait_event = 'advisory'"
+                )
+            )
+        if blocked:
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_unbinding_a_subject_another_transaction_already_removed_is_not_found(
+    directory, clean_database, postgres_dsn
+) -> None:
+    """**并发解绑不得写出一条虚假的成功审计。**
+
+    复现是确定性的，不靠两个客户端抢跑：另一个事务先删掉绑定但**不提交**，我们的
+    解绑因此在行锁上阻塞——阻塞本身就证明它已经越过了前置判定；对方提交之后，我们
+    那条 ``DELETE`` 实际影响 0 行。
+
+    旧写法在这一刻返回成功并记一条 ``external_identity_unbound`` 的 ``SUCCEEDED``：
+    一次没有发生的授权改变，在审计里留下了发生过的证据。而审计是事后唯一的依据。
+    """
+    await directory.apply(command=create_user("alice"), context=context("op-1"))
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="alice",
+            tenant_id=TENANT,
+            environment_id="env-a",
+            subject_ref="ou_alice",
+        ),
+        context=context("op-2"),
+    )
+
+    rival = create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool)
+    try:
+        connection = await rival.connect()
+        transaction = await connection.begin()
+        await connection.execute(sa.delete(EXTERNAL_IDENTITIES))
+
+        async def unbind() -> str:
+            try:
+                await directory.apply(
+                    command=UnbindExternalIdentityCommand(
+                        user_id="alice", tenant_id=TENANT, environment_id="env-a"
+                    ),
+                    context=context("op-unbind"),
+                )
+                return "success"
+            except UserDirectoryNotFoundError:
+                return "not-found"
+
+        task = asyncio.create_task(unbind())
+        assert await _wait_until_a_backend_blocks(clean_database), (
+            "解绑没有在行锁上阻塞——窗口没打开，这条用例证明不了任何事"
+        )
+        await transaction.commit()
+        await connection.close()
+        outcome = await task
+    finally:
+        await rival.dispose()
+
+    assert outcome == "not-found"
+    async with clean_database.connect() as connection:
+        unbind_audits = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(ADMIN_AUDIT_EVENTS)
+            .where(
+                ADMIN_AUDIT_EVENTS.c.action
+                == AdminAuditAction.EXTERNAL_IDENTITY_UNBOUND.value
+            )
+        )
+    assert unbind_audits == 0, "没有发生的解绑不得留下审计"
+
+
+async def test_a_second_bootstrap_waits_for_the_advisory_lock(
+    admins, clean_database, postgres_dsn
+) -> None:
+    """**bootstrap 必须在 advisory lock 上排队。**
+
+    两个 Web 进程同时装配会同时调用 ``seed_if_absent``。没有这把锁时，两边都读到
+    "还没有凭据行"、都去建账号，第二个撞 ``user_accounts`` 主键——一次正常的并发
+    启动变成一次启动失败。
+
+    这里不靠两个客户端抢跑来碰运气：外面先把**同一把锁**攥在一个未提交的事务里，
+    于是装配必然排队；"它确实在等一把 advisory lock"是一个可观测的事实，而不是一段
+    推断。锁一旦被换成一条无效语句，装配会立刻跑完，下面那条断言随即变红。
+    """
+    holder = create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool)
+    try:
+        connection = await holder.connect()
+        transaction = await connection.begin()
+        await connection.execute(
+            sa.text("SELECT pg_advisory_xact_lock(:lock_key)").bindparams(
+                lock_key=BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY
+            )
+        )
+
+        task = asyncio.create_task(
+            admins.seed_if_absent(password_hash=_LEGACY_PASSWORD_HASH)
+        )
+        waited = await _wait_until_a_backend_waits_for_an_advisory_lock(clean_database)
+        assert waited, "bootstrap 没有在 advisory lock 上排队"
+        assert not task.done()
+
+        await transaction.commit()
+        await connection.close()
+        assert await task is True
+    finally:
+        await holder.dispose()
+
+    async with clean_database.connect() as connection:
+        linked = await connection.scalar(
+            sa.select(LOCAL_ADMINS.c.user_id).where(
+                LOCAL_ADMINS.c.id == LOCAL_ADMIN_SINGLETON_ID
+            )
+        )
+    assert linked == LOCAL_ADMIN_USER_ID
+
+
+async def test_simultaneous_assembly_writes_exactly_one_local_admin(
+    clean_database, postgres_dsn, clock
+) -> None:
+    """八个进程同时装配：一次写入、七次幂等，**没有一次抛异常**。
+
+    这是上一条的端到端对照。它证明的不是锁的机制，而是调用方看到的结果：启动不会
+    因为"另一个进程刚好也在启动"而失败，四类事实也不会各写出两份。
+    """
+    engines = [
+        create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool) for _ in range(8)
+    ]
+    try:
+        stores = [
+            PostgresLocalAdminStore(engine=engine, clock=clock) for engine in engines
+        ]
+        barrier = asyncio.Barrier(len(stores))
+
+        async def seed(store) -> bool:
+            await barrier.wait()
+            return await store.seed_if_absent(password_hash=_LEGACY_PASSWORD_HASH)
+
+        results = await asyncio.gather(*(seed(store) for store in stores))
+    finally:
+        for engine in engines:
+            await engine.dispose()
+
+    assert sum(results) == 1, results
+    async with clean_database.connect() as connection:
+        credentials = await connection.scalar(
+            sa.select(sa.func.count()).select_from(LOCAL_ADMINS)
+        )
+        accounts = await connection.scalar(
+            sa.select(sa.func.count()).select_from(USER_ACCOUNTS)
+        )
+        roles = await connection.scalar(
+            sa.select(sa.func.count()).select_from(USER_ROLE_ASSIGNMENTS)
+        )
+        audits = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(ADMIN_AUDIT_EVENTS)
+            .where(
+                ADMIN_AUDIT_EVENTS.c.action
+                == AdminAuditAction.LOCAL_ADMIN_BOOTSTRAPPED.value
+            )
+        )
+    assert (credentials, accounts, roles, audits) == (1, 1, 1, 1)

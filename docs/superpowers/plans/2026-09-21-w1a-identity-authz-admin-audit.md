@@ -830,10 +830,10 @@ async def _insert_audit_event(
 
 | 守卫 | 判定方式 | 允许项 |
 | --- | --- | --- |
-| 授权表写入 | AST 找 `sa.insert/update/delete` 的目标表名 | `_AUTHZ_WRITE_SITES`（两个私有助手） |
+| 授权表写入 | AST 找 `sa.insert/update/delete` 的目标表名 | `_AUTHZ_WRITE_SITES`（实现为四个私有助手：一个分派方法加三个写助手，后者被目录与 bootstrap 两条路径共用） |
 | 审计表写入 | 同上 | `_AUDIT_WRITE_SITES`，**单元素** `postgres.py::_insert_audit_event` |
-| 完整候选 helper | AST 按**签名**发现能收下 `AdminAuditCandidate` 的函数，与声明名单 `==` | `_FULL_CANDIDATE_HELPERS`（三个） |
-| helper 调用点 | 上述 helper 的全部调用位置 | `_HELPER_CALL_SITES`（八个） |
+| 完整候选 helper | AST 按**签名**发现能收下 `AdminAuditCandidate` 的函数，与声明名单 `==` | `_FULL_CANDIDATE_HELPERS`（实现为六个：计划写三个时漏算了两个目录侧与一个审计侧的包装，它们确实收得下完整候选） |
+| helper 调用点 | 上述 helper 的全部调用位置 | `_HELPER_CALL_SITES`（以名单为准，不在此另记条数） |
 | `local_admins.user_id` | AST 提取 `values()` **实际写入的列** | `_CREDENTIAL_LINK_SITES`（与授权表同一份） |
 | append-only | `persistence/` 里对 `admin_audit_events` 的 `update` / `delete` 一律禁止 | 无 |
 

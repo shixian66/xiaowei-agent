@@ -2646,7 +2646,16 @@ class PostgresClarificationRecordStore:
             return existing
 
 
-_BOOTSTRAP_LOCAL_ADMIN_LOCK: Final = sa.text("SELECT pg_advisory_xact_lock(2026092101)")
+BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY: Final[int] = 2026092101
+"""bootstrap advisory lock 的键。
+
+公开导出，好让并发用例去**真的抢这把锁**而不是在测试里抄一遍字面量——抄出来的那
+一份不会跟着这里改，于是有朝一日换了键值，用例会去抢一把没人用的锁并安静地通过。
+"""
+
+_BOOTSTRAP_LOCAL_ADMIN_LOCK: Final = sa.text(
+    "SELECT pg_advisory_xact_lock(:lock_key)"
+).bindparams(lock_key=BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY)
 """bootstrap 的事务级 advisory lock。
 
 比 ``SELECT ... FOR UPDATE`` 严格强一档，而且强的正是需要的那一档：凭据行还不存在
@@ -2964,24 +2973,6 @@ class PostgresUserDirectoryStore:
             )
         ) is not None
 
-    async def _bound_subject_digest(
-        self,
-        connection: AsyncConnection,
-        *,
-        user_id: str,
-        tenant_id: str,
-        environment_id: str,
-    ) -> str | None:
-        digest = await connection.scalar(
-            sa.select(EXTERNAL_IDENTITIES.c.subject_ref_digest).where(
-                EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
-                EXTERNAL_IDENTITIES.c.tenant_id == tenant_id,
-                EXTERNAL_IDENTITIES.c.environment_id == environment_id,
-                EXTERNAL_IDENTITIES.c.user_id == user_id,
-            )
-        )
-        return None if digest is None else str(digest)
-
     # ---- 写：本方法与 ``_bootstrap_in_transaction`` 是四类授权事实的全部写入口 ----
 
     async def _apply_in_transaction(
@@ -3111,22 +3102,24 @@ class PostgresUserDirectoryStore:
         else:
             if not await self._account_exists(connection, command.user_id):
                 raise UserDirectoryNotFoundError("no such account")
-            digest = await self._bound_subject_digest(
-                connection,
-                user_id=command.user_id,
-                tenant_id=command.tenant_id,
-                environment_id=command.environment_id,
-            )
-            if digest is None:
-                raise UserDirectoryNotFoundError("no binding in this scope")
-            await connection.execute(
-                sa.delete(EXTERNAL_IDENTITIES).where(
+            # 前置判定**就是**这条写语句，不是它前面的一次 SELECT。
+            #
+            # 先 SELECT 出摘要、再发一条不看结果的 DELETE，中间就有一个窗口：另一个
+            # 事务在这两步之间解绑并提交之后，我们的 DELETE 影响 0 行，而下面那条
+            # 审计照样记 SUCCEEDED——一次没有发生的授权改变，在审计里留下了发生过的
+            # 证据。这与 ``RevokeRoleCommand`` 是同一条写法，不是两套。
+            removed = await connection.scalar(
+                sa.delete(EXTERNAL_IDENTITIES)
+                .where(
                     EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
                     EXTERNAL_IDENTITIES.c.tenant_id == command.tenant_id,
                     EXTERNAL_IDENTITIES.c.environment_id == command.environment_id,
-                    EXTERNAL_IDENTITIES.c.subject_ref_digest == digest,
+                    EXTERNAL_IDENTITIES.c.user_id == command.user_id,
                 )
+                .returning(EXTERNAL_IDENTITIES.c.subject_ref_digest)
             )
+            if removed is None:
+                raise UserDirectoryNotFoundError("no binding in this scope")
         return (
             await self._audit(
                 connection,

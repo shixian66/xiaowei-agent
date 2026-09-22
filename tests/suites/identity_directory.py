@@ -4,9 +4,14 @@
 表上必须逐格相同：内存没有事务，用快照恢复表达"回滚"那一列——它表达的是同一个
 语义，不是另一个。
 
-每个绑定必须提供五个 fixture：``directory``、``audit``、``admin_probe``、
-``clock``，以及 ``broken_audit_derivation``（把该实现模块里的 ``derive_audit``
-换成抛 ``RuntimeError`` 的桩，用来证明"与领域无关的异常同样不留痕"）。
+每个绑定必须提供六个 fixture：``directory``、``audit``、``admin_probe``、
+``directory_probe``、``clock``，以及 ``broken_audit_derivation``（把该实现模块里的
+``derive_audit`` 换成抛 ``RuntimeError`` 的桩，用来证明"与领域无关的异常同样不留痕"）。
+
+``directory_probe`` 存在的理由是一次实测的验收假绿：回滚原本只通过
+``load_account(...) is None`` 观察，而那是一次**组合读**——账号、角色两者缺一它就返回
+``None``。于是逐个撤掉内存实现的六项快照恢复，契约用例仍然全绿，撤掉凭据恢复后全量
+离线仍然全绿。承重的保护必须逐项可观测，否则"保护还在"和"保护没了"长得一模一样。
 """
 
 from collections.abc import Callable, MutableMapping, Sequence
@@ -226,7 +231,7 @@ async def test_revoking_a_role_claims_no_effect(directory: Any) -> None:
 
 
 async def test_audit_write_failure_rolls_back_the_authorization_change(
-    directory: Any,
+    directory: Any, directory_probe: Any
 ) -> None:
     """**承重**：审计写不进去，授权改动一点都不留。
 
@@ -234,6 +239,7 @@ async def test_audit_write_failure_rolls_back_the_authorization_change(
     重放，不是人为注入的异常。
     """
     await directory.apply(command=create_user("alice"), context=context("op-dup"))
+    before = await directory_probe.facts()
 
     with pytest.raises(AdminAuditUnwritableError):
         await directory.apply(
@@ -241,33 +247,31 @@ async def test_audit_write_failure_rolls_back_the_authorization_change(
             context=context("op-dup"),
         )
 
-    assert (
-        await directory.load_account(
-            user_id="bob", tenant_id=TENANT, environment_id=ENVIRONMENT
-        )
-        is None
-    )
+    after = await directory_probe.facts()
+    for kind in ("accounts", "roles", "bindings", "audits"):
+        assert after[kind] == before[kind], kind
 
 
 async def test_any_failure_after_a_directory_write_leaves_nothing_behind(
-    directory: Any, audit: Any, broken_audit_derivation: Any
+    directory: Any, directory_probe: Any, broken_audit_derivation: Any
 ) -> None:
     """**承重**：与领域无关的异常同样不留半状态。
 
     只在两三种异常上恢复，审计派生、契约校验或 helper 抛出的别的异常就会留下
     "授权已改、审计没写"的半状态——而那一格恰好是本阶段最核心的不变量。
+
+    **逐类事实分别断言**，不走 ``load_account`` 那一次组合读：组合读要账号与角色
+    同时在才返回非空，因此"账号留下了、角色没留下"这种半状态它一个字都不会说。
     """
+    before = await directory_probe.facts()
     broken_audit_derivation()
 
     with pytest.raises(RuntimeError):
         await directory.apply(command=create_user("carol"), context=context("op-boom"))
 
-    assert (
-        await directory.load_account(
-            user_id="carol", tenant_id=TENANT, environment_id=ENVIRONMENT
-        )
-        is None
-    )
+    after = await directory_probe.facts()
+    for kind in ("accounts", "roles", "bindings", "audits"):
+        assert after[kind] == before[kind], kind
 
 
 async def test_two_accounts_cannot_claim_the_same_actor(directory: Any) -> None:
@@ -518,6 +522,32 @@ async def test_bootstrap_fails_closed_when_the_link_points_at_nothing(
     assert await admin_probe.linked_user_id() is None
 
 
+async def test_a_failed_bootstrap_leaves_the_credential_row_untouched(
+    directory: Any, admin_probe: Any, directory_probe: Any, broken_audit_derivation: Any
+) -> None:
+    """**承重**：快照必须覆盖 ``state.local_admin``，不只是四张目录表。
+
+    bootstrap 在同一次调用里既写凭据又写目录。审计失败时只回滚目录、不回滚凭据，
+    会留下一行 ``user_id`` 已被写上的凭据——而那一行正好落进四态表第三行（幂等
+    no-op）而不是第二行（backfill），于是**下一次装配什么都不会做**，目录里永远没有
+    这个管理员账号。这条裂缝不会让任何一张表看起来异常。
+
+    四张目录表另有别的用例把守；这一条专钉凭据行那一项。
+    """
+    await admin_probe.seed_legacy_credential(password_hash=_LEGACY_PASSWORD_HASH)
+    before = await directory_probe.facts()
+    broken_audit_derivation()
+
+    with pytest.raises(RuntimeError):
+        await directory.apply(command=bootstrap(), context=context("op-boom"))
+
+    assert await admin_probe.linked_user_id() is None
+    assert await admin_probe.stored_password_hash() == _LEGACY_PASSWORD_HASH
+    after = await directory_probe.facts()
+    for kind in ("accounts", "roles", "bindings", "audits"):
+        assert after[kind] == before[kind], kind
+
+
 async def test_bootstrap_fails_closed_when_the_linked_account_lost_admin(
     directory: Any, admin_probe: Any
 ) -> None:
@@ -548,13 +578,20 @@ def _entry(user_id: str, *, role: ProductRole = ProductRole.USER) -> LegacyIdent
 
 
 async def test_legacy_migration_writes_the_whole_batch_or_nothing(
-    directory: Any,
+    directory: Any, directory_probe: Any
 ) -> None:
-    """整批原子：第二条撞上已被占用的 actor，第一条也不能留下。"""
+    """整批原子：第二条撞上已被占用的 actor，第一条也不能留下。
+
+    这条是**唯一**一条会让第一项写入真正落进四类事实再被撤回的用例：第一条目的
+    账号、角色、绑定、审计事件与阶段键全部写过一遍。因此四类事实逐个比对，外加一条
+    "同一个根 operation id 可以重新跑一遍"——阶段键如果没还回去，重放会撞上
+    ``AdminAuditUnwritableError``，而那时四张表看起来完全干净，谁也不会怀疑到它。
+    """
     await directory.apply(
         command=create_user("squatter", actor="dave@example.com"),
         context=context("op-1"),
     )
+    before = await directory_probe.facts()
 
     with pytest.raises(UserDirectoryConflictError):
         await directory.apply(
@@ -566,12 +603,19 @@ async def test_legacy_migration_writes_the_whole_batch_or_nothing(
             context=context("op-migrate"),
         )
 
-    assert (
-        await directory.load_account(
-            user_id="erin", tenant_id=TENANT, environment_id=ENVIRONMENT
-        )
-        is None
+    after = await directory_probe.facts()
+    for kind in ("accounts", "roles", "bindings", "audits"):
+        assert after[kind] == before[kind], kind
+
+    replayed = await directory.apply(
+        command=MigrateLegacyIdentitiesCommand(
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            entries=(_entry("erin"), _entry("frank")),
+        ),
+        context=context("op-migrate"),
     )
+    assert len(replayed) == 2
 
 
 async def test_legacy_migration_emits_one_audit_event_per_entry(
@@ -673,6 +717,7 @@ IDENTITY_DIRECTORY_CASES = (
     test_bootstrap_backfills_a_credential_that_has_no_directory_account,
     test_bootstrap_backfill_is_itself_idempotent,
     test_bootstrap_fails_closed_when_the_link_points_at_nothing,
+    test_a_failed_bootstrap_leaves_the_credential_row_untouched,
     test_bootstrap_fails_closed_when_the_linked_account_lost_admin,
     test_legacy_migration_writes_the_whole_batch_or_nothing,
     test_legacy_migration_emits_one_audit_event_per_entry,

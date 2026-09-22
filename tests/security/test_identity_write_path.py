@@ -126,9 +126,12 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/postgres.py::_insert_audit_event",
     }
 )
-"""上面那三个 helper 的全部调用位置。
+""":data:`_FULL_CANDIDATE_HELPERS` 里每一个 helper 的全部调用位置。
 
 冻结调用点而不只冻结 helper 本身：helper 是窄的，但**谁能叫它**同样是写权限。
+
+不在这条说明里写死条数：数字写两遍，改的人只会改一处，而剩下那一处会让下一个
+读者以为实现越了界。真正的判定是下面那条 ``==``。
 """
 
 

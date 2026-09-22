@@ -133,6 +133,26 @@ def admin_probe(memory_state):
 
 
 @pytest.fixture
+def directory_probe(memory_state):
+    """逐类事实的原始读。
+
+    与 ``load_account`` 的组合读分开：组合读要账号与角色同时在才返回非空，因此
+    "账号留下了、角色没留下"这种半状态它一个字都不会说，而回滚恰恰就是要排除半状态。
+    """
+
+    class _Probe:
+        async def facts(self) -> dict[str, frozenset]:
+            return {
+                "accounts": frozenset(memory_state.user_accounts),
+                "roles": frozenset(memory_state.user_role_assignments),
+                "bindings": frozenset(memory_state.external_identities),
+                "audits": frozenset(memory_state.admin_audit_events),
+            }
+
+    return _Probe()
+
+
+@pytest.fixture
 def broken_audit_derivation(monkeypatch):
     """把**内存实现模块里**的 ``derive_audit`` 换成一个与领域无关的爆炸。
 
