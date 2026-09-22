@@ -45,8 +45,8 @@
   每一次授权改变都与一条由命令派生的审计事件同事务提交，审计写不进去则整个授权改变回滚。
 - **证据等级到 `tests` 为止。** W1a 是离线写内核：没有激活流程、登录改造、Admin 页面、
   审计查询 API、真实飞书调用、部署或用户验收；W1a 的网络调用次数为 0。
-- **W1b 详细计划已由 PR #66 squash 合入** `main@8e6845da29c6d382dc53843c790e7c4fcaf5b8d7`；
-  负责人随后明确授权按计划开发。详细计划见
+- **W1b 详细计划已由 PR #66 squash 合入** `main@8e6845da29c6d382dc53843c790e7c4fcaf5b8d7`。
+  详细计划见
   `docs/superpowers/plans/2026-09-22-w1b-identity-activation-and-notification.md`，
   其两个切片依赖固定为“切片 1 写内核 → 切片 2 入口接线与通知”。该轮复审同时暴露一处真源冲突：
   登录 context 表 `web_oauth_login_contexts` 在详细规格 §17.1 属于
@@ -57,13 +57,17 @@
   `d6c53d8` 新增 `ActivationRequest` / `ActivationStore`、`activation_requests` / `rev_0015`，
   并把批准/拒绝接入 `UserDirectoryStore.apply()` 的同事务目录与审计写路径。当前仍**没有**把
   Web/OAuth 或飞书 listener 接到激活服务，也没有群通知；这些只属于切片 2。
-- **切片 1 当前证据等级为 `tests`。** 本机离线全量 `4289 passed, 346 skipped`；security
+- **切片 1 当前证据等级为 `tests`。** 本机离线全量 `4290 passed, 346 skipped`；security
   `1497 passed, 83 skipped`；`ruff check .` 与 `mypy src`（199 个源文件）通过；一次性 PostgreSQL
   16.15 容器内 `tests/integration` 为 `348 passed`、零 skip。容量 advisory lock、fake 激活快照恢复、
   激活动作单阶段审计、待办 partial unique index 四项保护均做了隔离变异并按预期转红后还原。
   PR #67 首轮 CI run `35705507266` 精确绑定 `f88933dd9be084056a24a9f71c91bf0501e1f774`，
   八项全绿且均有真实 steps（tests/integration/compose-smoke/security-gate/types/lint/secret-scan 为
-  8/10/8/8/8/8/8 steps，deps-audit 为 9 steps）。这些仍不是部署、真实飞书、canary 或用户验收证据。
+  8/10/8/8/8/8/8 steps，deps-audit 为 9 steps）。复审 head
+  `210476e3d4f74dc1e5e388155d2730c69bd693a6` 的 CI run
+  [`35706192765`](https://github.com/shixian66/xiaowei-agent/actions/runs/35706192765)
+  也为八项全绿、全部包含真实 steps，其中 integration 为 `4635 passed`、零 skip。
+  这些仍不是部署、真实飞书、canary 或用户验收证据。
 - 计划中的 1024 上限只约束活跃待办；终态申请的受控 PII 保留/清理是 W5 部署硬门，未完成前
   不得部署启用。
 - **I3 受治理资料查询为延期路线，未取消。** 它仍卡在同一个未拍板前提上：受治理

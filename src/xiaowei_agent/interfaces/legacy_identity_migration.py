@@ -35,6 +35,7 @@ from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
     UserDirectoryConflictError,
     UserDirectoryStore,
+    UserDirectorySubjectUnavailableError,
 )
 
 _USER_ID_DOMAIN: Final[str] = "xiaowei.identity.legacy_user.v1"
@@ -164,11 +165,10 @@ async def _is_already_migrated(
     )
     if facts is None:
         # 三种情况落在这里：账号不在、账号在而该作用域没有角色、账号**被停用**。
-        # `load_account` 对停用账号返回 `None`（"停用即刻生效"，由共享套件的
-        # `test_disabled_account_stops_resolving_on_the_next_request` 在两个实现上
-        # 各钉一遍），所以状态那一项不在下面**再判一次**——`facts` 非空时它必然是
-        # ACTIVE，写在下面就是一条永远为假的分支。后两种情况会在批次里撞上账号
-        # 唯一约束，由那一个事务给答案，仍然是整批零写入。
+        # `load_account` 对停用账号返回 `None`（"停用即刻生效"，由目录共享套件在
+        # 两个实现上各钉一遍），所以状态那一项不在下面**再判一次**——`facts` 非空
+        # 时它必然是 ACTIVE，写在下面就是一条永远为假的分支。后两种情况会在批次
+        # 里撞上账号唯一约束，由那一个事务给答案，仍然是整批零写入。
         return False
     if (
         facts.account.actor != entry.actor
@@ -177,12 +177,18 @@ async def _is_already_migrated(
         raise LegacyMigrationConflictError(
             "a legacy account already exists with different facts"
         )
-    bound = await directory.resolve_by_subject(
-        provider=IdentitySource.FEISHU,
-        tenant_id=tenant_id,
-        environment_id=environment_id,
-        subject_ref=entry.subject_ref,
-    )
+    try:
+        bound = await directory.resolve_by_subject(
+            provider=IdentitySource.FEISHU,
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            subject_ref=entry.subject_ref,
+        )
+    except UserDirectorySubjectUnavailableError:
+        # W1b 将“从未绑定”与“绑定已撤权”分成了两个目录结果；对一次性旧身份迁移
+        # 来说，两者仍是同一件事：五项事实没有完整匹配，整批必须以迁移层的闭集
+        # 冲突失败，不能向调用方泄漏持久化层异常类型。
+        bound = None
     if bound is None or bound.account.user_id != user_id:
         raise LegacyMigrationConflictError(
             "a legacy account exists without its matching feishu binding"

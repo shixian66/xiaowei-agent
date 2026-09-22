@@ -699,3 +699,66 @@ async def test_a_subject_bound_to_another_account_is_a_conflict(
         await _migrate(path, directory)
 
     assert _facts(memory_state) == before
+
+
+async def test_a_subject_bound_to_a_disabled_account_is_a_closed_conflict(
+    tmp_path: Path, directory, memory_state
+) -> None:
+    """目录的“已绑定但不可用”异常不能泄出迁移模块。
+
+    派生账号的 actor、状态和角色全部匹配；同一个飞书主体只绑定到另一个已停用
+    账号。这样唯一被推翻的事实就是绑定目标可用性，而不是账号缺失、角色不符或
+    绑定缺失。迁移必须把目录层异常收敛为自己的闭集冲突，并保持整批零写入。
+    """
+    user_id = legacy_user_id(actor="alice")
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id=user_id,
+            actor="alice",
+            display_name="alice",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=ProductRole.OPERATOR,
+        ),
+        "seed-disabled-binding-1",
+    )
+    await _seed(
+        directory,
+        CreateUserCommand(
+            user_id="disabled-owner",
+            actor="disabled-owner",
+            display_name="disabled owner",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            role=ProductRole.USER,
+        ),
+        "seed-disabled-binding-2",
+    )
+    await _seed(
+        directory,
+        BindExternalIdentityCommand(
+            user_id="disabled-owner",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            subject_ref="subject-alice",
+        ),
+        "seed-disabled-binding-3",
+    )
+    await _seed(
+        directory,
+        SetUserStatusCommand(
+            user_id="disabled-owner",
+            tenant_id=_TENANT,
+            environment_id=_ENVIRONMENT,
+            status=UserStatus.DISABLED,
+        ),
+        "seed-disabled-binding-4",
+    )
+    before = _facts(memory_state)
+    path = _document(tmp_path, _entry("subject-alice", "alice", "operator"))
+
+    with pytest.raises(LegacyMigrationConflictError):
+        await _migrate(path, directory)
+
+    assert _facts(memory_state) == before
