@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from pydantic import Field, ValidationError
 
-from xiaowei_agent.contracts import Contract, FreeText, StrictStr
+from xiaowei_agent.contracts import (
+    CONTROLLED_PII_MAX_LENGTH,
+    Contract,
+    FreeText,
+    StrictStr,
+)
 from xiaowei_agent.contracts.enums import ProjectionErrorCode
 from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
 
@@ -37,7 +42,7 @@ class FeishuMention(Contract):
     """消息正文中的一个 SDK 已解析 mention。"""
 
     key: StrictStr = Field(max_length=128)
-    subject_ref: StrictStr = Field(max_length=256)
+    subject_ref: StrictStr = Field(max_length=CONTROLLED_PII_MAX_LENGTH)
 
 
 class FeishuMessageEvent(Contract):
@@ -49,7 +54,7 @@ class FeishuMessageEvent(Contract):
     app_id: StrictStr = Field(max_length=256)
     tenant_key: StrictStr = Field(max_length=256)
     sender_type: StrictStr = Field(max_length=32)
-    sender_subject_ref: StrictStr = Field(max_length=256)
+    sender_subject_ref: StrictStr = Field(max_length=CONTROLLED_PII_MAX_LENGTH)
     message_id: StrictStr = Field(max_length=256)
     chat_id: StrictStr = Field(max_length=256)
     chat_type: StrictStr = Field(max_length=32)

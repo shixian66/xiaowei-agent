@@ -146,6 +146,11 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
+    "interfaces/legacy_identity_migration.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
     "interfaces/feishu_listener.py": {
         "xiaowei_agent.application",
         "xiaowei_agent.config",

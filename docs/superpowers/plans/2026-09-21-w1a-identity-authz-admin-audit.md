@@ -184,6 +184,8 @@ src/xiaowei_agent/persistence/migrations/versions/rev_0014_identity_admin_audit.
 src/xiaowei_agent/interfaces/legacy_identity_migration.py
 src/xiaowei_agent/interfaces/feishu_identity.py
 src/xiaowei_agent/interfaces/local_admin_auth.py
+src/xiaowei_agent/interfaces/feishu_sdk.py
+src/xiaowei_agent/interfaces/web_auth.py
 src/xiaowei_agent/_conformance.py
 tests/**
 ARCHITECTURE.md
@@ -202,9 +204,15 @@ README.md
 - `interfaces/local_admin_auth.py`：只为让它消费 `contracts/identity.py` 的五个本地管理员常量，
   并删掉自己那三个字面量。`persistence` 按 `test_module_layering.py:47` 不能反向导入 `interfaces`，
   所以真源必须下沉到契约层。
+- `interfaces/feishu_sdk.py` 与 `interfaces/web_auth.py`：**本行是切片 C 复审期加进 allowlist 的**，
+  原计划没有它们。加入的唯一理由是 `_PII` 上限的修订（见 A.1 的复审修订框）：同一个 `open_id`
+  的上限在这两个入口各写着一份 `256`，目录侧写着 `128`，而最窄的那一份是一道静默的兼容墙。
+  上限必须只有一处定义，否则守卫只能发现分叉、发现不了下一次分叉。这两处的改动仅是把字面量
+  换成 `contracts/base.py` 的 `CONTROLLED_PII_MAX_LENGTH`，**零行为变化**，不触及这两个模块的
+  任何其它语义。
 - `interfaces/feishu_identity.py`：切片 C 需要一份**保留原始 labels** 的公开只读解析契约，而
   当前的 `load_feishu_identity_directory()` 已经把 labels 压成了 `frozenset[ChannelPermission]`
-  （`feishu_identity.py:125`），原始标签在返回值里不复存在。切片 C 只**抽出**已有的解析逻辑并
+  （`feishu_identity.py:180`），原始标签在返回值里不复存在。切片 C 只**抽出**已有的解析逻辑并
   把它公开，不改变校验规则、大小上限、权限位检查，也不改变任何现有调用方的行为。
 
 任何超出该列表的文件出现在 `git status` 里，都必须先停下来说明理由。
@@ -351,11 +359,20 @@ def channel_permissions(*, role: ProductRole) -> frozenset[ChannelPermission]: .
 
 **身份目录契约**（`contracts/identity.py`）。`ControlledPii = StrictStr`，凡这样标注的字段必须同时
 写 `exclude=True, repr=False`；`_ID = Field(min_length=1, max_length=64)`，
-`_NAME = (1, 128)`，`_ACTOR = (1, 256)`，`_PII = (1, 128, exclude, repr=False)`。
+`_NAME = (1, 128)`，`_ACTOR = (1, 256)`，`_PII = (1, 256, exclude, repr=False)`。
+
+> **切片 C 复审修订（本计划唯一一处被实现推翻的接口形状）：`_PII` 从 128 改为 256。**
+> 128 是在没有核对生产者取值范围的情况下定下的，而它的两个真实生产者——飞书事件
+> DTO（`FeishuMention.subject_ref` / `FeishuMessageEvent.sender_subject_ref`）与 OAuth 交换结果
+> （`FeishuOAuthIdentity.subject_ref`）——都接受 256。实测：129–256 字符的 `open_id` 旧文档解析
+> 得出来、迁移被拒、数据库零行。这直接违反本计划 Global Constraints 的「长度边界必须两端闭合…
+> 契约收得比输入紧，就是把一批真实旧数据永久挡在门外」。因此以更高层的那条约束为准，把上限
+> 统一到最宽的生产者，并让三处共用 `contracts/base.py` 的 `CONTROLLED_PII_MAX_LENGTH` 一份定义。
+> 它不影响存储：数据库只存定长的 `subject_ref_digest`，明文 `open_id` 一个字符都不落库。
 对应关系是固定的：`user_id` / `tenant_id` / `environment_id` / `created_by` 用 `_ID`，`actor` 用
 `_ACTOR`，`display_name` 用 `_NAME`，`subject_ref` 用 `_PII`。`_ACTOR` 比 `_NAME` 宽，是因为 `actor`
 是**身份**、不可截断，而它要接收的旧静态文档对 actor 没有任何长度上限
-（`src/xiaowei_agent/interfaces/feishu_identity.py:40`）；256 这个数怎么落到旧数据上，见切片 C.1 的转换策略。
+（`src/xiaowei_agent/interfaces/feishu_identity.py:56`）；256 这个数怎么落到旧数据上，见切片 C.1 的转换策略。
 
 ```python
 class UserAccount(Contract):
@@ -1004,12 +1021,29 @@ test -z "$(git status --porcelain)" || {
 - Modify: `AGENT_HANDOFF.md`
 - Modify: `README.md`
 - Modify: `tests/contract/test_doc_fact_binding.py`
+- Modify: `tests/security/test_module_layering.py`
+- Modify: `src/xiaowei_agent/contracts/base.py`
+- Modify: `src/xiaowei_agent/contracts/identity.py`
+- Modify: `src/xiaowei_agent/contracts/__init__.py`
+- Modify: `src/xiaowei_agent/interfaces/feishu_sdk.py`
+- Modify: `src/xiaowei_agent/interfaces/web_auth.py`
+- Test: `tests/contract/test_identity_contracts.py`
+
+上面六个源文件里，`contracts/` 三个在本阶段 allowlist 内，`interfaces/feishu_sdk.py` 与
+`interfaces/web_auth.py` **不在**——它们出现在这里的唯一理由是 `_PII` 上限的修订（见 A.1 的
+复审修订框）：上限必须只有一处定义，否则守卫只能发现分叉、发现不了下一次分叉。这两处的改动
+是把字面量 `256` 换成同一个常量，**零行为变化**。
+
+`test_module_layering.py` 不是本切片的设计内容，是它的**注册表**：
+`test_every_interface_file_is_registered_exactly_once` 要求 `interfaces/` 下每个文件都在
+逐文件导入 allowlist 里恰好登记一次，新增一个模块而不登记会直接让它变红。登记项按本模块
+真实需要的三层给（`contracts` / `interfaces` / `persistence`），不给整包放行。
 
 ### C.1 接口形状
 
 **为什么要动 `feishu_identity.py`：** 当前唯一的公开读取入口 `load_feishu_identity_directory()`
 返回 `StaticFeishuIdentityDirectory`，其中的 `AuthenticatedPrincipal` 已经把 labels 压成了
-`frozenset[ChannelPermission]`（`feishu_identity.py:125`）。`viewer` 与 `approver`、`operator` 与
+`frozenset[ChannelPermission]`（`feishu_identity.py:180`）。`viewer` 与 `approver`、`operator` 与
 `dba`/`oncall` 压完之后完全一样，而规格 §6.6 的迁移表恰恰要按**原始 label** 分流。
 `_IdentityDocument` 与 `_read_identity_file` 都是私有的。因此本切片**抽出**一份公开的、保留原始
 labels 的只读解析契约，让两条路径共用同一个解析器——不是第二次实现解析。抽出时不改变它的校验
@@ -1159,6 +1193,13 @@ git add src/xiaowei_agent/interfaces/feishu_identity.py \
         tests/contract/test_legacy_identity_document.py \
         tests/contract/test_legacy_identity_migration.py \
         tests/contract/test_doc_fact_binding.py \
+        tests/security/test_module_layering.py \
+        tests/contract/test_identity_contracts.py \
+        src/xiaowei_agent/contracts/base.py \
+        src/xiaowei_agent/contracts/identity.py \
+        src/xiaowei_agent/contracts/__init__.py \
+        src/xiaowei_agent/interfaces/feishu_sdk.py \
+        src/xiaowei_agent/interfaces/web_auth.py \
         ARCHITECTURE.md AGENT_HANDOFF.md README.md
 git commit -m "feat(w1a): migrate legacy identity labels in one atomic command
 

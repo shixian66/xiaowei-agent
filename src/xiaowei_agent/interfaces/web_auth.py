@@ -15,6 +15,7 @@ from pydantic import AfterValidator, Field
 
 from xiaowei_agent.config import canonical_web_public_origin
 from xiaowei_agent.contracts import (
+    CONTROLLED_PII_MAX_LENGTH,
     AuthenticatedPrincipal,
     Contract,
     IdentitySource,
@@ -108,7 +109,7 @@ class FeishuOAuthUnavailableError(RuntimeError):
 class FeishuOAuthIdentity(Contract):
     """OAuth provider 的 ``open_id`` 进入本地后使用统一主体引用名。"""
 
-    subject_ref: _OAuthSubjectRef = Field(max_length=256)
+    subject_ref: _OAuthSubjectRef = Field(max_length=CONTROLLED_PII_MAX_LENGTH)
 
 
 class FeishuOAuthPort(Protocol):
