@@ -42,6 +42,7 @@ _TABLE_BY_CONSTANT = {
 AUTHZ_TABLES = frozenset(
     {"user_accounts", "user_role_assignments", "external_identities"}
 )
+ACTIVATION_TABLES = frozenset({"activation_requests"})
 AUDIT_TABLE = "admin_audit_events"
 CREDENTIAL_TABLE = "local_admins"
 CREDENTIAL_LINK_COLUMN = "user_id"
@@ -58,6 +59,25 @@ _AUTHZ_WRITE_SITES = frozenset(
 
 ``apply()`` 本身不发 SQL——它开事务并委托，所以名单里是助手而不是 ``apply``。
 """
+
+_ACTIVATION_SQL_WRITE_SITES = frozenset(
+    {
+        "persistence/postgres.py::PostgresActivationStore.create_or_reuse",
+        "persistence/postgres.py::PostgresUserDirectoryStore._decide_activation",
+    }
+)
+"""激活表的两类 SQL 写点：创建/收割，以及目录事务内的终态决策。"""
+
+_ACTIVATION_MEMORY_WRITE_SITES = frozenset(
+    {
+        "persistence/memory.py::InMemoryPersistenceState.__init__",
+        "persistence/fake.py::InMemoryActivationStore.create_or_reuse",
+        "persistence/fake.py::InMemoryUserDirectoryStore._approve_activation",
+        "persistence/fake.py::InMemoryUserDirectoryStore._reject_activation",
+        "persistence/fake.py::InMemoryUserDirectoryStore._restore",
+    }
+)
+"""内存激活事实的创建/收割、终态决策与事务回滚恢复点。"""
 
 _AUDIT_WRITE_SITES = frozenset({"persistence/postgres.py::_insert_audit_event"})
 """**单元素**。
@@ -108,10 +128,12 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/fake.py::InMemoryAdminAuditStore.append_started",
         "persistence/fake.py::InMemoryAdminAuditStore.append_terminal",
         "persistence/fake.py::InMemoryUserDirectoryStore._assign_role",
+        "persistence/fake.py::InMemoryUserDirectoryStore._approve_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._bind_identity",
         "persistence/fake.py::InMemoryUserDirectoryStore._bootstrap",
         "persistence/fake.py::InMemoryUserDirectoryStore._create_user",
         "persistence/fake.py::InMemoryUserDirectoryStore._migrate",
+        "persistence/fake.py::InMemoryUserDirectoryStore._reject_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._revoke_role",
         "persistence/fake.py::InMemoryUserDirectoryStore._set_status",
         "persistence/fake.py::InMemoryUserDirectoryStore._unbind_identity",
@@ -123,6 +145,7 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/postgres.py::PostgresUserDirectoryStore._apply_in_transaction",
         "persistence/postgres.py::PostgresUserDirectoryStore._audit",
         "persistence/postgres.py::PostgresUserDirectoryStore._bootstrap_in_transaction",
+        "persistence/postgres.py::PostgresUserDirectoryStore._decide_activation",
         "persistence/postgres.py::_insert_audit_event",
     }
 )
@@ -359,6 +382,41 @@ def helper_call_sites(source: str, *, module: str, helpers: frozenset[str]) -> f
     return frozenset(found)
 
 
+def activation_memory_write_sites(source: str, *, module: str) -> frozenset[str]:
+    """发现对 ``state.activation_requests`` 的赋值或原地改写。"""
+    tree = ast.parse(source)
+    _annotate_owners(tree)
+    found: set[str] = set()
+
+    def is_activation_state(node: ast.AST) -> bool:
+        dotted = _dotted(node)
+        return dotted is not None and dotted.endswith(".activation_requests")
+
+    for node in ast.walk(tree):
+        target: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            for candidate in node.targets:
+                base = candidate.value if isinstance(candidate, ast.Subscript) else candidate
+                if is_activation_state(base):
+                    target = candidate
+                    break
+        elif isinstance(node, ast.AnnAssign):
+            candidate = node.target
+            base = candidate.value if isinstance(candidate, ast.Subscript) else candidate
+            if is_activation_state(base):
+                target = candidate
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"clear", "update", "pop", "setdefault"}
+            and is_activation_state(node.func.value)
+        ):
+            target = node.func.value
+        if target is not None:
+            found.add(f"{module}::{getattr(node, '_owner', '')}")
+    return frozenset(found)
+
+
 def _persistence_modules() -> dict[str, str]:
     """只扫 ``persistence/*.py``，不递归进 ``migrations/``。见模块 docstring。"""
     return {
@@ -385,6 +443,20 @@ def test_authorization_tables_are_written_only_at_frozen_sites() -> None:
         if site.table in AUTHZ_TABLES and site.qualified not in _AUTHZ_WRITE_SITES
     }
     assert not offenders, offenders
+
+
+def test_activation_table_is_written_only_at_its_two_frozen_sql_owners() -> None:
+    discovered = {
+        site.qualified for site in _all_sites() if site.table in ACTIVATION_TABLES
+    }
+    assert discovered == _ACTIVATION_SQL_WRITE_SITES
+
+
+def test_activation_memory_facts_are_written_only_at_frozen_owners() -> None:
+    discovered: set[str] = set()
+    for module, source in _persistence_modules().items():
+        discovered |= activation_memory_write_sites(source, module=module)
+    assert discovered == _ACTIVATION_MEMORY_WRITE_SITES
 
 
 def test_audit_table_is_written_only_at_frozen_sites() -> None:
@@ -519,6 +591,39 @@ def test_the_guard_catches_a_module_level_write_function() -> None:
         if site.table in AUTHZ_TABLES and site.qualified not in _AUTHZ_WRITE_SITES
     }
     assert offenders == {"persistence/sneak.py::sneak"}
+
+
+def test_the_activation_sql_guard_catches_a_new_write_owner() -> None:
+    source = (
+        "import sqlalchemy as sa\n"
+        "from xiaowei_agent.persistence.schema import ACTIVATION_REQUESTS\n"
+        "async def sneak(connection):\n"
+        "    await connection.execute(\n"
+        "        sa.update(ACTIVATION_REQUESTS).values(status='approved')\n"
+        "    )\n"
+    )
+    discovered = {
+        site.qualified
+        for site in write_sites(source, module="persistence/sneak.py")
+        if site.table in ACTIVATION_TABLES
+    }
+    assert discovered - _ACTIVATION_SQL_WRITE_SITES == {
+        "persistence/sneak.py::sneak"
+    }
+
+
+def test_the_activation_memory_guard_catches_a_new_write_owner() -> None:
+    source = (
+        "class Sneaky:\n"
+        "    def decide(self, request):\n"
+        "        self._state.activation_requests[request.request_id] = request\n"
+    )
+    discovered = activation_memory_write_sites(
+        source, module="persistence/sneak.py"
+    )
+    assert discovered - _ACTIVATION_MEMORY_WRITE_SITES == {
+        "persistence/sneak.py::Sneaky.decide"
+    }
 
 
 def test_the_guard_catches_a_new_private_write_method() -> None:

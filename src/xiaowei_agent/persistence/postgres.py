@@ -39,6 +39,7 @@ from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ActorTaskPageQuery,
     AdminAuditOutcome,
+    AdminAuditReasonCode,
     ApprovalRequest,
     AttemptIntent,
     ChannelKind,
@@ -68,6 +69,12 @@ from xiaowei_agent.contracts import (
     TransitionResult,
     UserStatus,
 )
+from xiaowei_agent.contracts.activation import (
+    ActivationLookup,
+    ActivationRequest,
+    ActivationStatus,
+    CreateActivationCommand,
+)
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
@@ -77,6 +84,7 @@ from xiaowei_agent.contracts.admin_audit import (
     AdminOperationContext,
 )
 from xiaowei_agent.contracts.identity import (
+    ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
@@ -84,10 +92,18 @@ from xiaowei_agent.contracts.identity import (
     DirectoryCommand,
     DirectoryPrincipalFacts,
     MigrateLegacyIdentitiesCommand,
+    RejectActivationCommand,
     RevokeRoleCommand,
     SetUserStatusCommand,
     UserAccount,
     UserRoleAssignment,
+)
+from xiaowei_agent.persistence.activation import (
+    ACTIVATION_TTL_SECONDS,
+    MAX_PENDING_ACTIVATIONS,
+    ActivationCapacityError,
+    activation_source_ref_digest,
+    activation_subject_digest,
 )
 from xiaowei_agent.persistence.admin_audit import (
     AdminAuditConflictError,
@@ -162,7 +178,10 @@ from xiaowei_agent.persistence.evidence import (
 from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
     UserDirectoryConflictError,
+    UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
+    UserDirectorySubjectUnavailableError,
+    activation_user_id,
     batch_operation_id,
     derive_audit,
     external_subject_digest,
@@ -184,6 +203,7 @@ from xiaowei_agent.persistence.plans import (
     reject_unsupported_plan_schema,
 )
 from xiaowei_agent.persistence.rows import (
+    activation_request_to_row,
     admin_audit_event_to_row,
     channel_binding_to_row,
     clarification_record_to_row,
@@ -194,6 +214,7 @@ from xiaowei_agent.persistence.rows import (
     oauth_state_to_row,
     projection_subscription_to_row,
     record_to_row,
+    row_to_activation_request,
     row_to_admin_audit_event,
     row_to_channel_binding,
     row_to_clarification_record,
@@ -208,6 +229,7 @@ from xiaowei_agent.persistence.rows import (
     web_session_to_row,
 )
 from xiaowei_agent.persistence.schema import (
+    ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     CHANNEL_BINDINGS,
     CREATED_SEQUENCE,
@@ -283,6 +305,12 @@ _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
 _OAUTH_STATE_CAPACITY_LOCK: Final = sa.text(
     "SELECT pg_advisory_xact_lock(2026091001)"
 )
+ACTIVATION_CAPACITY_LOCK_KEY: Final[int] = 2026092201
+"""激活待办全局容量的固定事务锁键，供真库并发测试抢同一把锁。"""
+
+_ACTIVATION_CAPACITY_LOCK: Final = sa.text(
+    "SELECT pg_advisory_xact_lock(:lock_key)"
+).bindparams(lock_key=ACTIVATION_CAPACITY_LOCK_KEY)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -2665,6 +2693,119 @@ _BOOTSTRAP_LOCAL_ADMIN_LOCK: Final = sa.text(
 """
 
 
+class PostgresActivationStore:
+    """激活申请的 PostgreSQL 实现；容量、收割与判重共用一个事务临界区。"""
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    @_persistence_boundary(write=True)
+    async def create_or_reuse(
+        self, *, command: CreateActivationCommand
+    ) -> ActivationRequest:
+        async with _write_transaction(self._engine) as connection:
+            await connection.execute(_ACTIVATION_CAPACITY_LOCK)
+            now = self._clock()
+            await connection.execute(
+                sa.update(ACTIVATION_REQUESTS)
+                .where(
+                    ACTIVATION_REQUESTS.c.status
+                    == ActivationStatus.PENDING.value,
+                    ACTIVATION_REQUESTS.c.expires_at <= now,
+                )
+                .values(status=ActivationStatus.EXPIRED.value)
+            )
+            pending = int(
+                await connection.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(ACTIVATION_REQUESTS)
+                    .where(
+                        ACTIVATION_REQUESTS.c.status
+                        == ActivationStatus.PENDING.value
+                    )
+                )
+                or 0
+            )
+            if pending >= MAX_PENDING_ACTIVATIONS:
+                raise ActivationCapacityError
+
+            subject_digest = activation_subject_digest(command)
+            existing = (
+                (
+                    await connection.execute(
+                        sa.select(ACTIVATION_REQUESTS).where(
+                            ACTIVATION_REQUESTS.c.tenant_id == command.tenant_id,
+                            ACTIVATION_REQUESTS.c.environment_id
+                            == command.environment_id,
+                            ACTIVATION_REQUESTS.c.provider == command.provider.value,
+                            ACTIVATION_REQUESTS.c.subject_ref_digest
+                            == subject_digest,
+                            ACTIVATION_REQUESTS.c.status
+                            == ActivationStatus.PENDING.value,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                return row_to_activation_request(existing)
+
+            request = ActivationRequest(
+                request_id=str(uuid.uuid4()),
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                provider=command.provider,
+                subject_ref=command.subject_ref,
+                subject_ref_digest=subject_digest,
+                source=command.source,
+                source_event_digest=(
+                    None
+                    if command.source_event_ref is None
+                    else activation_source_ref_digest(
+                        kind="event", reference=command.source_event_ref
+                    )
+                ),
+                source_chat_digest=(
+                    None
+                    if command.source_chat_ref is None
+                    else activation_source_ref_digest(
+                        kind="chat", reference=command.source_chat_ref
+                    )
+                ),
+                requested_at=now,
+                expires_at=now
+                + _dt.timedelta(seconds=ACTIVATION_TTL_SECONDS),
+                status=ActivationStatus.PENDING,
+            )
+            await connection.execute(
+                sa.insert(ACTIVATION_REQUESTS).values(
+                    **activation_request_to_row(request)
+                )
+            )
+            return request
+
+    @_persistence_boundary(write=False)
+    async def load(self, *, query: ActivationLookup) -> ActivationRequest | None:
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.select(ACTIVATION_REQUESTS).where(
+                            ACTIVATION_REQUESTS.c.request_id == query.request_id,
+                            ACTIVATION_REQUESTS.c.tenant_id == query.tenant_id,
+                            ACTIVATION_REQUESTS.c.environment_id
+                            == query.environment_id,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else row_to_activation_request(row)
+
+
 async def _insert_audit_event(
     connection: AsyncConnection, candidate: AdminAuditCandidate, *, now: _dt.datetime
 ) -> AdminAuditEvent | None:
@@ -2867,12 +3008,17 @@ class PostgresUserDirectoryStore:
             )
             if user_id is None:
                 return None
-            return await self._facts(
+            facts = await self._facts(
                 connection,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 environment_id=environment_id,
             )
+            if facts is None:
+                raise UserDirectorySubjectUnavailableError(
+                    "the bound subject is unavailable"
+                )
+            return facts
 
     @_persistence_boundary(write=True)
     async def apply(
@@ -2983,6 +3129,10 @@ class PostgresUserDirectoryStore:
         context: AdminOperationContext,
     ) -> tuple[AdminAuditEvent, ...]:
         now = self._clock()
+        if isinstance(command, (ApproveActivationCommand, RejectActivationCommand)):
+            return await self._decide_activation(
+                connection, command=command, context=context, now=now
+            )
         if isinstance(command, BootstrapLocalAdminCommand):
             return await self._bootstrap_in_transaction(
                 connection, command=command, context=context, now=now
@@ -3127,6 +3277,272 @@ class PostgresUserDirectoryStore:
                 now=now,
             ),
         )
+
+    async def _require_activation_admin_for_update(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        context: AdminOperationContext,
+    ) -> None:
+        if context.auth_source is not IdentitySource.LOCAL_ADMIN:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
+            )
+        account = (
+            (
+                await connection.execute(
+                    sa.select(USER_ACCOUNTS)
+                    .where(USER_ACCOUNTS.c.user_id == context.actor_user_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        assignment = (
+            (
+                await connection.execute(
+                    sa.select(USER_ROLE_ASSIGNMENTS)
+                    .where(
+                        USER_ROLE_ASSIGNMENTS.c.user_id == context.actor_user_id,
+                        USER_ROLE_ASSIGNMENTS.c.tenant_id == tenant_id,
+                        USER_ROLE_ASSIGNMENTS.c.environment_id == environment_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if (
+            account is None
+            or account["status"] != UserStatus.ACTIVE.value
+            or account["actor"] != context.actor
+            or assignment is None
+            or assignment["role"] != ProductRole.ADMIN.value
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.ACTOR_NOT_ADMIN
+            )
+
+    async def _activation_for_update(
+        self,
+        connection: AsyncConnection,
+        *,
+        request_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> ActivationRequest:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(ACTIVATION_REQUESTS)
+                    .where(ACTIVATION_REQUESTS.c.request_id == request_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.TARGET_NOT_FOUND
+            )
+        request = row_to_activation_request(row)
+        if (
+            request.tenant_id != tenant_id
+            or request.environment_id != environment_id
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.SCOPE_MISMATCH
+            )
+        return request
+
+    async def _decide_activation(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: ApproveActivationCommand | RejectActivationCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        await self._require_activation_admin_for_update(
+            connection,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        request = await self._activation_for_update(
+            connection,
+            request_id=command.request_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if request.status is not ActivationStatus.PENDING:
+            raise UserDirectoryConflictError("the activation request is terminal")
+        if request.expires_at <= now:
+            raise UserDirectoryConflictError("the activation request expired")
+
+        if isinstance(command, ApproveActivationCommand):
+            await self._approve_activation_facts(
+                connection,
+                command=command,
+                request=request,
+                context=context,
+                now=now,
+            )
+            values = {
+                "status": ActivationStatus.APPROVED.value,
+                "decided_at": now,
+                "decided_by": context.actor_user_id,
+                "approved_role": command.approved_role.value,
+            }
+        else:
+            values = {
+                "status": ActivationStatus.REJECTED.value,
+                "decided_at": now,
+                "decided_by": context.actor_user_id,
+                "approved_role": None,
+            }
+        changed = await connection.scalar(
+            sa.update(ACTIVATION_REQUESTS)
+            .where(
+                ACTIVATION_REQUESTS.c.request_id == request.request_id,
+                ACTIVATION_REQUESTS.c.tenant_id == command.tenant_id,
+                ACTIVATION_REQUESTS.c.environment_id == command.environment_id,
+                ACTIVATION_REQUESTS.c.status == ActivationStatus.PENDING.value,
+                ACTIVATION_REQUESTS.c.expires_at > now,
+            )
+            .values(**values)
+            .returning(ACTIVATION_REQUESTS.c.request_id)
+        )
+        if changed is None:
+            raise UserDirectoryConflictError("the activation request changed")
+        return (
+            await self._audit(
+                connection,
+                derive_audit(command, context, target_ref=request.request_id),
+                now=now,
+            ),
+        )
+
+    async def _approve_activation_facts(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: ApproveActivationCommand,
+        request: ActivationRequest,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> None:
+        account = (
+            (
+                await connection.execute(
+                    sa.select(USER_ACCOUNTS)
+                    .where(USER_ACCOUNTS.c.actor == command.actor)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if account is not None:
+            if (
+                account["status"] != UserStatus.ACTIVE.value
+                or account["display_name"] != command.display_name
+            ):
+                raise UserDirectoryConflictError(
+                    "the activation account conflicts"
+                )
+            user_id = str(account["user_id"])
+        else:
+            user_id = activation_user_id(
+                subject_ref_digest=request.subject_ref_digest
+            )
+            account = (
+                (
+                    await connection.execute(
+                        sa.select(USER_ACCOUNTS)
+                        .where(USER_ACCOUNTS.c.user_id == user_id)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if account is None:
+            await self._insert_account(
+                connection,
+                user_id=user_id,
+                actor=command.actor,
+                display_name=command.display_name,
+                now=now,
+            )
+        elif (
+            account["actor"] != command.actor
+            or account["display_name"] != command.display_name
+            or account["status"] != UserStatus.ACTIVE.value
+        ):
+            raise UserDirectoryConflictError("the activation account conflicts")
+
+        assignment = (
+            (
+                await connection.execute(
+                    sa.select(USER_ROLE_ASSIGNMENTS)
+                    .where(
+                        USER_ROLE_ASSIGNMENTS.c.user_id == user_id,
+                        USER_ROLE_ASSIGNMENTS.c.tenant_id == command.tenant_id,
+                        USER_ROLE_ASSIGNMENTS.c.environment_id
+                        == command.environment_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if assignment is None:
+            await self._upsert_role(
+                connection,
+                user_id=user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                role=command.approved_role,
+                created_by=context.actor_user_id,
+                now=now,
+            )
+        elif assignment["role"] != command.approved_role.value:
+            raise UserDirectoryConflictError("the existing role differs")
+
+        digest = external_subject_digest(
+            provider=IdentitySource.FEISHU,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            subject_ref=request.subject_ref,
+        )
+        subject_owner = await connection.scalar(
+            sa.select(EXTERNAL_IDENTITIES.c.user_id)
+            .where(
+                EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
+                EXTERNAL_IDENTITIES.c.tenant_id == command.tenant_id,
+                EXTERNAL_IDENTITIES.c.environment_id == command.environment_id,
+                EXTERNAL_IDENTITIES.c.subject_ref_digest == digest,
+            )
+            .with_for_update()
+        )
+        if subject_owner is None:
+            await self._bind_subject(
+                connection,
+                user_id=user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                subject_ref=request.subject_ref,
+                now=now,
+            )
+        elif subject_owner != user_id:
+            raise UserDirectoryConflictError("the activation subject conflicts")
 
     async def _bootstrap_in_transaction(
         self,

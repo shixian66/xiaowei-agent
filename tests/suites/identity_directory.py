@@ -19,6 +19,12 @@ from typing import Any
 
 import pytest
 
+from xiaowei_agent.contracts.activation import (
+    ActivationLookup,
+    ActivationSource,
+    ActivationStatus,
+    CreateActivationCommand,
+)
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditDenial,
     AdminAuditTerminal,
@@ -40,12 +46,14 @@ from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_ENVIRONMENT_ID,
     LOCAL_ADMIN_TENANT_ID,
     LOCAL_ADMIN_USER_ID,
+    ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
     CreateUserCommand,
     LegacyIdentityMigrationEntry,
     MigrateLegacyIdentitiesCommand,
+    RejectActivationCommand,
     RevokeRoleCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
@@ -57,7 +65,9 @@ from xiaowei_agent.persistence.admin_audit import (
 from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
     UserDirectoryConflictError,
+    UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
+    UserDirectorySubjectUnavailableError,
     batch_operation_id,
     external_subject_digest,
 )
@@ -83,6 +93,40 @@ def context(operation_id: str = "op-1") -> AdminOperationContext:
         actor_user_id=_ADMIN_USER_ID,
         actor=_ADMIN_ACTOR,
         auth_source=IdentitySource.LOCAL_ADMIN,
+    )
+
+
+def admin_context(operation_id: str) -> AdminOperationContext:
+    return AdminOperationContext(
+        operation_id=operation_id,
+        actor_user_id=LOCAL_ADMIN_USER_ID,
+        actor=LOCAL_ADMIN_ACTOR,
+        auth_source=IdentitySource.LOCAL_ADMIN,
+    )
+
+
+def activation_command(
+    subject_ref: str = "ou_pending", *, environment_id: str = ENVIRONMENT
+) -> CreateActivationCommand:
+    return CreateActivationCommand(
+        tenant_id=TENANT,
+        environment_id=environment_id,
+        provider=IdentitySource.FEISHU,
+        subject_ref=subject_ref,
+        source=ActivationSource.WEB_LOGIN,
+    )
+
+
+async def prepare_activation_admin(directory: Any) -> None:
+    await directory.apply(command=bootstrap(), context=context("op-bootstrap"))
+    await directory.apply(
+        command=AssignRoleCommand(
+            user_id=LOCAL_ADMIN_USER_ID,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            role=ProductRole.ADMIN,
+        ),
+        context=context("op-admin-scope"),
     )
 
 
@@ -345,7 +389,7 @@ async def test_one_subject_ref_cannot_bind_two_accounts(directory: Any) -> None:
         )
 
 
-async def test_disabled_account_stops_resolving_on_the_next_request(
+async def test_disabled_bound_account_is_distinct_from_an_unknown_subject(
     directory: Any,
 ) -> None:
     """停用即刻生效：解析不再返回任何授权事实。"""
@@ -379,15 +423,42 @@ async def test_disabled_account_stops_resolving_on_the_next_request(
         context=context("op-3"),
     )
 
-    assert (
+    with pytest.raises(UserDirectorySubjectUnavailableError):
         await directory.resolve_by_subject(
             provider=IdentitySource.FEISHU,
             tenant_id=TENANT,
             environment_id=ENVIRONMENT,
             subject_ref="ou_alice",
         )
-        is None
+
+
+async def test_bound_account_without_a_current_scope_role_is_unavailable(
+    directory: Any,
+) -> None:
+    await directory.apply(command=create_user("alice"), context=context("op-1"))
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="alice",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            subject_ref="ou_alice",
+        ),
+        context=context("op-2"),
     )
+    await directory.apply(
+        command=RevokeRoleCommand(
+            user_id="alice", tenant_id=TENANT, environment_id=ENVIRONMENT
+        ),
+        context=context("op-3"),
+    )
+
+    with pytest.raises(UserDirectorySubjectUnavailableError):
+        await directory.resolve_by_subject(
+            provider=IdentitySource.FEISHU,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            subject_ref="ou_alice",
+        )
 
 
 async def test_a_binding_in_one_scope_does_not_resolve_in_another(
@@ -698,6 +769,535 @@ async def test_a_terminal_event_without_a_started_event_is_refused(audit: Any) -
         )
 
 
+async def test_activation_approval_is_atomic_and_derives_the_audit_matrix(
+    directory: Any, activation_store: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+
+    (event,) = await directory.apply(
+        command=ApproveActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            actor="new@example.com",
+            display_name="New User",
+            approved_role=ProductRole.OPERATOR,
+        ),
+        context=admin_context("op-approve"),
+    )
+
+    decided = await activation_store.load(
+        query=ActivationLookup(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        )
+    )
+    assert decided is not None
+    assert decided.status is ActivationStatus.APPROVED
+    assert decided.approved_role is ProductRole.OPERATOR
+    resolved = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+        subject_ref="ou_pending",
+    )
+    assert resolved is not None
+    assert resolved.account.actor == "new@example.com"
+    assert resolved.assignment.role is ProductRole.OPERATOR
+    assert event.action is AdminAuditAction.ACTIVATION_APPROVED
+    assert event.target_kind is AdminAuditTargetKind.ACTIVATION
+    assert event.effect.role is ProductRole.OPERATOR
+    assert event.effect.status is UserStatus.ACTIVE
+
+
+async def test_activation_approval_reuses_an_active_account_with_the_same_actor(
+    directory: Any, activation_store: Any, directory_probe: Any
+) -> None:
+    """既有账号是 actor 的全局真源；批准不能为同一 actor 再造一个摘要 ID。"""
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="legacy-alice",
+            actor="alice@example.com",
+            display_name="Alice",
+            tenant_id=TENANT,
+            environment_id="other-env",
+            role=ProductRole.USER,
+        ),
+        context=admin_context("op-create-existing-actor"),
+    )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+
+    await directory.apply(
+        command=ApproveActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            actor="alice@example.com",
+            display_name="Alice",
+        ),
+        context=admin_context("op-approve-existing-actor"),
+    )
+
+    resolved = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+        subject_ref="ou_pending",
+    )
+    assert resolved is not None
+    assert resolved.account.user_id == "legacy-alice"
+    assert resolved.assignment.role is ProductRole.USER
+    facts = await directory_probe.facts()
+    assert "legacy-alice" in facts["accounts"]
+    assert len(facts["accounts"]) == 2  # local admin + reused account
+
+
+async def test_activation_approval_keeps_an_existing_matching_role(
+    directory: Any, activation_store: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="existing-user",
+            actor="existing@example.com",
+            display_name="Existing User",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            role=ProductRole.USER,
+        ),
+        context=admin_context("op-create-existing-role"),
+    )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+
+    await directory.apply(
+        command=ApproveActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            actor="existing@example.com",
+            display_name="Existing User",
+            approved_role=ProductRole.USER,
+        ),
+        context=admin_context("op-approve-existing-role"),
+    )
+
+    resolved = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+        subject_ref="ou_pending",
+    )
+    assert resolved is not None
+    assert resolved.account.user_id == "existing-user"
+    assert resolved.assignment.role is ProductRole.USER
+
+
+@pytest.mark.parametrize(
+    ("existing_display_name", "existing_status"),
+    [
+        ("Different Alice", UserStatus.ACTIVE),
+        ("Alice", UserStatus.DISABLED),
+    ],
+)
+async def test_activation_approval_refuses_an_incompatible_existing_actor(
+    directory: Any,
+    activation_store: Any,
+    directory_probe: Any,
+    existing_display_name: str,
+    existing_status: UserStatus,
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="legacy-alice",
+            actor="alice@example.com",
+            display_name=existing_display_name,
+            tenant_id=TENANT,
+            environment_id="other-env",
+            role=ProductRole.USER,
+        ),
+        context=admin_context("op-create-incompatible-actor"),
+    )
+    if existing_status is UserStatus.DISABLED:
+        await directory.apply(
+            command=SetUserStatusCommand(
+                user_id="legacy-alice",
+                tenant_id=TENANT,
+                environment_id="other-env",
+                status=UserStatus.DISABLED,
+            ),
+            context=admin_context("op-disable-existing-actor"),
+        )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryConflictError):
+        await directory.apply(
+            command=ApproveActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                actor="alice@example.com",
+                display_name="Alice",
+            ),
+            context=admin_context("op-approve-incompatible-actor"),
+        )
+
+    assert await directory_probe.facts() == before
+
+
+@pytest.mark.parametrize("existing_role", [ProductRole.OPERATOR, ProductRole.ADMIN])
+async def test_activation_approval_never_overwrites_an_existing_role(
+    directory: Any,
+    activation_store: Any,
+    directory_probe: Any,
+    existing_role: ProductRole,
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="legacy-alice",
+            actor="alice@example.com",
+            display_name="Alice",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            role=existing_role,
+        ),
+        context=admin_context("op-create-role-conflict"),
+    )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryConflictError):
+        await directory.apply(
+            command=ApproveActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                actor="alice@example.com",
+                display_name="Alice",
+                approved_role=ProductRole.USER,
+            ),
+            context=admin_context("op-approve-role-conflict"),
+        )
+
+    assert await directory_probe.facts() == before
+
+
+async def test_activation_approval_rolls_back_if_the_subject_became_bound(
+    directory: Any, activation_store: Any, directory_probe: Any
+) -> None:
+    """申请后出现的身份绑定由事务内事实裁决，不能留下半个新账号。"""
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="existing-owner",
+            actor="owner@example.com",
+            display_name="Existing Owner",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            role=ProductRole.USER,
+        ),
+        context=admin_context("op-create-existing-owner"),
+    )
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="existing-owner",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            subject_ref="ou_pending",
+        ),
+        context=admin_context("op-bind-existing-owner"),
+    )
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryConflictError):
+        await directory.apply(
+            command=ApproveActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                actor="new@example.com",
+                display_name="New User",
+            ),
+            context=admin_context("op-approve-bound-subject"),
+        )
+
+    assert await directory_probe.facts() == before
+
+
+async def test_same_subject_can_be_approved_in_two_scopes_without_fact_leakage(
+    directory: Any, activation_store: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=AssignRoleCommand(
+            user_id=LOCAL_ADMIN_USER_ID,
+            tenant_id=TENANT,
+            environment_id=OTHER_ENVIRONMENT,
+            role=ProductRole.ADMIN,
+        ),
+        context=admin_context("op-admin-other-environment"),
+    )
+    first = await activation_store.create_or_reuse(command=activation_command())
+    second = await activation_store.create_or_reuse(
+        command=activation_command(environment_id=OTHER_ENVIRONMENT)
+    )
+
+    for request, environment, operation_id in (
+        (first, ENVIRONMENT, "op-approve-first-scope"),
+        (second, OTHER_ENVIRONMENT, "op-approve-second-scope"),
+    ):
+        await directory.apply(
+            command=ApproveActivationCommand(
+                request_id=request.request_id,
+                tenant_id=TENANT,
+                environment_id=environment,
+                actor="same@example.com",
+                display_name="Same User",
+            ),
+            context=admin_context(operation_id),
+        )
+
+    first_resolved = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+        subject_ref="ou_pending",
+    )
+    second_resolved = await directory.resolve_by_subject(
+        provider=IdentitySource.FEISHU,
+        tenant_id=TENANT,
+        environment_id=OTHER_ENVIRONMENT,
+        subject_ref="ou_pending",
+    )
+    assert first_resolved is not None
+    assert second_resolved is not None
+    assert first_resolved.account.user_id == second_resolved.account.user_id
+    assert first_resolved.assignment.environment_id == ENVIRONMENT
+    assert second_resolved.assignment.environment_id == OTHER_ENVIRONMENT
+
+
+async def test_activation_rejection_writes_only_terminal_and_empty_effect(
+    directory: Any, activation_store: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+
+    (event,) = await directory.apply(
+        command=RejectActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        ),
+        context=admin_context("op-reject"),
+    )
+
+    decided = await activation_store.load(
+        query=ActivationLookup(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        )
+    )
+    assert decided is not None
+    assert decided.status is ActivationStatus.REJECTED
+    assert event.action is AdminAuditAction.ACTIVATION_REJECTED
+    assert event.target_kind is AdminAuditTargetKind.ACTIVATION
+    assert event.effect.is_empty
+
+
+async def test_activation_decision_revalidates_the_current_admin(
+    directory: Any, activation_store: Any
+) -> None:
+    pending = await activation_store.create_or_reuse(command=activation_command())
+
+    with pytest.raises(UserDirectoryDecisionDeniedError) as caught:
+        await directory.apply(
+            command=RejectActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+            ),
+            context=context("op-not-admin"),
+        )
+
+    assert caught.value.reason_code is AdminAuditReasonCode.ACTOR_NOT_ADMIN
+    still_pending = await activation_store.load(
+        query=ActivationLookup(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        )
+    )
+    assert still_pending is not None
+    assert still_pending.status is ActivationStatus.PENDING
+
+
+async def test_activation_decision_hides_a_request_from_another_scope(
+    directory: Any, activation_store: Any, directory_probe: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=AssignRoleCommand(
+            user_id=LOCAL_ADMIN_USER_ID,
+            tenant_id=TENANT,
+            environment_id="other-env",
+            role=ProductRole.ADMIN,
+        ),
+        context=admin_context("op-admin-other-scope"),
+    )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryDecisionDeniedError) as caught:
+        await directory.apply(
+            command=RejectActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id="other-env",
+            ),
+            context=admin_context("op-wrong-scope"),
+        )
+
+    assert caught.value.reason_code is AdminAuditReasonCode.SCOPE_MISMATCH
+    assert await directory_probe.facts() == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["ordinary-user", "disabled-admin", "actor-mismatch", "external-auth"],
+)
+async def test_activation_decision_rejects_every_non_current_admin_shape(
+    directory: Any,
+    activation_store: Any,
+    directory_probe: Any,
+    case: str,
+) -> None:
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    decision_context = admin_context(f"op-denied-{case}")
+    expected = AdminAuditReasonCode.ACTOR_NOT_ADMIN
+
+    if case == "ordinary-user":
+        await directory.apply(
+            command=CreateUserCommand(
+                user_id="ordinary",
+                actor="ordinary@example.com",
+                display_name="Ordinary",
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                role=ProductRole.USER,
+            ),
+            context=admin_context("op-create-ordinary"),
+        )
+        decision_context = AdminOperationContext(
+            operation_id="op-denied-ordinary",
+            actor_user_id="ordinary",
+            actor="ordinary@example.com",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        )
+    elif case == "disabled-admin":
+        await directory.apply(
+            command=SetUserStatusCommand(
+                user_id=LOCAL_ADMIN_USER_ID,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                status=UserStatus.DISABLED,
+            ),
+            context=admin_context("op-disable-admin"),
+        )
+    elif case == "actor-mismatch":
+        decision_context = AdminOperationContext(
+            operation_id="op-denied-actor",
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor="not-the-admin",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        )
+    else:
+        decision_context = AdminOperationContext(
+            operation_id="op-denied-source",
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor=LOCAL_ADMIN_ACTOR,
+            auth_source=IdentitySource.FEISHU,
+        )
+        expected = AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
+
+    before = await directory_probe.facts()
+    with pytest.raises(UserDirectoryDecisionDeniedError) as caught:
+        await directory.apply(
+            command=RejectActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+            ),
+            context=decision_context,
+        )
+
+    assert caught.value.reason_code is expected
+    assert await directory_probe.facts() == before
+
+
+async def test_terminal_activation_replay_is_a_conflict_without_side_effects(
+    directory: Any, activation_store: Any, directory_probe: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    command = RejectActivationCommand(
+        request_id=pending.request_id,
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+    )
+    await directory.apply(command=command, context=admin_context("op-reject"))
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryConflictError):
+        await directory.apply(
+            command=command, context=admin_context("op-reject-replay")
+        )
+    assert await directory_probe.facts() == before
+
+
+async def test_activation_approval_rolls_back_the_request_with_the_directory(
+    directory: Any,
+    activation_store: Any,
+    directory_probe: Any,
+    broken_audit_derivation: Any,
+) -> None:
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    before = await directory_probe.facts()
+    broken_audit_derivation()
+
+    with pytest.raises(RuntimeError):
+        await directory.apply(
+            command=ApproveActivationCommand(
+                request_id=pending.request_id,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                actor="new@example.com",
+                display_name="New User",
+                approved_role=ProductRole.USER,
+            ),
+            context=admin_context("op-approve"),
+        )
+
+    assert await directory_probe.facts() == before
+    still_pending = await activation_store.load(
+        query=ActivationLookup(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        )
+    )
+    assert still_pending is not None
+    assert still_pending.status is ActivationStatus.PENDING
+
+
 IDENTITY_DIRECTORY_CASES = (
     test_creating_a_user_persists_the_account_and_a_derived_audit_event,
     test_the_audit_event_points_at_the_user_the_command_changed,
@@ -709,7 +1309,8 @@ IDENTITY_DIRECTORY_CASES = (
     test_two_accounts_cannot_claim_the_same_actor,
     test_commands_against_a_missing_account_are_not_found,
     test_one_subject_ref_cannot_bind_two_accounts,
-    test_disabled_account_stops_resolving_on_the_next_request,
+    test_disabled_bound_account_is_distinct_from_an_unknown_subject,
+    test_bound_account_without_a_current_scope_role_is_unavailable,
     test_a_binding_in_one_scope_does_not_resolve_in_another,
     test_unknown_subject_resolves_to_nothing,
     test_bootstrap_creates_account_role_and_credential_together,
@@ -724,6 +1325,19 @@ IDENTITY_DIRECTORY_CASES = (
     test_a_second_event_at_the_same_stage_is_rejected,
     test_a_denied_event_records_the_refusal_without_claiming_an_effect,
     test_a_terminal_event_without_a_started_event_is_refused,
+    test_activation_approval_is_atomic_and_derives_the_audit_matrix,
+    test_activation_approval_reuses_an_active_account_with_the_same_actor,
+    test_activation_approval_keeps_an_existing_matching_role,
+    test_activation_approval_refuses_an_incompatible_existing_actor,
+    test_activation_approval_never_overwrites_an_existing_role,
+    test_activation_approval_rolls_back_if_the_subject_became_bound,
+    test_same_subject_can_be_approved_in_two_scopes_without_fact_leakage,
+    test_activation_rejection_writes_only_terminal_and_empty_effect,
+    test_activation_decision_revalidates_the_current_admin,
+    test_activation_decision_hides_a_request_from_another_scope,
+    test_activation_decision_rejects_every_non_current_admin_shape,
+    test_terminal_activation_replay_is_a_conflict_without_side_effects,
+    test_activation_approval_rolls_back_the_request_with_the_directory,
 )
 
 ALL_GROUPS = {"identity_directory": IDENTITY_DIRECTORY_CASES}

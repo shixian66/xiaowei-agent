@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
+    from xiaowei_agent.persistence.activation import ActivationStore
     from xiaowei_agent.persistence.admin_audit import AdminAuditStore
     from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.clarification_records import (
@@ -71,6 +72,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import (
+        InMemoryActivationStore,
         InMemoryAdminAuditStore,
         InMemoryChannelStore,
         InMemoryTaskStore,
@@ -84,6 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
+        PostgresActivationStore,
         PostgresAdminAuditStore,
         PostgresChannelStore,
         PostgresClarificationRecordStore,
@@ -184,6 +187,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """两种审计实现都必须保持同一套 append-only 窄写协议。"""
         memory_port: AdminAuditStore = memory
         postgres_port: AdminAuditStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _activation_store_anchors(
+        memory: "InMemoryActivationStore",
+        postgres: "PostgresActivationStore",
+    ) -> None:
+        """两种激活实现都只能创建/读取待办，不能决定授权。"""
+        memory_port: ActivationStore = memory
+        postgres_port: ActivationStore = postgres
         _ = (memory_port, postgres_port)
 
     def _lease_renewal_anchor(store: "PostgresTaskStore") -> None:

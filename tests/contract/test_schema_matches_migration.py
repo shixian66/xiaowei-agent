@@ -27,6 +27,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
 from xiaowei_agent.persistence.schema import (
+    ADMIN_AUDIT_EVENTS,
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
@@ -73,6 +74,8 @@ _ALTERED_AFTER_CREATION = (
     # schema.py——这正是冻结历史快照应有的样子。新列与新外键改由
     # test_altered_table_head_has_all_declared_columns_and_constraints 覆盖。
     LOCAL_ADMINS,
+    # rev_0015 adds activation actions to four audit CHECK constraints.
+    ADMIN_AUDIT_EVENTS,
 )
 _RENAMED_TABLES = {
     "task_accepted_intents": "task_interaction_artifacts",
@@ -249,9 +252,10 @@ def test_rev_0014_has_the_expected_revision_chain() -> None:
 
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0014_identity_admin_audit as revision,
+        rev_0015_activation_requests as revision,
     )
 
+    assert revision.down_revision == "0014_identity_admin_audit"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )

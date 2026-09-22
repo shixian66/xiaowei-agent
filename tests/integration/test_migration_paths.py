@@ -990,6 +990,112 @@ async def test_rev_0014_downgrade_needs_no_authorization_on_an_empty_directory(
         await _restore_head(clean_database, run_upgrade)
 
 
+async def _seed_activation_request(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO activation_requests "
+                "(request_id, tenant_id, environment_id, provider, subject_ref, "
+                "subject_ref_digest, source, source_event_digest, source_chat_digest, "
+                "requested_at, expires_at, status, decided_at, decided_by, "
+                "approved_role) VALUES "
+                "('activation-1', 't-1', 'dev', 'feishu', 'ou_subject', :digest, "
+                "'web_login', NULL, NULL, now(), now() + interval '1 day', "
+                "'pending', NULL, NULL, NULL)"
+            ),
+            {"digest": "b" * 64},
+        )
+
+
+async def test_rev_0015_downgrade_needs_no_authorization_when_empty(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    """正常对照：空表能降级，避免把安全门写成无条件拒绝。"""
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(
+                run_downgrade, "0014_identity_admin_audit"
+            )
+        assert "activation_requests" not in await _table_names(clean_database)
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+    assert "activation_requests" in await _table_names(clean_database)
+
+
+async def test_rev_0015_downgrade_guards_requests_with_exact_counts(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        await _seed_activation_request(clean_database)
+        with pytest.raises(MigrationSafetyError) as exc_info:
+            async with clean_database.begin() as connection:
+                await connection.run_sync(
+                    run_downgrade, "0014_identity_admin_audit"
+                )
+        assert exc_info.value.counts == (
+            ("activation_requests", 1),
+            ("activation_audit", 0),
+        )
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            ) == _head_revision()
+            assert await connection.scalar(
+                sa.text("SELECT count(*) FROM activation_requests")
+            ) == 1
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(
+                run_downgrade, "0014_identity_admin_audit", True
+            )
+        assert "activation_requests" not in await _table_names(clean_database)
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+    assert "activation_requests" in await _table_names(clean_database)
+
+
+async def test_rev_0015_never_discards_activation_audit_even_when_authorized(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        await _insert_audit_event(
+            clean_database,
+            action="activation_rejected",
+            target_kind="activation",
+            outcome="denied",
+            reason_code="conflict",
+            effect_role=None,
+        )
+        with pytest.raises(MigrationSafetyError) as exc_info:
+            async with clean_database.begin() as connection:
+                await connection.run_sync(
+                    run_downgrade, "0014_identity_admin_audit", True
+                )
+        assert exc_info.value.counts == (
+            ("activation_requests", 0),
+            ("activation_audit", 1),
+        )
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            ) == _head_revision()
+            assert await connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM admin_audit_events "
+                    "WHERE action = 'activation_rejected'"
+                )
+            ) == 1
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+    assert "activation_requests" in await _table_names(clean_database)
+
+
 async def _insert_audit_event(engine: AsyncEngine, **values: Any) -> None:
     row = {
         "event_id": "e-1",

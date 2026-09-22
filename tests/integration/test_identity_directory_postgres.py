@@ -11,15 +11,20 @@ import datetime as dt
 
 import pytest
 import sqlalchemy as sa
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import create_async_engine
 from tests.suites.identity_directory import (
     IDENTITY_DIRECTORY_CASES,
     TENANT,
+    activation_command,
+    admin_context,
     bind,
     context,
     create_user,
+    prepare_activation_admin,
 )
 
+from xiaowei_agent.contracts.admin_audit import AdminOperationContext
 from xiaowei_agent.contracts.enums import (
     AdminAuditAction,
     AdminAuditOutcome,
@@ -31,13 +36,17 @@ from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_ENVIRONMENT_ID,
     LOCAL_ADMIN_TENANT_ID,
     LOCAL_ADMIN_USER_ID,
+    ApproveActivationCommand,
     BindExternalIdentityCommand,
+    CreateUserCommand,
     UnbindExternalIdentityCommand,
 )
 from xiaowei_agent.persistence import postgres
 from xiaowei_agent.persistence.errors import PersistenceIntegrityError
 from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
+    UserDirectoryConflictError,
+    UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
 )
 from xiaowei_agent.persistence.local_admin import (
@@ -45,12 +54,15 @@ from xiaowei_agent.persistence.local_admin import (
     ChangePasswordCommand,
     PostgresLocalAdminStore,
 )
+from xiaowei_agent.persistence.migrations.runner import alembic_config
 from xiaowei_agent.persistence.postgres import (
     BOOTSTRAP_LOCAL_ADMIN_LOCK_KEY,
+    PostgresActivationStore,
     PostgresAdminAuditStore,
     PostgresUserDirectoryStore,
 )
 from xiaowei_agent.persistence.schema import (
+    ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     EXTERNAL_IDENTITIES,
     LOCAL_ADMINS,
@@ -63,6 +75,12 @@ _ROTATED_PASSWORD_HASH = "rotated" + "-argon2id-digest"
 _W1A_TABLES = (USER_ACCOUNTS, USER_ROLE_ASSIGNMENTS, ADMIN_AUDIT_EVENTS)
 
 
+def _head_revision() -> str:
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head is not None
+    return head
+
+
 @pytest.fixture
 def directory(clean_database, clock):
     return PostgresUserDirectoryStore(engine=clean_database, clock=clock)
@@ -71,6 +89,11 @@ def directory(clean_database, clock):
 @pytest.fixture
 def audit(clean_database, clock):
     return PostgresAdminAuditStore(engine=clean_database, clock=clock)
+
+
+@pytest.fixture
+def activation_store(clean_database, clock):
+    return PostgresActivationStore(engine=clean_database, clock=clock)
 
 
 @pytest.fixture
@@ -169,6 +192,15 @@ def directory_probe(clean_database):
                     "roles": frozenset(tuple(row) for row in roles),
                     "bindings": frozenset(tuple(row) for row in bindings),
                     "audits": frozenset(audits.scalars()),
+                    "activations": frozenset(
+                        tuple(row)
+                        for row in await connection.execute(
+                            sa.select(
+                                ACTIVATION_REQUESTS.c.request_id,
+                                ACTIVATION_REQUESTS.c.status,
+                            )
+                        )
+                    ),
                 }
 
     return _Probe()
@@ -371,7 +403,7 @@ async def test_an_already_seeded_database_gets_its_directory_backfilled_on_upgra
                     " WHERE table_name = 'local_admins' AND column_name = 'user_id'"
                 )
             )
-        assert revision == "0014_identity_admin_audit"
+        assert revision == _head_revision()
         assert columns == 1
 
 
@@ -451,6 +483,168 @@ async def _wait_until_a_backend_waits_for_an_advisory_lock(
             return True
         await asyncio.sleep(0.02)
     return False
+
+
+async def test_two_admins_cannot_both_approve_one_activation(
+    directory, activation_store, clean_database, clock
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=CreateUserCommand(
+            user_id="admin-two",
+            actor="admin-two@example.com",
+            display_name="Admin Two",
+            tenant_id=TENANT,
+            environment_id="env-a",
+            role=ProductRole.ADMIN,
+        ),
+        context=admin_context("op-create-admin-two"),
+    )
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    command = ApproveActivationCommand(
+        request_id=pending.request_id,
+        tenant_id=TENANT,
+        environment_id="env-a",
+        actor="approved@example.com",
+        display_name="Approved User",
+    )
+    stores = (
+        PostgresUserDirectoryStore(engine=clean_database, clock=clock),
+        PostgresUserDirectoryStore(engine=clean_database, clock=clock),
+    )
+    contexts = (
+        admin_context("op-concurrent-approve-one"),
+        AdminOperationContext(
+            operation_id="op-concurrent-approve-two",
+            actor_user_id="admin-two",
+            actor="admin-two@example.com",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        ),
+    )
+
+    results = await asyncio.gather(
+        stores[0].apply(command=command, context=contexts[0]),
+        stores[1].apply(command=command, context=contexts[1]),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(item, tuple) for item in results) == 1
+    assert sum(isinstance(item, UserDirectoryConflictError) for item in results) == 1
+    async with clean_database.connect() as connection:
+        approved = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(ACTIVATION_REQUESTS)
+            .where(ACTIVATION_REQUESTS.c.status == "approved")
+        )
+        activation_audits = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(ADMIN_AUDIT_EVENTS)
+            .where(
+                ADMIN_AUDIT_EVENTS.c.action
+                == AdminAuditAction.ACTIVATION_APPROVED.value
+            )
+        )
+        bound = await connection.scalar(
+            sa.select(sa.func.count()).select_from(EXTERNAL_IDENTITIES)
+        )
+    assert approved == 1
+    assert activation_audits == 1
+    assert bound == 1
+
+
+@pytest.mark.parametrize(
+    "action",
+    [AdminAuditAction.ACTIVATION_APPROVED, AdminAuditAction.ACTIVATION_REJECTED],
+)
+async def test_postgres_rejects_a_started_activation_audit(
+    clean_database, action: AdminAuditAction
+) -> None:
+    """Python 契约被绕过时，rev_0015 的 CHECK 仍独立拒绝两阶段激活动作。"""
+    with pytest.raises(sa.exc.IntegrityError):
+        async with clean_database.begin() as connection:
+            await connection.execute(
+                sa.insert(ADMIN_AUDIT_EVENTS).values(
+                    event_id=f"started-{action.value}",
+                    operation_id=f"op-started-{action.value}",
+                    tenant_id=TENANT,
+                    environment_id="env-a",
+                    actor_user_id=LOCAL_ADMIN_USER_ID,
+                    actor="admin",
+                    auth_source=IdentitySource.LOCAL_ADMIN.value,
+                    action=action.value,
+                    target_kind=AdminAuditTargetKind.ACTIVATION.value,
+                    target_ref_digest="a" * 64,
+                    outcome=AdminAuditOutcome.STARTED.value,
+                    reason_code=None,
+                    effect_role=None,
+                    effect_status=None,
+                    created_at=dt.datetime(2026, 9, 2, tzinfo=dt.UTC),
+                )
+            )
+
+
+async def test_revoked_admin_cannot_approve_after_waiting_on_the_role_lock(
+    directory, activation_store, clean_database, postgres_dsn
+) -> None:
+    """撤权先线性化时，审批必须在事务内重读角色并关闭。"""
+    await prepare_activation_admin(directory)
+    pending = await activation_store.create_or_reuse(command=activation_command())
+    rival = create_async_engine(postgres_dsn, poolclass=sa.pool.NullPool)
+    connection = await rival.connect()
+    transaction = await connection.begin()
+    try:
+        await connection.execute(
+            sa.delete(USER_ROLE_ASSIGNMENTS).where(
+                USER_ROLE_ASSIGNMENTS.c.user_id == LOCAL_ADMIN_USER_ID,
+                USER_ROLE_ASSIGNMENTS.c.tenant_id == TENANT,
+                USER_ROLE_ASSIGNMENTS.c.environment_id == "env-a",
+            )
+        )
+
+        async def approve() -> object:
+            try:
+                return await directory.apply(
+                    command=ApproveActivationCommand(
+                        request_id=pending.request_id,
+                        tenant_id=TENANT,
+                        environment_id="env-a",
+                        actor="approved@example.com",
+                        display_name="Approved User",
+                    ),
+                    context=admin_context("op-revoked-admin-approve"),
+                )
+            except UserDirectoryDecisionDeniedError as error:
+                return error
+
+        task = asyncio.create_task(approve())
+        assert await _wait_until_a_backend_blocks(clean_database), (
+            "审批没有在角色行锁上等待——用例没有打开撤权竞态窗口"
+        )
+        await transaction.commit()
+        result = await task
+    finally:
+        if transaction.is_active:
+            await transaction.rollback()
+        await connection.close()
+        await rival.dispose()
+
+    assert isinstance(result, UserDirectoryDecisionDeniedError)
+    async with clean_database.connect() as check:
+        request_status = await check.scalar(
+            sa.select(ACTIVATION_REQUESTS.c.status).where(
+                ACTIVATION_REQUESTS.c.request_id == pending.request_id
+            )
+        )
+        activation_audits = await check.scalar(
+            sa.select(sa.func.count())
+            .select_from(ADMIN_AUDIT_EVENTS)
+            .where(
+                ADMIN_AUDIT_EVENTS.c.action
+                == AdminAuditAction.ACTIVATION_APPROVED.value
+            )
+        )
+    assert request_status == "pending"
+    assert activation_audits == 0
 
 
 async def test_unbinding_a_subject_another_transaction_already_removed_is_not_found(

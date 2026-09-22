@@ -37,6 +37,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.capabilities.target
     xiaowei_agent.config
     xiaowei_agent.contracts
+    xiaowei_agent.contracts.activation
     xiaowei_agent.contracts.admin_audit
     xiaowei_agent.contracts.answerability
     xiaowei_agent.contracts.approval
@@ -88,6 +89,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.interfaces.provider_consumption
     xiaowei_agent.log
     xiaowei_agent.persistence
+    xiaowei_agent.persistence.activation
     xiaowei_agent.persistence.local_admin
     xiaowei_agent.persistence.admin_audit
     xiaowei_agent.persistence.identity

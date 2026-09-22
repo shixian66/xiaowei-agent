@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from xiaowei_agent.contracts.enums import WebMode
+from xiaowei_agent.contracts.identity import BoundedId
 from xiaowei_agent.redaction import safe_error_details
 
 ENV_PREFIX: Final[str] = "XIAOWEI_"
@@ -232,7 +233,7 @@ class Settings(BaseModel):
     # 这正是"逐个模型配置会漏"的又一个实例。
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
-    environment_id: StrictStr
+    environment_id: BoundedId
     actor: StrictStr = "local-developer"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     lease_ttl_seconds: int = Field(default=60, gt=0)

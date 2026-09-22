@@ -46,6 +46,12 @@ from xiaowei_agent.contracts import (
     TraceEvent,
     TransitionResult,
 )
+from xiaowei_agent.contracts.activation import (
+    ActivationLookup,
+    ActivationRequest,
+    ActivationStatus,
+    CreateActivationCommand,
+)
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
@@ -56,10 +62,12 @@ from xiaowei_agent.contracts.admin_audit import (
 )
 from xiaowei_agent.contracts.enums import (
     AdminAuditOutcome,
+    AdminAuditReasonCode,
     ProductRole,
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
@@ -68,11 +76,19 @@ from xiaowei_agent.contracts.identity import (
     DirectoryPrincipalFacts,
     ExternalIdentity,
     MigrateLegacyIdentitiesCommand,
+    RejectActivationCommand,
     RevokeRoleCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
     UserAccount,
     UserRoleAssignment,
+)
+from xiaowei_agent.persistence.activation import (
+    ACTIVATION_TTL_SECONDS,
+    MAX_PENDING_ACTIVATIONS,
+    ActivationCapacityError,
+    activation_source_ref_digest,
+    activation_subject_digest,
 )
 from xiaowei_agent.persistence.admin_audit import (
     AdminAuditConflictError,
@@ -131,7 +147,10 @@ from xiaowei_agent.persistence.decisions import (
 from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
     UserDirectoryConflictError,
+    UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
+    UserDirectorySubjectUnavailableError,
+    activation_user_id,
     batch_operation_id,
     derive_audit,
     external_subject_digest,
@@ -540,6 +559,95 @@ class InMemoryProviderStateStore:
             )
 
 
+class InMemoryActivationStore:
+    """``ActivationStore`` 的单进程实现；与目录 Store 共用状态与锁。"""
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    async def create_or_reuse(
+        self, *, command: CreateActivationCommand
+    ) -> ActivationRequest:
+        async with self._lock:
+            now = self._clock()
+            for request_id, request in tuple(self._state.activation_requests.items()):
+                if (
+                    request.status is ActivationStatus.PENDING
+                    and request.expires_at <= now
+                ):
+                    self._state.activation_requests[request_id] = request.model_copy(
+                        update={"status": ActivationStatus.EXPIRED}
+                    )
+
+            pending = sum(
+                request.status is ActivationStatus.PENDING
+                for request in self._state.activation_requests.values()
+            )
+            if pending >= MAX_PENDING_ACTIVATIONS:
+                raise ActivationCapacityError
+
+            subject_digest = activation_subject_digest(command)
+            for request in self._state.activation_requests.values():
+                if (
+                    request.status is ActivationStatus.PENDING
+                    and request.tenant_id == command.tenant_id
+                    and request.environment_id == command.environment_id
+                    and request.provider is command.provider
+                    and request.subject_ref_digest == subject_digest
+                ):
+                    return request
+
+            event_digest = (
+                None
+                if command.source_event_ref is None
+                else activation_source_ref_digest(
+                    kind="event", reference=command.source_event_ref
+                )
+            )
+            chat_digest = (
+                None
+                if command.source_chat_ref is None
+                else activation_source_ref_digest(
+                    kind="chat", reference=command.source_chat_ref
+                )
+            )
+            created = ActivationRequest(
+                request_id=str(uuid.uuid4()),
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                provider=command.provider,
+                subject_ref=command.subject_ref,
+                subject_ref_digest=subject_digest,
+                source=command.source,
+                source_event_digest=event_digest,
+                source_chat_digest=chat_digest,
+                requested_at=now,
+                expires_at=now + _dt.timedelta(seconds=ACTIVATION_TTL_SECONDS),
+                status=ActivationStatus.PENDING,
+            )
+            self._state.activation_requests[created.request_id] = created
+            return created
+
+    async def load(self, *, query: ActivationLookup) -> ActivationRequest | None:
+        async with self._lock:
+            request = self._state.activation_requests.get(query.request_id)
+            if request is None:
+                return None
+            if (
+                request.tenant_id != query.tenant_id
+                or request.environment_id != query.environment_id
+            ):
+                return None
+            return request
+
+
 class InMemoryAdminAuditStore:
     """``AdminAuditStore`` 的单进程实现；与目录 store **共用同一把锁和同一份事实**。
 
@@ -663,6 +771,7 @@ _DirectorySnapshot = tuple[
     dict[tuple[str, str, str, str], ExternalIdentity],
     dict[str, AdminAuditEvent],
     dict[tuple[str, AuditStage], str],
+    dict[str, ActivationRequest],
     object,
 ]
 
@@ -712,7 +821,12 @@ class InMemoryUserDirectoryStore:
             )
             if binding is None:
                 return None
-            return self._facts(binding.user_id, tenant_id, environment_id)
+            facts = self._facts(binding.user_id, tenant_id, environment_id)
+            if facts is None:
+                raise UserDirectorySubjectUnavailableError(
+                    "the bound subject is unavailable"
+                )
+            return facts
 
     async def apply(
         self, *, command: DirectoryCommand, context: AdminOperationContext
@@ -757,12 +871,21 @@ class InMemoryUserDirectoryStore:
             dict(state.external_identities),
             dict(state.admin_audit_events),
             dict(state.admin_audit_stage_keys),
+            dict(state.activation_requests),
             state.local_admin,
         )
 
     def _restore(self, snapshot: _DirectorySnapshot) -> None:
         state = self._state
-        accounts, assignments, identities, events, stage_keys, local_admin = snapshot
+        (
+            accounts,
+            assignments,
+            identities,
+            events,
+            stage_keys,
+            activations,
+            local_admin,
+        ) = snapshot
         # 逐个写而不是在一个循环里遍历：五张表的键值类型各不相同，塞进一个循环
         # 就只能靠一条静音注释把类型错误压下去，而被压下去的那一条正是"恢复错了
         # 表"这种缺陷唯一会留下的信号。
@@ -776,6 +899,8 @@ class InMemoryUserDirectoryStore:
         state.admin_audit_events.update(events)
         state.admin_audit_stage_keys.clear()
         state.admin_audit_stage_keys.update(stage_keys)
+        state.activation_requests.clear()
+        state.activation_requests.update(activations)
         state.local_admin = local_admin
 
     # ---- 写 ----------------------------------------------------------------
@@ -798,7 +923,11 @@ class InMemoryUserDirectoryStore:
             return self._unbind_identity(command, context, now)
         if isinstance(command, BootstrapLocalAdminCommand):
             return self._bootstrap(command, context, now)
-        return self._migrate(command, context, now)
+        if isinstance(command, MigrateLegacyIdentitiesCommand):
+            return self._migrate(command, context, now)
+        if isinstance(command, ApproveActivationCommand):
+            return self._approve_activation(command, context, now)
+        return self._reject_activation(command, context, now)
 
     def _write_audit(
         self, candidate: AdminAuditCandidate, *, now: _dt.datetime
@@ -1103,6 +1232,184 @@ class InMemoryUserDirectoryStore:
             )
             events.append(self._write_audit(candidate, now=now))
         return tuple(events)
+
+    def _require_activation_admin(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        context: AdminOperationContext,
+    ) -> None:
+        if context.auth_source is not IdentitySource.LOCAL_ADMIN:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
+            )
+        account = self._state.user_accounts.get(context.actor_user_id)
+        assignment = self._state.user_role_assignments.get(
+            (context.actor_user_id, tenant_id, environment_id)
+        )
+        if (
+            account is None
+            or account.status is not UserStatus.ACTIVE
+            or account.actor != context.actor
+            or assignment is None
+            or assignment.role is not ProductRole.ADMIN
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.ACTOR_NOT_ADMIN
+            )
+
+    def _activation_for_decision(
+        self,
+        *,
+        request_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> ActivationRequest:
+        request = self._state.activation_requests.get(request_id)
+        if request is None:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.TARGET_NOT_FOUND
+            )
+        if (
+            request.tenant_id != tenant_id
+            or request.environment_id != environment_id
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.SCOPE_MISMATCH
+            )
+        return request
+
+    def _approve_activation(
+        self,
+        command: ApproveActivationCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_activation_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        request = self._activation_for_decision(
+            request_id=command.request_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if request.status is not ActivationStatus.PENDING:
+            raise UserDirectoryConflictError("the activation request is terminal")
+        if request.expires_at <= now:
+            raise UserDirectoryConflictError("the activation request expired")
+        account = next(
+            (
+                candidate
+                for candidate in self._state.user_accounts.values()
+                if candidate.actor == command.actor
+            ),
+            None,
+        )
+        if account is not None:
+            if (
+                account.status is not UserStatus.ACTIVE
+                or account.display_name != command.display_name
+            ):
+                raise UserDirectoryConflictError(
+                    "the activation account conflicts"
+                )
+            user_id = account.user_id
+        else:
+            user_id = activation_user_id(
+                subject_ref_digest=request.subject_ref_digest
+            )
+            account = self._state.user_accounts.get(user_id)
+        if account is None:
+            self._insert_account(
+                user_id=user_id,
+                actor=command.actor,
+                display_name=command.display_name,
+                now=now,
+            )
+        elif (
+            account.actor != command.actor
+            or account.display_name != command.display_name
+            or account.status is not UserStatus.ACTIVE
+        ):
+            raise UserDirectoryConflictError("the activation account conflicts")
+        role_key = (user_id, command.tenant_id, command.environment_id)
+        assignment = self._state.user_role_assignments.get(role_key)
+        if assignment is None:
+            self._upsert_role(
+                user_id=user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                role=command.approved_role,
+                created_by=context.actor_user_id,
+                now=now,
+            )
+        elif assignment.role is not command.approved_role:
+            raise UserDirectoryConflictError("the existing role differs")
+        binding_key = (
+            IdentitySource.FEISHU.value,
+            command.tenant_id,
+            command.environment_id,
+            external_subject_digest(
+                provider=IdentitySource.FEISHU,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                subject_ref=request.subject_ref,
+            ),
+        )
+        binding = self._state.external_identities.get(binding_key)
+        if binding is None:
+            self._bind_subject(
+                user_id=user_id,
+                tenant_id=command.tenant_id,
+                environment_id=command.environment_id,
+                subject_ref=request.subject_ref,
+                now=now,
+            )
+        elif binding.user_id != user_id:
+            raise UserDirectoryConflictError("the activation subject conflicts")
+        self._state.activation_requests[request.request_id] = request.model_copy(
+            update={
+                "status": ActivationStatus.APPROVED,
+                "decided_at": now,
+                "decided_by": context.actor_user_id,
+                "approved_role": command.approved_role,
+            }
+        )
+        candidate = derive_audit(command, context, target_ref=request.request_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _reject_activation(
+        self,
+        command: RejectActivationCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_activation_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        request = self._activation_for_decision(
+            request_id=command.request_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if request.status is not ActivationStatus.PENDING:
+            raise UserDirectoryConflictError("the activation request is terminal")
+        if request.expires_at <= now:
+            raise UserDirectoryConflictError("the activation request expired")
+        self._state.activation_requests[request.request_id] = request.model_copy(
+            update={
+                "status": ActivationStatus.REJECTED,
+                "decided_at": now,
+                "decided_by": context.actor_user_id,
+            }
+        )
+        candidate = derive_audit(command, context, target_ref=request.request_id)
+        return (self._write_audit(candidate, now=now),)
 
 
 class InMemoryLocalAdminStore:

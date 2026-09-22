@@ -96,6 +96,14 @@ def test_blank_or_padded_environment_id_rejected(bad: str) -> None:
         load_settings({"XIAOWEI_ENVIRONMENT_ID": bad})
 
 
+def test_environment_id_beyond_the_shared_bound_is_redacted() -> None:
+    too_long = "environment-" + "x" * 53
+    assert len(too_long) == 65
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"XIAOWEI_ENVIRONMENT_ID": too_long})
+    assert too_long not in str(caught.value)
+
+
 def test_unknown_variable_message_has_name_but_not_value() -> None:
     with pytest.raises(ConfigError) as exc:
         load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev", "XIAOWEI_UNKNOWN": _SECRET})

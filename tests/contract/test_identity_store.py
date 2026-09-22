@@ -17,6 +17,7 @@ from xiaowei_agent.contracts.identity import DirectoryCommand
 from xiaowei_agent.persistence import fake
 from xiaowei_agent.persistence.admin_audit import AdminAuditStore
 from xiaowei_agent.persistence.fake import (
+    InMemoryActivationStore,
     InMemoryAdminAuditStore,
     InMemoryUserDirectoryStore,
 )
@@ -85,7 +86,7 @@ def test_every_command_has_a_declared_action_and_effect() -> None:
     多一个：说明某个命令被删掉了而声明没跟着删，下一个读者会以为它还在。
     """
     commands = _command_types()
-    assert len(commands) == 8
+    assert len(commands) == 10
     assert frozenset(ACTION_FOR_COMMAND) == commands
     assert frozenset(EFFECT_FOR_COMMAND) == commands
 
@@ -98,6 +99,11 @@ def directory(clock, memory_state):
 @pytest.fixture
 def audit(clock, memory_state):
     return InMemoryAdminAuditStore(clock=clock, state=memory_state)
+
+
+@pytest.fixture
+def activation_store(clock, memory_state):
+    return InMemoryActivationStore(clock=clock, state=memory_state)
 
 
 @pytest.fixture
@@ -147,6 +153,10 @@ def directory_probe(memory_state):
                 "roles": frozenset(memory_state.user_role_assignments),
                 "bindings": frozenset(memory_state.external_identities),
                 "audits": frozenset(memory_state.admin_audit_events),
+                "activations": frozenset(
+                    (request_id, request.status.value)
+                    for request_id, request in memory_state.activation_requests.items()
+                ),
             }
 
     return _Probe()

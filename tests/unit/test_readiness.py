@@ -1,9 +1,10 @@
 """readiness 只做 DB ping 与 Alembic revision 比对。"""
 
 import pytest
+from alembic.script import ScriptDirectory
 
-from xiaowei_agent.persistence import database
 from xiaowei_agent.persistence.database import PostgresReadinessProbe
+from xiaowei_agent.persistence.migrations.runner import alembic_config
 
 
 class _Connection:
@@ -43,14 +44,10 @@ class _Engine:
 
 @pytest.mark.asyncio
 async def test_readiness_requires_database_head_and_assembly(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        database,
-        "_current_revision",
-        lambda _: "0014_identity_admin_audit",
-    )
-    connection = _Connection(revision="0014_identity_admin_audit")
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head is not None
+    connection = _Connection(revision=head)
     probe = PostgresReadinessProbe(engine=_Engine(connection), assembled=True)
     report = await probe.check()
     assert report.database_ok is True

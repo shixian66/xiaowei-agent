@@ -48,6 +48,11 @@ from xiaowei_agent.contracts import (
     TaskStatus,
     UserStatus,
 )
+from xiaowei_agent.contracts.activation import (
+    ActivationRequest,
+    ActivationSource,
+    ActivationStatus,
+)
 
 if TYPE_CHECKING:
     from xiaowei_agent.contracts.admin_audit import AdminAuditEvent
@@ -497,4 +502,54 @@ def row_to_admin_audit_event(row: Mapping[Any, Any]) -> "AdminAuditEvent":
             status=None if effect_status is None else UserStatus(effect_status),
         ),
         created_at=row["created_at"],
+    )
+
+
+def activation_request_to_row(request: ActivationRequest) -> dict[str, Any]:
+    """激活申请契约到列；受控主体是唯一允许落库的明文 PII。"""
+    return {
+        "request_id": request.request_id,
+        "tenant_id": request.tenant_id,
+        "environment_id": request.environment_id,
+        "provider": request.provider.value,
+        "subject_ref": request.subject_ref,
+        "subject_ref_digest": request.subject_ref_digest,
+        "source": request.source.value,
+        "source_event_digest": request.source_event_digest,
+        "source_chat_digest": request.source_chat_digest,
+        "requested_at": request.requested_at,
+        "expires_at": request.expires_at,
+        "status": request.status.value,
+        "decided_at": request.decided_at,
+        "decided_by": request.decided_by,
+        "approved_role": (
+            None if request.approved_role is None else request.approved_role.value
+        ),
+    }
+
+
+def row_to_activation_request(row: Mapping[Any, Any]) -> ActivationRequest:
+    """数据库列到激活申请；strict 契约要求显式恢复每个闭集枚举。"""
+    provider = IdentitySource(row["provider"])
+    if provider is not IdentitySource.FEISHU:
+        raise ValueError("activation provider must be feishu")
+    approved_role = row["approved_role"]
+    return ActivationRequest(
+        request_id=row["request_id"],
+        tenant_id=row["tenant_id"],
+        environment_id=row["environment_id"],
+        provider=IdentitySource.FEISHU,
+        subject_ref=row["subject_ref"],
+        subject_ref_digest=row["subject_ref_digest"],
+        source=ActivationSource(row["source"]),
+        source_event_digest=row["source_event_digest"],
+        source_chat_digest=row["source_chat_digest"],
+        requested_at=row["requested_at"],
+        expires_at=row["expires_at"],
+        status=ActivationStatus(row["status"]),
+        decided_at=row["decided_at"],
+        decided_by=row["decided_by"],
+        approved_role=(
+            None if approved_role is None else ProductRole(approved_role)
+        ),
     )

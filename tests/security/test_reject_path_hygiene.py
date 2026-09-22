@@ -94,6 +94,12 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "ModelErrorCode.INVALID_RESPONSE",
         "ModelErrorCode.TIMEOUT",
         "ModelErrorCode.UNAVAILABLE",
+        # --- AdminAuditReasonCode 枚举成员：只携代码定义的闭集拒绝原因 ---
+        # 申请、主体或作用域的真实取值不进入异常文本；调用方只消费这个码。
+        "AdminAuditReasonCode.ACTOR_NOT_ADMIN",
+        "AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED",
+        "AdminAuditReasonCode.SCOPE_MISMATCH",
+        "AdminAuditReasonCode.TARGET_NOT_FOUND",
         # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
         # 被拒的环境标识来自调用方，不进消息；由
         # test_rejection_message_never_echoes_the_environment_id 反向承重。

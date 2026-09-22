@@ -121,7 +121,7 @@ class AdminAuditStore(Protocol):
     async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
         """写两阶段操作的第一条事件。
 
-        W1a 没有任何可用的 action：``DIRECTORY_ACTIONS`` 恰好等于本阶段全部八个
+        W1b 没有任何可用的 action：``DIRECTORY_ACTIONS`` 恰好等于本阶段全部十个
         动作，而 :class:`AdminAuditStart` 在契约层就拒绝目录动作。这是设计结果，
         不是缺陷——放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
         """
