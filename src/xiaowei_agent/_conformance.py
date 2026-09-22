@@ -48,6 +48,9 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
     from xiaowei_agent.contracts import TaskStatus
+    from xiaowei_agent.interfaces.directory_identity import (
+        DirectoryFeishuIdentityDirectory,
+    )
     from xiaowei_agent.interfaces.feishu_identity import (
         FeishuIdentityDirectory,
         StaticFeishuIdentityDirectory,
@@ -217,6 +220,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
 
     def _feishu_port_anchors(
         identity: "StaticFeishuIdentityDirectory",
+        directory_identity: "DirectoryFeishuIdentityDirectory",
         inbound: "FeishuSdkInboundTransport",
         membership: "FeishuSdkMembershipAdapter",
         messages: "FeishuSdkMessageAdapter",
@@ -224,11 +228,19 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     ) -> None:
         """SDK、身份与 OAuth 实现必须保持应用层和入口层的本地窄协议。"""
         identity_port: FeishuIdentityDirectory = identity
+        directory_identity_port: FeishuIdentityDirectory = directory_identity
         inbound_port: FeishuInboundTransport = inbound
         membership_port: FeishuMembershipPort = membership
         message_port: ChannelMessagePort = messages
         oauth_port: FeishuOAuthPort = oauth
-        _ = (identity_port, inbound_port, membership_port, message_port, oauth_port)
+        _ = (
+            identity_port,
+            directory_identity_port,
+            inbound_port,
+            membership_port,
+            message_port,
+            oauth_port,
+        )
 
     def _task_projection_anchor(runtime: "TaskViewRuntime") -> None:
         """真实读取 Runtime 必须满足渠道只读投影的最小端口。"""

@@ -146,6 +146,12 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
+    "interfaces/directory_identity.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.governance",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
     "interfaces/legacy_identity_migration.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
@@ -224,6 +230,7 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.trace",
     },
     "interfaces/web_auth.py": {
+        "xiaowei_agent.application",
         "xiaowei_agent.config",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",

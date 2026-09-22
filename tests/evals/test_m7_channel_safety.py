@@ -9,6 +9,10 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from tests.conftest import lookup_for, make_submission
+from tests.fakes.activation import (
+    RecordingActivationNotifications,
+    RecordingActivationRequests,
+)
 
 from xiaowei_agent.application.channel_access import (
     TaskAccessNotFoundError,
@@ -222,6 +226,8 @@ async def test_forged_feishu_identity_never_reaches_submission(
             principals={alice.subject_ref: alice}
         ),
         submission_service=submissions,
+        activation_service=RecordingActivationRequests().as_service(),
+        activation_notifications=RecordingActivationNotifications().as_service(),
         policy_revision="policy-1",
         clock=clock,
         trace_id_factory=lambda: "1" * 32,

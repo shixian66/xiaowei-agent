@@ -1,4 +1,4 @@
-"""飞书卡片只投影安全 ``TaskView``，并在供应商预算内显式截断。"""
+"""飞书卡片只投影安全任务视图或通用激活状态。"""
 
 import json
 
@@ -14,7 +14,10 @@ from xiaowei_agent.contracts import (
     task_query_path,
 )
 from xiaowei_agent.rendering import feishu as feishu_renderer
-from xiaowei_agent.rendering.feishu import render_feishu_card
+from xiaowei_agent.rendering.feishu import (
+    render_activation_card,
+    render_feishu_card,
+)
 
 
 def _view(
@@ -272,3 +275,26 @@ def test_same_projection_has_a_stable_serialisation_and_digest() -> None:
     second = render_feishu_card(projection)
 
     assert second == first
+
+
+@pytest.mark.parametrize("submitted", [True, False])
+def test_activation_card_is_generic_and_has_no_action_surface(submitted: bool) -> None:
+    card = render_activation_card(submitted=submitted)
+    payload = json.loads(card.content_json)
+    serialized = card.content_json.lower()
+
+    assert payload["header"]["title"]["content"] == (
+        "身份激活申请已提交" if submitted else "身份激活暂不可用"
+    )
+    assert payload["elements"]
+    assert all(element.get("tag") != "action" for element in payload["elements"])
+    assert "http" not in serialized
+    assert "button" not in serialized
+    assert "@" not in serialized
+    assert "admin" not in serialized
+    assert "sql" not in serialized
+    assert card.truncated is False
+
+
+def test_activation_card_does_not_accept_external_text() -> None:
+    assert set(render_activation_card.__annotations__) == {"submitted", "return"}

@@ -28,10 +28,14 @@ class FeishuIdentityNotFoundError(LookupError):
     """外部主体不在显式身份 allowlist 中。"""
 
 
+class FeishuIdentityUnavailableError(LookupError):
+    """外部主体已绑定，但账号或当前作用域授权不可用。"""
+
+
 class FeishuIdentityDirectory(Protocol):
     """把飞书 ``open_id`` 精确映射到已认证内部主体。"""
 
-    def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+    async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """返回精确匹配的主体；未知主体必须 fail-closed。"""
 
 
@@ -107,7 +111,7 @@ class StaticFeishuIdentityDirectory:
     def __init__(self, *, principals: Mapping[str, AuthenticatedPrincipal]) -> None:
         self._principals = dict(principals)
 
-    def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+    async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """按 ``open_id`` 精确查找，未知主体统一返回安全错误。"""
         try:
             return self._principals[subject_ref]
@@ -207,6 +211,7 @@ __all__ = [
     "FeishuIdentityConfigurationError",
     "FeishuIdentityDirectory",
     "FeishuIdentityNotFoundError",
+    "FeishuIdentityUnavailableError",
     "LegacyIdentityEntry",
     "StaticFeishuIdentityDirectory",
     "load_feishu_identity_directory",

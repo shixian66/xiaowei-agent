@@ -56,12 +56,15 @@ from xiaowei_agent.persistence.model_artifacts import (
 )
 from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
 from xiaowei_agent.persistence.postgres import (
+    PostgresActivationStore,
+    PostgresAdminAuditStore,
     PostgresChannelStore,
     PostgresClarificationRecordStore,
     PostgresEvidenceLedger,
     PostgresModelArtifactStore,
     PostgresPlanStore,
     PostgresTaskStore,
+    PostgresUserDirectoryStore,
     PostgresWebSessionStore,
 )
 from xiaowei_agent.persistence.provider_state import (
@@ -74,6 +77,9 @@ if TYPE_CHECKING:
     # 这些执行栈类型必须保持静态导入；移到顶层会让仅 import local_stack 的
     # internal-api 一并加载完整 Runtime、Runner 与工具链。代价是 LocalStack 的
     # 延迟注解不能用 get_type_hints() 无参解析；窄进程只内省 TaskViewStack。
+    from xiaowei_agent.application.activation_notification import (
+        ActivationNotificationService,
+    )
     from xiaowei_agent.application.channel_access import (
         FeishuMembershipPort,
         TaskAccessService,
@@ -84,6 +90,7 @@ if TYPE_CHECKING:
         ChannelProjectionService,
     )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+    from xiaowei_agent.application.identity_activation import IdentityActivationService
     from xiaowei_agent.application.model_ports import (
         InteractionClassifierPort,
         SlowQueryAdvisoryPort,
@@ -187,6 +194,9 @@ class FeishuListenerStack:
     task_store: TaskStore
     channel_store: ChannelStore
     identity_directory: FeishuIdentityDirectory
+    activation_service: IdentityActivationService
+    activation_notifications: ActivationNotificationService
+    message_port: ChannelMessagePort
     submission_service: ChannelSubmissionService
     clock: Clock
     settings: Settings
@@ -232,6 +242,7 @@ class WebStack:
     web_session_store: WebSessionStore
     provider_state: ProviderStateStore
     identity_directory: FeishuIdentityDirectory | None
+    activation_service: IdentityActivationService | None
     task_access_service: TaskAccessService
     submission_service: ChannelSubmissionService
     clock: Clock
@@ -768,15 +779,23 @@ async def build_postgres_feishu_listener_stack(
     settings: Settings,
     clock: Clock = _utc_now,
     transport: FeishuInboundTransport | None = None,
+    message_port: ChannelMessagePort | None = None,
     credentials: ProviderCredentials | None = None,
 ) -> FeishuListenerStack:
     """装配默认关闭的飞书入口；不创建 Runner、Gateway 或目标 adapter。"""
+    from xiaowei_agent.application.activation_notification import (
+        ActivationNotificationService,
+    )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
-    from xiaowei_agent.interfaces.feishu_identity import (
-        load_feishu_identity_directory,
+    from xiaowei_agent.application.identity_activation import IdentityActivationService
+    from xiaowei_agent.interfaces.directory_identity import (
+        DirectoryFeishuIdentityDirectory,
     )
     from xiaowei_agent.interfaces.feishu_listener import FeishuListener
-    from xiaowei_agent.interfaces.feishu_sdk import FeishuSdkInboundTransport
+    from xiaowei_agent.interfaces.feishu_sdk import (
+        FeishuSdkInboundTransport,
+        FeishuSdkMessageAdapter,
+    )
 
     if not settings.feishu_listener_enabled:
         raise ValueError("Feishu listener is disabled")
@@ -802,6 +821,9 @@ async def build_postgres_feishu_listener_stack(
             engine=engine, clock=clock
         )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
+        activation_store = PostgresActivationStore(engine=engine, clock=clock)
+        directory_store = PostgresUserDirectoryStore(engine=engine, clock=clock)
+        audit_store = PostgresAdminAuditStore(engine=engine, clock=clock)
         snapshot, bindings = _build_capability_bindings()
         runtime = TaskViewRuntime(
             task_store=task_store,
@@ -813,8 +835,15 @@ async def build_postgres_feishu_listener_stack(
             model_artifacts=model_artifacts,
             model_profile=ModelInvocationProfile(),
         )
-        identity_directory = load_feishu_identity_directory(
-            path=cast(str, settings.feishu_identity_file),
+        identity_directory = DirectoryFeishuIdentityDirectory(
+            directory=directory_store,
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        )
+        activation_service = IdentityActivationService(
+            activations=activation_store,
+            directory=directory_store,
+            audit=audit_store,
             tenant_id=settings.tenant_id,
             environment_id=settings.environment_id,
         )
@@ -825,6 +854,14 @@ async def build_postgres_feishu_listener_stack(
         inbound = transport
         if inbound is None:
             inbound = FeishuSdkInboundTransport(app_id=app_id, app_secret=app_secret)
+        messages = message_port
+        if messages is None:
+            messages = FeishuSdkMessageAdapter(
+                app_id=app_id,
+                app_secret=app_secret,
+                timeout_seconds=settings.feishu_api_timeout_seconds,
+            )
+        activation_notifications = ActivationNotificationService(messages=messages)
         listener = FeishuListener(
             app_id=app_id,
             tenant_key=cast(str, settings.feishu_tenant_key),
@@ -833,6 +870,8 @@ async def build_postgres_feishu_listener_stack(
             environment_id=settings.environment_id,
             identity_directory=identity_directory,
             submission_service=submission_service,
+            activation_service=activation_service,
+            activation_notifications=activation_notifications,
             policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
             clock=clock,
         )
@@ -845,6 +884,9 @@ async def build_postgres_feishu_listener_stack(
             task_store=task_store,
             channel_store=channel_store,
             identity_directory=identity_directory,
+            activation_service=activation_service,
+            activation_notifications=activation_notifications,
+            message_port=messages,
             submission_service=submission_service,
             clock=clock,
             settings=settings,
@@ -955,9 +997,9 @@ async def build_postgres_web_stack(
     """
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
-    from xiaowei_agent.interfaces.feishu_identity import (
-        FeishuIdentityConfigurationError,
-        load_feishu_identity_directory,
+    from xiaowei_agent.application.identity_activation import IdentityActivationService
+    from xiaowei_agent.interfaces.directory_identity import (
+        DirectoryFeishuIdentityDirectory,
     )
     from xiaowei_agent.interfaces.local_admin_auth import (
         INITIAL_LOCAL_ADMIN_PASSWORD,
@@ -1041,16 +1083,29 @@ async def build_postgres_web_stack(
 
         auth: WebAuthService | None = None
         identity_directory: FeishuIdentityDirectory | None = None
+        activation_service: IdentityActivationService | None = None
         if oauth is not None and membership is not None:
             try:
-                identity_directory = load_feishu_identity_directory(
-                    path=cast(str, settings.feishu_identity_file),
+                directory_store = PostgresUserDirectoryStore(
+                    engine=engine,
+                    clock=clock,
+                )
+                identity_directory = DirectoryFeishuIdentityDirectory(
+                    directory=directory_store,
+                    tenant_id=settings.tenant_id,
+                    environment_id=settings.environment_id,
+                )
+                activation_service = IdentityActivationService(
+                    activations=PostgresActivationStore(engine=engine, clock=clock),
+                    directory=directory_store,
+                    audit=PostgresAdminAuditStore(engine=engine, clock=clock),
                     tenant_id=settings.tenant_id,
                     environment_id=settings.environment_id,
                 )
                 auth = WebAuthService(
                     sessions=web_session_store,
                     identities=identity_directory,
+                    activations=activation_service,
                     oauth=oauth,
                     public_origin=public_origin,
                     mode=settings.web_mode,
@@ -1058,12 +1113,13 @@ async def build_postgres_web_stack(
                     session_ttl_seconds=settings.web_session_ttl_seconds,
                     oauth_timeout_seconds=FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS,
                 )
-            except (FeishuIdentityConfigurationError, ValueError):
+            except ValueError:
                 # 只标记不可用；不 dispose engine，不抛出，Web 进程照常起来。
                 # 捕获集合必须含 ValueError——WebAuthService.__init__ 对 origin/ttl
                 # 非法抛的就是它，不能让它把整个 Web 打挂。
                 auth = None
                 identity_directory = None
+                activation_service = None
         return WebStack(
             local_admin_auth=local_admin_auth,
             oauth_available=auth is not None,
@@ -1076,6 +1132,7 @@ async def build_postgres_web_stack(
             web_session_store=web_session_store,
             provider_state=provider_state,
             identity_directory=identity_directory,
+            activation_service=activation_service,
             task_access_service=task_access_service,
             submission_service=submission_service,
             clock=clock,

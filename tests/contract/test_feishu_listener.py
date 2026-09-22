@@ -10,12 +10,16 @@ from typing import cast
 import pytest
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
+from xiaowei_agent.application.activation_notification import (
+    ActivationNotificationService,
+)
 from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
     ChannelSubmitCommand,
     SubmittedTask,
 )
+from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
@@ -24,9 +28,14 @@ from xiaowei_agent.contracts import (
     IdentitySource,
 )
 from xiaowei_agent.interfaces import feishu_listener as feishu_listener_module
-from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
+from xiaowei_agent.interfaces.feishu_identity import (
+    FeishuIdentityDirectory,
+    FeishuIdentityUnavailableError,
+    StaticFeishuIdentityDirectory,
+)
 from xiaowei_agent.interfaces.feishu_listener import FeishuListener, main, serve_listener
 from xiaowei_agent.interfaces.feishu_sdk import FeishuMention, FeishuMessageEvent
+from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ProjectionSubscriptionConflictError,
@@ -48,6 +57,31 @@ class _RecordingSubmissionService:
         if ChannelPermission.SUBMIT_READONLY_TASK not in command.principal.permissions:
             raise ChannelSubmissionForbiddenError
         return cast(SubmittedTask, object())
+
+
+class _ActivationRequests:
+    def __init__(self, *, capacity: bool = False) -> None:
+        self.capacity = capacity
+        self.groups: list[tuple[str, str, str]] = []
+
+    async def request_group(
+        self, *, subject_ref: str, event_ref: str, chat_ref: str
+    ) -> object:
+        self.groups.append((subject_ref, event_ref, chat_ref))
+        if self.capacity:
+            raise ActivationCapacityError
+        return object()
+
+
+class _Notifications:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+
+    async def notify(
+        self, *, conversation_ref: str, event_id: str, submitted: bool
+    ) -> bool:
+        self.calls.append((conversation_ref, event_id, submitted))
+        return True
 
 
 def _principal(
@@ -93,6 +127,9 @@ def _listener(
     service: _RecordingSubmissionService,
     *,
     principal: AuthenticatedPrincipal | None = None,
+    activations: _ActivationRequests | None = None,
+    notifications: _Notifications | None = None,
+    identity_directory: FeishuIdentityDirectory | None = None,
 ) -> FeishuListener:
     identity = _principal() if principal is None else principal
     return FeishuListener(
@@ -101,10 +138,15 @@ def _listener(
         bot_open_id="bot-open-id",
         tenant_id="dev-local",
         environment_id="dev",
-        identity_directory=StaticFeishuIdentityDirectory(
-            principals={identity.subject_ref: identity}
-        ),
+        identity_directory=identity_directory
+        or StaticFeishuIdentityDirectory(principals={identity.subject_ref: identity}),
         submission_service=cast(ChannelSubmissionService, service),
+        activation_service=cast(
+            IdentityActivationService, activations or _ActivationRequests()
+        ),
+        activation_notifications=cast(
+            ActivationNotificationService, notifications or _Notifications()
+        ),
         policy_revision="policy-1",
         clock=lambda: _NOW,
         trace_id_factory=lambda: "1" * 32,
@@ -262,6 +304,94 @@ async def test_unknown_identity_and_missing_submit_permission_fail_closed() -> N
     ) is False
     assert unknown_service.commands == []
     assert len(no_submit_service.commands) == 1
+
+
+async def test_unknown_group_identity_creates_request_and_one_generic_notice() -> None:
+    service = _RecordingSubmissionService()
+    activations = _ActivationRequests()
+    notifications = _Notifications()
+    listener = _listener(
+        service, activations=activations, notifications=notifications
+    )
+
+    handled = await listener.handle_event(
+        event=_event(
+            sender_subject_ref="unknown-open-id",
+            chat_type="group",
+            text="@_user_1 select secret from private_table",
+            mentions=(FeishuMention(key="@_user_1", subject_ref="bot-open-id"),),
+        )
+    )
+
+    assert handled is True
+    assert activations.groups == [("unknown-open-id", "event-1", "chat-1")]
+    assert notifications.calls == [("chat-1", "event-1", True)]
+    assert service.commands == []
+
+
+async def test_private_unknown_identity_never_enters_activation_or_notification() -> None:
+    service = _RecordingSubmissionService()
+    activations = _ActivationRequests()
+    notifications = _Notifications()
+
+    handled = await _listener(
+        service, activations=activations, notifications=notifications
+    ).handle_event(event=_event(sender_subject_ref="unknown-open-id"))
+
+    assert handled is False
+    assert activations.groups == []
+    assert notifications.calls == []
+    assert service.commands == []
+
+
+async def test_group_activation_capacity_uses_the_generic_unavailable_notice() -> None:
+    service = _RecordingSubmissionService()
+    activations = _ActivationRequests(capacity=True)
+    notifications = _Notifications()
+
+    handled = await _listener(
+        service, activations=activations, notifications=notifications
+    ).handle_event(
+        event=_event(
+            sender_subject_ref="unknown-open-id",
+            chat_type="group",
+            text="@_user_1 help",
+            mentions=(FeishuMention(key="@_user_1", subject_ref="bot-open-id"),),
+        )
+    )
+
+    assert handled is True
+    assert notifications.calls == [("chat-1", "event-1", False)]
+    assert service.commands == []
+
+
+async def test_bound_but_unavailable_group_identity_never_reenters_activation() -> None:
+    class _UnavailableIdentityDirectory:
+        async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+            del subject_ref
+            raise FeishuIdentityUnavailableError("feishu identity unavailable")
+
+    service = _RecordingSubmissionService()
+    activations = _ActivationRequests()
+    notifications = _Notifications()
+
+    handled = await _listener(
+        service,
+        activations=activations,
+        notifications=notifications,
+        identity_directory=_UnavailableIdentityDirectory(),
+    ).handle_event(
+        event=_event(
+            chat_type="group",
+            text="@_user_1 help",
+            mentions=(FeishuMention(key="@_user_1", subject_ref="bot-open-id"),),
+        )
+    )
+
+    assert handled is False
+    assert activations.groups == []
+    assert notifications.calls == []
+    assert service.commands == []
 
 
 async def test_event_replay_keeps_the_same_service_idempotency_input() -> None:

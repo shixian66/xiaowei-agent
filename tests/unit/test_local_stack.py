@@ -11,10 +11,14 @@ import pytest
 from tests.fakes.clock import ManualClock
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
+from xiaowei_agent.application.activation_notification import (
+    ActivationNotificationService,
+)
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
 from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
@@ -29,6 +33,9 @@ from xiaowei_agent.contracts import (
     TaskSubmission,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
+from xiaowei_agent.interfaces.directory_identity import (
+    DirectoryFeishuIdentityDirectory,
+)
 from xiaowei_agent.interfaces.local_admin_auth import LocalAdminAuthService
 from xiaowei_agent.interfaces.local_stack import (
     SMOKE_BARRIER_MARKER,
@@ -765,6 +772,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "web_session_store",
         "provider_state",
         "identity_directory",
+        "activation_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -785,6 +793,8 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     }
     assert stack.oauth_port is oauth
     assert stack.membership is membership
+    assert isinstance(stack.identity_directory, DirectoryFeishuIdentityDirectory)
+    assert isinstance(stack.activation_service, IdentityActivationService)
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
     assert stack.submission_service._web_parent_access is stack.task_access_service
@@ -871,16 +881,10 @@ async def test_web_stack_maps_database_credential_failure_to_its_narrow_error(
 
 
 @pytest.mark.asyncio
-async def test_identity_loading_failure_leaves_the_web_up_without_oauth(
+async def test_static_identity_file_is_not_a_web_runtime_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """身份目录加载失败**不再**打死整个 Web。
-
-    RI5 之前飞书 OAuth 是 Web 的必要条件，因此这里原本断言 engine 被 dispose、
-    装配抛错。现在本地管理员登录才是 Web 的必备入口，飞书是插件：加载失败只让
-    ``oauth_available`` 为假，进程照常起来，否则一份坏身份文件就能让运维连
-    配置页面都打不开——而那正是他修复它的唯一入口。
-    """
+    """静态身份文件只作迁移输入；OAuth 运行时只读数据库目录。"""
     engine = _FakeWebEngine()
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
@@ -893,12 +897,12 @@ async def test_identity_loading_failure_leaves_the_web_up_without_oauth(
         membership=_OfflineMembership(),
     )
     try:
-        assert stack.oauth_available is False
-        assert stack.auth is None
-        assert stack.identity_directory is None
-        assert stack.oauth_port is None
-        assert stack.membership is None
-        # 本地管理员那一组仍然装配好了——这正是"Web 还能用"的含义。
+        assert stack.oauth_available is True
+        assert isinstance(stack.auth, WebAuthService)
+        assert isinstance(stack.identity_directory, DirectoryFeishuIdentityDirectory)
+        assert isinstance(stack.activation_service, IdentityActivationService)
+        assert stack.oauth_port is not None
+        assert stack.membership is not None
         assert isinstance(stack.local_admin_auth, LocalAdminAuthService)
         assert engine.disposed is False
     finally:
@@ -978,6 +982,9 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
         "task_store",
         "channel_store",
         "identity_directory",
+        "activation_service",
+        "activation_notifications",
+        "message_port",
         "submission_service",
         "clock",
         "settings",
@@ -996,6 +1003,9 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
             "_model_profile",
     }
     assert stack.transport is fake_transport
+    assert isinstance(stack.identity_directory, DirectoryFeishuIdentityDirectory)
+    assert isinstance(stack.activation_service, IdentityActivationService)
+    assert isinstance(stack.activation_notifications, ActivationNotificationService)
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
     assert stack.submission_service._web_parent_access is None
@@ -1044,7 +1054,7 @@ async def test_disabled_feishu_stack_does_not_create_an_engine(
 
 
 @pytest.mark.asyncio
-async def test_feishu_stack_disposes_engine_when_identity_loading_fails(
+async def test_static_identity_file_is_not_a_listener_runtime_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeEngine:
@@ -1059,17 +1069,20 @@ async def test_feishu_stack_disposes_engine_when_identity_loading_fails(
         lambda _: engine,
     )
 
-    with pytest.raises(Exception, match="identity configuration invalid"):
-        await build_postgres_feishu_listener_stack(
-            settings=_feishu_settings(
-                tmp_path / "missing-identities.json", tmp_path / "missing-secret"
-            ),
-            transport=RecordingFeishuInboundTransport(),
-            credentials=ProviderCredentials(
-                feishu_app_id="cli_listener",
-                feishu_app_secret="listener-" + "fixture-secret",
-            ),
-        )
+    stack = await build_postgres_feishu_listener_stack(
+        settings=_feishu_settings(
+            tmp_path / "missing-identities.json", tmp_path / "missing-secret"
+        ),
+        transport=RecordingFeishuInboundTransport(),
+        credentials=ProviderCredentials(
+            feishu_app_id="cli_listener",
+            feishu_app_secret="listener-" + "fixture-secret",
+        ),
+    )
+    try:
+        assert isinstance(stack.identity_directory, DirectoryFeishuIdentityDirectory)
+    finally:
+        await stack.aclose()
     assert engine.disposed is True
 
 

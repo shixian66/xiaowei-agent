@@ -50,12 +50,13 @@ def _load(tmp_path: Path, document: dict[str, object]) -> StaticFeishuIdentityDi
 
 
 @pytest.mark.parametrize("label", ["operator", "dba", "oncall"])
-def test_operational_labels_map_to_view_and_submit(
+@pytest.mark.asyncio
+async def test_operational_labels_map_to_view_and_submit(
     tmp_path: Path, label: str
 ) -> None:
     directory = _load(tmp_path, _document(_entry("subject-alice", "alice", label)))
 
-    principal = directory.resolve(subject_ref="subject-alice")
+    principal = await directory.resolve(subject_ref="subject-alice")
 
     assert principal.tenant_id == "dev-local"
     assert principal.environment_id == "dev"
@@ -70,30 +71,35 @@ def test_operational_labels_map_to_view_and_submit(
 
 
 @pytest.mark.parametrize("label", ["viewer", "approver"])
-def test_readonly_labels_map_only_to_safe_view(tmp_path: Path, label: str) -> None:
+@pytest.mark.asyncio
+async def test_readonly_labels_map_only_to_safe_view(
+    tmp_path: Path, label: str
+) -> None:
     directory = _load(tmp_path, _document(_entry("subject-alice", "alice", label)))
 
-    assert directory.resolve(subject_ref="subject-alice").permissions == frozenset(
-        {ChannelPermission.VIEW_SAFE_TASK}
-    )
+    principal = await directory.resolve(subject_ref="subject-alice")
+    assert principal.permissions == frozenset({ChannelPermission.VIEW_SAFE_TASK})
 
 
-def test_admin_maps_to_the_complete_m7_permission_set(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_admin_maps_to_the_complete_m7_permission_set(tmp_path: Path) -> None:
     directory = _load(tmp_path, _document(_entry("subject-root", "root", "admin")))
 
-    assert directory.resolve(subject_ref="subject-root").permissions == frozenset(
-        ChannelPermission
-    )
+    principal = await directory.resolve(subject_ref="subject-root")
+    assert principal.permissions == frozenset(ChannelPermission)
 
 
-def test_unknown_subject_is_not_inferred_from_actor_or_label(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_unknown_subject_is_not_inferred_from_actor_or_label(
+    tmp_path: Path,
+) -> None:
     directory = _load(
         tmp_path,
         _document(_entry("subject-alice", "operations-admin", "operator")),
     )
 
     with pytest.raises(FeishuIdentityNotFoundError, match="identity not found"):
-        directory.resolve(subject_ref="operations-admin")
+        await directory.resolve(subject_ref="operations-admin")
 
 
 @pytest.mark.parametrize(

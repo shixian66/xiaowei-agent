@@ -12,22 +12,28 @@ from enum import StrEnum
 from threading import Lock
 from typing import Final, Protocol
 
+from xiaowei_agent.application.activation_notification import (
+    ActivationNotificationService,
+)
 from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
     ChannelSubmitCommand,
 )
+from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.config import ConfigError, Settings, load_settings
 from xiaowei_agent.contracts import ChannelKind
 from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityDirectory,
     FeishuIdentityNotFoundError,
+    FeishuIdentityUnavailableError,
 )
 from xiaowei_agent.interfaces.feishu_sdk import (
     FeishuInboundTransport,
     FeishuMessageEvent,
 )
 from xiaowei_agent.log import configure_logging
+from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ProjectionSubscriptionConflictError,
@@ -93,6 +99,8 @@ class FeishuListener:
         environment_id: str,
         identity_directory: FeishuIdentityDirectory,
         submission_service: ChannelSubmissionService,
+        activation_service: IdentityActivationService,
+        activation_notifications: ActivationNotificationService,
         policy_revision: str,
         clock: Callable[[], dt.datetime],
         trace_id_factory: Callable[[], str] = new_trace_id,
@@ -104,6 +112,8 @@ class FeishuListener:
         self._environment_id = environment_id
         self._identities = identity_directory
         self._submissions = submission_service
+        self._activations = activation_service
+        self._activation_notifications = activation_notifications
         self._policy_revision = policy_revision
         self._clock = clock
         self._trace_id_factory = trace_id_factory
@@ -172,9 +182,29 @@ class FeishuListener:
             return self._reject(submission)
         channel, text = submission
         try:
-            principal = self._identities.resolve(subject_ref=event.sender_subject_ref)
-        except FeishuIdentityNotFoundError:
+            principal = await self._identities.resolve(
+                subject_ref=event.sender_subject_ref
+            )
+        except FeishuIdentityUnavailableError:
             return self._reject(_FailureKind.IDENTITY_UNMAPPED)
+        except FeishuIdentityNotFoundError:
+            if channel is ChannelKind.FEISHU_PRIVATE:
+                return self._reject(_FailureKind.IDENTITY_UNMAPPED)
+            submitted = True
+            try:
+                await self._activations.request_group(
+                    subject_ref=event.sender_subject_ref,
+                    event_ref=event.event_id,
+                    chat_ref=event.chat_id,
+                )
+            except ActivationCapacityError:
+                submitted = False
+            await self._activation_notifications.notify(
+                conversation_ref=event.chat_id,
+                event_id=event.event_id,
+                submitted=submitted,
+            )
+            return True
         trace_id = self._trace_id_factory()
         try:
             with bind_trace_id(trace_id):
