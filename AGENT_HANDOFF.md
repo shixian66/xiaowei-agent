@@ -69,7 +69,7 @@
   [`35706192765`](https://github.com/shixian66/xiaowei-agent/actions/runs/35706192765)
   也为八项全绿、全部包含真实 steps，其中 integration 为 `4635 passed`、零 skip。
   这些仍不是部署、真实飞书、canary 或用户验收证据。
-- **W1b 切片 2 已在分支 `codex/w1b-entry-wiring` 离线实现，等待精确 SHA 复审与合入。**
+- **W1b 切片 2 已在 PR #68 / 分支 `codex/w1b-entry-wiring` 离线实现，等待精确 SHA 复审与合入。**
   实现提交为 `f4709ce8669c1af1ad77e44463328d83457ce1e7`。
   Web OAuth 未知身份现在只创建/复用申请并返回 `403 activation_pending`，不签发 Session；群未知
   身份只创建申请并单次发送通用卡片，私聊未知身份继续 fail-closed。两个入口均通过数据库目录
