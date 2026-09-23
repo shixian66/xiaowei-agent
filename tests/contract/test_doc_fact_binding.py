@@ -1647,6 +1647,10 @@ def test_handoff_names_w2_as_the_only_post_w1b_next_step() -> None:
 # ---------------------------------------------------------------------------
 
 _LOGIN_CONTEXT_TABLE: Final[str] = "web_oauth_login_contexts"
+_W2_PLAN = (
+    _ROOT
+    / "docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md"
+)
 _STAGE_LABEL = re.compile(r"\*\*(W[0-9][ab]?)\b")
 
 
@@ -1711,3 +1715,111 @@ def test_the_stage_ownership_guard_is_discriminating() -> None:
     drifted = spec.replace("**W2 登录与页面壳**", "**W1b 激活内核**")
     assert drifted != spec, "反例没有改动任何阶段条目"
     assert _stage_owning(drifted, _LOGIN_CONTEXT_TABLE) != {"W2"}
+
+
+def _w2_role_intent_matrix(text: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """解析 W2 的服务端终态矩阵；每个角色/来源与 intent 只能出现一次。"""
+    section = _section_between(
+        text,
+        start="#### 服务端终态矩阵",
+        end="#### 管理中心投影",
+    )
+    rows: dict[tuple[str, str], tuple[str, str]] = {}
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        assert len(cells) == 4, line
+        key = (cells[0], cells[1])
+        assert key not in rows, f"W2 角色×intent 终态重复：{key}"
+        rows[key] = (cells[2], cells[3])
+    return rows
+
+
+def test_w2_plan_role_intent_matrix_is_total_and_terminal() -> None:
+    """已认证主体不能落入「登录成功但不知道去哪里」的未定义状态。"""
+    assert _w2_role_intent_matrix(_W2_PLAN.read_text(encoding="utf-8")) == {
+        ("LOCAL_ADMIN", "WORKBENCH"): ("issue_session", "/app"),
+        ("LOCAL_ADMIN", "SAFE_TASK_DETAIL"): ("issue_session", "task_acl"),
+        ("LOCAL_ADMIN", "ADMIN_CENTER"): ("issue_session", "/admin_local"),
+        ("LOCAL_ADMIN", "ACTIVATION_STATUS"): ("deny_no_session", "forbidden"),
+        ("FEISHU_ADMIN", "WORKBENCH"): ("issue_session", "/app"),
+        ("FEISHU_ADMIN", "SAFE_TASK_DETAIL"): ("issue_session", "task_acl"),
+        ("FEISHU_ADMIN", "ADMIN_CENTER"): ("issue_session", "/admin_redacted"),
+        ("FEISHU_ADMIN", "ACTIVATION_STATUS"): (
+            "subject_bound",
+            "restore_original_intent",
+        ),
+        ("FEISHU_OPERATOR", "WORKBENCH"): ("issue_session", "/app"),
+        ("FEISHU_OPERATOR", "SAFE_TASK_DETAIL"): (
+            "issue_session",
+            "task_acl",
+        ),
+        ("FEISHU_OPERATOR", "ADMIN_CENTER"): (
+            "deny_no_session",
+            "destination_not_available",
+        ),
+        ("FEISHU_OPERATOR", "ACTIVATION_STATUS"): (
+            "subject_bound",
+            "restore_original_intent",
+        ),
+        ("FEISHU_USER", "WORKBENCH"): (
+            "deny_no_session",
+            "destination_not_available",
+        ),
+        ("FEISHU_USER", "SAFE_TASK_DETAIL"): ("issue_session", "task_acl"),
+        ("FEISHU_USER", "ADMIN_CENTER"): (
+            "deny_no_session",
+            "destination_not_available",
+        ),
+        ("FEISHU_USER", "ACTIVATION_STATUS"): (
+            "subject_bound",
+            "restore_original_intent",
+        ),
+    }
+
+
+def test_w2_plan_closes_enum_migration_and_single_source_surfaces() -> None:
+    """W2 新成员必须贯穿契约、DDL、共享套件与既有单真源。"""
+    text = _W2_PLAN.read_text(encoding="utf-8")
+    for required in (
+        "ActivationSource 全集相等",
+        "ActivationStatus 全集相等",
+        "DROP CONSTRAINT",
+        "ADD CONSTRAINT",
+        "`ACTIVATION_REQUESTS` 加入 `_ALTERED_AFTER_CREATION`",
+        "`SAFE_TASK_LINK` + 任一群摘要必须拒绝",
+        "`web_task_detail_path()` 从 `web_models.py` 移到 `interfaces/web_navigation.py`",
+        "`web_models.py` 只导入并复用该函数",
+        "`src/xiaowei_agent/_conformance.py`",
+        "文件 `rev_0016_web_login_contexts.py` / revision id `0016_web_login_contexts`",
+    ):
+        assert required in text, f"W2 计划缺少承重要求：{required}"
+    stale_conformance_path = (
+        "persistence/{web_session.py,schema.py,rows.py,memory.py,fake.py,postgres.py,"
+        "_conformance.py}"
+    )
+    assert stale_conformance_path not in text
+
+
+def test_w2_plan_resolves_login_window_admin_projection_and_slice_boundaries() -> None:
+    """迁移窗口、脱敏投影与机械搬迁不能留到实现者临场选择。"""
+    plan = _W2_PLAN.read_text(encoding="utf-8")
+    spec = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
+    for required in (
+        "清空现有 `web_oauth_states`",
+        "缺登录 context",
+        "不回落连接测试域",
+        "不注册匿名 request_id 状态查询",
+        "WebIntegrationStatusView",
+        "不得复用 `WebConfigView`",
+        "需使用本地管理员账号继续",
+        "服务端不得仅凭 request ID 查询 `ActivationStore`",
+        "B1 过渡期仍只向 `IdentitySource.LOCAL_ADMIN` 渲染并授权",
+        "### W2-B1：登录、角色路由与四个独立 shell",
+        "### W2-B2：配置 UI/API 迁入 Admin shell",
+        "ProductRole.ADMIN + IdentitySource.LOCAL_ADMIN",
+    ):
+        assert required in plan, f"W2 计划仍留有实现期选择：{required}"
+    assert "当前账号不能进入此页面" in spec
+    assert "把 W2 已迁入 Admin shell 的当前 RI5 Gemini/飞书配置" in spec
