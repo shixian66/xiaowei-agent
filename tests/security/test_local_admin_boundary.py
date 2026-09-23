@@ -17,7 +17,11 @@ from xiaowei_agent.interfaces.local_admin_auth import (
     LocalAdminAuthService,
     hash_password,
 )
-from xiaowei_agent.interfaces.web_auth import web_origin_digest, web_session_digest
+from xiaowei_agent.interfaces.web_auth import (
+    WebDestinationNotAvailableError,
+    web_origin_digest,
+    web_session_digest,
+)
 from xiaowei_agent.persistence.fake import (
     InMemoryLocalAdminStore,
     InMemoryWebSessionStore,
@@ -109,7 +113,7 @@ async def test_local_admin_cannot_use_activation_status_as_a_destination(
 ) -> None:
     service, _, _ = await _service(clock, memory_state)
 
-    with pytest.raises(LocalAdminAuthenticationError):
+    with pytest.raises(WebDestinationNotAvailableError):
         await service.login(
             username="admin",
             password=_INITIAL_PASSWORD,
@@ -120,6 +124,53 @@ async def test_local_admin_cannot_use_activation_status_as_a_destination(
             previous_session_cookie=None,
         )
     assert memory_state.web_sessions == {}
+
+
+async def test_wrong_password_stays_unauthorized_for_a_forbidden_destination(
+    clock, memory_state
+) -> None:
+    service, _, _ = await _service(clock, memory_state)
+
+    with pytest.raises(LocalAdminAuthenticationError):
+        await service.login(
+            username="admin",
+            password=_INITIAL_PASSWORD + "x",
+            return_intent=WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+            previous_session_cookie=None,
+        )
+    assert memory_state.web_sessions == {}
+
+
+async def test_change_password_rejects_activation_status_before_mutating_state(
+    clock, memory_state
+) -> None:
+    service, admins, _ = await _service(clock, memory_state)
+    issued = await service.login(
+        username="admin",
+        password=_INITIAL_PASSWORD,
+        return_intent=_WORKBENCH_INTENT,
+        previous_session_cookie=None,
+    )
+    before = await admins.get()
+
+    with pytest.raises(WebDestinationNotAvailableError):
+        await service.change_password(
+            session_cookie=issued.session_cookie,
+            current=_INITIAL_PASSWORD,
+            new="rotated" + "-secret",
+            return_intent=WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+        )
+
+    after = await admins.get()
+    assert after.password_hash == before.password_hash
+    assert after.must_change_password is True
+    assert await service.authenticate(session_cookie=issued.session_cookie)
 
 
 async def test_password_hash_never_appears_in_any_returned_payload(clock, memory_state) -> None:

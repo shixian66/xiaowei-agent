@@ -455,6 +455,21 @@ async def test_operator_cannot_receive_an_admin_session(clock, memory_state) -> 
         assert (await client.get("/admin")).status_code == 302
 
 
+async def test_authenticated_operator_cannot_access_admin_routes(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state, role=ProductRole.OPERATOR)
+    async with _client(app) as client:
+        callback = await _login_for(client, oauth, intent="workbench")
+        assert callback.status_code == 302
+        assert callback.headers["location"] == "/app"
+
+        for path in ("/admin", "/admin/api/integration-status"):
+            response = await client.get(path)
+            assert response.status_code == 403, path
+            assert response.json() == {"error": {"code": "forbidden"}}, path
+
+
 async def test_user_can_only_receive_a_safe_task_detail_session(
     clock, memory_state
 ) -> None:

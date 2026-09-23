@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from xiaowei_agent.application.identity_activation import (
+    ActivationResumeUnavailableError,
+)
 from xiaowei_agent.contracts import (
     ActivationStatus,
     AuthenticatedPrincipal,
@@ -79,11 +82,18 @@ class _RecordingOAuth:
 
 
 class _ActivationRequests:
-    def __init__(self, *, capacity: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        capacity: bool = False,
+        resume_failure: Exception | None = None,
+    ) -> None:
         self.capacity = capacity
+        self.resume_failure = resume_failure
         self.subjects: list[str] = []
         self.intents: list[WebReturnIntent] = []
         self.requests: dict[str, object] = {}
+        self.resume_calls: list[tuple[str, str]] = []
 
     async def request_web(self, *, subject_ref: str, return_intent):
         self.subjects.append(subject_ref)
@@ -100,12 +110,11 @@ class _ActivationRequests:
         return request
 
     async def resume_web(self, *, request_id: str, subject_ref: str):
+        self.resume_calls.append((request_id, subject_ref))
+        if self.resume_failure is not None:
+            raise self.resume_failure
         request = self.requests.get(request_id)
-        if request is None or request.subject_ref != subject_ref:
-            from xiaowei_agent.application.identity_activation import (
-                ActivationResumeUnavailableError,
-            )
-
+        if request is None:
             raise ActivationResumeUnavailableError
         return request
 
@@ -411,10 +420,12 @@ async def test_unknown_identity_never_creates_a_session(clock, memory_state) -> 
     assert caught.value.status is ActivationStatus.PENDING
 
 
-async def test_activation_status_requires_the_same_subject_and_still_issues_no_session(
+async def test_activation_resume_unavailable_maps_to_destination_denied_without_session(
     clock, memory_state
 ) -> None:
-    activations = _ActivationRequests()
+    activations = _ActivationRequests(
+        resume_failure=ActivationResumeUnavailableError()
+    )
     request = await activations.request_web(
         subject_ref="subject-alice",
         return_intent=_WORKBENCH_INTENT,
@@ -439,6 +450,7 @@ async def test_activation_status_requires_the_same_subject_and_still_issues_no_s
             previous_session_cookie=None,
         )
     assert memory_state.web_sessions == {}
+    assert activations.resume_calls == [(request.request_id, "other-subject")]
 
 
 async def test_approved_activation_restores_the_original_intent_and_role_gate(

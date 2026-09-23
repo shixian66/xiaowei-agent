@@ -41,8 +41,9 @@ class RecordingActivationRequests:
     async def resume_web(
         self, *, request_id: str, subject_ref: str
     ) -> ActivationRequest:
+        del subject_ref
         request = self.requests.get(request_id)
-        if request is None or getattr(request, "subject_ref", None) != subject_ref:
+        if request is None:
             raise ActivationResumeUnavailableError
         return cast(ActivationRequest, request)
 

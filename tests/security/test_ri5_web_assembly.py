@@ -442,22 +442,37 @@ async def _seed(admins: Any, hash_password: Any, password: str) -> None:
     await admins.seed_if_absent(password_hash=hash_password(password))
 
 
-def _login_body(password: str) -> str:
+def _login_body(
+    password: str, *, return_intent: dict[str, str] | None = None
+) -> str:
     return json.dumps(
         {
             "username": "admin",
             "password": password,
-            "return_intent": {"kind": "workbench"},
+            "return_intent": (
+                return_intent
+                if return_intent is not None
+                else {"kind": "workbench"}
+            ),
         }
     )
 
 
-def _change_password_body(*, current_password: str, new_password: str) -> str:
+def _change_password_body(
+    *,
+    current_password: str,
+    new_password: str,
+    return_intent: dict[str, str] | None = None,
+) -> str:
     return json.dumps(
         {
             "current_password": current_password,
             "new_password": new_password,
-            "return_intent": {"kind": "workbench"},
+            "return_intent": (
+                return_intent
+                if return_intent is not None
+                else {"kind": "workbench"}
+            ),
         }
     )
 
@@ -518,6 +533,73 @@ async def test_a_wrong_password_never_sets_a_cookie(clock, memory_state) -> None
 
     assert response.status_code == 401
     assert response.headers.get_list("set-cookie") == []
+
+
+async def test_local_admin_activation_destination_is_forbidden_without_a_session(
+    clock, memory_state
+) -> None:
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/login/api/login",
+            content=_login_body(
+                initial,
+                return_intent={
+                    "kind": "activation_status",
+                    "request_id": "activation-1",
+                },
+            ),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": {"code": "forbidden"}}
+    assert response.headers.get_list("set-cookie") == []
+    assert memory_state.web_sessions == {}
+
+
+async def test_change_password_rejects_activation_destination_without_mutation(
+    clock, memory_state
+) -> None:
+    from xiaowei_agent.interfaces.web_auth import web_csrf_token
+
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+    before = await admins.get()
+
+    async with _client(app) as client:
+        await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        cookie = client.cookies.get("__Host-xiaowei-session")
+        assert cookie is not None
+        response = await client.post(
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial,
+                new_password="rotated-local-" + "admin-secret",
+                return_intent={
+                    "kind": "activation_status",
+                    "request_id": "activation-1",
+                },
+            ),
+            headers={
+                "origin": origin,
+                "content-type": "application/json",
+                "x-csrf-token": web_csrf_token(cookie),
+            },
+        )
+
+    after = await admins.get()
+    assert response.status_code == 403
+    assert response.json() == {"error": {"code": "forbidden"}}
+    assert response.headers.get_list("set-cookie") == []
+    assert after.password_hash == before.password_hash
+    assert after.must_change_password is True
 
 
 async def test_before_first_change_password_other_routes_are_refused(

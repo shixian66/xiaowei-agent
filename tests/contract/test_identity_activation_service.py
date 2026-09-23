@@ -5,7 +5,10 @@ from typing import cast
 
 import pytest
 
-from xiaowei_agent.application.identity_activation import IdentityActivationService
+from xiaowei_agent.application.identity_activation import (
+    ActivationResumeUnavailableError,
+    IdentityActivationService,
+)
 from xiaowei_agent.contracts import (
     ActivationSource,
     ActivationStatus,
@@ -18,6 +21,7 @@ from xiaowei_agent.contracts import (
     WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.activation import (
+    ActivationLookup,
     ActivationRequest,
     CreateActivationCommand,
 )
@@ -76,12 +80,17 @@ def _context() -> AdminOperationContext:
 class _ActivationStore:
     def __init__(self) -> None:
         self.commands: list[CreateActivationCommand] = []
+        self.lookups: list[ActivationLookup] = []
 
     async def create_or_reuse(
         self, *, command: CreateActivationCommand
     ) -> ActivationRequest:
         self.commands.append(command)
         return _request()
+
+    async def load(self, *, query: ActivationLookup) -> ActivationRequest | None:
+        self.lookups.append(query)
+        return _request() if query.request_id == "activation-1" else None
 
 
 class _Directory:
@@ -157,6 +166,34 @@ async def test_group_request_derives_both_source_references() -> None:
     assert command.source_event_ref == "event-1"
     assert command.source_chat_ref == "chat-1"
     assert command.return_intent is None
+
+
+@pytest.mark.asyncio
+async def test_resume_web_returns_the_request_for_the_same_subject() -> None:
+    service, activations, _, _ = _service()
+
+    resumed = await service.resume_web(
+        request_id="activation-1", subject_ref="ou_alice"
+    )
+
+    assert resumed == _request()
+    assert activations.lookups == [
+        ActivationLookup(
+            request_id="activation-1",
+            tenant_id="dev-local",
+            environment_id="dev",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_web_rejects_a_different_subject() -> None:
+    service, _, _, _ = _service()
+
+    with pytest.raises(ActivationResumeUnavailableError):
+        await service.resume_web(
+            request_id="activation-1", subject_ref="ou_someone_else"
+        )
 
 
 @pytest.mark.asyncio
