@@ -53,7 +53,7 @@
 - [x] **Step 2: 调整文档。** 按去向表保留原始 handoff 快照，修正当前摘要和已核实的过期状态；替换 AGENTS 日常流程，收敛 README/ARCHITECTURE/DEVELOPMENT_PLAN。保持源码、CI、ADR 与启动命令不变；runbook 的解释性事实须与当前源码一致。
 - [x] **Step 3: 迁移既有断言。** 架构不变量仍在架构断言，当前实施与证据上限在 handoff 断言，README 绑定当前状态链接；保留所有未受影响的文档保护。运行 `python -m pytest tests/contract/test_doc_fact_binding.py -q`，Expected: 全部通过，且新反例能识别损坏。
 - [x] **Step 4: 最终验证。** 激活既有 Python 3.11.16 工具链并令 `PYTHONPATH=src`（已确认 uv.lock 相同、加载本工作区源码）。依次执行 `python -m pytest -q`、`python -m pytest -m security -q`、`ruff check .`、`mypy src`、`git diff --check`。Expected: exit 0；未设置 PostgreSQL DSN 的 skip 如实列明。另核对快照正文与基线字节相同、修改文档的相对链接可解析、风险去向与实际 diff。
-- [ ] **Step 5: 提交并独立复审。** 只暂存本计划列明的文件，提交精确 SHA；独立审查者检查基线至候选的全部 diff、Review Focus 和验证记录。我核实并处理有证据的问题；已完成的测试不因写总结而无理由重跑。
+- [x] **Step 5: 提交并独立复审。** 只暂存本计划列明的文件，提交精确 SHA；独立审查者检查基线至候选的全部 diff、Review Focus 和验证记录。两项有证据的问题已修复并经独立有限复核确认闭合；已完成的测试不因写总结而无理由重跑。
 
 ## 执行记录
 
@@ -96,6 +96,7 @@
 - 修复前目标检查：`python -m pytest tests/contract/test_doc_fact_binding.py -k 'current_status or stale_entry_shapes or entry_guard' -q`，exit 1，`2 failed, 15 passed, 58 deselected in 0.11s`；两项失败分别定位 README 后部旧状态与 handoff/ARCHITECTURE 旧父链。
 - 修复后：`python -m pytest tests/contract/test_doc_fact_binding.py tests/unit/test_model_contracts.py -q`，exit 0，`141 passed in 0.27s`；Ruff、`git diff --check`、快照/103 个引用与稳定门核对均通过。
 - 修复后全量：`python -m pytest -q`，exit 0，`4341 passed, 349 skipped, 5 warnings in 40.31s`。安全专门命令与 mypy 的输入未变，沿用前表已执行证据，不声称重跑；上述 skip 与环境限制不变。
+- 修复确认固定 `4f2fbed79a6a874dfc57766ce5dbcd0d67869b1e` → `2cd6eb61046c50a43fd80fa19610031a18d8d256`，独立审查结论“Ready to merge：是（技术结论）”，两项均闭合且无新增实质问题。审查者独立运行同组文档/模型契约 `141 passed in 0.28s`，确认 README 13 个代码块原样保留、工作树干净。随后提交只更新本计划与 handoff 的审查状态，不改受审规则、测试或源码；最终提交 SHA 由 PR/交付记录提供。
 
 ### 证据上限与恢复
 
