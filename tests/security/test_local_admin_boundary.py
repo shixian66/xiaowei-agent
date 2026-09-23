@@ -4,14 +4,24 @@ from typing import Any
 
 import pytest
 
-from xiaowei_agent.contracts import ChannelPermission, IdentitySource
+from xiaowei_agent.contracts import (
+    ChannelPermission,
+    IdentitySource,
+    ProductRole,
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
 from xiaowei_agent.interfaces.local_admin_auth import (
     LOCAL_ADMIN_PRINCIPAL,
     LocalAdminAuthenticationError,
     LocalAdminAuthService,
     hash_password,
 )
-from xiaowei_agent.interfaces.web_auth import web_origin_digest, web_session_digest
+from xiaowei_agent.interfaces.web_auth import (
+    WebDestinationNotAvailableError,
+    web_origin_digest,
+    web_session_digest,
+)
 from xiaowei_agent.persistence.fake import (
     InMemoryLocalAdminStore,
     InMemoryWebSessionStore,
@@ -27,6 +37,7 @@ pytestmark = pytest.mark.security
 _ORIGIN = "http://127.0.0.1:8080"
 _OTHER_ORIGIN = "https://sso.example.test"
 _INITIAL_PASSWORD = "admin" + "-initial"
+_WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
 def _tokens(count: int = 16) -> Any:
@@ -51,7 +62,10 @@ async def _service(clock: Any, memory_state: Any, *, origin: str = _ORIGIN) -> A
 async def test_local_admin_principal_is_fixed(clock, memory_state) -> None:
     service, _, _ = await _service(clock, memory_state)
     issued = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
 
     assert issued.principal is LOCAL_ADMIN_PRINCIPAL
@@ -66,16 +80,108 @@ async def test_local_admin_principal_is_fixed(clock, memory_state) -> None:
             ChannelPermission.ADMIN_ALL_SAFE_TASKS,
         }
     )
+    assert issued.role is ProductRole.ADMIN
+    assert issued.return_intent == _WORKBENCH_INTENT
+    assert issued.admin_capabilities
 
 
-async def test_password_hash_never_appears_in_any_returned_payload(
+async def test_wrong_username_and_wrong_password_share_one_closed_error(
     clock, memory_state
 ) -> None:
+    service, _, _ = await _service(clock, memory_state)
+
+    for username, password in (
+        ("not-admin", _INITIAL_PASSWORD),
+        ("管理员", _INITIAL_PASSWORD),
+        ("admin", _INITIAL_PASSWORD + "x"),
+    ):
+        with pytest.raises(
+            LocalAdminAuthenticationError,
+            match=r"^local admin authentication failed$",
+        ):
+            await service.login(
+                username=username,
+                password=password,
+                return_intent=_WORKBENCH_INTENT,
+                previous_session_cookie=None,
+            )
+    assert memory_state.web_sessions == {}
+
+
+async def test_local_admin_cannot_use_activation_status_as_a_destination(
+    clock, memory_state
+) -> None:
+    service, _, _ = await _service(clock, memory_state)
+
+    with pytest.raises(WebDestinationNotAvailableError):
+        await service.login(
+            username="admin",
+            password=_INITIAL_PASSWORD,
+            return_intent=WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+            previous_session_cookie=None,
+        )
+    assert memory_state.web_sessions == {}
+
+
+async def test_wrong_password_stays_unauthorized_for_a_forbidden_destination(
+    clock, memory_state
+) -> None:
+    service, _, _ = await _service(clock, memory_state)
+
+    with pytest.raises(LocalAdminAuthenticationError):
+        await service.login(
+            username="admin",
+            password=_INITIAL_PASSWORD + "x",
+            return_intent=WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+            previous_session_cookie=None,
+        )
+    assert memory_state.web_sessions == {}
+
+
+async def test_change_password_rejects_activation_status_before_mutating_state(
+    clock, memory_state
+) -> None:
+    service, admins, _ = await _service(clock, memory_state)
+    issued = await service.login(
+        username="admin",
+        password=_INITIAL_PASSWORD,
+        return_intent=_WORKBENCH_INTENT,
+        previous_session_cookie=None,
+    )
+    before = await admins.get()
+
+    with pytest.raises(WebDestinationNotAvailableError):
+        await service.change_password(
+            session_cookie=issued.session_cookie,
+            current=_INITIAL_PASSWORD,
+            new="rotated" + "-secret",
+            return_intent=WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+        )
+
+    after = await admins.get()
+    assert after.password_hash == before.password_hash
+    assert after.must_change_password is True
+    assert await service.authenticate(session_cookie=issued.session_cookie)
+
+
+async def test_password_hash_never_appears_in_any_returned_payload(clock, memory_state) -> None:
     service, admins, _ = await _service(clock, memory_state)
     stored = (await admins.get()).password_hash
 
     issued = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
     authenticated = await service.authenticate(session_cookie=issued.session_cookie)
 
@@ -87,9 +193,7 @@ async def test_password_hash_never_appears_in_any_returned_payload(
         assert authenticated.csrf_token not in rendered
 
 
-async def test_the_password_hash_never_survives_repr_or_dump(
-    clock, memory_state
-) -> None:
+async def test_the_password_hash_never_survives_repr_or_dump(clock, memory_state) -> None:
     """哈希不是明文口令，但它是离线爆破的输入，同样不得进日志或响应体。"""
     from xiaowei_agent.persistence.local_admin import ChangePasswordCommand
 
@@ -117,12 +221,13 @@ async def test_the_password_hash_never_survives_repr_or_dump(
     assert "must_change_password" in repr(record)
 
 
-async def test_session_is_bound_to_the_public_origin_that_created_it(
-    clock, memory_state
-) -> None:
+async def test_session_is_bound_to_the_public_origin_that_created_it(clock, memory_state) -> None:
     service, admins, sessions = await _service(clock, memory_state)
     issued = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
 
     other = LocalAdminAuthService(
@@ -137,15 +242,19 @@ async def test_session_is_bound_to_the_public_origin_that_created_it(
     assert await service.authenticate(session_cookie=issued.session_cookie)
 
 
-async def test_change_password_revokes_every_other_local_admin_session(
-    clock, memory_state
-) -> None:
+async def test_change_password_revokes_every_other_local_admin_session(clock, memory_state) -> None:
     service, admins, _sessions = await _service(clock, memory_state)
     first = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
     second = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
     assert first.session_cookie != second.session_cookie
 
@@ -154,6 +263,7 @@ async def test_change_password_revokes_every_other_local_admin_session(
         session_cookie=second.session_cookie,
         current=_INITIAL_PASSWORD,
         new=new_password,
+        return_intent=_WORKBENCH_INTENT,
     )
 
     for stale in (first.session_cookie, second.session_cookie):
@@ -164,23 +274,33 @@ async def test_change_password_revokes_every_other_local_admin_session(
     # 口令确实换了：旧口令不再能登录，新口令可以。
     with pytest.raises(LocalAdminAuthenticationError):
         await service.login(
-            password=_INITIAL_PASSWORD, previous_session_cookie=None
+            username="admin",
+            return_intent=_WORKBENCH_INTENT,
+            password=_INITIAL_PASSWORD,
+            previous_session_cookie=None,
         )
-    assert await service.login(password=new_password, previous_session_cookie=None)
+    assert await service.login(
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=new_password,
+        previous_session_cookie=None,
+    )
 
 
-async def test_change_password_is_atomic_across_admin_and_sessions(
-    clock, memory_state
-) -> None:
+async def test_change_password_is_atomic_across_admin_and_sessions(clock, memory_state) -> None:
     """反例守护：撤销必须先于插入，否则新 session 会被自己那一批撤掉。"""
     service, _, sessions = await _service(clock, memory_state)
     live = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
     rotated = await service.change_password(
         session_cookie=live.session_cookie,
         current=_INITIAL_PASSWORD,
         new="rotated" + "-secret",
+        return_intent=_WORKBENCH_INTENT,
     )
 
     session = await sessions.get_session(
@@ -193,9 +313,7 @@ async def test_change_password_is_atomic_across_admin_and_sessions(
     assert session.auth_source is IdentitySource.LOCAL_ADMIN
 
 
-async def test_seed_is_idempotent_and_forces_a_password_change(
-    clock, memory_state
-) -> None:
+async def test_seed_is_idempotent_and_forces_a_password_change(clock, memory_state) -> None:
     service, admins, _ = await _service(clock, memory_state)
     first_hash = (await admins.get()).password_hash
 
@@ -204,16 +322,17 @@ async def test_seed_is_idempotent_and_forces_a_password_change(
     assert (await admins.get()).must_change_password is True
 
     issued = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
     assert (
         await service.authenticate(session_cookie=issued.session_cookie)
     ).must_change_password is True
 
 
-async def test_a_feishu_session_cannot_authenticate_as_the_local_admin(
-    clock, memory_state
-) -> None:
+async def test_a_feishu_session_cannot_authenticate_as_the_local_admin(clock, memory_state) -> None:
     """同一张表里飞书 session 也有效，但不得走本地管理员这条路径。"""
     service, _, sessions = await _service(clock, memory_state)
     cookie = "feishu-cookie-" + "y" * 32
@@ -243,7 +362,10 @@ async def test_a_wrong_password_never_creates_a_session(clock, memory_state) -> 
 
     with pytest.raises(LocalAdminAuthenticationError):
         await service.login(
-            password=_INITIAL_PASSWORD + "x", previous_session_cookie=None
+            username="admin",
+            return_intent=_WORKBENCH_INTENT,
+            password=_INITIAL_PASSWORD + "x",
+            previous_session_cookie=None,
         )
     assert memory_state.web_sessions == {}
 
@@ -251,7 +373,10 @@ async def test_a_wrong_password_never_creates_a_session(clock, memory_state) -> 
 async def test_logout_revokes_and_is_idempotent(clock, memory_state) -> None:
     service, _, sessions = await _service(clock, memory_state)
     issued = await service.login(
-        password=_INITIAL_PASSWORD, previous_session_cookie=None
+        username="admin",
+        return_intent=_WORKBENCH_INTENT,
+        password=_INITIAL_PASSWORD,
+        previous_session_cookie=None,
     )
 
     assert await service.logout(session_cookie=issued.session_cookie) is True

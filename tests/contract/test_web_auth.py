@@ -1,21 +1,30 @@
 """飞书 OAuth 与浏览器 session 编排的离线契约。"""
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from xiaowei_agent.application.identity_activation import (
+    ActivationResumeUnavailableError,
+)
 from xiaowei_agent.contracts import (
+    ActivationStatus,
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    ProductRole,
     WebMode,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.feishu_identity import (
-    FeishuIdentityDirectory,
     FeishuIdentityUnavailableError,
     StaticFeishuIdentityDirectory,
+    WebIdentityDirectory,
+    WebIdentityResolution,
 )
 from xiaowei_agent.interfaces.web_auth import (
     FeishuOAuthCodeError,
@@ -25,6 +34,7 @@ from xiaowei_agent.interfaces.web_auth import (
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
+    WebDestinationNotAvailableError,
     WebOAuthCodeError,
     WebOAuthStateError,
     WebOAuthUnavailableError,
@@ -72,20 +82,45 @@ class _RecordingOAuth:
 
 
 class _ActivationRequests:
-    def __init__(self, *, capacity: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        capacity: bool = False,
+        resume_failure: Exception | None = None,
+    ) -> None:
         self.capacity = capacity
+        self.resume_failure = resume_failure
         self.subjects: list[str] = []
+        self.intents: list[WebReturnIntent] = []
+        self.requests: dict[str, object] = {}
+        self.resume_calls: list[tuple[str, str]] = []
 
     async def request_web(self, *, subject_ref: str, return_intent):
-        assert return_intent.kind.value == "workbench"
         self.subjects.append(subject_ref)
+        self.intents.append(return_intent)
         if self.capacity:
             raise ActivationCapacityError
-        return object()
+        request = SimpleNamespace(
+            request_id=f"activation-{len(self.subjects)}",
+            subject_ref=subject_ref,
+            status=ActivationStatus.PENDING,
+            return_intent=return_intent,
+        )
+        self.requests[request.request_id] = request
+        return request
+
+    async def resume_web(self, *, request_id: str, subject_ref: str):
+        self.resume_calls.append((request_id, subject_ref))
+        if self.resume_failure is not None:
+            raise self.resume_failure
+        request = self.requests.get(request_id)
+        if request is None:
+            raise ActivationResumeUnavailableError
+        return request
 
 
 class _UnavailableIdentityDirectory:
-    async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
+    async def resolve_for_web(self, *, subject_ref: str) -> WebIdentityResolution:
         del subject_ref
         raise FeishuIdentityUnavailableError("feishu identity unavailable")
 
@@ -104,6 +139,9 @@ def _principal(subject_ref: str = "subject-alice") -> AuthenticatedPrincipal:
             }
         ),
     )
+
+
+_WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
 def _token_factory(*values: str):
@@ -131,10 +169,11 @@ def _service(
     clock,
     memory_state,
     oauth: _RecordingOAuth | None = None,
-    identities: FeishuIdentityDirectory | None = None,
+    identities: WebIdentityDirectory | None = None,
     tokens: tuple[str, ...] = ("state_value_1234567890", "session_value_1234567890"),
     oauth_state_capacity: int = 1024,
     activations: _ActivationRequests | None = None,
+    role: ProductRole = ProductRole.OPERATOR,
 ) -> tuple[WebAuthService, _RecordingOAuth, InMemoryWebSessionStore]:
     oauth_port = _RecordingOAuth() if oauth is None else oauth
     sessions = InMemoryWebSessionStore(
@@ -144,7 +183,8 @@ def _service(
     )
     principal = _principal()
     directory = identities or StaticFeishuIdentityDirectory(
-        principals={principal.subject_ref: principal}
+        principals={principal.subject_ref: principal},
+        web_roles={principal.subject_ref: role},
     )
     return (
         WebAuthService(
@@ -168,7 +208,7 @@ async def test_login_start_persists_only_digest_and_uses_trusted_callback(
 ) -> None:
     service, oauth, _ = _service(clock=clock, memory_state=memory_state)
 
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     assert isinstance(start, OAuthStart)
     assert start.state_cookie == "state_value_1234567890"
@@ -195,10 +235,10 @@ async def test_login_start_maps_state_capacity_to_closed_unavailable_error(
         oauth_state_capacity=1,
         tokens=("first_state_value_1234567890", "second_state_value_1234567890"),
     )
-    await service.start_login()
+    await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     try:
-        await service.start_login()
+        await service.start_login(return_intent=_WORKBENCH_INTENT)
     except WebOAuthUnavailableError as exc:
         assert str(exc) == "oauth provider unavailable"
         assert exc.__cause__ is None
@@ -207,11 +247,90 @@ async def test_login_start_maps_state_capacity_to_closed_unavailable_error(
         pytest.fail("expected WebOAuthUnavailableError")
 
 
+@pytest.mark.parametrize(
+    ("role", "intent", "allowed"),
+    (
+        (
+            ProductRole.ADMIN,
+            WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
+            True,
+        ),
+        (
+            ProductRole.ADMIN,
+            WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER),
+            True,
+        ),
+        (
+            ProductRole.OPERATOR,
+            WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
+            True,
+        ),
+        (
+            ProductRole.OPERATOR,
+            WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER),
+            False,
+        ),
+        (
+            ProductRole.USER,
+            WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
+            False,
+        ),
+        (
+            ProductRole.USER,
+            WebReturnIntent(
+                kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                task_id="task-1",
+            ),
+            True,
+        ),
+        (
+            ProductRole.USER,
+            WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER),
+            False,
+        ),
+    ),
+)
+async def test_role_destination_matrix_is_enforced_before_session_rotation(
+    clock,
+    memory_state,
+    role: ProductRole,
+    intent: WebReturnIntent,
+    allowed: bool,
+) -> None:
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        role=role,
+    )
+    start = await service.start_login(return_intent=intent)
+
+    if not allowed:
+        with pytest.raises(WebDestinationNotAvailableError):
+            await service.complete_login(
+                code="valid-code",
+                state=start.state_cookie,
+                state_cookie=start.state_cookie,
+                previous_session_cookie=None,
+            )
+        assert memory_state.web_sessions == {}
+        return
+
+    issued = await service.complete_login(
+        code="valid-code",
+        state=start.state_cookie,
+        state_cookie=start.state_cookie,
+        previous_session_cookie=None,
+    )
+    assert issued.role is role
+    assert issued.return_intent == intent
+    assert len(memory_state.web_sessions) == 1
+
+
 async def test_state_cookie_mismatch_does_not_burn_the_valid_state(
     clock, memory_state
 ) -> None:
     service, oauth, _ = _service(clock=clock, memory_state=memory_state)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebOAuthStateError):
         await service.complete_login(
@@ -233,7 +352,7 @@ async def test_state_cookie_mismatch_does_not_burn_the_valid_state(
 
 async def test_oauth_state_is_expired_once_and_replay_safe(clock, memory_state) -> None:
     service, oauth, _ = _service(clock=clock, memory_state=memory_state)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
     clock.advance(seconds=300)
 
     for _ in range(2):
@@ -252,7 +371,7 @@ async def test_code_failure_consumes_state_before_provider_result(
 ) -> None:
     oauth = _RecordingOAuth(code_error=True)
     service, _, _ = _service(clock=clock, memory_state=memory_state, oauth=oauth)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebOAuthCodeError):
         await service.complete_login(
@@ -280,9 +399,13 @@ async def test_unknown_identity_never_creates_a_session(clock, memory_state) -> 
         oauth=_RecordingOAuth(subject_ref="unknown-subject"),
         activations=activations,
     )
-    start = await service.start_login()
+    original = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="task-1",
+    )
+    start = await service.start_login(return_intent=original)
 
-    with pytest.raises(WebActivationPendingError):
+    with pytest.raises(WebActivationPendingError) as caught:
         await service.complete_login(
             code="valid-code",
             state=start.state_cookie,
@@ -292,6 +415,79 @@ async def test_unknown_identity_never_creates_a_session(clock, memory_state) -> 
 
     assert memory_state.web_sessions == {}
     assert activations.subjects == ["unknown-subject"]
+    assert activations.intents == [original]
+    assert caught.value.request_id == "activation-1"
+    assert caught.value.status is ActivationStatus.PENDING
+
+
+async def test_activation_resume_unavailable_maps_to_destination_denied_without_session(
+    clock, memory_state
+) -> None:
+    activations = _ActivationRequests(
+        resume_failure=ActivationResumeUnavailableError()
+    )
+    request = await activations.request_web(
+        subject_ref="subject-alice",
+        return_intent=_WORKBENCH_INTENT,
+    )
+    intent = WebReturnIntent(
+        kind=WebReturnIntentKind.ACTIVATION_STATUS,
+        request_id=request.request_id,
+    )
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        oauth=_RecordingOAuth(subject_ref="other-subject"),
+        activations=activations,
+    )
+    start = await service.start_login(return_intent=intent)
+
+    with pytest.raises(WebDestinationNotAvailableError):
+        await service.complete_login(
+            code="valid-code",
+            state=start.state_cookie,
+            state_cookie=start.state_cookie,
+            previous_session_cookie=None,
+        )
+    assert memory_state.web_sessions == {}
+    assert activations.resume_calls == [(request.request_id, "other-subject")]
+
+
+async def test_approved_activation_restores_the_original_intent_and_role_gate(
+    clock, memory_state
+) -> None:
+    activations = _ActivationRequests()
+    original = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="task-1",
+    )
+    request = await activations.request_web(
+        subject_ref="subject-alice",
+        return_intent=original,
+    )
+    request.status = ActivationStatus.APPROVED
+    status_intent = WebReturnIntent(
+        kind=WebReturnIntentKind.ACTIVATION_STATUS,
+        request_id=request.request_id,
+    )
+    service, _, _ = _service(
+        clock=clock,
+        memory_state=memory_state,
+        activations=activations,
+        role=ProductRole.USER,
+    )
+    start = await service.start_login(return_intent=status_intent)
+
+    issued = await service.complete_login(
+        code="valid-code",
+        state=start.state_cookie,
+        state_cookie=start.state_cookie,
+        previous_session_cookie=None,
+    )
+
+    assert issued.return_intent == original
+    assert issued.role is ProductRole.USER
+    assert len(memory_state.web_sessions) == 1
 
 
 async def test_activation_capacity_maps_to_unavailable_without_a_session(
@@ -304,7 +500,7 @@ async def test_activation_capacity_maps_to_unavailable_without_a_session(
         oauth=_RecordingOAuth(subject_ref="unknown-subject"),
         activations=activations,
     )
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebOAuthUnavailableError):
         await service.complete_login(
@@ -328,7 +524,7 @@ async def test_bound_but_unavailable_identity_never_reenters_activation(
         identities=_UnavailableIdentityDirectory(),
         activations=activations,
     )
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebAuthenticationError):
         await service.complete_login(
@@ -355,14 +551,14 @@ async def test_login_rotates_old_session_and_current_directory_is_authoritative(
             "session_value_second_1234567890",
         ),
     )
-    first_start = await service.start_login()
+    first_start = await service.start_login(return_intent=_WORKBENCH_INTENT)
     first = await service.complete_login(
         code="valid-code",
         state=first_start.state_cookie,
         state_cookie=first_start.state_cookie,
         previous_session_cookie=None,
     )
-    second_start = await service.start_login()
+    second_start = await service.start_login(return_intent=_WORKBENCH_INTENT)
     second = await service.complete_login(
         code="valid-code",
         state=second_start.state_cookie,
@@ -390,7 +586,7 @@ async def test_current_session_rejects_an_identity_that_becomes_unavailable(
     clock, memory_state
 ) -> None:
     service, _, _ = _service(clock=clock, memory_state=memory_state)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
     session = await service.complete_login(
         code="valid-code",
         state=start.state_cookie,
@@ -412,7 +608,7 @@ async def test_session_expiry_logout_origin_and_csrf_fail_closed(
     clock, memory_state
 ) -> None:
     service, _, _ = _service(clock=clock, memory_state=memory_state)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
     session = await service.complete_login(
         code="valid-code",
         state=start.state_cookie,
@@ -449,7 +645,7 @@ async def test_session_expiry_logout_origin_and_csrf_fail_closed(
         memory_state=memory_state,
         tokens=("new_state_value_1234567890", "new_session_value_1234567890"),
     )
-    second_start = await second_service.start_login()
+    second_start = await second_service.start_login(return_intent=_WORKBENCH_INTENT)
     second = await second_service.complete_login(
         code="valid-code",
         state=second_start.state_cookie,
@@ -469,7 +665,7 @@ async def test_untrusted_authorization_redirect_is_rejected(clock, memory_state)
     )
 
     with pytest.raises(WebOAuthCodeError):
-        await service.start_login()
+        await service.start_login(return_intent=_WORKBENCH_INTENT)
 
 
 async def test_printable_non_ascii_authorization_path_remains_supported(
@@ -483,7 +679,7 @@ async def test_printable_non_ascii_authorization_path_remains_supported(
         ),
     )
 
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     assert start.authorization_url.startswith("https://feishu.example.test/授权?")
 
@@ -492,7 +688,7 @@ async def test_printable_non_ascii_oauth_code_reaches_provider(
     clock, memory_state
 ) -> None:
     service, oauth, _ = _service(clock=clock, memory_state=memory_state)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     completed = await service.complete_login(
         code="一次性授权码",
@@ -547,7 +743,8 @@ async def test_a_local_admin_session_is_not_accepted_as_a_feishu_session(
         clock=clock,
         memory_state=memory_state,
         identities=StaticFeishuIdentityDirectory(
-            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)}
+            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)},
+            web_roles={LOCAL_ADMIN_SUBJECT_REF: ProductRole.OPERATOR},
         ),
     )
     await _session_in(sessions, cookie, auth_source=IdentitySource.LOCAL_ADMIN)
@@ -570,7 +767,8 @@ async def test_a_feishu_session_of_the_same_shape_is_still_accepted(
         clock=clock,
         memory_state=memory_state,
         identities=StaticFeishuIdentityDirectory(
-            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)}
+            principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)},
+            web_roles={LOCAL_ADMIN_SUBJECT_REF: ProductRole.OPERATOR},
         ),
     )
     await _session_in(sessions, cookie, auth_source=IdentitySource.FEISHU)

@@ -32,7 +32,6 @@ async def test_all_task_routes_require_a_valid_session() -> None:
         for method, path in (
             ("GET", "/app/api/tasks"),
             ("GET", "/app/api/tasks/task-1"),
-            ("GET", "/app/tasks/task-1"),
             ("POST", "/app/api/tasks"),
         ):
             kwargs = {}
@@ -50,6 +49,11 @@ async def test_all_task_routes_require_a_valid_session() -> None:
             response = await client.request(method, path, **kwargs)
             assert response.status_code == 401
             assert response.json() == {"error": {"code": "unauthorized"}}
+        shell = await client.get("/app/tasks/task-1")
+        assert shell.status_code == 302
+        assert shell.headers["location"] == (
+            "/login?intent=safe_task_detail&task_id=task-1"
+        )
     assert access.list_calls == []
     assert access.detail_calls == []
     assert submissions.calls == []

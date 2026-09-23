@@ -18,6 +18,7 @@ from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    ProductRole,
     ReadinessReport,
     WebMode,
 )
@@ -152,7 +153,8 @@ def _build(
         WebAuthService(
             sessions=sessions,
             identities=StaticFeishuIdentityDirectory(
-                principals={"subject-alice": _admin_principal()}
+                principals={"subject-alice": _admin_principal()},
+                web_roles={"subject-alice": ProductRole.ADMIN},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=oauth if oauth is not None else _OAuth(),
@@ -212,18 +214,27 @@ async def _sign_in(client: httpx.AsyncClient, admins: Any) -> str:
         password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD)
     )
     await client.post(
-        "/app/api/login",
-        content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+        "/login/api/login",
+        content=json.dumps(
+            {
+                "username": "admin",
+                "password": INITIAL_LOCAL_ADMIN_PASSWORD,
+                "return_intent": {"kind": "workbench"},
+            }
+        ),
         headers=_json_headers(),
     )
-    carried = _CSRF_META_RE.search((await client.get("/app")).text)
+    carried = _CSRF_META_RE.search(
+        (await client.get("/login?intent=workbench")).text
+    )
     assert carried is not None
     changed = await client.post(
-        "/app/api/change-password",
+        "/login/api/change-password",
         content=json.dumps(
             {
                 "current_password": INITIAL_LOCAL_ADMIN_PASSWORD,
                 "new_password": _NEW_PASSWORD,
+                "return_intent": {"kind": "workbench"},
             }
         ),
         headers=_json_headers(carried.group(1)),
@@ -838,11 +849,19 @@ async def test_probe_routes_refuse_before_the_forced_password_change(
     )
     async with _client(built["app"]) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+            "/login/api/login",
+            content=json.dumps(
+                {
+                    "username": "admin",
+                    "password": INITIAL_LOCAL_ADMIN_PASSWORD,
+                    "return_intent": {"kind": "workbench"},
+                }
+            ),
             headers=_json_headers(),
         )
-        carried = _CSRF_META_RE.search((await client.get("/app")).text)
+        carried = _CSRF_META_RE.search(
+            (await client.get("/login?intent=workbench")).text
+        )
         assert carried is not None
         token = carried.group(1)
         for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):

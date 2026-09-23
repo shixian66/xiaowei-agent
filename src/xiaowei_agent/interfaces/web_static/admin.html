@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>管理中心 · 小维</title>
+  <link rel="stylesheet" href="/app/static/app.css">
+</head>
+<body class="admin-page">
+  <div class="desktop-width-notice" aria-live="polite">
+    <h1>管理中心需要更宽的窗口</h1><p>请在宽度至少 1024px 的桌面浏览器中打开。</p>
+  </div>
+  <main class="app-shell admin-shell">
+    <header class="topbar">
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">维</span><div><p class="eyebrow">ADMIN CENTER</p><h1>小维管理中心</h1></div></div>
+      <nav class="topbar-actions" aria-label="主导航"><a class="button button-quiet" href="/app">返回工作台</a><span class="user-chip"><span class="user-avatar" id="admin-avatar">A</span><span><strong id="admin-actor">读取中</strong><small id="admin-source">身份核验中</small></span></span></nav>
+    </header>
+    <section class="admin-content">
+      <div class="stage-heading"><div><p class="eyebrow">SYSTEM OVERVIEW</p><h2>集成状态</h2></div><span class="safe-view-pill">脱敏只读视图</span></div>
+      <p class="admin-lead">这里只展示是否已配置、是否需要重启、加载结果和最近测试结果，不展示凭据或连接细节。</p>
+      <div class="integration-grid" id="integration-grid" aria-live="polite"></div>
+      <p class="form-message is-hidden" id="admin-message" role="alert"></p>
+      <section class="local-admin-callout is-hidden" id="local-admin-callout">
+        <h2>本地配置维护</h2><p>当前版本暂时保留在工作台配置区域；下一切片会迁入这里，存储和真实调用门不会改变。</p><a class="button button-primary" href="/app#configuration">前往当前配置区域</a>
+      </section>
+      <section class="feishu-admin-callout is-hidden" id="feishu-admin-callout">
+        <h2>配置变更需要本地管理员</h2><p>请使用本地管理员账号登录后继续。飞书管理员仅拥有脱敏状态查看权限。</p>
+      </section>
+    </section>
+  </main>
+  <script type="module" src="/app/static/admin.js"></script>
+</body>
+</html>

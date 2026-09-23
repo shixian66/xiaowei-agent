@@ -442,6 +442,41 @@ async def _seed(admins: Any, hash_password: Any, password: str) -> None:
     await admins.seed_if_absent(password_hash=hash_password(password))
 
 
+def _login_body(
+    password: str, *, return_intent: dict[str, str] | None = None
+) -> str:
+    return json.dumps(
+        {
+            "username": "admin",
+            "password": password,
+            "return_intent": (
+                return_intent
+                if return_intent is not None
+                else {"kind": "workbench"}
+            ),
+        }
+    )
+
+
+def _change_password_body(
+    *,
+    current_password: str,
+    new_password: str,
+    return_intent: dict[str, str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "current_password": current_password,
+            "new_password": new_password,
+            "return_intent": (
+                return_intent
+                if return_intent is not None
+                else {"kind": "workbench"}
+            ),
+        }
+    )
+
+
 async def test_first_login_succeeds_without_any_csrf_token(clock, memory_state) -> None:
     """首启闭环的入口：没有 session 就没有 CSRF token，登录不能要求它。"""
     app, admins, origin, initial, hash_password = _app(clock, memory_state)
@@ -449,8 +484,8 @@ async def test_first_login_succeeds_without_any_csrf_token(clock, memory_state) 
 
     async with _client(app) as client:
         response = await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
 
@@ -477,8 +512,8 @@ async def test_login_still_requires_the_exact_origin_and_json_content_type(
             ({"origin": origin, "content-type": "text/plain"}, 415),
         ):
             response = await client.post(
-                "/app/api/login",
-                content=json.dumps({"password": initial}),
+                "/login/api/login",
+                content=_login_body(initial),
                 headers=headers,
             )
             assert response.status_code == expected, headers
@@ -491,13 +526,80 @@ async def test_a_wrong_password_never_sets_a_cookie(clock, memory_state) -> None
 
     async with _client(app) as client:
         response = await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial + "x"}),
+            "/login/api/login",
+            content=_login_body(initial + "x"),
             headers={"origin": origin, "content-type": "application/json"},
         )
 
     assert response.status_code == 401
     assert response.headers.get_list("set-cookie") == []
+
+
+async def test_local_admin_activation_destination_is_forbidden_without_a_session(
+    clock, memory_state
+) -> None:
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/login/api/login",
+            content=_login_body(
+                initial,
+                return_intent={
+                    "kind": "activation_status",
+                    "request_id": "activation-1",
+                },
+            ),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": {"code": "forbidden"}}
+    assert response.headers.get_list("set-cookie") == []
+    assert memory_state.web_sessions == {}
+
+
+async def test_change_password_rejects_activation_destination_without_mutation(
+    clock, memory_state
+) -> None:
+    from xiaowei_agent.interfaces.web_auth import web_csrf_token
+
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+    before = await admins.get()
+
+    async with _client(app) as client:
+        await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        cookie = client.cookies.get("__Host-xiaowei-session")
+        assert cookie is not None
+        response = await client.post(
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial,
+                new_password="rotated-local-" + "admin-secret",
+                return_intent={
+                    "kind": "activation_status",
+                    "request_id": "activation-1",
+                },
+            ),
+            headers={
+                "origin": origin,
+                "content-type": "application/json",
+                "x-csrf-token": web_csrf_token(cookie),
+            },
+        )
+
+    after = await admins.get()
+    assert response.status_code == 403
+    assert response.json() == {"error": {"code": "forbidden"}}
+    assert response.headers.get_list("set-cookie") == []
+    assert after.password_hash == before.password_hash
+    assert after.must_change_password is True
 
 
 async def test_before_first_change_password_other_routes_are_refused(
@@ -509,12 +611,12 @@ async def test_before_first_change_password_other_routes_are_refused(
 
     async with _client(app) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
         blocked = await client.get("/app/api/me")
-        shell = await client.get("/app")
+        shell = await client.get("/login?intent=workbench")
 
     assert blocked.status_code == 403
     assert blocked.json() == {"error": {"code": "password_change_required"}}
@@ -531,14 +633,14 @@ async def test_change_password_still_requires_session_csrf(
 
     async with _client(app) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
         response = await client.post(
-            "/app/api/change-password",
-            content=json.dumps(
-                {"current_password": initial, "new_password": new_password}
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial, new_password=new_password
             ),
             headers={"origin": origin, "content-type": "application/json"},
         )
@@ -557,16 +659,16 @@ async def test_the_full_first_run_loop_works(clock, memory_state) -> None:
 
     async with _client(app) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
         cookie = client.cookies.get("__Host-xiaowei-session")
         assert cookie is not None
         changed = await client.post(
-            "/app/api/change-password",
-            content=json.dumps(
-                {"current_password": initial, "new_password": new_password}
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial, new_password=new_password
             ),
             headers={
                 "origin": origin,
@@ -596,8 +698,8 @@ async def test_lan_http_mode_drops_the_host_prefix_and_hsts(
         transport=httpx.ASGITransport(app=app), base_url=origin
     ) as client:
         response = await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
 
@@ -620,8 +722,8 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
 
     async with _client(app) as client:
         for method, path in (
-            ("POST", "/app/api/login"),
-            ("POST", "/app/api/change-password"),
+            ("POST", "/login/api/login"),
+            ("POST", "/login/api/change-password"),
             # 配置保存是 PUT。中间件只认 POST 时这一条会整条绕过 body 上限，
             # 而它恰好是唯一一个会被原样写进磁盘文件的入口。
             ("PUT", "/app/api/config"),
@@ -661,13 +763,13 @@ async def test_every_asset_the_server_rendered_shells_reference_is_served(
     await _seed(admins, hash_password, initial)
 
     async with _client(app) as client:
-        pages = [(await client.get("/app")).text]
+        pages = [(await client.get("/login?intent=workbench")).text]
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
-        pages.append((await client.get("/app")).text)
+        pages.append((await client.get("/login?intent=workbench")).text)
         referenced = sorted({url for page in pages for url in _ASSET_RE.findall(page)})
         # 反向断言：守卫本身不能因为"壳其实什么都没引用"而空转。
         assert "/app/static/login.js" in referenced
@@ -693,28 +795,28 @@ async def test_a_browser_completes_the_first_run_without_reading_the_cookie(
     new_password = "rotated-local-" + "admin-secret"
 
     async with _client(app) as client:
-        login_page = await client.get("/app")
+        login_page = await client.get("/login?intent=workbench")
         assert "login-form" in login_page.text
         # 未登录时没有 session，就没有可绑定的 token；此刻交出任何 token 都是错的。
         assert _CSRF_META_RE.search(login_page.text) is None
         assert (await client.get("/app/static/login.js")).status_code == 200
 
         signed_in = await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
         assert signed_in.status_code == 200
 
-        change_page = await client.get("/app")
+        change_page = await client.get("/login?intent=workbench")
         assert "change-password-form" in change_page.text
         carried = _CSRF_META_RE.search(change_page.text)
         assert carried is not None, "改密页必须自带 CSRF token，否则闭环走不下去"
 
         changed = await client.post(
-            "/app/api/change-password",
-            content=json.dumps(
-                {"current_password": initial, "new_password": new_password}
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial, new_password=new_password
             ),
             headers={
                 "origin": origin,
@@ -737,18 +839,20 @@ async def test_a_token_from_someone_elses_page_is_still_refused(
 
     async with _client(app) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": initial}),
+            "/login/api/login",
+            content=_login_body(initial),
             headers={"origin": origin, "content-type": "application/json"},
         )
-        stolen = _CSRF_META_RE.search((await client.get("/app")).text)
+        stolen = _CSRF_META_RE.search(
+            (await client.get("/login?intent=workbench")).text
+        )
         assert stolen is not None
         forged = "f" * len(stolen.group(1))
         assert forged != stolen.group(1)
         refused = await client.post(
-            "/app/api/change-password",
-            content=json.dumps(
-                {"current_password": initial, "new_password": new_password}
+            "/login/api/change-password",
+            content=_change_password_body(
+                current_password=initial, new_password=new_password
             ),
             headers={
                 "origin": origin,

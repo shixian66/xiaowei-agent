@@ -10,7 +10,7 @@ from typing import ClassVar, Literal
 
 from pydantic import Field
 
-from xiaowei_agent.contracts.base import Contract, StrictInt
+from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictInt
 
 LoadStatus = Literal["loaded", "invalid"]
 TestStatus = Literal["passed", "failed"]
@@ -36,6 +36,7 @@ class TestResult(Contract):
 
     status: TestStatus
     generation: StrictInt
+    tested_at: AwareDatetime | None = None
 
 
 __all__ = [

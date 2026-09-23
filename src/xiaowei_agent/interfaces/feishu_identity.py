@@ -3,6 +3,7 @@
 import os
 import stat
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Final, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -13,6 +14,7 @@ from xiaowei_agent.contracts import (
     Contract,
     ControlledPii,
     IdentitySource,
+    ProductRole,
     StrictStr,
 )
 
@@ -37,6 +39,21 @@ class FeishuIdentityDirectory(Protocol):
 
     async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """返回精确匹配的主体；未知主体必须 fail-closed。"""
+
+
+@dataclass(frozen=True)
+class WebIdentityResolution:
+    """Web 授权所需的当前主体与当前产品角色。"""
+
+    principal: AuthenticatedPrincipal
+    role: ProductRole
+
+
+class WebIdentityDirectory(Protocol):
+    """为每次 Web 请求从目录重建主体与角色，不把角色写入 Session。"""
+
+    async def resolve_for_web(self, *, subject_ref: str) -> WebIdentityResolution:
+        """未知、停用或撤权主体必须按既有闭集错误 fail-closed。"""
 
 
 class LegacyIdentityEntry(Contract):
@@ -108,8 +125,14 @@ _LABEL_PERMISSIONS: Final[Mapping[str, frozenset[ChannelPermission]]] = {
 class StaticFeishuIdentityDirectory:
     """只接受配置文件中逐项声明的飞书主体，不做姓名或角色推断。"""
 
-    def __init__(self, *, principals: Mapping[str, AuthenticatedPrincipal]) -> None:
+    def __init__(
+        self,
+        *,
+        principals: Mapping[str, AuthenticatedPrincipal],
+        web_roles: Mapping[str, ProductRole] | None = None,
+    ) -> None:
         self._principals = dict(principals)
+        self._web_roles = {} if web_roles is None else dict(web_roles)
 
     async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """按 ``open_id`` 精确查找，未知主体统一返回安全错误。"""
@@ -117,6 +140,17 @@ class StaticFeishuIdentityDirectory:
             return self._principals[subject_ref]
         except (KeyError, TypeError):
             raise FeishuIdentityNotFoundError("feishu identity not found") from None
+
+    async def resolve_for_web(self, *, subject_ref: str) -> WebIdentityResolution:
+        """测试/迁移兼容实现；Web 角色必须显式提供，绝不从权限位反推。"""
+        principal = await self.resolve(subject_ref=subject_ref)
+        try:
+            role = self._web_roles[subject_ref]
+        except (KeyError, TypeError):
+            raise FeishuIdentityUnavailableError(
+                "feishu identity unavailable"
+            ) from None
+        return WebIdentityResolution(principal=principal, role=role)
 
 
 def _read_identity_file(path: str) -> bytes:
@@ -214,6 +248,8 @@ __all__ = [
     "FeishuIdentityUnavailableError",
     "LegacyIdentityEntry",
     "StaticFeishuIdentityDirectory",
+    "WebIdentityDirectory",
+    "WebIdentityResolution",
     "load_feishu_identity_directory",
     "read_legacy_identity_document",
 ]

@@ -17,9 +17,12 @@ from xiaowei_agent.contracts import (
     LOCAL_ADMIN_USER_ID,
     ActorTaskPageQuery,
     IdentitySource,
+    ProductRole,
     TaskStatus,
     UserStatus,
     WebMode,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.admin_audit import AdminOperationContext
 from xiaowei_agent.contracts.identity import (
@@ -51,6 +54,7 @@ from xiaowei_agent.persistence.schema import ACTIVATION_REQUESTS, TASKS, WEB_SES
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard
 
 _SESSION_COOKIE_NAME = session_cookie_name(WebMode.HTTPS)
+_WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 _I1_FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "evals"
@@ -207,8 +211,10 @@ def _i1_rejected_text() -> str:
     return str(case["text"])
 
 
-async def _web_session(auth: WebAuthService, *, code: str) -> str:
-    started = await auth.start_login()
+async def _web_session(
+    auth: WebAuthService, *, code: str, return_intent: WebReturnIntent
+) -> str:
+    started = await auth.start_login(return_intent=return_intent)
     issued = await auth.complete_login(
         code=code,
         state=started.state_cookie,
@@ -338,7 +344,7 @@ async def test_bound_but_disabled_identity_never_reenters_activation(
         ),
     )
 
-    started = await web.auth.start_login()
+    started = await web.auth.start_login(return_intent=_WORKBENCH_INTENT)
     with pytest.raises(WebAuthenticationError):
         await web.auth.complete_login(
             code="alice-code",
@@ -451,7 +457,14 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     assert [item[0] for item in messages.updates] == [original_message_ref]
     assert "小维处理完成" in messages.updates[0][1].content_json
 
-    bob_cookie = await _web_session(web.auth, code="bob-code")
+    bob_cookie = await _web_session(
+        web.auth,
+        code="bob-code",
+        return_intent=WebReturnIntent(
+            kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+            task_id=group_task_id,
+        ),
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
@@ -467,7 +480,9 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
             "subject-bob",
         )
 
-    alice_cookie = await _web_session(web.auth, code="alice-code")
+    alice_cookie = await _web_session(
+        web.auth, code="alice-code", return_intent=_WORKBENCH_INTENT
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
@@ -494,7 +509,9 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     assert normal_task_id in messages.user_sends[0][1].content_json
     assert await projection.service.poll_once() == 0
 
-    admin_cookie = await _web_session(web.auth, code="admin-code")
+    admin_cookie = await _web_session(
+        web.auth, code="admin-code", return_intent=_WORKBENCH_INTENT
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
@@ -595,7 +612,9 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
     feishu_task_id = group_page.items[0].record.task_id
     assert await worker.poll_once() == 1
 
-    alice_cookie = await _web_session(web.auth, code="alice-code")
+    alice_cookie = await _web_session(
+        web.auth, code="alice-code", return_intent=_WORKBENCH_INTENT
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=web_app, raise_app_exceptions=False),
         base_url="https://ops.example.test",
@@ -649,8 +668,12 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
     )
     assert web.auth is not None
     assert web.activation_service is not None
+    original_intent = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="activation-preview-task",
+    )
 
-    first = await web.auth.start_login()
+    first = await web.auth.start_login(return_intent=original_intent)
     with pytest.raises(WebActivationPendingError):
         await web.auth.complete_login(
             code="new-user-code",
@@ -683,7 +706,7 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
         ),
     )
 
-    after_rejection = await web.auth.start_login()
+    after_rejection = await web.auth.start_login(return_intent=original_intent)
     with pytest.raises(WebActivationPendingError):
         await web.auth.complete_login(
             code="new-user-code",
@@ -721,7 +744,7 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
         ),
     )
 
-    second = await web.auth.start_login()
+    second = await web.auth.start_login(return_intent=original_intent)
     issued = await web.auth.complete_login(
         code="new-user-code",
         state=second.state_cookie,
@@ -731,4 +754,6 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
 
     assert issued.principal.actor == "new-user"
     assert issued.principal.subject_ref == "subject-new-user"
+    assert issued.role is ProductRole.USER
+    assert issued.return_intent == original_intent
     await web.aclose()

@@ -15,6 +15,9 @@ def test_web_static_asset_set_is_exact_and_not_a_python_package() -> None:
         "app.js",
         "detail.js",
         "login.js",
+        "login.html",
+        "admin.html",
+        "admin.js",
     }
     assert not (_STATIC / "__init__.py").exists()
 
@@ -42,8 +45,8 @@ def test_desktop_shell_contains_a_static_minimum_width_notice() -> None:
     index = (_STATIC / "index.html").read_text(encoding="utf-8")
     css = (_STATIC / "app.css").read_text(encoding="utf-8")
 
-    assert "请使用宽度至少 1280px 的桌面浏览器" in index
-    assert "1279px" in css
+    assert "请使用宽度至少 1024px 的桌面浏览器" in index
+    assert "1023px" in css
     assert "desktop-width-notice" in index
 
 
@@ -95,20 +98,22 @@ def test_execution_disclosure_is_rendered_as_text_only() -> None:
     assert "item.textContent = `${label}：${value}`" in detail_script
 
 
-def test_no_script_sends_the_browser_to_an_oauth_only_entry() -> None:
+def test_only_the_login_shell_can_enter_the_optional_oauth_route() -> None:
     """飞书可能整个不装配，那时 ``/oauth/feishu/start`` 根本没有注册。
 
     401 之后跳一条可能不存在的路由，等于把"会话过期"变成 404 死路。唯一在任何
     装配形态下都存在的入口是 ``/app``：它未登录时渲染登录壳，飞书入口渲不渲染
     由服务端按装配结果决定。
     """
-    scripts = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted(_STATIC.glob("*.js"))
+    login = (_STATIC / "login.js").read_text(encoding="utf-8")
+    protected_scripts = "\n".join(
+        (_STATIC / name).read_text(encoding="utf-8")
+        for name in ("app.js", "detail.js", "admin.js")
     )
 
-    assert "/oauth/feishu/start" not in scripts
-    # 反向断言：守卫不能因为脚本里根本没有跳转而空转。
-    assert 'window.location.assign("/app")' in scripts
+    assert "/oauth/feishu/start" in login
+    assert "/oauth/feishu/start" not in protected_scripts
+    assert 'window.location.assign("/login?intent=workbench")' in protected_scripts
 
 
 def test_the_login_script_never_derives_the_csrf_token_itself() -> None:

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 小维运维工作台</title>
+  <link rel="stylesheet" href="/app/static/app.css">
+</head>
+<body class="auth-page">
+  <main class="auth-shell" aria-labelledby="login-title">
+    <section class="auth-story" aria-label="产品说明">
+      <div class="brand-lockup auth-brand">
+        <span class="brand-mark brand-mark-large" aria-hidden="true">维</span>
+        <div><p class="eyebrow">XIAOWEI OPERATIONS</p><strong>小维运维工作台</strong></div>
+      </div>
+      <h1 id="login-title">把复杂运维，收进一条可信工作流</h1>
+      <p>面向运维人员的安全查询、任务跟踪与结果复核入口。所有权限都由服务端实时核验。</p>
+      <ul class="auth-assurances">
+        <li>只读能力默认开启安全边界</li>
+        <li>身份降级与撤权立即生效</li>
+        <li>普通用户仅能打开获准的具体结果</li>
+      </ul>
+    </section>
+    <section class="auth-card">
+      <p class="eyebrow">WELCOME BACK</p>
+      <h2>登录小维</h2>
+      <p class="auth-intro">管理员可使用本地账号，其他成员使用飞书身份登录。</p>
+      <div class="activation-message is-hidden" id="activation-message" role="status"></div>
+      <form id="login-form" method="post" action="/login/api/login">
+        <label class="config-field" for="username"><span>用户名</span>
+          <input id="username" name="username" type="text" value="admin" autocomplete="username" required>
+        </label>
+        <label class="config-field" for="password"><span>密码</span>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="button button-primary auth-submit" type="submit">登录</button>
+      </form>
+      <div class="oauth-entry" id="oauth-entry">
+        <div class="auth-divider"><span>或</span></div>
+        <a class="button button-secondary auth-submit" id="feishu-oauth" href="/oauth/feishu/start">使用飞书登录</a>
+      </div>
+      <p class="form-message is-hidden" id="form-message" role="alert"></p>
+      <p class="auth-footnote">首次使用默认管理员账号登录后，系统会强制修改初始密码。</p>
+    </section>
+  </main>
+  <script type="module" src="/app/static/login.js"></script>
+</body>
+</html>

@@ -207,7 +207,9 @@ class PostgresProviderStateStore:
             },
             tests={
                 row["check_name"]: TestResult(
-                    status=row["test_status"], generation=row["tested_generation"]
+                    status=row["test_status"],
+                    generation=row["tested_generation"],
+                    tested_at=row["tested_at"],
                 )
                 for row in test_rows
             },

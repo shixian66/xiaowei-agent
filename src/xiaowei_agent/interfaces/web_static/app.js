@@ -234,7 +234,7 @@ async function loadTasks({ append = false } = {}) {
   } catch (error) {
     setVisible(elements.listError, true);
     if (error.status === 401) {
-      window.location.assign("/app");
+      window.location.assign("/login?intent=workbench");
     }
   } finally {
     setVisible(elements.listLoading, false);
@@ -484,9 +484,10 @@ async function loadIdentity() {
   elements.actor.textContent = text(me.actor, "授权用户");
   elements.avatar.textContent = text(me.actor, "用").slice(0, 1).toUpperCase();
   elements.environment.textContent = `${text(me.environment_id, "未知")} 环境`;
-  const admin = Array.isArray(me.permissions) && me.permissions.includes("admin_all_safe_tasks");
-  elements.role.textContent = admin ? "Admin · 全部安全任务" : "授权运维用户";
+  const admin = me.role === "admin";
+  elements.role.textContent = admin ? "Admin · 全部安全任务" : "运维人员";
   elements.listTitle.textContent = admin ? "全部安全任务" : "我的任务";
+  return me;
 }
 
 async function logout() {
@@ -501,7 +502,7 @@ async function logout() {
       body: "{}",
     });
   } finally {
-    window.location.assign("/app");
+    window.location.assign("/login?intent=workbench");
   }
 }
 
@@ -736,12 +737,12 @@ for (const name of CHECK_NAMES) {
 
 async function start() {
   try {
-    await loadIdentity();
-    // 配置面只对本地管理员开放。其他身份在这里拿到 403，面板保持隐藏——
-    // 不是"藏起来但能调"，服务端那一侧同样拒绝。
-    try {
+    const me = await loadIdentity();
+    // 配置面只对拿到本地管理能力的管理员渲染；服务端仍独立校验认证来源。
+    if (Array.isArray(me.admin_capabilities)
+        && me.admin_capabilities.includes("manage_integrations")) {
       await loadConfig();
-    } catch (_) {
+    } else {
       setVisible(configElements.panel, false);
     }
     await loadTasks();
@@ -754,7 +755,7 @@ async function start() {
     }
   } catch (error) {
     if (error.status === 401) {
-      window.location.assign("/app");
+      window.location.assign("/login?intent=workbench");
       return;
     }
     setVisible(elements.listLoading, false);

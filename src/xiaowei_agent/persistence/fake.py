@@ -552,7 +552,9 @@ class InMemoryProviderStateStore:
     async def record_test(self, *, command: RecordTestCommand) -> None:
         async with self._lock:
             self._state.provider_tests[command.check_name.value] = TestResult(
-                status=command.status, generation=command.generation
+                status=command.status,
+                generation=command.generation,
+                tested_at=self._clock(),
             )
 
     async def snapshot(self) -> ProviderStateSnapshot:
