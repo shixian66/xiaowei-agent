@@ -10,7 +10,7 @@
 - **当前基线**：`main@869be7ae20887fb3cda7c3de3d07a15b166c543c`（2026-09-23，PR #72 已合入 W2-A 原子登录导航 context）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
-- **W2-A 已合入，W2-B1 已形成离线候选但尚未合入**。W2-A 由 PR #72 合入当前基线；W2-B1 最终代码与测试候选为 `3b86a9b574ecfa15eb9a31c808810128429ebbf8`（PR #73，核心实现提交 `4c75ec028f8a1d6a4fa6dd7f79c99bc07ede99cc`）：独立登录、工作台、管理中心与结果详情壳、闭集角色导航、按请求重建角色、脱敏集成状态投影已经离线实现，等待独立精确 SHA 复审。W2-B2 尚未开始；I3 延期未取消。
+- **W2-A 已合入，W2-B1 已形成离线候选但尚未合入**。W2-A 由 PR #72 合入当前基线；W2-B1 最终代码与测试候选为 `eeb6613c6cfb372c2da263f9bc90de16921e9286`（PR #73，核心实现提交 `4c75ec028f8a1d6a4fa6dd7f79c99bc07ede99cc`）：独立登录、工作台、管理中心与结果详情壳、闭集角色导航、按请求重建角色、脱敏集成状态投影已经离线实现；本地 Admin 的激活状态目标固定返回 403 且不改投，激活恢复的 subject 绑定由真实服务测试承重，已有 Operator Session 仍不能进入 Admin 路由。等待独立精确 SHA 复审。W2-B2 尚未开始；I3 延期未取消。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -50,14 +50,14 @@ GitHub CI [35827515879](https://github.com/shixian66/xiaowei-agent/actions/runs/
 `869be7ae20887fb3cda7c3de3d07a15b166c543c`。这不构成部署、真实调用或用户验收证据。
 
 W2-B1 核心实现提交 `4c75ec028f8a1d6a4fa6dd7f79c99bc07ede99cc`、最终代码与测试候选
-`3b86a9b574ecfa15eb9a31c808810128429ebbf8`（PR #73）的本机离线全量为
-`4428 passed, 362 skipped`，security 为 `1508 passed, 83 skipped`，Ruff/mypy 通过；聚焦 Web 回归为
-`208 passed`。锁定 wheel 实测包含 `login/admin/index/detail` 的 HTML、CSS 与 JS；本机 headless Chrome
+`eeb6613c6cfb372c2da263f9bc90de16921e9286`（PR #73）的本机离线全量为
+`4435 passed, 362 skipped`，security 为 `1512 passed, 83 skipped`，Ruff/mypy 通过；聚焦受影响回归为
+`243 passed`。锁定 wheel 实测包含 `login/admin/index/detail` 的 HTML、CSS 与 JS；本机 headless Chrome
 只完成登录壳 1440/1280/1024/390、管理壳 1440/1024、工作台 1440 与低于 1024 静态提示的视觉核对。
-GitHub CI [35843431575](https://github.com/shixian66/xiaowei-agent/actions/runs/35843431575)
+GitHub CI [35849155681](https://github.com/shixian66/xiaowei-agent/actions/runs/35849155681)
 在最终代码与测试候选上 8/8 通过且每个 job 都有真实 steps；普通测试为
-`4428 passed, 362 skipped`，security 为 `1508 passed, 83 skipped`，PostgreSQL integration 为
-`4790 passed, 0 skipped`。这批证据不包含正式浏览器交互、部署、真实飞书或用户验收。
+`4435 passed, 362 skipped`，security 为 `1512 passed, 83 skipped`，PostgreSQL integration 为
+`4797 passed, 0 skipped`。这批证据不包含正式浏览器交互、部署、真实飞书或用户验收。
 
 ## 1. 当前基线
 
