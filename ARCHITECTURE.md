@@ -699,6 +699,12 @@ application setting is default-false
 `XIAOWEI_GEMINI_ENABLED`. Provider/model/API/limits are versioned constants;
 RI3 fixes Developer API `v1beta` and canonical origin
 `https://generativelanguage.googleapis.com`.
+W2 将任务工作台与配置面分开：`/app` 及其静态脚本不含 Provider 配置表单或配置请求；
+本地 Admin 只经 `/admin/api/config*` 读取、保存、清除和测试配置，并继续受强制改密、认证来源、
+Origin、CSRF 与 JSON body 上限约束。飞书 Admin 只能读取独立的
+`/admin/api/integration-status` 脱敏投影，不能复用 raw config DTO；旧
+`/app/api/config*` 路径不保留兼容入口。OAuth 连接测试完成后回到 `/admin`，仍不签发或轮换
+Session，也不改变身份、激活与真实调用授权。
 README/runbook alone explain host-side key setup. This path requires Docker
 Compose 2.24.4+ (the project support floor shared with RI6's `!override` deployment
 path) and Linux containers. The version floor and rendered-config check are

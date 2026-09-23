@@ -264,6 +264,8 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 唯一真源是 `.config/integrations.json`，由本地管理面写入。`.config/` 已被 `.gitignore` 与
 `.dockerignore` 忽略；`web-app` 以读写方式挂载它，`worker` / `feishu-listener` / `channel-worker`
 只读挂载，`api` 完全不挂。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
+本地 Admin 在 `/admin` 维护配置；`/app` 只承担运维任务工作台，不再承载配置表单。
+飞书 Admin 进入 `/admin` 时只能看脱敏集成状态，不能读取、保存、清除或测试 raw config。
 
 启用飞书 OAuth 时另外准备 `.secrets/feishu-identities.json`，并叠加 `docker-compose.feishu.yml`；
 不启用飞书时**不需要**这个文件——它不在基础 Compose 里，干净部署不会因为缺它而起不来。
@@ -327,7 +329,8 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
    compose up -d
    ```
 
-6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**。
+6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**；
+   随后进入 `/admin` 填写 Provider 配置。任务工作台 `/app` 不提供配置入口。
 
 7. 改密完成后，再把 `.env` 的 public origin 改成局域网地址：
 
