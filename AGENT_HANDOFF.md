@@ -7,15 +7,13 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@6ea17849a663dd13caae05599d1eb7663884fe0a`（2026-09-23，PR #73 已合入 W2-B1 登录、角色与多壳）。
+- **当前基线**：`main@3fa17bb53eac27892263a721e5ba74dc34232e40`（2026-09-23，PR #74 已合入 W2-B2 Admin 配置迁移）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
-- **W2-A 与 W2-B1 已合入，W2-B2 已形成离线实现候选**。W2-B1 由 PR #73 合入当前基线；
-  W2-B2 实现提交 `941ec83cf0a595bcc8d28e60d5892e03a553baf7` 把现有配置 UI/API 机械迁到
-  `/admin`，关闭旧 `/app/api/config*`，保留本地 Admin 来源校验、Origin/CSRF、body-limit、
-  Secret 只进不出与真实调用门。本地四门、聚焦回归、wheel 与 headless Chrome 视觉核对已完成；
-  该候选仍待 CI 与独立精确 SHA 复审，不等于已合入或部署；
-  I3 延期未取消。
+- **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
+  角色路由、四个独立 shell 及 Admin 配置 UI/API 迁移均已有离线测试和独立复审证据。
+  本次收口只关闭 W2 离线实施范围，不表示正式部署、真实 Provider 调用、canary 或产品用户验收完成，
+  也不授权 W3 源码；I3 延期未取消。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -34,7 +32,7 @@
 | I2 | I2 限定领域普通对话已完成离线实施并归档，详见 [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。回答只投影当前 CapabilitySnapshot，无工具/外部系统/长期记忆；knowledge_lookup/log_analysis 仍拒绝 |
 | W1a | `rev_0014`、用户目录与 Admin 审计写内核、旧身份原子迁移已离线实现。`UserDirectoryStore.apply()` 是唯一授权写入口，每次授权改变与命令派生审计同事务提交；审计不可写则回滚 |
 | W1b | `rev_0015`、ActivationRequest/ActivationStore、身份激活流程与单次群通知已离线实现。未知 OAuth 身份返回 `403 activation_pending` 且无 Session；未知群成员当次事件只发通用卡片，私聊未知身份拒绝。运行时从数据库目录重建主体，停用/撤权不进入重新激活，静态文件仅作发布前一次性迁移输入 |
-| W2 及以后 | W2 计划 Approved V0.2，A（契约/迁移）与 B1（登录/角色/壳）已合入；B2（配置 UI/API 搬迁）已形成离线实现候选，待完整验证、独立复审与合入。W3/W4/W5 保持后续阶段；W4c 与 R1 独立，不由 W2 解锁 |
+| W2 及以后 | W2 计划 Approved V0.2，A（契约/迁移）、B1（登录/角色/壳）与 B2（配置 UI/API 搬迁）均已合入，离线范围已收口。W3/W4/W5 保持后续阶段；W3 尚无获批详细计划，W4c 与 R1 独立，不由 W2 解锁 |
 
 W1a 最终受审 head `ed8c9e82db46d75e47e4761d8897d0d2d23f9831` 已由 PR #65 合入
 `f92aa88b9016b52c35ebce4052a8609fd574d8fb`，历史 CI [35681783752](https://github.com/shixian66/xiaowei-agent/actions/runs/35681783752)
@@ -64,22 +62,30 @@ GitHub CI [35849779780](https://github.com/shixian66/xiaowei-agent/actions/runs/
 `4435 passed, 362 skipped`，security 为 `1512 passed, 83 skipped`，PostgreSQL integration 为
 `4797 passed, 0 skipped`。这批证据不包含正式浏览器交互、部署、真实飞书或用户验收。
 
-W2-B2 实现提交 `941ec83cf0a595bcc8d28e60d5892e03a553baf7` 的本机离线全量为
+W2-B2 实现提交 `941ec83cf0a595bcc8d28e60d5892e03a553baf7`、最终受审 head
+`6b2999c752e55525518f2a9d01291cdaad4fac34` 已由 PR #74 squash 合入
+`3fa17bb53eac27892263a721e5ba74dc34232e40`。本机离线全量为
 `4438 passed, 362 skipped`，security 为 `1512 passed, 83 skipped`，Ruff 通过，mypy 对
 `205 source files` 通过；聚焦受影响回归 `160 passed`，文档契约 `83 passed`。三项隔离变异分别证明：
 恢复旧 `/app/api/config*` 会打红旧路由闭集、把 raw config 放给飞书 Admin 会打红来源授权、移除
 clear 路径 body-limit 会打红 413 边界。锁定 wheel 实测包含 `admin.html`、`admin.js` 与其余 Web
 静态资源；本机 Chrome 154 在 1024/1280/1440 宽度下用本地脱敏假数据完成迁移后 Admin 配置页视觉核对，
-JavaScript 另经 Node `--check`。这只是离线构建与本地视觉证据，不是正式浏览器交互、部署、真实调用或用户验收。
+JavaScript 另经 Node `--check`。GitHub CI
+[35861738344](https://github.com/shixian66/xiaowei-agent/actions/runs/35861738344) 在最终受审 head 上
+8/8 通过且每个 job 都有真实 steps：普通测试 `4438 passed, 362 skipped`，security
+`1512 passed, 83 skipped`，PostgreSQL integration `4800 passed, 0 skipped`，Ruff/mypy 通过，
+Compose smoke 通过。受审 head 与 squash merge 的 tree 均为
+`e49734cb29e903f9d449b03c5f95643e76b3b3df`。这些仍只是离线构建、测试与本地视觉证据，
+不是正式浏览器交互、部署、真实调用或用户验收。
 
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `codex/w2-b2-admin-config`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `codex/w2-closeout`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-23（Asia/Shanghai） |
-| 阶段 | W2-A 与 W2-B1 已合入；W2-B2 离线候选已完成本地验证，尚待 CI、独立复审与合入 |
-| 下一步 | 推送 W2-B2、取得 CI 后按最终 PR head 独立复审；不提前实施 W3/W4/W5 或真实调用 |
+| 阶段 | W2 离线范围已完成并收口；W3 尚未开始，且没有获批详细计划 |
+| 下一步 | 若负责人继续产品序列，只能先编写并送审 W3 详细计划；计划获批前不写 W3 源码，也不开放真实调用或部署 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5，Web 序列与各阶段硬门保持原定义 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -108,7 +114,7 @@ JavaScript 另经 Node `--check`。这只是离线构建与本地视觉证据，
 - W1a/W1b 各自批准计划与交付记录见 [W1a 计划](docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md)、
   [W1b 计划](docs/superpowers/plans/2026-09-22-w1b-identity-activation-and-notification.md) 和原文快照。
   登录 context 表 `web_oauth_login_contexts` 归 W2，私聊 Admin 通知与可靠重试归 W3。
-- W2 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md) 已由 PR #71 合入并取得负责人开工口令；授权范围是 W2-A（闭集 intent/context/迁移）、W2-B1（登录、角色路由与四个 shell）和 W2-B2（配置 UI/API 搬迁），不包含 W3/W4/真实调用。W2-A、W2-B1 已分别由 PR #72、#73 合入；W2-B2 在途。
+- W2 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md) 已由 PR #71 合入并取得负责人开工口令；授权范围是 W2-A（闭集 intent/context/迁移）、W2-B1（登录、角色路由与四个 shell）和 W2-B2（配置 UI/API 搬迁），不包含 W3/W4/真实调用。W2-A、W2-B1、W2-B2 已分别由 PR #72、#73、#74 合入；该授权已经用完，不能外推为 W3 实现许可。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
 - M6b 仅离线实现并合入，真实验证被负责人延期，未验收归档。重新进入需唯一 canonical target、物理身份、带外 version/grants/DDL/identity digest、
@@ -152,7 +158,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. 产品下一步是完成 W2-B2 的完整验证、独立代码复审与合入。W2 不提前建设 W3 或后续范围。
+2. 产品下一步是先编写并送审 W3 详细计划；在该计划获批前不实现 W3，也不提前进入 W4/W5 或真实调用。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 

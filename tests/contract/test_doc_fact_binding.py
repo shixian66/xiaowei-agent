@@ -1557,12 +1557,11 @@ def test_w1b_contract_and_handoff_keep_live_evidence_separate() -> None:
         assert unverified in handoff
 
 
-def test_handoff_advances_from_w1b_to_w2_without_overclaiming() -> None:
+def test_handoff_preserves_w1b_prerequisite_after_w2_closure() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     assert "W1b 两个切片已离线实现" in handoff
     assert "激活流程" in handoff and "单次群通知" in handoff
-    for statement in _next_step_statements(handoff):
-        assert "W2" in statement, f"W1b 收口后的下一步没有指向 W2：{statement}"
+    assert "W2 离线范围已完成并收口" in handoff
 
 
 _RETIRED_README_W1A_PHRASES: Final[tuple[str, ...]] = (
@@ -1627,13 +1626,29 @@ def test_development_plan_carries_no_implementation_progress() -> None:
     assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
 
 
-def test_handoff_names_w2_as_the_only_post_w1b_next_step() -> None:
-    """W1b 两个切片实现后，唯一获准的下一步是 W2，不再重复实现 W1b。"""
+def test_handoff_closes_w2_and_names_only_w3_planning_as_next_step() -> None:
+    """W2 收口后只能先规划 W3，不能把合并外推成 W3 实现授权。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    for fact in (
+        "6b2999c752e55525518f2a9d01291cdaad4fac34",
+        "3fa17bb53eac27892263a721e5ba74dc34232e40",
+        "35861738344",
+        "4800 passed",
+    ):
+        assert fact in handoff, f"W2-B2 收口缺少稳定证据：{fact}"
+    for stale in (
+        "W2-B2 已形成离线实现候选",
+        "W2-B2 在途",
+        "尚待 CI、独立复审与合入",
+        "产品下一步是完成 W2-B2",
+    ):
+        assert stale not in handoff, f"handoff 仍含 W2-B2 在途口径：{stale}"
+
     statements = _next_step_statements(handoff)
     assert statements, "handoff 没有任何可解析的下一步声明"
     for statement in statements:
-        assert "W2" in statement, f"下一步声明没有指向 W2：{statement}"
+        assert "W3" in statement, f"W2 收口后的下一步没有指向 W3 计划：{statement}"
+        assert "计划" in statement, f"W3 仍没有先走详细计划门：{statement}"
         if "I3" in statement:
             assert "延期" in statement or "未取消" in statement, (
                 f"下一步仍把 I3 写成当前动作：{statement}"
