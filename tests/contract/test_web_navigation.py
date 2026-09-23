@@ -108,6 +108,24 @@ def test_activation_request_reference_remains_bounded_to_64_characters() -> None
         )
 
 
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://outside.example.test/app",
+        "/login/activation-1",
+        "activation-1?next=/admin",
+        "activation-1#fragment",
+        "activation-1\nheader:value",
+    ),
+)
+def test_activation_request_reference_rejects_redirect_shapes(reference: str) -> None:
+    with pytest.raises(ValidationError):
+        WebReturnIntent(
+            kind=WebReturnIntentKind.ACTIVATION_STATUS,
+            request_id=reference,
+        )
+
+
 def test_return_intent_kind_is_exhaustively_covered() -> None:
     examples = {
         WebReturnIntentKind.WORKBENCH: WebReturnIntent(
