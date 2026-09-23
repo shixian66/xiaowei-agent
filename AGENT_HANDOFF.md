@@ -10,7 +10,7 @@
 - **当前基线**：`main@f2b72e56b37676906350725cd7c48162a418cb70`（2026-09-23，PR #71 已合入经批准的 W2 V0.2 详细计划）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
-- **W2 详细计划 Approved V0.2 已合入，W2-A 实现候选已形成但尚未合入**。候选源码提交为 `d7f501834cb022aa2c0a20a1808d6105f8401951`：闭集 return intent、原子 OAuth 登录 context、`rev_0016` 与激活来源/意图已经离线实现，等待独立复审。W2-B1/B2 尚未开始；I3 延期未取消。
+- **W2 详细计划 Approved V0.2 已合入，W2-A 实现候选已形成但尚未合入**。实现与测试证据 head 为 `33866a4e7d6fd8b6d2930f195e11c35f5ee7de95`（PR #72）：闭集 return intent、原子 OAuth 登录 context、`rev_0016` 与激活来源/意图已经离线实现，等待独立复审。W2-B1/B2 尚未开始；I3 延期未取消。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -41,11 +41,12 @@ PostgreSQL 全量 `4674 passed`、零 skip；本机离线为 `4325 passed, 349 s
 `1505 passed, 83 skipped`，Ruff/mypy 通过，一次性 PostgreSQL integration `351 passed`。
 这些是历史运行记录，本轮没有重跑该 CI 或真实库；完整命令与变异链见[原文快照](docs/handoff/archive/2026-09-23-pre-workflow-v1.md)。
 
-W2-A 候选 `d7f501834cb022aa2c0a20a1808d6105f8401951` 本机离线全量为
-`4390 passed, 362 skipped`，security 为 `1505 passed, 83 skipped`，Ruff/mypy 通过；
+W2-A 实现与测试证据 head `33866a4e7d6fd8b6d2930f195e11c35f5ee7de95` 本机离线全量为
+`4395 passed, 362 skipped`，security 为 `1505 passed, 83 skipped`，Ruff/mypy 通过；
 专用一次性 PostgreSQL 16.15 容器全量 `4752 passed, 0 skipped`，容器已删除且未触碰既有实例。
 四项隔离反证分别证明 context 必填、缺 context 回滚、收割级联与数据库 source/intent CHECK 承重。
-该候选尚未取得独立代码复审、远端 CI、合并、部署、真实调用或用户验收证据。
+GitHub CI [35827515879](https://github.com/shixian66/xiaowei-agent/actions/runs/35827515879)
+在同一 head 上 8/8 通过且每个 job 都有真实 steps；该候选尚未取得独立代码复审、合并、部署、真实调用或用户验收证据。
 
 ## 1. 当前基线
 
