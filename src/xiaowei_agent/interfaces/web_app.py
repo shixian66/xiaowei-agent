@@ -1257,11 +1257,11 @@ def create_app(
                 "/app/api/tasks",
                 "/login/api/login",
                 "/login/api/change-password",
-                "/app/api/config",
-                "/app/api/config/clear",
-                "/app/api/config/test/gemini_connection",
-                "/app/api/config/test/feishu_credentials",
-                "/app/api/config/test/feishu_oauth",
+                "/admin/api/config",
+                "/admin/api/config/clear",
+                "/admin/api/config/test/gemini_connection",
+                "/admin/api/config/test/feishu_credentials",
+                "/admin/api/config/test/feishu_oauth",
             }
         ),
     )
@@ -1354,7 +1354,7 @@ def create_app(
             )
             # 不 ``_set_secret_cookie``、不 ``rotate_session``：一次连接测试结束时
             # 浏览器手里不该多出任何东西。
-            return RedirectResponse("/app", status_code=302)
+            return RedirectResponse("/admin", status_code=302)
 
         @app.get("/oauth/feishu/callback")
         async def oauth_callback(
@@ -1709,7 +1709,7 @@ def create_app(
             snapshot=snapshot,
         ).model_dump(mode="json")
 
-    @app.get("/app/api/config")
+    @app.get("/admin/api/config")
     async def read_config(request: Request) -> dict[str, object]:
         await local_admin_session(request)
         config = _integration_config_or_unavailable(integration_config_path)
@@ -1718,7 +1718,7 @@ def create_app(
             settings=settings, config=config, snapshot=snapshot
         ).model_dump(mode="json")
 
-    @app.put("/app/api/config")
+    @app.put("/admin/api/config")
     async def save_config(request: Request) -> dict[str, object]:
         session = await local_admin_session(request)
         _validate_state_change(
@@ -1743,7 +1743,7 @@ def create_app(
             generation=updated.generation, restart_required=True
         ).model_dump(mode="json")
 
-    @app.post("/app/api/config/clear")
+    @app.post("/admin/api/config/clear")
     async def clear_config(request: Request) -> dict[str, object]:
         session = await local_admin_session(request)
         _validate_state_change(
@@ -1814,7 +1814,7 @@ def create_app(
     # 字面量路由必须注册在带路径参数的那条**之前**：Starlette 按注册顺序匹配。
     # 顺序之外还有一道兜底——下面那条路由显式拒绝 ``feishu_oauth``，因此即使有人
     # 调换了顺序，也不会静默落进"用凭据探针去测 OAuth"的错误分支。
-    @app.post("/app/api/config/test/feishu_oauth", response_model=None)
+    @app.post("/admin/api/config/test/feishu_oauth", response_model=None)
     async def start_oauth_test(request: Request) -> Response:
         """签发一次只能被测试分支消费的 state，并返回授权 URL。
 
@@ -1848,7 +1848,7 @@ def create_app(
         )
         return response
 
-    @app.post("/app/api/config/test/{check_name}")
+    @app.post("/admin/api/config/test/{check_name}")
     async def run_provider_test(
         request: Request, check_name: str
     ) -> dict[str, object]:

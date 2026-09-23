@@ -226,7 +226,7 @@ async def test_get_config_never_returns_secret_values(
     )
     async with _client(app) as client:
         await _sign_in(client, admins)
-        response = await client.get("/app/api/config")
+        response = await client.get("/admin/api/config")
 
     assert response.status_code == 200
     body = response.json()
@@ -266,19 +266,19 @@ async def test_get_config_reflects_the_load_receipts(
     )
     async with _client(app) as client:
         await _sign_in(client, admins)
-        before = (await client.get("/app/api/config")).json()
+        before = (await client.get("/admin/api/config")).json()
         await provider_state.record_load(
             receipts={
                 (SERVICE_WORKER, "gemini"): LoadReceipt(generation=4, status="loaded")
             }
         )
-        after = (await client.get("/app/api/config")).json()
+        after = (await client.get("/admin/api/config")).json()
         await provider_state.record_load(
             receipts={
                 (SERVICE_WORKER, "gemini"): LoadReceipt(generation=3, status="loaded")
             }
         )
-        stale = (await client.get("/app/api/config")).json()
+        stale = (await client.get("/admin/api/config")).json()
 
     assert before["checks"]["gemini_connection"] == "pending_restart"
     assert after["checks"]["gemini_connection"] == "pending_test"
@@ -308,7 +308,7 @@ async def test_put_without_a_secret_field_keeps_the_existing_value(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": False}}),
             headers=_json_headers(csrf),
         )
@@ -338,7 +338,7 @@ async def test_put_with_a_new_secret_replaces_it_and_bumps_generation(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"api_key": replacement}}),
             headers=_json_headers(csrf),
         )
@@ -366,7 +366,7 @@ async def test_put_response_states_restart_required(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": True, "api_key": _GEMINI_KEY}}),
             headers=_json_headers(csrf),
         )
@@ -404,7 +404,7 @@ async def test_empty_string_never_clears_a_secret(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps(payload),
             headers=_json_headers(csrf),
         )
@@ -434,7 +434,7 @@ async def test_clear_action_removes_the_secret_and_bumps_generation(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.post(
-            "/app/api/config/clear",
+            "/admin/api/config/clear",
             content=json.dumps({"provider": "feishu"}),
             headers=_json_headers(csrf),
         )
@@ -469,7 +469,7 @@ async def test_invalid_payload_does_not_replace_the_current_file(
             [],
         ):
             response = await client.put(
-                "/app/api/config",
+                "/admin/api/config",
                 content=json.dumps(payload),
                 headers=_json_headers(csrf),
             )
@@ -498,7 +498,7 @@ async def test_model_and_endpoint_are_read_only(
         csrf = await _sign_in(client, admins)
         for field in ("model", "endpoint", "api_version"):
             response = await client.put(
-                "/app/api/config",
+                "/admin/api/config",
                 content=json.dumps({"gemini": {field: "anything"}}),
                 headers=_json_headers(csrf),
             )
@@ -517,7 +517,7 @@ async def test_first_save_on_a_clean_deployment_creates_generation_1(
     assert not config_path.exists()
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
-        empty = await client.get("/app/api/config")
+        empty = await client.get("/admin/api/config")
         assert empty.status_code == 200
         assert empty.json()["generation"] == 0
         assert empty.json()["checks"] == {
@@ -526,7 +526,7 @@ async def test_first_save_on_a_clean_deployment_creates_generation_1(
             "feishu_oauth": "unconfigured",
         }
         saved = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": True, "api_key": _GEMINI_KEY}}),
             headers=_json_headers(csrf),
         )
@@ -561,9 +561,9 @@ async def test_a_corrupt_file_is_not_treated_as_absent(
         original = target.read_bytes()
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
-        read = await client.get("/app/api/config")
+        read = await client.get("/admin/api/config")
         written = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": True, "api_key": _GEMINI_KEY}}),
             headers=_json_headers(csrf),
         )
@@ -621,14 +621,14 @@ async def test_config_routes_reject_a_feishu_principal_with_admin_permission(
         # 先确认这条 session 本身是有效的——否则 403 可能只是"没登录"。
         assert (await client.get("/app/api/me")).status_code == 200
         refused = [
-            await client.get("/app/api/config"),
+            await client.get("/admin/api/config"),
             await client.put(
-                "/app/api/config",
+                "/admin/api/config",
                 content=json.dumps({"gemini": {"enabled": False}}),
                 headers=_json_headers(web_csrf_token(cookie)),
             ),
             await client.post(
-                "/app/api/config/clear",
+                "/admin/api/config/clear",
                 content=json.dumps({"provider": "gemini"}),
                 headers=_json_headers(web_csrf_token(cookie)),
             ),
@@ -647,15 +647,59 @@ async def test_config_routes_refuse_an_anonymous_browser(
     app, _, _, _, _ = _build(tmp_path, clock, memory_state)
 
     async with _client(app) as client:
-        read = await client.get("/app/api/config")
+        read = await client.get("/admin/api/config")
         written = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": False}}),
             headers=_json_headers("0" * 64),
         )
 
     assert read.status_code == 401
     assert written.status_code == 401
+
+
+async def test_legacy_workbench_config_routes_are_closed(
+    tmp_path, clock, memory_state
+) -> None:
+    """B2 迁移后旧路径必须真的消失，不能留下兼容旁路。"""
+    app, admins, _, _, _ = _build(tmp_path, clock, memory_state)
+
+    async with _client(app) as client:
+        csrf = await _sign_in(client, admins)
+        responses = [
+            await client.get("/app/api/config"),
+            await client.put(
+                "/app/api/config",
+                content=json.dumps({"gemini": {"enabled": False}}),
+                headers=_json_headers(csrf),
+            ),
+            await client.post(
+                "/app/api/config/clear",
+                content=json.dumps({"provider": "gemini"}),
+                headers=_json_headers(csrf),
+            ),
+            await client.post(
+                "/app/api/config/test/gemini_connection",
+                content="{}",
+                headers=_json_headers(csrf),
+            ),
+            await client.post(
+                "/app/api/config/test/feishu_credentials",
+                content="{}",
+                headers=_json_headers(csrf),
+            ),
+            await client.post(
+                "/app/api/config/test/feishu_oauth",
+                content="{}",
+                headers=_json_headers(csrf),
+            ),
+        ]
+
+    assert [response.status_code for response in responses] == [404] * 6
+    assert all(
+        response.json() == {"error": {"code": "not_found"}}
+        for response in responses
+    )
 
 
 async def test_config_writes_still_require_origin_and_csrf(
@@ -675,12 +719,12 @@ async def test_config_writes_still_require_origin_and_csrf(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         without_csrf = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": False}}),
             headers=_json_headers(),
         )
         wrong_origin = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": False}}),
             headers={
                 "origin": "https://evil.example",
@@ -718,7 +762,7 @@ async def test_configured_and_the_page_state_answer_the_same_question(
 
     async with _client(app) as client:
         await _sign_in(client, admins)
-        body = (await client.get("/app/api/config")).json()
+        body = (await client.get("/admin/api/config")).json()
 
     assert body["feishu"]["configured"] is False
     assert body["feishu"]["app_id"] is None
@@ -765,7 +809,7 @@ async def test_an_explicit_null_is_refused_like_an_empty_string(
     async with _client(app) as client:
         csrf = await _sign_in(client, admins)
         response = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps(payload),
             headers=_json_headers(csrf),
         )
@@ -807,14 +851,14 @@ async def test_config_routes_refuse_before_the_forced_password_change(
         assert carried is not None
         token = carried.group(1)
 
-        read = await client.get("/app/api/config")
+        read = await client.get("/admin/api/config")
         written = await client.put(
-            "/app/api/config",
+            "/admin/api/config",
             content=json.dumps({"gemini": {"enabled": True, "api_key": _GEMINI_KEY}}),
             headers=_json_headers(token),
         )
         cleared = await client.post(
-            "/app/api/config/clear",
+            "/admin/api/config/clear",
             content=json.dumps({"provider": "gemini"}),
             headers=_json_headers(token),
         )

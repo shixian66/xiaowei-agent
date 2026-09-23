@@ -726,11 +726,11 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
             ("POST", "/login/api/change-password"),
             # 配置保存是 PUT。中间件只认 POST 时这一条会整条绕过 body 上限，
             # 而它恰好是唯一一个会被原样写进磁盘文件的入口。
-            ("PUT", "/app/api/config"),
-            ("POST", "/app/api/config/clear"),
-            ("POST", "/app/api/config/test/gemini_connection"),
-            ("POST", "/app/api/config/test/feishu_credentials"),
-            ("POST", "/app/api/config/test/feishu_oauth"),
+            ("PUT", "/admin/api/config"),
+            ("POST", "/admin/api/config/clear"),
+            ("POST", "/admin/api/config/test/gemini_connection"),
+            ("POST", "/admin/api/config/test/feishu_credentials"),
+            ("POST", "/admin/api/config/test/feishu_oauth"),
         ):
             response = await client.request(
                 method,

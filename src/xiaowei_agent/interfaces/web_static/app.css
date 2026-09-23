@@ -348,13 +348,13 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .admin-content { padding: 34px; background: #fbfcfc; }
 .admin-lead { margin: 8px 0 24px; color: var(--ink-500); }
 .integration-grid { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.integration-card, .local-admin-callout, .feishu-admin-callout { padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: #fff; box-shadow: var(--shadow-soft); }
+.integration-card, .feishu-admin-callout { padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: #fff; box-shadow: var(--shadow-soft); }
 .integration-card h3 { margin: 3px 0 18px; font-size: 19px; }
 .integration-primary { margin: 0; color: var(--ink-900); font-weight: 760; }
 .integration-secondary { margin: 7px 0 0; color: var(--ink-500); font-size: 13px; }
-.local-admin-callout, .feishu-admin-callout { margin-top: 20px; }
-.local-admin-callout h2, .feishu-admin-callout h2 { margin: 0 0 6px; font-size: 17px; }
-.local-admin-callout p, .feishu-admin-callout p { color: var(--ink-500); }
+.feishu-admin-callout, .admin-content .config-panel { margin-top: 20px; }
+.feishu-admin-callout h2 { margin: 0 0 6px; font-size: 17px; }
+.feishu-admin-callout p { color: var(--ink-500); }
 
 @media (max-width: 1023px) {
   .workbench-page { padding: 0 20px; }

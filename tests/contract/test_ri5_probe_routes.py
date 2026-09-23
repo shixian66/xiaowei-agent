@@ -284,7 +284,7 @@ async def test_probe_never_creates_a_task_submission_or_evidence(
         token = await _sign_in(client, built["admins"])
         for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):
             response = await client.post(
-                f"/app/api/config/test/{name}", headers=_json_headers(token)
+                f"/admin/api/config/test/{name}", headers=_json_headers(token)
             )
             assert response.status_code == 200
 
@@ -356,7 +356,7 @@ async def test_probe_never_reaches_the_tool_gateway(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers(token)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
         )
     assert response.status_code == 200
 
@@ -384,7 +384,7 @@ async def test_probe_does_not_change_readiness(tmp_path, clock, memory_state) ->
         token = await _sign_in(client, built["admins"])
         assert (await client.get("/readyz")).status_code == 200
         failed = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers(token)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
         )
         assert failed.json()["status"] == "failed"
         assert (await client.get("/readyz")).status_code == 200
@@ -405,16 +405,16 @@ async def test_probe_routes_require_a_local_admin_and_a_csrf_token(
     _write_config(built["config_path"])
     async with _client(built["app"]) as client:
         anonymous = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers("x" * 64)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers("x" * 64)
         )
         assert anonymous.status_code == 401
         token = await _sign_in(client, built["admins"])
         without_csrf = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers()
+            "/admin/api/config/test/gemini_connection", headers=_json_headers()
         )
         assert without_csrf.status_code == 403
         foreign_origin = await client.post(
-            "/app/api/config/test/gemini_connection",
+            "/admin/api/config/test/gemini_connection",
             headers={**_json_headers(token), "origin": "https://evil.example.test"},
         )
         assert foreign_origin.status_code == 403
@@ -428,7 +428,7 @@ async def test_an_unknown_check_name_is_refused(tmp_path, clock, memory_state) -
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/everything", headers=_json_headers(token)
+            "/admin/api/config/test/everything", headers=_json_headers(token)
         )
     assert response.status_code == 400
 
@@ -452,7 +452,7 @@ async def test_a_result_is_recorded_against_the_generation_that_was_tested(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers(token)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
         )
     assert response.json()["status"] == "passed"
     snapshot = await built["provider_state"].snapshot()
@@ -470,7 +470,7 @@ async def test_no_result_is_recorded_when_there_is_no_configuration_yet(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers(token)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
         )
     assert response.json()["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
     snapshot = await built["provider_state"].snapshot()
@@ -491,7 +491,7 @@ async def test_the_response_never_carries_the_secret(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/gemini_connection", headers=_json_headers(token)
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
         )
     assert _GEMINI_KEY not in response.text
     assert set(response.json()) == {"status", "duration_ms", "error_code"}
@@ -527,7 +527,7 @@ async def test_oauth_test_requires_passing_feishu_credentials_first(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
     body = response.json()
     assert body["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
@@ -552,7 +552,7 @@ async def test_oauth_test_at_a_stale_generation_is_refused(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
     assert response.json()["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
     assert memory_state.oauth_states == {}
@@ -575,7 +575,7 @@ async def test_oauth_test_issues_a_state_that_the_login_path_cannot_consume(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         started = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
         assert started.status_code == 200
         state = started.json()["authorization_url"].split("state=")[1]
@@ -640,7 +640,7 @@ async def test_oauth_test_callback_requires_a_live_local_admin_session(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         started = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
         state = started.json()["authorization_url"].split("state=")[1]
         signed_out = await client.post(
@@ -670,7 +670,7 @@ async def test_oauth_test_branch_issues_no_cookie_and_no_session(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         started = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
         state = started.json()["authorization_url"].split("state=")[1]
         sessions_before = dict(memory_state.web_sessions)
@@ -681,7 +681,7 @@ async def test_oauth_test_branch_issues_no_cookie_and_no_session(
         )
 
     assert response.status_code == 302
-    assert response.headers["location"] == "/app"
+    assert response.headers["location"] == "/admin"
     assert oauth.exchanges == ["code-1"]
     # session 表**逐字节不变**：没有轮换，也没有新签发。
     assert dict(memory_state.web_sessions) == sessions_before
@@ -708,7 +708,7 @@ async def test_a_failed_oauth_exchange_is_recorded_as_a_closed_code(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         started = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
         state = started.json()["authorization_url"].split("state=")[1]
         response = await client.get(
@@ -741,7 +741,7 @@ async def test_oauth_test_is_refused_when_feishu_is_not_assembled(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
     assert response.json()["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
 
@@ -763,7 +763,7 @@ async def test_the_literal_oauth_route_wins_over_the_parameterised_one(
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
-            "/app/api/config/test/feishu_oauth", headers=_json_headers(token)
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
         )
     assert "authorization_url" in response.json()
     # 凭据探针一次都没被调用——说明请求没有落进那条参数化路由。
@@ -811,7 +811,7 @@ async def test_probe_routes_reject_a_feishu_principal_with_admin_permission(
         client.cookies.set("__Host-xiaowei-session", cookie)
         for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):
             response = await client.post(
-                f"/app/api/config/test/{name}",
+                f"/admin/api/config/test/{name}",
                 headers=_json_headers(web_csrf_token(cookie)),
             )
             assert response.status_code == 403, name
@@ -866,7 +866,7 @@ async def test_probe_routes_refuse_before_the_forced_password_change(
         token = carried.group(1)
         for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):
             response = await client.post(
-                f"/app/api/config/test/{name}", headers=_json_headers(token)
+                f"/admin/api/config/test/{name}", headers=_json_headers(token)
             )
             assert response.status_code == 403, name
             assert response.json() == {

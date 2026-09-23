@@ -350,7 +350,7 @@ def test_the_page_shows_the_same_fixed_gemini_constants_as_the_adapter() -> None
     )
 
     script = (
-        _ROOT / "src" / "xiaowei_agent" / "interfaces" / "web_static" / "app.js"
+        _ROOT / "src" / "xiaowei_agent" / "interfaces" / "web_static" / "admin.js"
     ).read_text(encoding="utf-8")
     assert f'model: "{GEMINI_MODEL}"' in script
     assert f'apiVersion: "{GEMINI_API_VERSION}"' in script
