@@ -116,7 +116,7 @@ class _ConfigUpdate(_WebModel):
     """保存请求里"未携带 = 保留原值"这条语义的共同约束。
 
     显式 ``null`` 与空串一样被拒绝：两者都是"用一个取值暗示清除"，而清除只能走
-    ``POST /app/api/config/clear``。规则写在基类上，新增字段自动继承——写在每个
+    ``POST /admin/api/config/clear``。规则写在基类上，新增字段自动继承——写在每个
     字段上迟早会漏掉一个。
     """
 
@@ -186,7 +186,7 @@ class WebConfigChecks(_WebModel):
 
 
 class WebConfigView(_WebModel):
-    """``GET /app/api/config`` 的完整响应。
+    """``GET /admin/api/config`` 的完整响应。
 
     ``generation`` 为 ``0`` 表示文件尚不存在——干净部署的正常起点，不是错误。
     """

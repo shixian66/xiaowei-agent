@@ -470,6 +470,18 @@ async def test_authenticated_operator_cannot_access_admin_routes(
             assert response.json() == {"error": {"code": "forbidden"}}, path
 
 
+async def test_operator_cannot_read_raw_admin_configuration(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state, role=ProductRole.OPERATOR)
+    async with _client(app) as client:
+        assert (await _login_for(client, oauth, intent="workbench")).status_code == 302
+        response = await client.get("/admin/api/config")
+
+    assert response.status_code == 403
+    assert response.json() == {"error": {"code": "forbidden"}}
+
+
 async def test_user_can_only_receive_a_safe_task_detail_session(
     clock, memory_state
 ) -> None:
@@ -489,6 +501,9 @@ async def test_user_can_only_receive_a_safe_task_detail_session(
         assert (await client.get("/app/tasks/task-1")).status_code == 200
         assert (await client.get("/app/api/tasks")).status_code == 403
         assert (await client.post("/app/api/tasks", json={})).status_code == 403
+        raw_config = await client.get("/admin/api/config")
+        assert raw_config.status_code == 403
+        assert raw_config.json() == {"error": {"code": "forbidden"}}
 
 
 async def test_feishu_admin_reads_only_the_redacted_integration_projection(
@@ -533,7 +548,7 @@ async def test_feishu_admin_reads_only_the_redacted_integration_projection(
             "error_code",
         ):
             assert forbidden not in serialized.lower()
-        assert (await client.get("/app/api/config")).status_code == 403
+        assert (await client.get("/admin/api/config")).status_code == 403
 
 
 async def test_duplicate_callback_parameters_are_rejected_before_exchange(
@@ -707,13 +722,13 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("POST", "/login/api/login"),
         ("POST", "/login/api/change-password"),
         ("GET", "/admin/api/integration-status"),
-        ("GET", "/app/api/config"),
-        ("PUT", "/app/api/config"),
-        ("POST", "/app/api/config/clear"),
+        ("GET", "/admin/api/config"),
+        ("PUT", "/admin/api/config"),
+        ("POST", "/admin/api/config/clear"),
         # 字面量在前、路径参数在后：Starlette 按注册顺序匹配，反过来会让
         # feishu_oauth 落进凭据探针那条分支。
-        ("POST", "/app/api/config/test/feishu_oauth"),
-        ("POST", "/app/api/config/test/{check_name}"),
+        ("POST", "/admin/api/config/test/feishu_oauth"),
+        ("POST", "/admin/api/config/test/{check_name}"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/admin.js"),
@@ -785,6 +800,7 @@ async def test_static_assets_are_served_from_exact_routes_with_safe_media_types(
     expected = {
         "/app/static/app.css": ("text/css", ".workbench-main"),
         "/app/static/app.js": ("text/javascript", "function renderTaskList"),
+        "/app/static/admin.js": ("text/javascript", "function renderConfig"),
         "/app/static/detail.js": ("text/javascript", "function clearTaskDetail"),
         "/app/static/login.js": ("text/javascript", 'meta[name="csrf-token"]'),
     }

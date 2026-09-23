@@ -25,20 +25,50 @@ def test_web_static_asset_set_is_exact_and_not_a_python_package() -> None:
 def test_shells_use_only_external_styles_and_scripts() -> None:
     index = (_STATIC / "index.html").read_text(encoding="utf-8")
     detail = (_STATIC / "detail.html").read_text(encoding="utf-8")
+    admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
 
     assert '<link rel="stylesheet" href="/app/static/app.css">' in index
     assert '<script type="module" src="/app/static/app.js"></script>' in index
     assert '<link rel="stylesheet" href="/app/static/app.css">' in detail
     assert '<script type="module" src="/app/static/detail.js"></script>' in detail
-    assert "<style" not in index + detail
-    assert "onclick=" not in (index + detail).lower()
-    assert "javascript:" not in (index + detail).lower()
+    assert '<link rel="stylesheet" href="/app/static/app.css">' in admin
+    assert '<script type="module" src="/app/static/admin.js"></script>' in admin
+    assert "/app/static/app.js" not in admin
+    assert "<style" not in index + detail + admin
+    assert "onclick=" not in (index + detail + admin).lower()
+    assert "javascript:" not in (index + detail + admin).lower()
     assert re.findall(r"<script\b([^>]*)>(.*?)</script>", index, re.I | re.S) == [
         (' type="module" src="/app/static/app.js"', "")
     ]
     assert re.findall(r"<script\b([^>]*)>(.*?)</script>", detail, re.I | re.S) == [
         (' type="module" src="/app/static/detail.js"', "")
     ]
+    assert re.findall(r"<script\b([^>]*)>(.*?)</script>", admin, re.I | re.S) == [
+        (' type="module" src="/app/static/admin.js"', "")
+    ]
+
+
+def test_raw_configuration_ui_belongs_only_to_the_admin_shell() -> None:
+    index = (_STATIC / "index.html").read_text(encoding="utf-8")
+    admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+    admin_script = (_STATIC / "admin.js").read_text(encoding="utf-8")
+
+    for forbidden in (
+        'id="config-panel"',
+        'id="gemini-api-key"',
+        'id="feishu-app-secret"',
+    ):
+        assert forbidden not in index
+        assert forbidden in admin
+    assert "/app/api/config" not in app_script + admin_script
+    assert "/admin/api/config" not in app_script
+    for required in (
+        "/admin/api/config",
+        "/admin/api/config/clear",
+        "/admin/api/config/test/",
+    ):
+        assert required in admin_script
 
 
 def test_desktop_shell_contains_a_static_minimum_width_notice() -> None:
