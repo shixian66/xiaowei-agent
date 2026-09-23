@@ -667,8 +667,12 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
     )
     assert web.auth is not None
     assert web.activation_service is not None
+    original_intent = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="activation-preview-task",
+    )
 
-    first = await web.auth.start_login(return_intent=_WORKBENCH_INTENT)
+    first = await web.auth.start_login(return_intent=original_intent)
     with pytest.raises(WebActivationPendingError):
         await web.auth.complete_login(
             code="new-user-code",
@@ -701,7 +705,7 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
         ),
     )
 
-    after_rejection = await web.auth.start_login(return_intent=_WORKBENCH_INTENT)
+    after_rejection = await web.auth.start_login(return_intent=original_intent)
     with pytest.raises(WebActivationPendingError):
         await web.auth.complete_login(
             code="new-user-code",
@@ -739,7 +743,7 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
         ),
     )
 
-    second = await web.auth.start_login(return_intent=_WORKBENCH_INTENT)
+    second = await web.auth.start_login(return_intent=original_intent)
     issued = await web.auth.complete_login(
         code="new-user-code",
         state=second.state_cookie,
@@ -749,4 +753,6 @@ async def test_unknown_oauth_identity_can_log_in_only_after_admin_approval(
 
     assert issued.principal.actor == "new-user"
     assert issued.principal.subject_ref == "subject-new-user"
+    assert issued.role is ProductRole.USER
+    assert issued.return_intent == original_intent
     await web.aclose()
