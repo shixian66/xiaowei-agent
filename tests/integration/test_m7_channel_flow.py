@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     LOCAL_ADMIN_USER_ID,
     ActorTaskPageQuery,
     IdentitySource,
+    ProductRole,
     TaskStatus,
     UserStatus,
     WebMode,
