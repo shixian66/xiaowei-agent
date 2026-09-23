@@ -31,13 +31,19 @@ def _check_current_status_reference(source: str, handoff: str) -> None:
     assert targets == ["AGENT_HANDOFF.md#current-status"], targets
     assert handoff.count('<a id="current-status"></a>') == 1
     # 状态链接之外的阶段流水会再次产生可独立漂移的副本。
-    for pattern in (r"main@[0-9a-f]+", r"PR #\d+", r"\d+ passed", r"已离线实现"):
+    for pattern in (
+        r"main@[0-9a-f]+",
+        r"\d+ passed",
+        r"已离线实现",
+        r"当前开发机",
+        r"当前状态[：:]\s*(?:W\d|RI\d|M\d|I\d)",
+    ):
         assert not re.search(pattern, source), pattern
 
 
 @pytest.mark.parametrize("name", ["README.md", "ARCHITECTURE.md"])
 def test_current_status_entry_points_to_the_single_handoff(name: str) -> None:
-    source = (_ROOT / name).read_text(encoding="utf-8").split("\n## ", 1)[0]
+    source = (_ROOT / name).read_text(encoding="utf-8")
     _check_current_status_reference(source, (_ROOT / "AGENT_HANDOFF.md").read_text())
 
 
@@ -51,6 +57,18 @@ def test_current_status_entry_points_to_the_single_handoff(name: str) -> None:
         ('无链接', '<a id="current-status"></a>', False),
         (
             '[当前状态](AGENT_HANDOFF.md#current-status)\nW1b 已离线实现',
+            '<a id="current-status"></a>',
+            False,
+        ),
+        (
+            '[当前状态](AGENT_HANDOFF.md#current-status)\n## 启动\n说明\n'
+            '当前状态：W1a 详细实施计划送审，计划获批后才可开始',
+            '<a id="current-status"></a>',
+            False,
+        ),
+        (
+            '[当前状态](AGENT_HANDOFF.md#current-status)\n## 验证\n'
+            '当前开发机缺少 Docker，本轮没有运行验证',
             '<a id="current-status"></a>',
             False,
         ),
@@ -315,18 +333,39 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     ]
 
 
-def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
-    stale_phrases = (
-        "Context → IntentDraft → Resolver → PlanCompiler",
-        "ContextAssembler（只有显式 parent 时）",
-    )
-    found = [
+_STALE_I0_ENTRY_SHAPES = (
+    "Context → IntentDraft → Resolver → PlanCompiler",
+    "ContextAssembler（只有显式 parent 时）",
+    "RI3 的已保存 advisory 可作为后续显式父链的模型输入",
+    "显式历史会把既存文本再次发送给 provider",
+    "The 64,000-character history limit",
+    "RI3 的 Web parent 只增加",
+)
+
+
+def _stale_i0_entry_shapes(docs: dict[str, str]) -> list[tuple[str, str]]:
+    return [
         (name, phrase)
-        for name in _I0_TRUTH_DOC_TERMS
-        for phrase in stale_phrases
-        if phrase in (_ROOT / name).read_text(encoding="utf-8")
+        for name, text in docs.items()
+        for phrase in _STALE_I0_ENTRY_SHAPES
+        if phrase in text
     ]
+
+
+def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
+    docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
+    found = _stale_i0_entry_shapes(docs)
     assert not found, f"I0 真相文档仍在使用旧入口/父上下文形状：{found}"
+
+
+@pytest.mark.parametrize("stale", _STALE_I0_ENTRY_SHAPES)
+def test_i0_entry_guard_rejects_restored_legacy_parent_requirements(stale: str) -> None:
+    current = "分类请求仅含本轮文本与澄清，真实调用仍须独立 GO。"
+    assert not _stale_i0_entry_shapes({"AGENT_HANDOFF.md": current})
+    restored = f"{current}\n## 当前验收要求\n{stale}"
+    assert _stale_i0_entry_shapes({"AGENT_HANDOFF.md": restored}) == [
+        ("AGENT_HANDOFF.md", stale)
+    ]
 
 
 _I1D_TRUTH_DOC_TERMS = {

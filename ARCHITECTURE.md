@@ -242,7 +242,7 @@ attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
 ### 5.3 Interaction Context / Clarification
 
-I1/I2 目标是淘汰通用父任务历史与 `ContextAssembler` 目标语义。TaskStore 不保存普通 conversation
+I1/I2 不使用通用父任务历史或 `ContextAssembler`。TaskStore 不保存普通 conversation
 history，provider chat/session 也不是任务事实源。I2 的普通对话只返回由当前 `CapabilitySnapshot`
 投影出来的能力目录：回答与用户文本无关，不读取历史、不保存长期记忆、不调用工具、不进入
 Resolver/Planner/Gateway。带 `clarification_parent_task_id` 的子任务不能走这条通道，否则一次性
@@ -261,21 +261,18 @@ constants; RI3 does not enable provider caching or sessions. Variable evidence i
 projected separately. Typed builders apply raw per-field character/UTF-8-validity checks
 and aggregate character/count limits before the total `redaction.scrub_text()` function;
 there is no redaction-exception branch. Model ports never receive `RequestEnvelope`.
-The 8,192-character current/history field limit itself implies a 32 KiB UTF-8 ceiling;
-it is not duplicated as an unreachable second guard. The 64,000-character history limit
-likewise implies at most 256,000 UTF-8 bytes (less than 256 KiB), so there is no duplicate
-history-byte branch. Because replacement can expand text, every scrubbed history round
-and the retained aggregate are rechecked against the same 8,192/64,000-character budgets;
-an overflowing round and all older rounds are omitted. The complete typed request is then
-serialized again and must fit the independent 512 KiB cap. If the current request alone
-cannot fit, the call is rejected.
+`InteractionClassifierRequest` 只接受 `user_text` 与可选 `clarification`，不接收通用 history
+或已保存 advisory。`user_text` 在脱敏前检查 8,192 字符上限与 UTF-8 有效性，脱敏后的 typed
+request 再复验字段约束；澄清内容来自 Runtime 读取的 `ClarificationRecord`。
+8,192 字符本身隐含 32 KiB UTF-8 上限，不重复设置不可达的第二门。完整 typed request 的
+序列化 JSON 另受 512 KiB 总量上限约束，超限拒绝；不存在旧通用历史的截断/保留预算。
 
 The StarRocks advisory projector derives names and order directly from
 `SLOW_QUERY_SURFACE.allowed_columns`, takes at most 20 rows, and applies closed type
 rules to every derived field. Missing, extra or invalid columns reject the whole batch.
 `stmt`, `clientIp`, `digest`, target/config internals, full rows, secrets, connections
-and raw objects never enter model context. History and advisory evidence remain
-understanding/explanation input; they are not a side channel into planner arguments.
+and raw objects never enter model context. Advisory evidence is explanation input;
+it is not a side channel into planner arguments or later classifier requests.
 The projector runs only after successful deterministic execution and a sufficient
 Answerability verdict. Rendering includes a stored advisory only for a `SUCCEEDED` task
 whose rebuilt typed input digest still matches.
@@ -345,7 +342,7 @@ owner/token 续租验证，再启动唯一 heartbeat。Runner 仍在具体持久
 自建 heartbeat。`plan`、`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要活的
 对照物**：调用方必须以持久化 submission 重新解析并编译，再把当前计划、目标与 policy revision 交给
 Runner，与 `PlanStore` 中最初保存的事实逐项比较。这里的“重新解析”只消费已持久化的
-`AcceptedIntentDraft`，不重新调模型。若两边都从存储读最初计划，比较的是同一个值，检查恒真——
+`AcceptedInteractionArtifact`，不重新调模型。若两边都从存储读最初计划，比较的是同一个值，检查恒真——
 安全检查会静默退化成空操作。恢复通过后仍执行存储中的原计划；当前计划只用于验证。Runner 不拥有
 领域安全规则，因此不能自行重算这些值。
 
@@ -405,9 +402,9 @@ preflight 闭合逻辑目标和物理集群；完整决策见
   与 preflight verdict；Evidence builder 逐项比对获批策略。失败结果只允许记为
   `preflight=unverified`，不能借 adapter payload 或 limitations 把失败伪装成已验证。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
-- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。I1
-  目标删除普通显式父任务历史；澄清补槽只走 `clarification_parent_task_id`，无父引用时不自动推断历史。
-- `AcceptedIntentDraft` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
+- 任务状态与证据分别由 TaskStore 与 EvidenceLedger 持久化，不由模型会话承载。普通显式父任务历史
+  不进入模型；澄清补槽只走 `clarification_parent_task_id`，无父引用时不自动推断历史。
+- `AcceptedInteractionArtifact` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
 - `ModelAdvisory` 是 task 级 insert-once 的可选展示事实；失败时不保存并保留确定性答案。TaskView 只在
   原任务已终态时附加它，它不能修改事实、限制、状态、证据引用或 `next_steps`，也不能触发新模型调用。
@@ -422,7 +419,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
 | `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段；Web 的 parent selector 不成为执行字段 |
-| `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选，I1 目标） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
+| `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `InteractionDraft` | proposed_kind、capability_draft、confidence、source | 模型/规则的不可信交互候选；`InteractionKind` 与 `RoutingDisposition` 由确定性 Router 采纳或拒绝 |
 | `AcceptedInteractionArtifact` | task_id、artifact_version、draft、origin、provider/model metadata、input/result digest、usage、fencing | I1 的 insert-once 交互事实；替代新运行路径的 accepted intent，artifact version 2 才会被 Runtime loader 解释，模型元数据不来自模型响应 |
@@ -523,16 +520,15 @@ sha256(canonical_json({
 TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移、worker lease、heartbeat、fencing token、stale recovery、终态保护、审批记录和审计事件。所有写入都必须采纳存储层返回的 winner；调用方不能用本地旧对象覆盖 winner。
 
 After real-model integration, TaskStore additionally carries only insert-once
-`AcceptedIntentDraft` and `ModelAdvisory` artifacts. Both writes bind the current
+`AcceptedInteractionArtifact` and `ModelAdvisory` artifacts. Both writes bind the current
 grant/lease/fencing state. Exact digest replay returns the winner; different content,
 an expired lease or stale fencing is rejected. Recovery reads accepted artifacts first.
 If the provider received a call before local save, only that unsaved model call may
 repeat under ADR-015's no-execution-side-effect at-least-once rule.
 Model call count, latency, usage and fallback enter the existing safe trace/audit path.
-PR 3B ports already return accepted DTO plus nullable bounded usage atomically, while the
-composition root exposes the same immutable invocation profile to the adapter and future
-application service; PR 3C therefore does not hardcode provider/model/revision or inspect
-the concrete adapter when persisting artifacts.
+Model ports return accepted DTO plus nullable bounded usage atomically. The composition
+root exposes the same immutable invocation profile to the adapter and application service;
+artifact persistence does not inspect the concrete adapter or duplicate its profile.
 The trace contract adds `PipelineStage.MODEL` plus typed `ModelCallObservation` (call
 kind, total elapsed milliseconds, request count, nullable input/output usage and a
 closed fallback code). Model-stage free-form detail remains empty. Prompt, response,
@@ -567,9 +563,9 @@ A task can therefore remain RUNNING for up to 180 extra seconds. On recovery, co
 steps are adopted from the step journal without Gateway replay; only an advisory not
 yet saved may be requested again.
 
-渠道 ingress 当前仍是 task submission 后写 binding/projection 的既有路径。RI3 的 Web parent 只增加
-scoped lookup 与 Worker 二次核验，不把渠道原子性债务混入模型接入。若后续要修半聚合窗口，应单独
-立项并覆盖 Web/飞书全部失败和幂等路径。
+渠道 ingress 仍是 task submission 后写 binding/projection 的既有路径；澄清子任务只消费
+`CLARIFICATION_REQUIRED` 父任务，并在创建与 Worker 执行时重新核验。通用 Web parent 不再是
+受支持路径。若后续要修渠道半聚合窗口，应单独立项并覆盖 Web/飞书全部失败和幂等路径。
 
 `CANCELED` 只是终态闭集成员，不等于本阶段已有用户取消命令。RI3 不新增取消 API；进程级
 `CancelledError`/SIGTERM 取消并等待正在运行的模型 coroutine，随后依赖现有 lease/stale recovery，

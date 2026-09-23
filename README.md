@@ -20,8 +20,8 @@
 已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
 [总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
-**这些是未来目标，不是当前启动步骤**——当前可照做的首启流程见下文，仍是单一
-`.config/integrations.json` 与 loopback 发布。
+各阶段进度见顶部交接入口；当前可照做的首启流程见下文，仍是单一
+`.config/integrations.json` 与 loopback 发布，不能提前套用后续配置设计。
 
 ## 目标能力
 
@@ -95,10 +95,8 @@
   port 和离线测试均不加载 SDK 或连接飞书。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
-截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
-`lark-oapi` 也已合入；RI3 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
-提升为生产直接依赖。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
-兼容性仍需独立部署与运行证据。
+依赖声明与锁定版本以 `pyproject.toml` / `uv.lock` 为准；已执行的 CI、Compose 及其证据
+限制统一记录于 [交接文档](AGENT_HANDOFF.md#current-status)，不由依赖安装成功推定运行兼容性。
 
 ## 预期目录
 
@@ -230,8 +228,9 @@ code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 
 watchdog，且不重试；两者都没有读取
 `XIAOWEI_FEISHU_API_TIMEOUT_SECONDS`；后者目前只装配给渠道消息发送路径。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
-两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
-`open_id` 精确映射，不按姓名或群角色猜权限：
+`XIAOWEI_FEISHU_IDENTITY_FILE` 必须是绝对路径；当前 Settings 的启动校验与飞书 Compose
+override 仍保留这个文件输入。它不是在线授权真源，也不会在启动时自动导入数据库。旧文件的
+版本化 JSON 仅供显式一次性迁移，按飞书 `open_id` 精确关联，不按姓名或群角色猜权限：
 
 ```json
 {
@@ -248,9 +247,12 @@ watchdog，且不重试；两者都没有读取
 }
 ```
 
-`operator`、`dba`、`oncall` 可查看安全任务并发起只读任务；`viewer`、`approver` 只可查看；
-`admin` 拥有当前渠道权限闭集。映射在 listener 或 Web app 装配时一次读取，修改后必须重启对应
-进程才生效。
+Web 与 listener 使用 `DirectoryFeishuIdentityDirectory`，每次身份解析都从数据库目录重建主体，
+停用或撤权不依赖重启。旧文件的 labels 由
+[迁移适配器](src/xiaowei_agent/interfaces/legacy_identity_migration.py) 转为产品角色；在线权限由
+[角色映射](src/xiaowei_agent/governance/product_roles.py) 确定，仍受结果 ACL 与认证来源限制。
+不能通过编辑旧文件授予在线权限；未知身份须经明确 Admin 激活，迁移与发布核验门见
+[交接文档](AGENT_HANDOFF.md#current-status)。
 
 Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 
@@ -454,30 +456,25 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
-当前开发机有 Docker client、standalone Compose 5.5.1 与可用的 Colima daemon；但 Docker credential
-helper 缺失，且用户已有容器占用 `127.0.0.1:8000`，所以本轮没有取得 PR 3B 完整 Compose/model
-mount audit 证据。本任务未停止或修改用户容器；本机仍只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
-`2d67b59` 已在 GitHub 隔离 runner 实际执行 Compose smoke 与隔离 PostgreSQL integration，八项
-CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
+执行前检查本机 Docker daemon、Compose 版本、credential helper 与端口占用；历史环境记录不能
+替代当次预检。已取得的 CI/本机证据与缺口统一见
+[交接文档](AGENT_HANDOFF.md#current-status)。隔离 smoke 只证明对应 `tests`，不替代真实服务、
+部署、canary 或用户验收。
 
-### 尚未完成与能力边界
+### 模型与真实服务的激活边界
 
-当前默认装配仍使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B–3D 已离线新增
-固定 Gemini SDK adapter、严格 DTO/窄 port、worker-only secret override、durable 模型编排、持久 artifact、
-MODEL trace、慢查询 advisory 与显式 Web 父任务上下文，但未读取真实 key，也未进行真实 provider 调用。M6a 增加了
-Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
-已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
-PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离
-环境中的 fake 闭环，不能推出任何真实运维系统兼容、部署、canary 或产品用户验收。
+默认装配使用确定性无模型 interpreter。Gemini 的窄端口与数据边界见
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)，当前分类与澄清契约见
+[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。模型开关、凭据配置与离线
+实现都不自动授权真实调用；现场 GO、供应商条款与数据范围仍须按有效授权核对。
 
-M6b 已实现默认关闭的 StarRocks 测试环境只读 adapter、精确 target binding、固定 preflight、
-证据归属与离线 Eval。当前测试目标仍故意保持歧义，生产 API/Worker 也未注入获批的物理身份探针，
+StarRocks 测试环境只读 adapter 默认关闭，要求精确 target binding、固定 preflight 与证据归属。
+测试目标仍故意保持歧义，API/Worker 也未注入获批的物理身份探针，
 所以 `test` 环境会在目标解析阶段拒绝 recording 和真实装配；`dev` recording 仍可用，且环境变量
 不能单独激活真实连接。只有离线候选经审查、唯一目标、identity、secret reference、
 证据处置与窗口全部获批、负责人再次明确“现场 GO”后，才允许补齐激活并运行
-`docker-compose.m6b-test.yml`。当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1
-（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
+`docker-compose.m6b-test.yml`。E1（写）的独立授权门见 ADR-007；`tools/gateway.py` 的
+`_E1_EXECUTION_ENABLED` 保持 `False`。实际能力与证据等级只在 handoff 维护。
 
 ## 旧项目关系
 
