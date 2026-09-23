@@ -21,6 +21,7 @@ from xiaowei_agent.contracts import (
     ChannelPermission,
     IdentitySource,
     LoadReceipt,
+    ProductRole,
     WebMode,
 )
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
@@ -114,7 +115,8 @@ def _build(
         WebAuthService(
             sessions=sessions,
             identities=StaticFeishuIdentityDirectory(
-                principals={"subject-alice": _feishu_admin()}
+                principals={"subject-alice": _feishu_admin()},
+                web_roles={"subject-alice": ProductRole.ADMIN},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),
@@ -164,18 +166,27 @@ async def _sign_in(client: httpx.AsyncClient, admins: Any) -> str:
     """走真实首启闭环拿到一个可用会话与 CSRF token。"""
     await admins.seed_if_absent(password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD))
     await client.post(
-        "/app/api/login",
-        content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+        "/login/api/login",
+        content=json.dumps(
+            {
+                "username": "admin",
+                "password": INITIAL_LOCAL_ADMIN_PASSWORD,
+                "return_intent": {"kind": "workbench"},
+            }
+        ),
         headers=_json_headers(),
     )
-    carried = _CSRF_META_RE.search((await client.get("/app")).text)
+    carried = _CSRF_META_RE.search(
+        (await client.get("/login?intent=workbench")).text
+    )
     assert carried is not None
     changed = await client.post(
-        "/app/api/change-password",
+        "/login/api/change-password",
         content=json.dumps(
             {
                 "current_password": INITIAL_LOCAL_ADMIN_PASSWORD,
                 "new_password": _NEW_PASSWORD,
+                "return_intent": {"kind": "workbench"},
             }
         ),
         headers=_json_headers(carried.group(1)),
@@ -778,13 +789,21 @@ async def test_config_routes_refuse_before_the_forced_password_change(
     )
     async with _client(app) as client:
         await client.post(
-            "/app/api/login",
-            content=json.dumps({"password": INITIAL_LOCAL_ADMIN_PASSWORD}),
+            "/login/api/login",
+            content=json.dumps(
+                {
+                    "username": "admin",
+                    "password": INITIAL_LOCAL_ADMIN_PASSWORD,
+                    "return_intent": {"kind": "workbench"},
+                }
+            ),
             headers=_json_headers(),
         )
         # 页面里渲染的 token 是真实浏览器唯一拿得到的那一个；用它才说明这条拒绝
         # 不是"缺 CSRF"而是"必须先改密"。
-        carried = _CSRF_META_RE.search((await client.get("/app")).text)
+        carried = _CSRF_META_RE.search(
+            (await client.get("/login?intent=workbench")).text
+        )
         assert carried is not None
         token = carried.group(1)
 

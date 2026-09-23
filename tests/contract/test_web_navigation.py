@@ -3,7 +3,20 @@
 import pytest
 from pydantic import ValidationError
 
-from xiaowei_agent.contracts import WebReturnIntent, WebReturnIntentKind
+from xiaowei_agent.contracts import (
+    IdentitySource,
+    ProductRole,
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
+from xiaowei_agent.interfaces.web_navigation import (
+    WebNavigationInputError,
+    parse_web_return_intent,
+    web_login_path,
+    web_return_intent_allowed,
+    web_return_path,
+    web_task_detail_path,
+)
 
 
 @pytest.mark.parametrize(
@@ -144,3 +157,131 @@ def test_return_intent_kind_is_exhaustively_covered() -> None:
         ),
     }
     assert set(examples) == set(WebReturnIntentKind)
+
+
+@pytest.mark.parametrize(
+    ("intent", "path"),
+    (
+        (WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH), "/app"),
+        (
+            WebReturnIntent(
+                kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                task_id="task:with-safe.chars_1",
+            ),
+            "/app/tasks/task%3Awith-safe.chars_1",
+        ),
+        (WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER), "/admin"),
+        (
+            WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+            "/login?intent=activation_status&request_id=activation-1",
+        ),
+    ),
+)
+def test_return_paths_are_rebuilt_only_from_the_closed_intent(
+    intent: WebReturnIntent, path: str
+) -> None:
+    assert web_return_path(intent) == path
+    if intent.kind is WebReturnIntentKind.SAFE_TASK_DETAIL:
+        assert web_return_path(intent) == web_task_detail_path(intent.task_id)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (
+        ((), WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)),
+        (
+            (("intent", "safe_task_detail"), ("task_id", "task-1")),
+            WebReturnIntent(
+                kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                task_id="task-1",
+            ),
+        ),
+        (
+            (("intent", "admin_center"),),
+            WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER),
+        ),
+        (
+            (("intent", "activation_status"), ("request_id", "activation-1")),
+            WebReturnIntent(
+                kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                request_id="activation-1",
+            ),
+        ),
+    ),
+)
+def test_query_parser_accepts_only_the_closed_intent_shape(
+    query: tuple[tuple[str, str], ...], expected: WebReturnIntent
+) -> None:
+    assert parse_web_return_intent(query) == expected
+    assert web_login_path(expected).startswith("/login?intent=")
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        (("next", "https://outside.example.test"),),
+        (("intent", "workbench"), ("intent", "admin_center")),
+        (("intent", "safe_task_detail"),),
+        (("intent", "workbench"), ("task_id", "task-1")),
+        (("intent", "unknown"),),
+    ),
+)
+def test_query_parser_rejects_unknown_duplicate_and_mismatched_fields(
+    query: tuple[tuple[str, str], ...],
+) -> None:
+    with pytest.raises(WebNavigationInputError):
+        parse_web_return_intent(query)
+
+
+@pytest.mark.parametrize(
+    ("source", "role", "allowed"),
+    (
+        (
+            IdentitySource.LOCAL_ADMIN,
+            ProductRole.ADMIN,
+            {"workbench", "safe_task_detail", "admin_center"},
+        ),
+        (
+            IdentitySource.FEISHU,
+            ProductRole.ADMIN,
+            {"workbench", "safe_task_detail", "admin_center"},
+        ),
+        (
+            IdentitySource.FEISHU,
+            ProductRole.OPERATOR,
+            {"workbench", "safe_task_detail"},
+        ),
+        (
+            IdentitySource.FEISHU,
+            ProductRole.USER,
+            {"safe_task_detail"},
+        ),
+    ),
+)
+def test_destination_matrix_is_total_and_activation_status_is_never_a_destination(
+    source: IdentitySource, role: ProductRole, allowed: set[str]
+) -> None:
+    intents = {
+        WebReturnIntentKind.WORKBENCH: WebReturnIntent(
+            kind=WebReturnIntentKind.WORKBENCH
+        ),
+        WebReturnIntentKind.SAFE_TASK_DETAIL: WebReturnIntent(
+            kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+            task_id="task-1",
+        ),
+        WebReturnIntentKind.ADMIN_CENTER: WebReturnIntent(
+            kind=WebReturnIntentKind.ADMIN_CENTER
+        ),
+        WebReturnIntentKind.ACTIVATION_STATUS: WebReturnIntent(
+            kind=WebReturnIntentKind.ACTIVATION_STATUS,
+            request_id="activation-1",
+        ),
+    }
+    assert {
+        kind.value
+        for kind, intent in intents.items()
+        if web_return_intent_allowed(source=source, role=role, intent=intent)
+    } == allowed

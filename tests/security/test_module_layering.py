@@ -139,6 +139,7 @@ _ALLOWED_INTERNAL_BY_FILE = {
     },
     "interfaces/local_admin_auth.py": {
         "xiaowei_agent.contracts",
+        "xiaowei_agent.governance",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.persistence",
     },
@@ -233,8 +234,12 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.application",
         "xiaowei_agent.config",
         "xiaowei_agent.contracts",
+        "xiaowei_agent.governance",
         "xiaowei_agent.interfaces",
         "xiaowei_agent.persistence",
+    },
+    "interfaces/web_navigation.py": {
+        "xiaowei_agent.contracts",
     },
     "interfaces/web_models.py": {
         "xiaowei_agent.application",

@@ -28,9 +28,11 @@ from xiaowei_agent.application.channel_submission import (
 from xiaowei_agent.application.task_view_runtime import ClarificationIntegrityError
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
+    AdminCapability,
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    ProductRole,
     ReadinessReport,
     RenderPayload,
     RenderSection,
@@ -112,7 +114,12 @@ class _Auth:
         self.trace_ids.append(get_trace_id())
         if session_cookie != _COOKIE:
             raise WebAuthenticationError
-        return AuthenticatedWebSession(principal=self.principal, csrf_token=_CSRF)
+        return AuthenticatedWebSession(
+            principal=self.principal,
+            role=ProductRole.OPERATOR,
+            admin_capabilities=frozenset[AdminCapability](),
+            csrf_token=_CSRF,
+        )
 
     def validate_state_change(
         self, *, session_cookie: str, origin: str | None, csrf_token: str | None
@@ -122,7 +129,7 @@ class _Auth:
         if session_cookie != _COOKIE or csrf_token != _CSRF:
             raise WebCsrfError
 
-    async def start_login(self) -> Any:  # pragma: no cover - 其他契约已覆盖
+    async def start_login(self, **_: object) -> Any:  # pragma: no cover
         raise AssertionError("not used")
 
     async def complete_login(self, **_: object) -> Any:  # pragma: no cover

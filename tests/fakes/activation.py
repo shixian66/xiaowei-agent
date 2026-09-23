@@ -1,12 +1,16 @@
 """身份激活入口测试替身；只记录调用，不复制存储状态机。"""
 
+from types import SimpleNamespace
 from typing import cast
 
 from xiaowei_agent.application.activation_notification import (
     ActivationNotificationService,
 )
-from xiaowei_agent.application.identity_activation import IdentityActivationService
-from xiaowei_agent.contracts.activation import ActivationRequest
+from xiaowei_agent.application.identity_activation import (
+    ActivationResumeUnavailableError,
+    IdentityActivationService,
+)
+from xiaowei_agent.contracts.activation import ActivationRequest, ActivationStatus
 from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 
@@ -16,6 +20,7 @@ class RecordingActivationRequests:
         self.web_subjects: list[str] = []
         self.web_intents: list[WebReturnIntent] = []
         self.groups: list[tuple[str, str, str]] = []
+        self.requests: dict[str, object] = {}
 
     async def request_web(
         self, *, subject_ref: str, return_intent: WebReturnIntent
@@ -24,7 +29,22 @@ class RecordingActivationRequests:
         self.web_intents.append(return_intent)
         if self.failure is not None:
             raise self.failure
-        return cast(ActivationRequest, object())
+        request = SimpleNamespace(
+            request_id=f"activation-{len(self.web_subjects)}",
+            subject_ref=subject_ref,
+            status=ActivationStatus.PENDING,
+            return_intent=return_intent,
+        )
+        self.requests[request.request_id] = request
+        return cast(ActivationRequest, request)
+
+    async def resume_web(
+        self, *, request_id: str, subject_ref: str
+    ) -> ActivationRequest:
+        request = self.requests.get(request_id)
+        if request is None or getattr(request, "subject_ref", None) != subject_ref:
+            raise ActivationResumeUnavailableError
+        return cast(ActivationRequest, request)
 
     async def request_group(
         self,
@@ -36,7 +56,15 @@ class RecordingActivationRequests:
         self.groups.append((subject_ref, event_ref, chat_ref))
         if self.failure is not None:
             raise self.failure
-        return cast(ActivationRequest, object())
+        return cast(
+            ActivationRequest,
+            SimpleNamespace(
+                request_id=f"group-activation-{len(self.groups)}",
+                subject_ref=subject_ref,
+                status=ActivationStatus.PENDING,
+                return_intent=None,
+            ),
+        )
 
     def as_service(self) -> IdentityActivationService:
         return cast(IdentityActivationService, self)

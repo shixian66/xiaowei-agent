@@ -2,6 +2,7 @@
 
 from xiaowei_agent.contracts import (
     ActivationSource,
+    ActivationStatus,
     AdminAuditAction,
     AdminAuditTargetKind,
     IdentitySource,
@@ -9,6 +10,7 @@ from xiaowei_agent.contracts import (
     WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.activation import (
+    ActivationLookup,
     ActivationRequest,
     CreateActivationCommand,
 )
@@ -94,6 +96,27 @@ class IdentityActivationService:
             )
         )
 
+    async def resume_web(
+        self, *, request_id: str, subject_ref: str
+    ) -> ActivationRequest:
+        """只向同一个 OAuth 主体返回 Web 申请；引用错配统一按不可用处理。"""
+        request = await self._activations.load(
+            query=ActivationLookup(
+                request_id=request_id,
+                tenant_id=self._tenant_id,
+                environment_id=self._environment_id,
+            )
+        )
+        if (
+            request is None
+            or request.provider is not IdentitySource.FEISHU
+            or request.return_intent is None
+            or request.subject_ref != subject_ref
+            or request.status not in set(ActivationStatus)
+        ):
+            raise ActivationResumeUnavailableError
+        return request
+
     async def decide(
         self,
         *,
@@ -149,7 +172,15 @@ async def reject_activation(
     return await service.decide(command=command, context=context)
 
 
+class ActivationResumeUnavailableError(RuntimeError):
+    """申请引用不存在、作用域不匹配或 OAuth 主体不匹配。"""
+
+    def __init__(self) -> None:
+        super().__init__("activation resume unavailable")
+
+
 __all__ = [
+    "ActivationResumeUnavailableError",
     "IdentityActivationService",
     "approve_activation",
     "reject_activation",

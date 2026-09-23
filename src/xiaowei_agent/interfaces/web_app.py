@@ -55,15 +55,21 @@ from xiaowei_agent.config import (
 )
 from xiaowei_agent.contracts import (
     TASK_ID_PATTERN,
+    AdminCapability,
     AuthenticatedPrincipal,
     ChannelKind,
+    ChannelPermission,
     FeishuIntegration,
     GeminiIntegration,
     IdentitySource,
     IntegrationConfig,
+    ProductRole,
     ProviderName,
     ReadinessProbe,
+    TestResult,
     WebMode,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.interfaces.auth import Clock
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
@@ -99,7 +105,9 @@ from xiaowei_agent.interfaces.web_auth import (
     WebAuthenticationError,
     WebAuthService,
     WebCsrfError,
+    WebDestinationNotAvailableError,
     WebOAuthCodeError,
+    WebOAuthLoginContextError,
     WebOAuthStateError,
     WebOAuthUnavailableError,
     WebOriginError,
@@ -118,12 +126,23 @@ from xiaowei_agent.interfaces.web_models import (
     WebFeishuConfigView,
     WebGeminiConfigUpdate,
     WebGeminiConfigView,
+    WebIntegrationDomain,
+    WebIntegrationDomainStatus,
+    WebIntegrationLoadStatus,
+    WebIntegrationStatusView,
     WebLoginRequest,
     WebOAuthTestStarted,
     WebTaskAccepted,
     WebTaskDetail,
     WebTaskPage,
     WebTaskSubmitRequest,
+)
+from xiaowei_agent.interfaces.web_navigation import (
+    WebNavigationInputError,
+    parse_web_return_intent,
+    web_login_path,
+    web_return_intent_allowed,
+    web_return_path,
 )
 from xiaowei_agent.log import configure_logging
 from xiaowei_agent.persistence.provider_state import (
@@ -182,6 +201,7 @@ _TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
 _POSITIVE_INT_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_CREATED_SEQ: Final[int] = 9_223_372_036_854_775_807
 _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
+    "admin.js": "text/javascript",
     "app.css": "text/css",
     "app.js": "text/javascript",
     "detail.js": "text/javascript",
@@ -611,32 +631,14 @@ def _single_cookie(request: Request, *, name: str) -> tuple[str | None, bool]:
     return (matches[0] if matches else None), True
 
 
-def _login_shell(*, oauth_available: bool) -> str:
-    """未登录时的最小登录壳。
-
-    只含口令表单与同源提交脚本：**不加载**任务列表、配置面板或任何需要会话的
-    资源，否则未登录页面自己就会触发一串 401。飞书入口仅在装配成功时渲染，
-    避免出现一个点进去必然失败的假入口。
-    """
-    oauth_entry = (
-        '<p><a id="feishu-oauth" href="/oauth/feishu/start">使用飞书登录</a></p>'
-        if oauth_available
-        else ""
-    )
-    return (
-        "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
-        "<title>小维 Agent 登录</title>"
-        '<link rel="stylesheet" href="/app/static/app.css"></head><body>'
-        "<main><h1>登录</h1>"
-        '<form id="login-form" method="post" action="/app/api/login">'
-        '<label for="password">口令</label>'
-        '<input id="password" name="password" type="password"'
-        ' autocomplete="current-password" required>'
-        '<button type="submit">登录</button></form>'
-        '<p class="form-message is-hidden" id="form-message" role="alert"></p>'
-        f"{oauth_entry}"
-        '<script type="module" src="/app/static/login.js"></script>'
-        "</main></body></html>"
+def _login_shell(*, shell: str, oauth_available: bool) -> str:
+    """按装配事实裁掉不可用的 OAuth 入口，不生成第二套登录页面。"""
+    if oauth_available:
+        return shell
+    return shell.replace(
+        '<div class="oauth-entry" id="oauth-entry">',
+        '<div class="oauth-entry is-hidden" id="oauth-entry">',
+        1,
     )
 
 
@@ -661,7 +663,7 @@ def _password_change_shell(*, csrf_token: str) -> str:
         f'<meta name="csrf-token" content="{csrf_token}">'
         '<link rel="stylesheet" href="/app/static/app.css"></head><body>'
         "<main><h1>请先修改初始口令</h1>"
-        '<form id="change-password-form" method="post" action="/app/api/change-password">'
+        '<form id="change-password-form" method="post" action="/login/api/change-password">'
         '<label for="current-password">当前口令</label>'
         '<input id="current-password" name="current_password" type="password" required>'
         '<label for="new-password">新口令</label>'
@@ -671,6 +673,36 @@ def _password_change_shell(*, csrf_token: str) -> str:
         '<script type="module" src="/app/static/login.js"></script>'
         "</main></body></html>"
     )
+
+
+_LOGIN_NOTICE_VALUES: Final = frozenset(
+    {"pending", "destination_not_available"}
+)
+
+
+def _login_query(request: Request) -> tuple[WebReturnIntent, str | None]:
+    """严格解析登录 query；固定 notice 不进入 return intent 契约。"""
+    intent_items: list[tuple[str, str]] = []
+    notices: list[str] = []
+    for name, value in request.query_params.multi_items():
+        if name == "notice":
+            notices.append(value)
+        else:
+            intent_items.append((name, value))
+    if len(notices) > 1 or (notices and notices[0] not in _LOGIN_NOTICE_VALUES):
+        raise _WebInputError
+    try:
+        intent = parse_web_return_intent(intent_items)
+    except WebNavigationInputError:
+        raise _WebInputError from None
+    return intent, notices[0] if notices else None
+
+
+def _login_redirect(intent: WebReturnIntent, *, notice: str | None = None) -> Response:
+    path = web_login_path(intent)
+    if notice is not None:
+        path = f"{path}&notice={notice}"
+    return RedirectResponse(path, status_code=302)
 
 
 def _static_asset_route(
@@ -934,6 +966,113 @@ def _config_view(
     )
 
 
+def _latest_test(
+    snapshot: ProviderStateSnapshot, checks: tuple[CheckName, ...]
+) -> TestResult | None:
+    """取一个域最近的脱敏测试事实；没有时间的旧事实排在有时间事实之前。"""
+    candidates = [
+        snapshot.tests[check.value]
+        for check in checks
+        if check.value in snapshot.tests
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            item.tested_at is not None,
+            item.tested_at.isoformat() if item.tested_at is not None else "",
+        ),
+    )
+
+
+def _integration_domain_status(
+    *,
+    domain: WebIntegrationDomain,
+    provider: ProviderName,
+    checks: tuple[CheckName, ...],
+    settings: Settings,
+    config: IntegrationConfig | None,
+    snapshot: ProviderStateSnapshot,
+) -> WebIntegrationDomainStatus:
+    """从现有配置/回执/测试事实派生一个不含原值的管理面域状态。"""
+    configured = _provider_enabled(provider, config) and _required_fields_present(
+        provider, config
+    )
+    generation = current_generation(config)
+    required_services = frozenset().union(
+        *(required_services_for_check(settings, check.value) for check in checks)
+    )
+    restart_required = False
+    load_status: WebIntegrationLoadStatus = "unconfigured"
+    if configured:
+        receipts = [
+            snapshot.receipts.get((service_name, provider.value))
+            for service_name in required_services
+        ]
+        if any(
+            receipt is not None
+            and receipt.generation == generation
+            and receipt.status == "invalid"
+            for receipt in receipts
+        ):
+            load_status = "invalid"
+        elif any(
+            receipt is None
+            or receipt.generation != generation
+            or receipt.status != "loaded"
+            for receipt in receipts
+        ):
+            load_status = "pending_restart"
+            restart_required = True
+        else:
+            load_status = "loaded"
+    latest = _latest_test(snapshot, checks)
+    return WebIntegrationDomainStatus(
+        domain=domain,
+        configured=configured,
+        restart_required=restart_required,
+        load_status=load_status,
+        last_test_status=None if latest is None else latest.status,
+        last_tested_at=None if latest is None else latest.tested_at,
+    )
+
+
+def _integration_status_view(
+    *,
+    settings: Settings,
+    config: IntegrationConfig | None,
+    snapshot: ProviderStateSnapshot,
+) -> WebIntegrationStatusView:
+    """三域脱敏状态；resources 未交付，永远明确标为 not_applicable。"""
+    return WebIntegrationStatusView(
+        domains=(
+            _integration_domain_status(
+                domain="ai",
+                provider=ProviderName.GEMINI,
+                checks=(CheckName.GEMINI_CONNECTION,),
+                settings=settings,
+                config=config,
+                snapshot=snapshot,
+            ),
+            _integration_domain_status(
+                domain="feishu",
+                provider=ProviderName.FEISHU,
+                checks=(CheckName.FEISHU_CREDENTIALS, CheckName.FEISHU_OAUTH),
+                settings=settings,
+                config=config,
+                snapshot=snapshot,
+            ),
+            WebIntegrationDomainStatus(
+                domain="resources",
+                configured=False,
+                restart_required=False,
+                load_status="not_applicable",
+            ),
+        )
+    )
+
+
 def _probe_duration_ms(started: float) -> int:
     """与 ``provider_probe`` 用同一个上界裁剪；两处不一致会让写库在边界上失败。"""
     elapsed = int((time.monotonic() - started) * 1000)
@@ -986,6 +1125,8 @@ class _WebPrincipalSession:
 
     cookie: str = field(repr=False)
     principal: AuthenticatedPrincipal
+    role: ProductRole
+    admin_capabilities: frozenset[AdminCapability]
     csrf_token: str = field(repr=False)
     must_change_password: bool
 
@@ -1015,6 +1156,8 @@ async def _authenticated(
         return _WebPrincipalSession(
             cookie=cookie,
             principal=local.principal,
+            role=local.role,
+            admin_capabilities=local.admin_capabilities,
             csrf_token=local.csrf_token,
             must_change_password=local.must_change_password,
         )
@@ -1024,6 +1167,8 @@ async def _authenticated(
     return _WebPrincipalSession(
         cookie=cookie,
         principal=session.principal,
+        role=session.role,
+        admin_capabilities=session.admin_capabilities,
         csrf_token=session.csrf_token,
         must_change_password=False,
     )
@@ -1082,6 +1227,16 @@ def create_app(
     public_origin = cast(str, settings.web_public_origin).rstrip("/")
     index_shell = _asset_text("index.html")
     detail_shell = _asset_text("detail.html")
+    login_shell = _login_shell(
+        shell=_asset_text("login.html"), oauth_available=oauth_available
+    )
+
+    def login_shell_response(*, notice: str | None) -> HTMLResponse:
+        """目标无权限仍渲染固定登录壳，但保留闭集 403 语义。"""
+        status_code = 403 if notice == "destination_not_available" else 200
+        return HTMLResponse(login_shell, status_code=status_code)
+
+    admin_shell = _asset_text("admin.html")
     static_assets = {name: _asset_text(name) for name in _STATIC_MEDIA_TYPES}
     app = FastAPI(
         redirect_slashes=False,
@@ -1100,8 +1255,8 @@ def create_app(
             {
                 "/app/api/logout",
                 "/app/api/tasks",
-                "/app/api/login",
-                "/app/api/change-password",
+                "/login/api/login",
+                "/login/api/change-password",
                 "/app/api/config",
                 "/app/api/config/clear",
                 "/app/api/config/test/gemini_connection",
@@ -1118,8 +1273,10 @@ def create_app(
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
     app.add_exception_handler(LocalAdminAuthenticationError, _authentication_error)
     app.add_exception_handler(WebOAuthStateError, _oauth_input_error)
+    app.add_exception_handler(WebOAuthLoginContextError, _oauth_input_error)
     app.add_exception_handler(WebOAuthCodeError, _oauth_input_error)
     app.add_exception_handler(WebOAuthUnavailableError, _oauth_unavailable)
+    app.add_exception_handler(WebDestinationNotAvailableError, _forbidden)
     app.add_exception_handler(
         _PasswordChangeRequiredError, _password_change_required
     )
@@ -1138,8 +1295,11 @@ def create_app(
 
     if auth is not None:
         @app.get("/oauth/feishu/start")
-        async def oauth_start() -> Response:
-            started = await auth.start_login()
+        async def oauth_start(request: Request) -> Response:
+            return_intent, notice = _login_query(request)
+            if notice is not None:
+                raise _WebInputError
+            started = await auth.start_login(return_intent=return_intent)
             response = RedirectResponse(started.authorization_url, status_code=302)
             _set_secret_cookie(
                 response,
@@ -1231,8 +1391,19 @@ def create_app(
                 response = await oauth_connection_test_callback(
                     request, code=code, state=state, state_cookie=state_cookie
                 )
-            except WebActivationPendingError:
-                response = _error(403, "activation_pending")
+            except WebActivationPendingError as pending:
+                response = _login_redirect(
+                    WebReturnIntent(
+                        kind=WebReturnIntentKind.ACTIVATION_STATUS,
+                        request_id=pending.request_id,
+                    ),
+                    notice="pending",
+                )
+            except WebDestinationNotAvailableError as unavailable:
+                response = _login_redirect(
+                    unavailable.return_intent,
+                    notice="destination_not_available",
+                )
             except WebAuthenticationError:
                 response = _error(401, "unauthorized")
             except WebOAuthCodeError:
@@ -1240,7 +1411,9 @@ def create_app(
             except WebOAuthUnavailableError:
                 response = _error(503, "unavailable")
             else:
-                response = RedirectResponse("/app", status_code=302)
+                response = RedirectResponse(
+                    web_return_path(issued.return_intent), status_code=302
+                )
                 _set_secret_cookie(
                     response,
                     name=session_cookie,
@@ -1270,35 +1443,102 @@ def create_app(
             raise _PasswordChangeRequiredError
         return session
 
-    @app.get("/app")
-    async def shell(request: Request) -> Response:
+    async def workbench_session(request: Request) -> _WebPrincipalSession:
+        session = await session_allowed_to_work(request)
+        if session.role not in {ProductRole.ADMIN, ProductRole.OPERATOR}:
+            raise _WebForbiddenError
+        return session
+
+    async def admin_session(request: Request) -> _WebPrincipalSession:
+        session = await session_allowed_to_work(request)
+        if (
+            session.role is not ProductRole.ADMIN
+            or AdminCapability.VIEW_INTEGRATION_STATUS
+            not in session.admin_capabilities
+        ):
+            raise _WebForbiddenError
+        return session
+
+    async def safe_task_session(request: Request) -> _WebPrincipalSession:
+        session = await session_allowed_to_work(request)
+        if ChannelPermission.VIEW_SAFE_TASK not in session.principal.permissions:
+            raise _WebForbiddenError
+        return session
+
+    @app.get("/login")
+    async def login_shell_route(request: Request) -> Response:
+        return_intent, notice = _login_query(request)
         try:
             session = await session_of(request)
         except (WebAuthenticationError, LocalAdminAuthenticationError):
-            # 未登录必须拿到登录壳：否则本地管理员没有任何入口能取到表单。
-            return HTMLResponse(_login_shell(oauth_available=oauth_available))
+            return login_shell_response(notice=notice)
         if session.must_change_password:
-            return HTMLResponse(
-                _password_change_shell(csrf_token=session.csrf_token)
+            return HTMLResponse(_password_change_shell(csrf_token=session.csrf_token))
+        if return_intent.kind is WebReturnIntentKind.ACTIVATION_STATUS:
+            return login_shell_response(notice=notice)
+        if web_return_intent_allowed(
+            source=session.principal.source,
+            role=session.role,
+            intent=return_intent,
+        ):
+            return RedirectResponse(web_return_path(return_intent), status_code=302)
+        if notice == "destination_not_available":
+            return login_shell_response(notice=notice)
+        return _login_redirect(
+            return_intent, notice="destination_not_available"
+        )
+
+    @app.get("/app")
+    async def shell(request: Request) -> Response:
+        try:
+            await workbench_session(request)
+        except (WebAuthenticationError, LocalAdminAuthenticationError):
+            return _login_redirect(
+                WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
             )
         return HTMLResponse(index_shell)
 
+    @app.get("/admin")
+    async def admin_shell_route(request: Request) -> Response:
+        try:
+            await admin_session(request)
+        except (WebAuthenticationError, LocalAdminAuthenticationError):
+            return _login_redirect(
+                WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER)
+            )
+        return HTMLResponse(admin_shell)
+
     @app.get("/app/tasks/{task_id}")
     async def detail_shell_route(request: Request, task_id: str) -> Response:
-        await session_allowed_to_work(request)
-        _task_id_or_not_found(task_id)
+        try:
+            await safe_task_session(request)
+        except (WebAuthenticationError, LocalAdminAuthenticationError):
+            try:
+                task_id = _task_id_or_not_found(task_id)
+            except TaskAccessNotFoundError:
+                raise WebAuthenticationError from None
+            return _login_redirect(
+                WebReturnIntent(
+                    kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                    task_id=task_id,
+                )
+            )
+        task_id = _task_id_or_not_found(task_id)
         return HTMLResponse(detail_shell)
 
     @app.get("/app/api/me")
     async def current_user(request: Request) -> dict[str, object]:
         session = await session_allowed_to_work(request)
         return WebCurrentUser.from_principal(
-            session.principal, csrf_token=session.csrf_token
+            session.principal,
+            role=session.role,
+            admin_capabilities=session.admin_capabilities,
+            csrf_token=session.csrf_token,
         ).model_dump(mode="json")
 
     @app.get("/app/api/tasks")
     async def list_tasks(request: Request) -> dict[str, object]:
-        session = await session_allowed_to_work(request)
+        session = await workbench_session(request)
         before_created_seq, limit = _list_query(request)
         page = await task_access.list_tasks(
             query=TaskListQuery(
@@ -1311,7 +1551,7 @@ def create_app(
 
     @app.post("/app/api/tasks", status_code=202)
     async def submit_task(request: Request) -> dict[str, object]:
-        session = await session_allowed_to_work(request)
+        session = await workbench_session(request)
         _validate_state_change(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
@@ -1343,7 +1583,7 @@ def create_app(
 
     @app.get("/app/api/tasks/{task_id}")
     async def get_task(request: Request, task_id: str) -> dict[str, object]:
-        session = await session_allowed_to_work(request)
+        session = await safe_task_session(request)
         accessible = await task_access.get_task(
             query=TaskAccessQuery(
                 principal=session.principal,
@@ -1362,7 +1602,7 @@ def create_app(
             exclude.add("disclosure")
         return detail.model_dump(mode="json", exclude=exclude)
 
-    @app.post("/app/api/login")
+    @app.post("/login/api/login")
     async def login(request: Request) -> Response:
         """首次登录必须能在没有任何 cookie 的情况下完成。"""
         origin, _ = _state_change_headers(request)
@@ -1375,10 +1615,17 @@ def create_app(
         body = await _login_body(request)
         previous, unambiguous = _single_cookie(request, name=session_cookie)
         issued = await local_admin_auth.login(
+            username=body.username,
             password=body.password,
+            return_intent=body.return_intent,
             previous_session_cookie=previous if unambiguous else None,
         )
-        response = JSONResponse(content={"status": "ok"})
+        response = JSONResponse(
+            content={
+                "status": "ok",
+                "destination": web_return_path(issued.return_intent),
+            }
+        )
         _set_secret_cookie(
             response,
             name=session_cookie,
@@ -1388,7 +1635,7 @@ def create_app(
         )
         return response
 
-    @app.post("/app/api/change-password")
+    @app.post("/login/api/change-password")
     async def change_password(request: Request) -> Response:
         session = await session_of(request)
         _validate_state_change(
@@ -1399,8 +1646,14 @@ def create_app(
             session_cookie=session.cookie,
             current=body.current_password,
             new=body.new_password,
+            return_intent=body.return_intent,
         )
-        response = JSONResponse(content={"status": "ok"})
+        response = JSONResponse(
+            content={
+                "status": "ok",
+                "destination": web_return_path(issued.return_intent),
+            }
+        )
         _set_secret_cookie(
             response,
             name=session_cookie,
@@ -1444,6 +1697,17 @@ def create_app(
         if session.principal.source is not IdentitySource.LOCAL_ADMIN:
             raise _WebForbiddenError
         return session
+
+    @app.get("/admin/api/integration-status")
+    async def read_integration_status(request: Request) -> dict[str, object]:
+        await admin_session(request)
+        config = _integration_config_or_unavailable(integration_config_path)
+        snapshot = await provider_state.snapshot()
+        return _integration_status_view(
+            settings=settings,
+            config=config,
+            snapshot=snapshot,
+        ).model_dump(mode="json")
 
     @app.get("/app/api/config")
     async def read_config(request: Request) -> dict[str, object]:

@@ -17,20 +17,25 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from xiaowei_agent.contracts import (
+    AdminCapability,
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    ProductRole,
+    WebReturnIntent,
 )
 from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_ACTOR,
     LOCAL_ADMIN_ENVIRONMENT_ID,
     LOCAL_ADMIN_TENANT_ID,
 )
+from xiaowei_agent.governance.product_roles import admin_capabilities
 from xiaowei_agent.interfaces.web_auth import (
     IssuedWebSession,
     web_csrf_token,
     web_session_digest,
 )
+from xiaowei_agent.interfaces.web_navigation import web_return_intent_allowed
 from xiaowei_agent.persistence.local_admin import (
     LOCAL_ADMIN_SUBJECT_REF,
     ChangePasswordCommand,
@@ -52,6 +57,8 @@ INITIAL_LOCAL_ADMIN_PASSWORD: Final[str] = "adm" + "in"
 配套约束是 ``must_change_password=True``——在改密之前，除登录/改密/退出以外的
 所有接口一律拒绝，因此这个众所周知的口令不构成一个可用的长期凭据。
 """
+
+LOCAL_ADMIN_USERNAME: Final[str] = LOCAL_ADMIN_ACTOR
 
 _SCRYPT_N: Final[int] = 2**14
 _SCRYPT_R: Final[int] = 8
@@ -155,6 +162,8 @@ class LocalAdminSession:
     """一次通过认证的本地管理员会话。"""
 
     principal: AuthenticatedPrincipal
+    role: ProductRole
+    admin_capabilities: frozenset[AdminCapability]
     csrf_token: str = field(repr=False)
     must_change_password: bool = False
 
@@ -197,7 +206,12 @@ class LocalAdminAuthService:
         return value
 
     async def login(
-        self, *, password: str, previous_session_cookie: str | None
+        self,
+        *,
+        username: str,
+        password: str,
+        return_intent: WebReturnIntent,
+        previous_session_cookie: str | None,
     ) -> IssuedWebSession:
         """核对口令并签发新 session；失败路径不区分"没 seed"与"口令错"。"""
         record = None
@@ -206,8 +220,18 @@ class LocalAdminAuthService:
             record = await self._admins.get()
         except LocalAdminNotFoundError:
             lookup_failed = True
-        if lookup_failed or record is None or not verify_password(
-            password, record.password_hash
+        username_matches = username.isascii() and hmac.compare_digest(
+            username, LOCAL_ADMIN_USERNAME
+        )
+        password_matches = (
+            record is not None and verify_password(password, record.password_hash)
+        )
+        if lookup_failed or not username_matches or not password_matches:
+            raise LocalAdminAuthenticationError
+        if not web_return_intent_allowed(
+            source=IdentitySource.LOCAL_ADMIN,
+            role=ProductRole.ADMIN,
+            intent=return_intent,
         ):
             raise LocalAdminAuthenticationError
         cookie = self._new_cookie()
@@ -232,6 +256,12 @@ class LocalAdminAuthService:
         return IssuedWebSession(
             session_cookie=cookie,
             principal=LOCAL_ADMIN_PRINCIPAL,
+            role=ProductRole.ADMIN,
+            admin_capabilities=admin_capabilities(
+                role=ProductRole.ADMIN,
+                source=IdentitySource.LOCAL_ADMIN,
+            ),
+            return_intent=return_intent,
             max_age_seconds=self._session_ttl_seconds,
         )
 
@@ -258,12 +288,22 @@ class LocalAdminAuthService:
         record = await self._admins.get()
         return LocalAdminSession(
             principal=LOCAL_ADMIN_PRINCIPAL,
+            role=ProductRole.ADMIN,
+            admin_capabilities=admin_capabilities(
+                role=ProductRole.ADMIN,
+                source=IdentitySource.LOCAL_ADMIN,
+            ),
             csrf_token=web_csrf_token(session_cookie),
             must_change_password=record.must_change_password,
         )
 
     async def change_password(
-        self, *, session_cookie: str, current: str, new: str
+        self,
+        *,
+        session_cookie: str,
+        current: str,
+        new: str,
+        return_intent: WebReturnIntent,
     ) -> IssuedWebSession:
         """核对当前口令后，在**一个事务**里改密、撤销全部旧 session 并签发新的。"""
         await self.authenticate(session_cookie=session_cookie)
@@ -282,6 +322,12 @@ class LocalAdminAuthService:
         return IssuedWebSession(
             session_cookie=cookie,
             principal=LOCAL_ADMIN_PRINCIPAL,
+            role=ProductRole.ADMIN,
+            admin_capabilities=admin_capabilities(
+                role=ProductRole.ADMIN,
+                source=IdentitySource.LOCAL_ADMIN,
+            ),
+            return_intent=return_intent,
             max_age_seconds=self._session_ttl_seconds,
         )
 

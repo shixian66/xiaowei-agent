@@ -13,27 +13,39 @@ from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from pydantic import AfterValidator, Field
 
-from xiaowei_agent.application.identity_activation import IdentityActivationService
+from xiaowei_agent.application.identity_activation import (
+    ActivationResumeUnavailableError,
+    IdentityActivationService,
+)
 from xiaowei_agent.config import canonical_web_public_origin
 from xiaowei_agent.contracts import (
     CONTROLLED_PII_MAX_LENGTH,
+    ActivationStatus,
+    AdminCapability,
     AuthenticatedPrincipal,
     Contract,
     IdentitySource,
+    ProductRole,
     StrictStr,
     WebMode,
     WebReturnIntent,
     WebReturnIntentKind,
 )
+from xiaowei_agent.governance.product_roles import admin_capabilities
 from xiaowei_agent.interfaces.feishu_identity import (
-    FeishuIdentityDirectory,
     FeishuIdentityNotFoundError,
     FeishuIdentityUnavailableError,
+    WebIdentityDirectory,
+    WebIdentityResolution,
 )
+from xiaowei_agent.interfaces.web_navigation import web_return_intent_allowed
 from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.web_session import (
+    ConsumeOAuthLoginStateCommand,
     ConsumeOAuthStateCommand,
+    IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
+    OAuthLoginContextNotFoundError,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
@@ -71,8 +83,18 @@ class WebAuthenticationError(RuntimeError):
 class WebActivationPendingError(RuntimeError):
     """身份未知且激活待办已创建或复用；不得签发 Session。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, request_id: str, status: ActivationStatus) -> None:
+        self.request_id = request_id
+        self.status = status
         super().__init__("web activation pending")
+
+
+class WebDestinationNotAvailableError(RuntimeError):
+    """当前来源/角色不能进入请求目标；不得自动回落或签发 Session。"""
+
+    def __init__(self, *, return_intent: WebReturnIntent) -> None:
+        self.return_intent = return_intent
+        super().__init__("web destination not available")
 
 
 class WebOAuthStateError(RuntimeError):
@@ -80,6 +102,13 @@ class WebOAuthStateError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("oauth state invalid")
+
+
+class WebOAuthLoginContextError(RuntimeError):
+    """登录 state 存在但它的必需闭集 context 缺失。"""
+
+    def __init__(self) -> None:
+        super().__init__("oauth login context invalid")
 
 
 class WebOAuthCodeError(RuntimeError):
@@ -147,12 +176,17 @@ class OAuthStart:
 class IssuedWebSession:
     session_cookie: str = field(repr=False)
     principal: AuthenticatedPrincipal
+    role: ProductRole
+    admin_capabilities: frozenset[AdminCapability]
+    return_intent: WebReturnIntent
     max_age_seconds: int
 
 
 @dataclass(frozen=True)
 class AuthenticatedWebSession:
     principal: AuthenticatedPrincipal
+    role: ProductRole
+    admin_capabilities: frozenset[AdminCapability]
     csrf_token: str = field(repr=False)
 
 
@@ -315,7 +349,7 @@ class WebAuthService:
         self,
         *,
         sessions: WebSessionStore,
-        identities: FeishuIdentityDirectory,
+        identities: WebIdentityDirectory,
         activations: IdentityActivationService,
         oauth: FeishuOAuthPort,
         public_origin: str,
@@ -356,9 +390,29 @@ class WebAuthService:
             raise RuntimeError("secure random token generation failed")
         return value
 
-    async def start_login(self) -> OAuthStart:
-        """创建与浏览器临时 cookie 绑定的一次性登录 state。"""
-        return await self._start(domain=OAUTH_LOGIN_STATE_DOMAIN)
+    async def start_login(self, *, return_intent: WebReturnIntent) -> OAuthStart:
+        """原子创建登录 state 与闭集 intent。"""
+        state, authorization_url = self._new_oauth_start()
+        capacity_reached = False
+        try:
+            await self._sessions.issue_oauth_login_state(
+                command=IssueOAuthLoginStateCommand(
+                    state_digest=_digest(
+                        domain=OAUTH_LOGIN_STATE_DOMAIN, secret=state
+                    ),
+                    ttl_seconds=self._oauth_state_ttl_seconds,
+                    return_intent=return_intent,
+                )
+            )
+        except OAuthStateCapacityError:
+            capacity_reached = True
+        if capacity_reached:
+            raise WebOAuthUnavailableError
+        return OAuthStart(
+            authorization_url=authorization_url,
+            state_cookie=state,
+            max_age_seconds=self._oauth_state_ttl_seconds,
+        )
 
     async def start_connection_test(self) -> OAuthStart:
         """签发一次**只能**被测试分支消费的 state。
@@ -366,9 +420,27 @@ class WebAuthService:
         与登录共用授权 URL 与 redirect_uri——测的就是那条真实回调链路；换一个
         redirect_uri 等于测了一条生产环境里不存在的路径。
         """
-        return await self._start(domain=OAUTH_TEST_STATE_DOMAIN)
+        state, authorization_url = self._new_oauth_start()
+        capacity_reached = False
+        try:
+            await self._sessions.issue_oauth_state(
+                command=IssueOAuthStateCommand(
+                    state_digest=_digest(domain=OAUTH_TEST_STATE_DOMAIN, secret=state),
+                    ttl_seconds=self._oauth_state_ttl_seconds,
+                )
+            )
+        except OAuthStateCapacityError:
+            capacity_reached = True
+        if capacity_reached:
+            raise WebOAuthUnavailableError
+        return OAuthStart(
+            authorization_url=authorization_url,
+            state_cookie=state,
+            max_age_seconds=self._oauth_state_ttl_seconds,
+        )
 
-    async def _start(self, *, domain: str) -> OAuthStart:
+    def _new_oauth_start(self) -> tuple[str, str]:
+        """生成并校验 Provider 授权 URL；不触碰任何持久化。"""
         state = self._new_secret()
         authorization_url: str | None = None
         provider_failed = False
@@ -386,23 +458,35 @@ class WebAuthService:
             expected_state=state,
         ):
             raise WebOAuthCodeError
-        capacity_reached = False
+        return state, authorization_url
+
+    async def _consume_login_state(
+        self, *, state: str, state_cookie: str | None
+    ) -> WebReturnIntent:
+        """原子消费登录 state 并取 intent；缺 context 不回落连接测试。"""
+        self._validate_state_pair(state=state, state_cookie=state_cookie)
         try:
-            await self._sessions.issue_oauth_state(
-                command=IssueOAuthStateCommand(
-                    state_digest=_digest(domain=domain, secret=state),
-                    ttl_seconds=self._oauth_state_ttl_seconds,
+            consumed = await self._sessions.consume_oauth_login_state(
+                command=ConsumeOAuthLoginStateCommand(
+                    state_digest=_digest(
+                        domain=OAUTH_LOGIN_STATE_DOMAIN, secret=state
+                    )
                 )
             )
-        except OAuthStateCapacityError:
-            capacity_reached = True
-        if capacity_reached:
-            raise WebOAuthUnavailableError
-        return OAuthStart(
-            authorization_url=authorization_url,
-            state_cookie=state,
-            max_age_seconds=self._oauth_state_ttl_seconds,
-        )
+        except OAuthLoginContextNotFoundError:
+            raise WebOAuthLoginContextError from None
+        except OAuthStateNotFoundError:
+            raise WebOAuthStateError from None
+        return consumed.return_intent
+
+    @staticmethod
+    def _validate_state_pair(*, state: str, state_cookie: str | None) -> None:
+        if (
+            not _secret_is_valid(state)
+            or not _secret_is_valid(state_cookie)
+            or not _constant_time_ascii_equal(state, state_cookie)
+        ):
+            raise WebOAuthStateError
 
     async def _consume_state(
         self, *, state: str, state_cookie: str | None, domain: str
@@ -412,12 +496,7 @@ class WebAuthService:
         先比 cookie 再查库：``state`` 来自 URL（攻击者可控），``state_cookie``
         来自浏览器。少了前一步，一个被诱导的回调就能替受害者消费掉 state。
         """
-        if (
-            not _secret_is_valid(state)
-            or not _secret_is_valid(state_cookie)
-            or not _constant_time_ascii_equal(state, state_cookie)
-        ):
-            raise WebOAuthStateError
+        self._validate_state_pair(state=state, state_cookie=state_cookie)
         state_missing = False
         try:
             await self._sessions.consume_oauth_state(
@@ -495,31 +574,78 @@ class WebAuthService:
         state_cookie: str | None,
         previous_session_cookie: str | None,
     ) -> IssuedWebSession:
-        """消费同浏览器 state，重映射身份并原子轮换 session。"""
-        await self._consume_state(
-            state=state, state_cookie=state_cookie, domain=OAUTH_LOGIN_STATE_DOMAIN
+        """消费登录 context，重映射角色，获准后才原子轮换 session。"""
+        return_intent = await self._consume_login_state(
+            state=state, state_cookie=state_cookie
         )
         identity = await self._exchange(code=code)
-        identity_missing = False
+
+        if return_intent.kind is WebReturnIntentKind.ACTIVATION_STATUS:
+            if return_intent.request_id is None:
+                raise WebOAuthLoginContextError
+            try:
+                activation = await self._activations.resume_web(
+                    request_id=return_intent.request_id,
+                    subject_ref=identity.subject_ref,
+                )
+            except ActivationResumeUnavailableError:
+                raise WebDestinationNotAvailableError(
+                    return_intent=return_intent
+                ) from None
+            if activation.status is ActivationStatus.PENDING:
+                raise WebActivationPendingError(
+                    request_id=activation.request_id,
+                    status=activation.status,
+                )
+            if activation.status in {
+                ActivationStatus.REJECTED,
+                ActivationStatus.EXPIRED,
+            }:
+                if activation.return_intent is None:
+                    raise WebOAuthLoginContextError
+                try:
+                    replacement = await self._activations.request_web(
+                        subject_ref=identity.subject_ref,
+                        return_intent=activation.return_intent,
+                    )
+                except ActivationCapacityError:
+                    raise WebOAuthUnavailableError from None
+                raise WebActivationPendingError(
+                    request_id=replacement.request_id,
+                    status=replacement.status,
+                )
+            if activation.return_intent is None:
+                raise WebOAuthLoginContextError
+            return_intent = activation.return_intent
+
+        resolution: WebIdentityResolution | None = None
         try:
-            principal = await self._identities.resolve(
+            resolution = await self._identities.resolve_for_web(
                 subject_ref=identity.subject_ref
             )
         except FeishuIdentityUnavailableError:
             raise WebAuthenticationError from None
         except FeishuIdentityNotFoundError:
-            identity_missing = True
-        if identity_missing:
+            resolution = None
+        if resolution is None:
             try:
-                await self._activations.request_web(
+                activation = await self._activations.request_web(
                     subject_ref=identity.subject_ref,
-                    return_intent=WebReturnIntent(
-                        kind=WebReturnIntentKind.WORKBENCH
-                    ),
+                    return_intent=return_intent,
                 )
             except ActivationCapacityError:
                 raise WebOAuthUnavailableError from None
-            raise WebActivationPendingError
+            raise WebActivationPendingError(
+                request_id=activation.request_id,
+                status=activation.status,
+            )
+
+        if not web_return_intent_allowed(
+            source=IdentitySource.FEISHU,
+            role=resolution.role,
+            intent=return_intent,
+        ):
+            raise WebDestinationNotAvailableError(return_intent=return_intent)
 
         cookie = self._new_secret()
         previous_digest = (
@@ -539,7 +665,13 @@ class WebAuthService:
         )
         return IssuedWebSession(
             session_cookie=cookie,
-            principal=principal,
+            principal=resolution.principal,
+            role=resolution.role,
+            admin_capabilities=admin_capabilities(
+                role=resolution.role,
+                source=IdentitySource.FEISHU,
+            ),
+            return_intent=return_intent,
             max_age_seconds=self._session_ttl_seconds,
         )
 
@@ -562,7 +694,9 @@ class WebAuthService:
                 # cookie 就会被当成飞书身份放行。隔离必须双向——
                 # ``LocalAdminAuthService.authenticate`` 那侧是这句的镜像。
                 raise WebAuthenticationError
-            principal = await self._identities.resolve(subject_ref=session.subject_ref)
+            resolution = await self._identities.resolve_for_web(
+                subject_ref=session.subject_ref
+            )
         except (
             WebSessionNotFoundError,
             FeishuIdentityNotFoundError,
@@ -572,7 +706,12 @@ class WebAuthService:
         if authentication_failed:
             raise WebAuthenticationError
         return AuthenticatedWebSession(
-            principal=principal,
+            principal=resolution.principal,
+            role=resolution.role,
+            admin_capabilities=admin_capabilities(
+                role=resolution.role,
+                source=IdentitySource.FEISHU,
+            ),
             csrf_token=web_csrf_token(session_cookie),
         )
 
@@ -616,7 +755,9 @@ __all__ = [
     "WebAuthService",
     "WebAuthenticationError",
     "WebCsrfError",
+    "WebDestinationNotAvailableError",
     "WebOAuthCodeError",
+    "WebOAuthLoginContextError",
     "WebOAuthStateError",
     "WebOAuthUnavailableError",
     "WebOriginError",

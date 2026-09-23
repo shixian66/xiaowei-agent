@@ -5,6 +5,7 @@ from xiaowei_agent.governance.product_roles import channel_permissions
 from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityNotFoundError,
     FeishuIdentityUnavailableError,
+    WebIdentityResolution,
 )
 from xiaowei_agent.persistence.identity import (
     UserDirectoryStore,
@@ -28,6 +29,10 @@ class DirectoryFeishuIdentityDirectory:
 
     async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """区分真正未登记与已绑定但不可用；两类错误均不回显主体。"""
+        return (await self.resolve_for_web(subject_ref=subject_ref)).principal
+
+    async def resolve_for_web(self, *, subject_ref: str) -> WebIdentityResolution:
+        """在同一次目录读取中返回 Web 需要的主体与当前角色。"""
         try:
             facts = await self._directory.resolve_by_subject(
                 provider=IdentitySource.FEISHU,
@@ -41,13 +46,16 @@ class DirectoryFeishuIdentityDirectory:
             ) from None
         if facts is None:
             raise FeishuIdentityNotFoundError("feishu identity not found")
-        return AuthenticatedPrincipal(
-            tenant_id=self._tenant_id,
-            environment_id=self._environment_id,
-            actor=facts.account.actor,
-            source=IdentitySource.FEISHU,
-            subject_ref=subject_ref,
-            permissions=channel_permissions(role=facts.assignment.role),
+        return WebIdentityResolution(
+            principal=AuthenticatedPrincipal(
+                tenant_id=self._tenant_id,
+                environment_id=self._environment_id,
+                actor=facts.account.actor,
+                source=IdentitySource.FEISHU,
+                subject_ref=subject_ref,
+                permissions=channel_permissions(role=facts.assignment.role),
+            ),
+            role=facts.assignment.role,
         )
 
 

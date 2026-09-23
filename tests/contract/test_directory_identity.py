@@ -22,6 +22,7 @@ from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityNotFoundError,
     FeishuIdentityUnavailableError,
     StaticFeishuIdentityDirectory,
+    WebIdentityDirectory,
 )
 from xiaowei_agent.persistence.identity import UserDirectorySubjectUnavailableError
 
@@ -73,6 +74,10 @@ def test_feishu_identity_protocol_and_implementations_are_async() -> None:
     assert inspect.iscoroutinefunction(FeishuIdentityDirectory.resolve)
     assert inspect.iscoroutinefunction(StaticFeishuIdentityDirectory.resolve)
     assert inspect.iscoroutinefunction(DirectoryFeishuIdentityDirectory.resolve)
+    assert inspect.iscoroutinefunction(WebIdentityDirectory.resolve_for_web)
+    assert inspect.iscoroutinefunction(
+        DirectoryFeishuIdentityDirectory.resolve_for_web
+    )
 
 
 @pytest.mark.asyncio
@@ -96,6 +101,10 @@ async def test_directory_adapter_uses_the_shared_role_permission_mapping(
     assert principal.source is IdentitySource.FEISHU
     assert principal.subject_ref == "ou_alice"
     assert principal.permissions == channel_permissions(role=role)
+
+    web_identity = await adapter.resolve_for_web(subject_ref="ou_alice")
+    assert web_identity.principal == principal
+    assert web_identity.role is role
 
 
 @pytest.mark.asyncio

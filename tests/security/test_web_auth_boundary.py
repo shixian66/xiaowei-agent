@@ -21,8 +21,11 @@ from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelPermission,
     IdentitySource,
+    ProductRole,
     ReadinessReport,
     WebMode,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.interfaces import web_app as web_app_module
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
@@ -42,6 +45,7 @@ from xiaowei_agent.trace import get_trace_id
 pytestmark = pytest.mark.security
 
 _C1_CONTROLS = ("\u0080", "\u0085", "\u009f")
+_WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
 class _Probe:
@@ -204,7 +208,8 @@ def _service(
             oauth_state_capacity=oauth_state_capacity,
         ),
         identities=StaticFeishuIdentityDirectory(
-            principals={principal.subject_ref: principal}
+            principals={principal.subject_ref: principal},
+            web_roles={principal.subject_ref: ProductRole.ADMIN},
         ),
         activations=(activations or RecordingActivationRequests()).as_service(),
         oauth=oauth,
@@ -222,7 +227,7 @@ async def test_provider_exception_is_mapped_without_retaining_sensitive_context(
     provider_detail = "token=" + "provider-sensitive-value"
     oauth = _OAuth(exchange_error=RuntimeError(provider_detail))
     service = _service(clock, memory_state, oauth=oauth)
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     try:
         await service.complete_login(
@@ -256,7 +261,7 @@ async def test_authorization_builder_exception_drops_sensitive_context(
     service = _service(clock, memory_state, oauth=_FailingOAuth())
 
     try:
-        await service.start_login()
+        await service.start_login(return_intent=_WORKBENCH_INTENT)
     except WebOAuthUnavailableError as exc:
         rendered = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
@@ -338,7 +343,8 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
     service = WebAuthService(
         sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
         identities=StaticFeishuIdentityDirectory(
-            principals={principal.subject_ref: principal}
+            principals={principal.subject_ref: principal},
+            web_roles={principal.subject_ref: ProductRole.ADMIN},
         ),
         activations=RecordingActivationRequests().as_service(),
         oauth=oauth,
@@ -349,7 +355,7 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
         oauth_timeout_seconds=0.01,
         token_factory=lambda: next(tokens),
     )
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebOAuthUnavailableError):
         await service.complete_login(
@@ -382,7 +388,7 @@ async def test_unknown_identity_is_mapped_without_retaining_subject_context(
         oauth=_OAuth(subject_ref=subject_ref),
         activations=activations,
     )
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     try:
         await service.complete_login(
@@ -432,7 +438,7 @@ async def test_authorization_redirect_must_bind_the_exact_generated_state_once(
     )
 
     with pytest.raises(WebOAuthCodeError):
-        await service.start_login()
+        await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     assert memory_state.oauth_states == {}
 
@@ -448,7 +454,7 @@ async def test_oauth_code_rejects_c1_control_before_provider_call(
             raise AssertionError((code, redirect_uri))
 
     service = _service(clock, memory_state, oauth=_UnexpectedOAuth())
-    start = await service.start_login()
+    start = await service.start_login(return_intent=_WORKBENCH_INTENT)
 
     with pytest.raises(WebOAuthCodeError):
         await service.complete_login(
@@ -486,7 +492,8 @@ def test_public_origin_is_an_origin_not_a_url_path(
         WebAuthService(
             sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
             identities=StaticFeishuIdentityDirectory(
-                principals={principal.subject_ref: principal}
+                principals={principal.subject_ref: principal},
+                web_roles={principal.subject_ref: ProductRole.ADMIN},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),
@@ -1014,7 +1021,10 @@ async def test_rejected_web_request_log_uses_only_closed_fields(
             path_response = await client.get(f"/app/tasks/{task_id}")
 
     assert response.status_code == 403
-    assert path_response.status_code == 401
+    assert path_response.status_code == 302
+    assert path_response.headers["location"] == (
+        "/login?intent=safe_task_detail&task_id=task-sensitive-path-parameter"
+    )
     records = [
         record
         for record in caplog.records
@@ -1024,7 +1034,7 @@ async def test_rejected_web_request_log_uses_only_closed_fields(
         "oauth_callback",
         "task_shell",
     ]
-    assert [record.outcome for record in records] == ["rejected", "rejected"]
+    assert [record.outcome for record in records] == ["rejected", "ok"]
     rendered = caplog.text + repr([record.__dict__ for record in records])
     for sensitive in (code, state, cookie, bad_host, bad_origin, task_id):
         assert sensitive not in rendered
@@ -1222,6 +1232,7 @@ assert "lark_oapi" not in sys.modules
         # RI5：本地管理员登录是 Web 的必备入口，装配时必然加载。
         "xiaowei_agent.interfaces.local_admin_auth",
         "xiaowei_agent.interfaces.web_auth",
+        "xiaowei_agent.interfaces.web_navigation",
     }
     assert loaded == (
         set(_TASK_VIEW_PROCESS_ALLOWED_MODULES) - internal_api_only

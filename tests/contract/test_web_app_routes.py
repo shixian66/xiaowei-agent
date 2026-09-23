@@ -19,11 +19,12 @@ from xiaowei_agent.application.identity_activation import IdentityActivationServ
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
-    ChannelPermission,
     IdentitySource,
+    ProductRole,
     ReadinessReport,
     WebMode,
 )
+from xiaowei_agent.governance.product_roles import channel_permissions
 from xiaowei_agent.interfaces import feishu_oauth as feishu_oauth_module
 from xiaowei_agent.interfaces import feishu_sdk as feishu_sdk_module
 from xiaowei_agent.interfaces import local_stack as local_stack_module
@@ -31,7 +32,10 @@ from xiaowei_agent.interfaces import provider_consumption as provider_consumptio
 from xiaowei_agent.interfaces import web_app as web_app_module
 from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.api import create_app as create_internal_app
-from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
+from xiaowei_agent.interfaces.feishu_identity import (
+    StaticFeishuIdentityDirectory,
+    WebIdentityResolution,
+)
 from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
 from xiaowei_agent.interfaces.web_app import (
     create_app,
@@ -99,10 +103,12 @@ class _TracingIdentityDirectory:
         self,
         *,
         principal: AuthenticatedPrincipal,
+        role: ProductRole,
         trace_ids: list[str | None],
     ) -> None:
         self._delegate = StaticFeishuIdentityDirectory(
-            principals={principal.subject_ref: principal}
+            principals={principal.subject_ref: principal},
+            web_roles={principal.subject_ref: role},
         )
         self._trace_ids = trace_ids
 
@@ -110,20 +116,21 @@ class _TracingIdentityDirectory:
         self._trace_ids.append(get_trace_id())
         return await self._delegate.resolve(subject_ref=subject_ref)
 
+    async def resolve_for_web(
+        self, *, subject_ref: str
+    ) -> WebIdentityResolution:
+        self._trace_ids.append(get_trace_id())
+        return await self._delegate.resolve_for_web(subject_ref=subject_ref)
 
-def _principal() -> AuthenticatedPrincipal:
+
+def _principal(*, role: ProductRole = ProductRole.OPERATOR) -> AuthenticatedPrincipal:
     return AuthenticatedPrincipal(
         tenant_id="dev-local",
         environment_id="dev",
         actor="alice",
         source=IdentitySource.FEISHU,
         subject_ref="subject-alice",
-        permissions=frozenset(
-            {
-                ChannelPermission.VIEW_SAFE_TASK,
-                ChannelPermission.SUBMIT_READONLY_TASK,
-            }
-        ),
+        permissions=channel_permissions(role=role),
     )
 
 
@@ -151,15 +158,17 @@ def _web_app(
     memory_state,
     *,
     subject_ref: str = "subject-alice",
+    role: ProductRole = ProductRole.OPERATOR,
     public_origin: str = "https://ops.example.test",
 ) -> Any:
     oauth = _OAuth(subject_ref=subject_ref, public_origin=public_origin)
     token_values = _tokens()
-    principal = _principal()
+    principal = _principal(role=role)
     auth = WebAuthService(
         sessions=InMemoryWebSessionStore(clock=clock, state=memory_state),
         identities=_TracingIdentityDirectory(
             principal=principal,
+            role=role,
             trace_ids=oauth.identity_trace_ids,
         ),
         activations=IdentityActivationService(
@@ -266,11 +275,28 @@ async def _login(client: httpx.AsyncClient, oauth: _OAuth) -> httpx.Response:
     )
 
 
+async def _login_for(
+    client: httpx.AsyncClient,
+    oauth: _OAuth,
+    *,
+    intent: str,
+    task_id: str | None = None,
+) -> httpx.Response:
+    params: list[tuple[str, str]] = [("intent", intent)]
+    if task_id is not None:
+        params.append(("task_id", task_id))
+    started = await client.get("/oauth/feishu/start", params=params)
+    assert started.status_code == 302
+    return await client.get(
+        "/oauth/feishu/callback",
+        params={"code": "valid-code", "state": oauth.states[-1]},
+    )
+
+
 async def test_real_protected_routes_return_401_unauthorized(clock, memory_state) -> None:
     app, _ = _web_app(clock, memory_state)
     async with _client(app) as client:
         for path in (
-            "/app/tasks/task-1",
             "/app/api/me",
             "/app/api/tasks",
             "/app/api/tasks/task-1",
@@ -280,22 +306,28 @@ async def test_real_protected_routes_return_401_unauthorized(clock, memory_state
             assert response.json() == {"error": {"code": "unauthorized"}}
 
 
-async def test_the_app_shell_is_a_login_page_instead_of_a_401(
+async def test_anonymous_shells_redirect_to_the_independent_login_page(
     clock, memory_state
 ) -> None:
-    """``GET /app`` 是唯一一条未登录也返回 200 的非健康检查路由。
-
-    它原本和其它受保护路由一样 401。RI5 之后本地管理员必须能在浏览器里拿到
-    口令表单，401 或跳转 OAuth 都等于"没有任何入口可以登录"。壳里不得包含
-    任何需要会话的内容，否则未登录页面自己就会触发一串 401。
-    """
     app, _ = _web_app(clock, memory_state)
     async with _client(app) as client:
-        response = await client.get("/app")
+        workbench = await client.get("/app")
+        detail = await client.get("/app/tasks/task-1")
+        admin = await client.get("/admin")
+        response = await client.get("/login?intent=workbench")
 
+    assert workbench.status_code == 302
+    assert workbench.headers["location"] == "/login?intent=workbench"
+    assert detail.status_code == 302
+    assert detail.headers["location"] == (
+        "/login?intent=safe_task_detail&task_id=task-1"
+    )
+    assert admin.status_code == 302
+    assert admin.headers["location"] == "/login?intent=admin_center"
     assert response.status_code == 200
     assert "login-form" in response.text
-    assert 'type="password"' in response.text
+    assert 'id="username"' in response.text
+    assert "把复杂运维，收进一条可信工作流" in response.text
     assert "/app/api/tasks" not in response.text
 
 
@@ -368,8 +400,11 @@ async def test_unknown_identity_callback_returns_activation_pending_without_sess
             params={"code": "valid-code", "state": oauth.states[-1]},
         )
 
-        assert callback.status_code == 403
-        assert callback.json() == {"error": {"code": "activation_pending"}}
+        assert callback.status_code == 302
+        assert callback.headers["location"].startswith(
+            "/login?intent=activation_status&request_id="
+        )
+        assert callback.headers["location"].endswith("&notice=pending")
         cookies = callback.headers.get_list("set-cookie")
         assert any(
             header.startswith(f"{_OAUTH_STATE_COOKIE_NAME}=") and "Max-Age=0" in header
@@ -380,6 +415,110 @@ async def test_unknown_identity_callback_returns_activation_pending_without_sess
         )
         assert len(memory_state.activation_requests) == 1
         assert memory_state.web_sessions == {}
+
+
+async def test_oauth_start_rejects_open_redirect_and_ambiguous_intents(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state)
+    async with _client(app) as client:
+        for params in (
+            [("next", "https://evil.example.test")],
+            [("intent", "workbench"), ("intent", "admin_center")],
+            [("intent", "safe_task_detail")],
+            [("intent", "workbench"), ("task_id", "task-1")],
+        ):
+            response = await client.get("/oauth/feishu/start", params=params)
+            assert response.status_code == 400
+            assert response.json() == {"error": {"code": "invalid_request"}}
+    assert oauth.states == []
+
+
+async def test_operator_cannot_receive_an_admin_session(clock, memory_state) -> None:
+    app, oauth = _web_app(clock, memory_state, role=ProductRole.OPERATOR)
+    async with _client(app) as client:
+        callback = await _login_for(client, oauth, intent="admin_center")
+        assert callback.status_code == 302
+        assert callback.headers["location"] == (
+            "/login?intent=admin_center&notice=destination_not_available"
+        )
+        assert not any(
+            header.startswith(f"{_SESSION_COOKIE_NAME}=")
+            for header in callback.headers.get_list("set-cookie")
+        )
+        denied = await client.get(callback.headers["location"])
+        assert denied.status_code == 403
+        assert not any(
+            header.startswith(f"{_SESSION_COOKIE_NAME}=")
+            for header in denied.headers.get_list("set-cookie")
+        )
+        assert (await client.get("/admin")).status_code == 302
+
+
+async def test_user_can_only_receive_a_safe_task_detail_session(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state, role=ProductRole.USER)
+    async with _client(app) as client:
+        denied = await _login_for(client, oauth, intent="workbench")
+        assert denied.status_code == 302
+        assert "destination_not_available" in denied.headers["location"]
+        allowed = await _login_for(
+            client,
+            oauth,
+            intent="safe_task_detail",
+            task_id="task-1",
+        )
+        assert allowed.status_code == 302
+        assert allowed.headers["location"] == "/app/tasks/task-1"
+        assert (await client.get("/app/tasks/task-1")).status_code == 200
+        assert (await client.get("/app/api/tasks")).status_code == 403
+        assert (await client.post("/app/api/tasks", json={})).status_code == 403
+
+
+async def test_feishu_admin_reads_only_the_redacted_integration_projection(
+    clock, memory_state
+) -> None:
+    app, oauth = _web_app(clock, memory_state, role=ProductRole.ADMIN)
+    async with _client(app) as client:
+        callback = await _login_for(client, oauth, intent="admin_center")
+        assert callback.status_code == 302
+        assert callback.headers["location"] == "/admin"
+        shell = await client.get("/admin")
+        assert shell.status_code == 200
+        assert "/app/static/admin.js" in shell.text
+
+        status = await client.get("/admin/api/integration-status")
+        assert status.status_code == 200
+        payload = status.json()
+        assert set(payload) == {"domains"}
+        assert [item["domain"] for item in payload["domains"]] == [
+            "ai",
+            "feishu",
+            "resources",
+        ]
+        assert all(
+            set(item)
+            == {
+                "domain",
+                "configured",
+                "restart_required",
+                "load_status",
+                "last_test_status",
+                "last_tested_at",
+            }
+            for item in payload["domains"]
+        )
+        serialized = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "generation",
+            "app_id",
+            "secret",
+            "endpoint",
+            "error_code",
+        ):
+            assert forbidden not in serialized.lower()
+        assert (await client.get("/app/api/config")).status_code == 403
 
 
 async def test_duplicate_callback_parameters_are_rejected_before_exchange(
@@ -541,15 +680,18 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
     } == {
         ("GET", "/oauth/feishu/start"),
         ("GET", "/oauth/feishu/callback"),
+        ("GET", "/login"),
         ("GET", "/app"),
+        ("GET", "/admin"),
         ("GET", "/app/tasks/{task_id}"),
         ("GET", "/app/api/me"),
         ("GET", "/app/api/tasks"),
         ("POST", "/app/api/tasks"),
         ("GET", "/app/api/tasks/{task_id}"),
         ("POST", "/app/api/logout"),
-        ("POST", "/app/api/login"),
-        ("POST", "/app/api/change-password"),
+        ("POST", "/login/api/login"),
+        ("POST", "/login/api/change-password"),
+        ("GET", "/admin/api/integration-status"),
         ("GET", "/app/api/config"),
         ("PUT", "/app/api/config"),
         ("POST", "/app/api/config/clear"),
@@ -559,6 +701,7 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("POST", "/app/api/config/test/{check_name}"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
+        ("GET", "/app/static/admin.js"),
         ("GET", "/app/static/detail.js"),
         ("GET", "/app/static/login.js"),
         ("GET", "/healthz"),

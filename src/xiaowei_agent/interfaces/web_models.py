@@ -1,9 +1,8 @@
 """Web 工作台的严格请求与安全响应模型。"""
 
-from typing import Annotated, Self, TypeAlias
-from urllib.parse import quote
+from typing import Annotated, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from xiaowei_agent.application.channel_access import (
     TASK_DETAIL_PREVIEW_LIMIT,
@@ -15,12 +14,14 @@ from xiaowei_agent.application.channel_access import (
 from xiaowei_agent.application.channel_submission import SubmittedTask
 from xiaowei_agent.application.integration_state import ProviderDisplayState
 from xiaowei_agent.contracts import (
+    AdminCapability,
     AuthenticatedPrincipal,
     AwareDatetime,
     ChannelPermission,
     ClarificationPayload,
     ExecutionDisclosure,
     NonEmptyText,
+    ProductRole,
     ProviderName,
     RenderPayload,
     SecretRef,
@@ -28,7 +29,9 @@ from xiaowei_agent.contracts import (
     StrictStr,
     TaskId,
     TaskStatus,
+    WebReturnIntent,
 )
+from xiaowei_agent.interfaces.web_navigation import web_task_detail_path
 
 SecretPassword: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
 """**提交上来的**明文口令；只做长度边界，不判强度。
@@ -58,11 +61,6 @@ class _WebModel(BaseModel):
     )
 
 
-def web_task_detail_path(task_id: str) -> str:
-    """生成同源详情路径；任务 ID 不能改变路由层级。"""
-    return f"/app/tasks/{quote(task_id, safe='')}"
-
-
 class WebTaskSubmitRequest(_WebModel):
     """浏览器可提交正文、幂等引用和可选显式父任务。"""
 
@@ -75,21 +73,35 @@ class WebTaskSubmitRequest(_WebModel):
     clarification_parent_task_id: TaskId | None = None
 
 
-class WebLoginRequest(_WebModel):
+class _WebReturnIntentRequest(_WebModel):
+    """只在 JSON 请求边界把闭集 intent 字符串还原成契约枚举。"""
+
+    @field_validator("return_intent", mode="before", check_fields=False)
+    @classmethod
+    def _parse_return_intent(cls, value: object) -> WebReturnIntent:
+        if isinstance(value, WebReturnIntent):
+            return value
+        return WebReturnIntent.model_validate(value, strict=False)
+
+
+class WebLoginRequest(_WebReturnIntentRequest):
     """本地管理员登录请求。
 
     ``password`` 标为 ``Secret*`` 并同时关掉 ``repr`` 与 ``model_dump``：请求体
     模型最容易在校验失败时被打进日志，明文口令不能走那条路。
     """
 
+    username: StrictStr = Field(min_length=1, max_length=64)
     password: SecretPassword = Field(exclude=True, repr=False)
+    return_intent: WebReturnIntent
 
 
-class WebChangePasswordRequest(_WebModel):
+class WebChangePasswordRequest(_WebReturnIntentRequest):
     """改密请求；两个字段都是明文口令。"""
 
     current_password: SecretPassword = Field(exclude=True, repr=False)
     new_password: SecretNewPassword = Field(exclude=True, repr=False)
+    return_intent: WebReturnIntent
 
 
 ConfigText: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
@@ -210,12 +222,19 @@ class WebOAuthTestStarted(_WebModel):
 class WebCurrentUser(_WebModel):
     actor: StrictStr
     environment_id: StrictStr
+    role: ProductRole
     permissions: tuple[ChannelPermission, ...]
+    admin_capabilities: tuple[AdminCapability, ...]
     csrf_token: StrictStr = Field(min_length=64, max_length=64, repr=False)
 
     @classmethod
     def from_principal(
-        cls, principal: AuthenticatedPrincipal, *, csrf_token: str
+        cls,
+        principal: AuthenticatedPrincipal,
+        *,
+        role: ProductRole,
+        admin_capabilities: frozenset[AdminCapability],
+        csrf_token: str,
     ) -> "WebCurrentUser":
         """按主体构造。
 
@@ -225,9 +244,41 @@ class WebCurrentUser(_WebModel):
         return cls(
             actor=principal.actor,
             environment_id=principal.environment_id,
+            role=role,
             permissions=tuple(sorted(principal.permissions, key=lambda item: item.value)),
+            admin_capabilities=tuple(
+                sorted(admin_capabilities, key=lambda item: item.value)
+            ),
             csrf_token=csrf_token,
         )
+
+
+WebIntegrationDomain = Literal["ai", "feishu", "resources"]
+WebIntegrationLoadStatus = Literal[
+    "unconfigured", "pending_restart", "loaded", "invalid", "not_applicable"
+]
+WebIntegrationTestStatus = Literal["passed", "failed"]
+
+
+class WebIntegrationDomainStatus(_WebModel):
+    """Admin 脱敏集成状态；没有配置值、代次、标识或错误正文。"""
+
+    domain: WebIntegrationDomain
+    configured: bool
+    restart_required: bool
+    load_status: WebIntegrationLoadStatus
+    last_test_status: WebIntegrationTestStatus | None = None
+    last_tested_at: AwareDatetime | None = None
+
+
+class WebIntegrationStatusView(_WebModel):
+    """飞书 Admin 也可读取的三域脱敏概览。"""
+
+    domains: tuple[
+        WebIntegrationDomainStatus,
+        WebIntegrationDomainStatus,
+        WebIntegrationDomainStatus,
+    ]
 
 
 class WebTaskSummary(_WebModel):
@@ -329,6 +380,10 @@ __all__ = [
     "SecretPassword",
     "WebChangePasswordRequest",
     "WebCurrentUser",
+    "WebIntegrationDomain",
+    "WebIntegrationDomainStatus",
+    "WebIntegrationLoadStatus",
+    "WebIntegrationStatusView",
     "WebLoginRequest",
     "WebOAuthTestStarted",
     "WebTaskAccepted",
