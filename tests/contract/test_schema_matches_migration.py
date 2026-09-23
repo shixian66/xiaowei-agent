@@ -27,6 +27,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
 from xiaowei_agent.persistence.schema import (
+    ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     ALL_TABLES,
     CREATED_SEQUENCE_NAME,
@@ -76,6 +77,8 @@ _ALTERED_AFTER_CREATION = (
     LOCAL_ADMINS,
     # rev_0015 adds activation actions to four audit CHECK constraints.
     ADMIN_AUDIT_EVENTS,
+    # rev_0016 adds return-intent columns and replaces source CHECK constraints.
+    ACTIVATION_REQUESTS,
 )
 _RENAMED_TABLES = {
     "task_accepted_intents": "task_interaction_artifacts",
@@ -252,10 +255,10 @@ def test_rev_0014_has_the_expected_revision_chain() -> None:
 
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0015_activation_requests as revision,
+        rev_0016_web_login_contexts as revision,
     )
 
-    assert revision.down_revision == "0014_identity_admin_audit"
+    assert revision.down_revision == "0015_activation_requests"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )

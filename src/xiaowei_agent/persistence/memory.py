@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         UserAccount,
         UserRoleAssignment,
     )
+    from xiaowei_agent.contracts.web_navigation import WebReturnIntent
     from xiaowei_agent.persistence.admin_audit import AuditStage
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
@@ -50,6 +51,7 @@ class InMemoryPersistenceState:
             tuple[str, str, str], str
         ] = {}
         self.oauth_states: dict[str, OAuthState] = {}
+        self.oauth_login_contexts: dict[str, WebReturnIntent] = {}
         self.web_sessions: dict[str, WebSession] = {}
         self.local_admin: Any | None = None
         self.user_accounts: dict[str, UserAccount] = {}

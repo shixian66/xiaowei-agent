@@ -201,8 +201,12 @@ from xiaowei_agent.persistence.store import (
 )
 from xiaowei_agent.persistence.web_session import (
     DEFAULT_OAUTH_STATE_CAPACITY,
+    ConsumeOAuthLoginStateCommand,
     ConsumeOAuthStateCommand,
+    IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
+    OAuthLoginContextNotFoundError,
+    OAuthLoginState,
     OAuthState,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
@@ -626,6 +630,7 @@ class InMemoryActivationStore:
                 subject_ref=command.subject_ref,
                 subject_ref_digest=subject_digest,
                 source=command.source,
+                return_intent=command.return_intent,
                 source_event_digest=event_digest,
                 source_chat_digest=chat_digest,
                 requested_at=now,
@@ -1507,24 +1512,23 @@ class InMemoryWebSessionStore:
     ) -> OAuthState:
         async with self._lock:
             now = self._clock()
-            stale_digests = tuple(
-                digest
-                for digest, state in self._state.oauth_states.items()
-                if state.consumed_at is not None or now >= state.expires_at
+            self._cleanup_oauth_states(now=now)
+            return self._issue_oauth_state(command=command, now=now)
+
+    async def issue_oauth_login_state(
+        self, *, command: IssueOAuthLoginStateCommand
+    ) -> OAuthLoginState:
+        async with self._lock:
+            now = self._clock()
+            self._cleanup_oauth_states(now=now)
+            state = self._issue_oauth_state(command=command, now=now)
+            self._state.oauth_login_contexts[state.state_digest] = (
+                command.return_intent
             )
-            for digest in stale_digests:
-                del self._state.oauth_states[digest]
-            if command.state_digest in self._state.oauth_states:
-                raise WebSessionConflictError
-            if len(self._state.oauth_states) >= self._oauth_state_capacity:
-                raise OAuthStateCapacityError
-            state = OAuthState(
-                state_digest=command.state_digest,
-                issued_at=now,
-                expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+            return OAuthLoginState(
+                **state.model_dump(),
+                return_intent=command.return_intent,
             )
-            self._state.oauth_states[state.state_digest] = state
-            return state
 
     async def consume_oauth_state(
         self, *, command: ConsumeOAuthStateCommand
@@ -1541,6 +1545,58 @@ class InMemoryWebSessionStore:
             consumed = state.model_copy(update={"consumed_at": now})
             self._state.oauth_states[state.state_digest] = consumed
             return consumed
+
+    async def consume_oauth_login_state(
+        self, *, command: ConsumeOAuthLoginStateCommand
+    ) -> OAuthLoginState:
+        async with self._lock:
+            state = self._state.oauth_states.get(command.state_digest)
+            now = self._clock()
+            if (
+                state is None
+                or state.consumed_at is not None
+                or now >= state.expires_at
+            ):
+                raise OAuthStateNotFoundError
+            return_intent = self._state.oauth_login_contexts.get(
+                command.state_digest
+            )
+            if return_intent is None:
+                raise OAuthLoginContextNotFoundError
+            consumed = state.model_copy(update={"consumed_at": now})
+            self._state.oauth_states[state.state_digest] = consumed
+            return OAuthLoginState(
+                **consumed.model_dump(),
+                return_intent=return_intent,
+            )
+
+    def _cleanup_oauth_states(self, *, now: _dt.datetime) -> None:
+        stale_digests = tuple(
+            digest
+            for digest, state in self._state.oauth_states.items()
+            if state.consumed_at is not None or now >= state.expires_at
+        )
+        for digest in stale_digests:
+            del self._state.oauth_states[digest]
+            self._state.oauth_login_contexts.pop(digest, None)
+
+    def _issue_oauth_state(
+        self,
+        *,
+        command: IssueOAuthStateCommand,
+        now: _dt.datetime,
+    ) -> OAuthState:
+        if command.state_digest in self._state.oauth_states:
+            raise WebSessionConflictError
+        if len(self._state.oauth_states) >= self._oauth_state_capacity:
+            raise OAuthStateCapacityError
+        state = OAuthState(
+            state_digest=command.state_digest,
+            issued_at=now,
+            expires_at=now + _dt.timedelta(seconds=command.ttl_seconds),
+        )
+        self._state.oauth_states[state.state_digest] = state
+        return state
 
     async def rotate_session(
         self, *, command: RotateWebSessionCommand

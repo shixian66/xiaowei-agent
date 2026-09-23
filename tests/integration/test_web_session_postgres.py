@@ -9,7 +9,7 @@ from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
 from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.persistence.migrations.guards import MigrationSafetyError
 from xiaowei_agent.persistence.postgres import PostgresWebSessionStore
-from xiaowei_agent.persistence.schema import WEB_OAUTH_STATES
+from xiaowei_agent.persistence.schema import WEB_OAUTH_LOGIN_CONTEXTS, WEB_OAUTH_STATES
 from xiaowei_agent.persistence.web_session import (
     IssueOAuthStateCommand,
     OAuthStateCapacityError,
@@ -41,6 +41,31 @@ def oauth_state_digests(clean_database):
         return set(rows.scalars())
 
     return load
+
+
+@pytest.fixture
+def oauth_login_context_digests(clean_database):
+    async def load() -> set[str]:
+        async with clean_database.connect() as connection:
+            rows = await connection.execute(
+                sa.select(WEB_OAUTH_LOGIN_CONTEXTS.c.state_digest)
+            )
+        return set(rows.scalars())
+
+    return load
+
+
+@pytest.fixture
+def delete_oauth_login_context(clean_database):
+    async def delete(state_digest: str) -> None:
+        async with clean_database.begin() as connection:
+            await connection.execute(
+                sa.delete(WEB_OAUTH_LOGIN_CONTEXTS).where(
+                    WEB_OAUTH_LOGIN_CONTEXTS.c.state_digest == state_digest
+                )
+            )
+
+    return delete
 
 
 bind(globals(), WEB_SESSION_STORE_CASES)

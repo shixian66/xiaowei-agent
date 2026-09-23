@@ -53,6 +53,10 @@ from xiaowei_agent.contracts.activation import (
     ActivationSource,
     ActivationStatus,
 )
+from xiaowei_agent.contracts.web_navigation import (
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
 
 if TYPE_CHECKING:
     from xiaowei_agent.contracts.admin_audit import AdminAuditEvent
@@ -408,6 +412,24 @@ def row_to_web_session(row: Mapping[Any, Any]) -> "WebSession":
     )
 
 
+def web_return_intent_to_row(intent: WebReturnIntent) -> dict[str, Any]:
+    """闭集返回意图到三个标量列；绝不产生 path/URL。"""
+    return {
+        "return_intent_kind": intent.kind.value,
+        "return_intent_task_id": intent.task_id,
+        "return_intent_request_id": intent.request_id,
+    }
+
+
+def row_to_web_return_intent(row: Mapping[Any, Any]) -> WebReturnIntent:
+    """三个标量列到闭集返回意图；组合错误由契约拒绝。"""
+    return WebReturnIntent(
+        kind=WebReturnIntentKind(row["return_intent_kind"]),
+        task_id=row["return_intent_task_id"],
+        request_id=row["return_intent_request_id"],
+    )
+
+
 def step_execution_to_row(record: "StepExecutionRecord") -> dict[str, Any]:
     """步骤 journal 契约到列；可空终局字段一律显式保留。"""
     return {
@@ -507,6 +529,15 @@ def row_to_admin_audit_event(row: Mapping[Any, Any]) -> "AdminAuditEvent":
 
 def activation_request_to_row(request: ActivationRequest) -> dict[str, Any]:
     """激活申请契约到列；受控主体是唯一允许落库的明文 PII。"""
+    intent_row = (
+        {
+            "return_intent_kind": None,
+            "return_intent_task_id": None,
+            "return_intent_request_id": None,
+        }
+        if request.return_intent is None
+        else web_return_intent_to_row(request.return_intent)
+    )
     return {
         "request_id": request.request_id,
         "tenant_id": request.tenant_id,
@@ -515,6 +546,7 @@ def activation_request_to_row(request: ActivationRequest) -> dict[str, Any]:
         "subject_ref": request.subject_ref,
         "subject_ref_digest": request.subject_ref_digest,
         "source": request.source.value,
+        **intent_row,
         "source_event_digest": request.source_event_digest,
         "source_chat_digest": request.source_chat_digest,
         "requested_at": request.requested_at,
@@ -534,6 +566,12 @@ def row_to_activation_request(row: Mapping[Any, Any]) -> ActivationRequest:
     if provider is not IdentitySource.FEISHU:
         raise ValueError("activation provider must be feishu")
     approved_role = row["approved_role"]
+    intent_kind = row["return_intent_kind"]
+    return_intent = (
+        None
+        if intent_kind is None
+        else row_to_web_return_intent(row)
+    )
     return ActivationRequest(
         request_id=row["request_id"],
         tenant_id=row["tenant_id"],
@@ -542,6 +580,7 @@ def row_to_activation_request(row: Mapping[Any, Any]) -> ActivationRequest:
         subject_ref=row["subject_ref"],
         subject_ref_digest=row["subject_ref_digest"],
         source=ActivationSource(row["source"]),
+        return_intent=return_intent,
         source_event_digest=row["source_event_digest"],
         source_chat_digest=row["source_chat_digest"],
         requested_at=row["requested_at"],

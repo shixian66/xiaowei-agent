@@ -14,6 +14,8 @@ from xiaowei_agent.contracts import (
     AdminAuditTargetKind,
     IdentitySource,
     ProductRole,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.activation import (
     ActivationRequest,
@@ -42,6 +44,7 @@ def _request_command() -> CreateActivationCommand:
         provider=IdentitySource.FEISHU,
         subject_ref="ou_alice",
         source=ActivationSource.WEB_LOGIN,
+        return_intent=WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
     )
 
 
@@ -54,6 +57,7 @@ def _request() -> ActivationRequest:
         subject_ref="ou_alice",
         subject_ref_digest="a" * 64,
         source=ActivationSource.WEB_LOGIN,
+        return_intent=WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
         requested_at=_NOW,
         expires_at=_NOW + dt.timedelta(hours=24),
         status=ActivationStatus.PENDING,
@@ -128,7 +132,10 @@ async def test_request_creation_is_a_single_activation_store_call() -> None:
     service, activations, directory, audit = _service()
     command = _request_command()
 
-    created = await service.request_web(subject_ref=command.subject_ref)
+    created = await service.request_web(
+        subject_ref=command.subject_ref,
+        return_intent=command.return_intent,
+    )
 
     assert created.request_id == "activation-1"
     assert activations.commands == [command]
@@ -149,6 +156,43 @@ async def test_group_request_derives_both_source_references() -> None:
     assert command.source is ActivationSource.FEISHU_GROUP
     assert command.source_event_ref == "event-1"
     assert command.source_chat_ref == "chat-1"
+    assert command.return_intent is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("return_intent", "source"),
+    (
+        (
+            WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
+            ActivationSource.WEB_LOGIN,
+        ),
+        (
+            WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER),
+            ActivationSource.WEB_LOGIN,
+        ),
+        (
+            WebReturnIntent(
+                kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                task_id="task-1",
+            ),
+            ActivationSource.SAFE_TASK_LINK,
+        ),
+    ),
+)
+async def test_web_request_derives_source_from_the_validated_intent(
+    return_intent: WebReturnIntent,
+    source: ActivationSource,
+) -> None:
+    service, activations, _, _ = _service()
+
+    await service.request_web(
+        subject_ref="ou_alice",
+        return_intent=return_intent,
+    )
+
+    assert activations.commands[0].return_intent == return_intent
+    assert activations.commands[0].source is source
 
 
 @pytest.mark.asyncio

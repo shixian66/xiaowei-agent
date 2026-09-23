@@ -6,6 +6,9 @@
 """
 
 from xiaowei_agent.contracts.activation import (
+    ACTIVATION_SOURCE_INTENT_KINDS,
+    ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS,
+    ACTIVATION_STATUS_DECISION_RULES,
     ActivationLookup,
     ActivationRequest,
     ActivationSource,
@@ -136,6 +139,7 @@ from xiaowei_agent.contracts.enums import (
     TrustLevel,
     UserStatus,
     WebMode,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.errors import AgentError
 from xiaowei_agent.contracts.evidence import EvidenceEnvelope, evidence_id
@@ -240,8 +244,12 @@ from xiaowei_agent.contracts.task import (
 )
 from xiaowei_agent.contracts.tool import ToolCall, ToolResult
 from xiaowei_agent.contracts.trace_events import ModelCallObservation, TraceEvent
+from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 __all__ = [
+    "ACTIVATION_SOURCE_INTENT_KINDS",
+    "ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS",
+    "ACTIVATION_STATUS_DECISION_RULES",
     "ALLOWED_TRANSITIONS",
     "CONTROLLED_PII_MAX_LENGTH",
     "DIRECTORY_ACTIONS",
@@ -451,6 +459,8 @@ __all__ = [
     "UserRoleAssignment",
     "UserStatus",
     "WebMode",
+    "WebReturnIntent",
+    "WebReturnIntentKind",
     "admin_audit_target_digest",
     "content_digest",
     "evidence_id",

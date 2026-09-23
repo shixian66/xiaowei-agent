@@ -7,9 +7,16 @@ from typing import Any
 import pytest
 
 from xiaowei_agent.contracts import IdentitySource
+from xiaowei_agent.contracts.web_navigation import (
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
 from xiaowei_agent.persistence.web_session import (
+    ConsumeOAuthLoginStateCommand,
     ConsumeOAuthStateCommand,
+    IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
+    OAuthLoginContextNotFoundError,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
     RevokeWebSessionCommand,
@@ -21,6 +28,7 @@ from xiaowei_agent.persistence.web_session import (
 
 _ORIGIN_DIGEST = "a1" * 32
 _OTHER_ORIGIN_DIGEST = "b2" * 32
+_WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
 def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]]) -> None:
@@ -75,6 +83,150 @@ async def test_concurrent_oauth_state_consumption_has_exactly_one_winner(
         *(
             web_sessions.consume_oauth_state(
                 command=ConsumeOAuthStateCommand(state_digest=digest)
+            )
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(item, Exception) for item in results) == 1
+    assert sum(isinstance(item, OAuthStateNotFoundError) for item in results) == 1
+
+
+async def test_login_state_and_intent_are_issued_and_consumed_as_one_fact(
+    web_sessions: Any,
+) -> None:
+    command = IssueOAuthLoginStateCommand(
+        state_digest="0" * 64,
+        ttl_seconds=60,
+        return_intent=_WORKBENCH_INTENT,
+    )
+
+    issued = await web_sessions.issue_oauth_login_state(command=command)
+    consumed = await web_sessions.consume_oauth_login_state(
+        command=ConsumeOAuthLoginStateCommand(state_digest=command.state_digest)
+    )
+
+    assert issued.return_intent == _WORKBENCH_INTENT
+    assert issued.consumed_at is None
+    assert consumed.return_intent == _WORKBENCH_INTENT
+    assert consumed.consumed_at is not None
+    with pytest.raises(OAuthStateNotFoundError):
+        await web_sessions.consume_oauth_login_state(
+            command=ConsumeOAuthLoginStateCommand(state_digest=command.state_digest)
+        )
+
+
+async def test_connection_test_state_never_creates_a_login_context(
+    web_sessions: Any,
+    oauth_login_context_digests: Callable[[], Awaitable[set[str]]],
+) -> None:
+    digest = "1a" * 32
+    await web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+    )
+
+    assert await oauth_login_context_digests() == set()
+
+
+async def test_missing_login_context_rolls_back_state_consumption(
+    web_sessions: Any,
+    delete_oauth_login_context: Callable[[str], Awaitable[None]],
+) -> None:
+    digest = "1b" * 32
+    await web_sessions.issue_oauth_login_state(
+        command=IssueOAuthLoginStateCommand(
+            state_digest=digest,
+            ttl_seconds=60,
+            return_intent=_WORKBENCH_INTENT,
+        )
+    )
+    await delete_oauth_login_context(digest)
+
+    with pytest.raises(
+        OAuthLoginContextNotFoundError,
+        match=r"^oauth login context missing$",
+    ):
+        await web_sessions.consume_oauth_login_state(
+            command=ConsumeOAuthLoginStateCommand(state_digest=digest)
+        )
+
+    # The aggregate failed, so the state update must have rolled back rather than
+    # turning an invariant failure into a consumed ticket.
+    assert (
+        await web_sessions.consume_oauth_state(
+            command=ConsumeOAuthStateCommand(state_digest=digest)
+        )
+    ).consumed_at is not None
+
+
+async def test_state_cleanup_cascades_login_contexts(
+    web_sessions: Any,
+    clock: Any,
+    oauth_login_context_digests: Callable[[], Awaitable[set[str]]],
+) -> None:
+    consumed_digest = "1c" * 32
+    expired_digest = "1d" * 32
+    for digest, ttl_seconds in ((consumed_digest, 60), (expired_digest, 1)):
+        await web_sessions.issue_oauth_login_state(
+            command=IssueOAuthLoginStateCommand(
+                state_digest=digest,
+                ttl_seconds=ttl_seconds,
+                return_intent=_WORKBENCH_INTENT,
+            )
+        )
+    await web_sessions.consume_oauth_login_state(
+        command=ConsumeOAuthLoginStateCommand(state_digest=consumed_digest)
+    )
+    clock.advance(seconds=1)
+
+    await web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(state_digest="1e" * 32, ttl_seconds=60)
+    )
+
+    assert await oauth_login_context_digests() == set()
+
+
+async def test_login_and_connection_test_states_share_one_capacity(
+    bounded_web_sessions: Any,
+) -> None:
+    await bounded_web_sessions.issue_oauth_login_state(
+        command=IssueOAuthLoginStateCommand(
+            state_digest="1f" * 32,
+            ttl_seconds=60,
+            return_intent=_WORKBENCH_INTENT,
+        )
+    )
+    await bounded_web_sessions.issue_oauth_state(
+        command=IssueOAuthStateCommand(state_digest="20" * 32, ttl_seconds=60)
+    )
+
+    with pytest.raises(OAuthStateCapacityError):
+        await bounded_web_sessions.issue_oauth_login_state(
+            command=IssueOAuthLoginStateCommand(
+                state_digest="21" * 32,
+                ttl_seconds=60,
+                return_intent=_WORKBENCH_INTENT,
+            )
+        )
+
+
+async def test_concurrent_login_state_consumption_has_exactly_one_winner(
+    web_sessions: Any,
+) -> None:
+    digest = "22" * 32
+    await web_sessions.issue_oauth_login_state(
+        command=IssueOAuthLoginStateCommand(
+            state_digest=digest,
+            ttl_seconds=60,
+            return_intent=_WORKBENCH_INTENT,
+        )
+    )
+
+    results = await asyncio.gather(
+        *(
+            web_sessions.consume_oauth_login_state(
+                command=ConsumeOAuthLoginStateCommand(state_digest=digest)
             )
             for _ in range(2)
         ),
@@ -436,6 +588,12 @@ async def test_the_auth_source_is_persisted_as_issued(web_sessions: Any) -> None
 WEB_SESSION_STORE_CASES = (
     test_oauth_state_is_single_use_and_expiry_is_fail_closed,
     test_concurrent_oauth_state_consumption_has_exactly_one_winner,
+    test_login_state_and_intent_are_issued_and_consumed_as_one_fact,
+    test_connection_test_state_never_creates_a_login_context,
+    test_missing_login_context_rolls_back_state_consumption,
+    test_state_cleanup_cascades_login_contexts,
+    test_login_and_connection_test_states_share_one_capacity,
+    test_concurrent_login_state_consumption_has_exactly_one_winner,
     test_unknown_oauth_state_is_indistinguishable_from_replay,
     test_oauth_state_capacity_rejects_the_first_issue_above_the_limit,
     test_live_oauth_state_digest_conflicts_below_capacity,

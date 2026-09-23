@@ -56,6 +56,8 @@ from xiaowei_agent.persistence.schema import (
     LOCAL_ADMINS,
     USER_ACCOUNTS,
     USER_ROLE_ASSIGNMENTS,
+    WEB_OAUTH_LOGIN_CONTEXTS,
+    WEB_OAUTH_STATES,
 )
 
 _DIGEST_LENGTH = 64
@@ -126,6 +128,7 @@ def test_new_tables_are_registered_in_all_tables() -> None:
         USER_ROLE_ASSIGNMENTS,
         EXTERNAL_IDENTITIES,
         ADMIN_AUDIT_EVENTS,
+        WEB_OAUTH_LOGIN_CONTEXTS,
     } <= set(ALL_TABLES)
 
 
@@ -139,6 +142,9 @@ def test_activation_request_table_has_closed_scope_and_state_constraints() -> No
         "subject_ref",
         "subject_ref_digest",
         "source",
+        "return_intent_kind",
+        "return_intent_task_id",
+        "return_intent_request_id",
         "source_event_digest",
         "source_chat_digest",
         "requested_at",
@@ -156,6 +162,32 @@ def test_activation_request_table_has_closed_scope_and_state_constraints() -> No
         ACTIVATION_REQUESTS, "ck_activation_requests_status_closed"
     )
     assert all(member.value in status_check for member in ActivationStatus)
+    assert {
+        "ck_activation_requests_return_intent_shape",
+        "ck_activation_requests_source_intent_match",
+        "ck_activation_requests_source_digests_match",
+    } <= _check_names(ACTIVATION_REQUESTS)
+
+
+def test_login_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> None:
+    assert _primary_key(WEB_OAUTH_LOGIN_CONTEXTS) == ("state_digest",)
+    assert set(WEB_OAUTH_LOGIN_CONTEXTS.c) == {
+        WEB_OAUTH_LOGIN_CONTEXTS.c.state_digest,
+        WEB_OAUTH_LOGIN_CONTEXTS.c.return_intent_kind,
+        WEB_OAUTH_LOGIN_CONTEXTS.c.return_intent_task_id,
+        WEB_OAUTH_LOGIN_CONTEXTS.c.return_intent_request_id,
+    }
+    foreign_keys = tuple(WEB_OAUTH_LOGIN_CONTEXTS.foreign_key_constraints)
+    assert len(foreign_keys) == 1
+    foreign_key = foreign_keys[0]
+    assert tuple(element.target_fullname for element in foreign_key.elements) == (
+        f"{WEB_OAUTH_STATES.name}.state_digest",
+    )
+    assert foreign_key.ondelete == "CASCADE"
+    assert {
+        "ck_web_oauth_login_contexts_kind_closed",
+        "ck_web_oauth_login_contexts_intent_shape",
+    } <= _check_names(WEB_OAUTH_LOGIN_CONTEXTS)
 
 
 def test_activation_request_has_one_pending_subject_per_scope() -> None:

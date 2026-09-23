@@ -1,6 +1,6 @@
 # W2 登录与多 shell 实施计划
 
-> 状态：Review Draft V0.2。本文尚未获项目负责人和独立审查者批准；批准前不写 W2 产品测试、迁移或源码。V0.2 按首轮独立审核收口闭集扩展、角色×意图终态、飞书 Admin 脱敏投影与详情路径单真源。
+> 状态：Approved V0.2。独立审查按计划 head `8d6483148b0eceb871a0446446874c8f8e0c7743` 通过，项目负责人随后明确批准开工；PR #71 已合入 `main@f2b72e56b37676906350725cd7c48162a418cb70`。该批准只覆盖本文三个离线切片，不授权真实调用、部署、canary 或 UAT。
 
 **Goal:** 把现有 Web 入口收敛成成熟的 `/login`、`/app`、`/admin` 与只读任务详情四个壳；用一次性 OAuth state 绑定闭集 return intent；让 Admin、运维人员和普通用户只进入各自获准页面，同时保持 W1b 的“未知身份不签 Session、只创建激活申请”边界。
 
@@ -16,16 +16,15 @@
 
 ### 已满足
 
+- 本计划已按精确 SHA 独立审查、由项目负责人批准并经 PR #71 合入 main；W2 三个离线切片的实现门已打开。
 - W1a 的用户目录、作用域角色、外部身份、本地 Admin 链接和 Admin 审计写内核已在 main。
 - W1b 的 `activation_requests`、申请容量/CAS、数据库身份解析、未知 OAuth `activation_pending`、无 Session 和群内单次通用通知已在 main。
 - ADR-014 R3 已精确允许 `web_oauth_login_contexts`，且禁止向 `web_oauth_states` 增列或增加第二张 OAuth context 表。
 - 当前登录与连接测试已有不同 digest domain；连接测试成功不签 Session、不查身份目录、不建激活申请。
 - 当前 Web 的 Cookie、Origin、CSRF、CSP、HSTS/no-store、body limit、静态资源闭集和只读详情 shell 已有测试基线。
 
-### 尚未满足
+### 仍未满足的真实边界
 
-- 仓库在本计划前没有 W2 详细计划，也没有“W2 计划已批准”的 handoff 记录。
-- 本计划尚未经过独立精确 SHA 审查与项目负责人批准，因此不能开始实现。
 - 真实飞书应用/凭据/网络、部署、canary 和用户验收均未授权；W2 只允许 fake port、隔离 PostgreSQL 与本地浏览器检查。
 
 ### 开工条件
@@ -33,6 +32,8 @@
 1. 本计划以精确 SHA 独立审查，无未解决 P0/P1；涉及真源冲突的判断在批准记录中明确接受。
 2. 计划与 handoff 基线合入最新 main，并记录“W2 详细计划已批准”。
 3. 从届时最新 main 建实现分支。批准范围内按三个切片连续推进，不逐文件重复申请；新增范围、真实调用、合并、部署和 UAT 仍分别等待授权。
+
+上述三条已由 PR #71 合入和负责人开工口令满足；本节保留为审计记录，不要求后续切片重复申请同一范围。
 
 ---
 
