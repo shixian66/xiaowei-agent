@@ -7,10 +7,10 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@f2b72e56b37676906350725cd7c48162a418cb70`（2026-09-23，PR #71 已合入经批准的 W2 V0.2 详细计划）。
+- **当前基线**：`main@869be7ae20887fb3cda7c3de3d07a15b166c543c`（2026-09-23，PR #72 已合入 W2-A 原子登录导航 context）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
-- **W2 详细计划 Approved V0.2 已合入，W2-A 实现候选已形成但尚未合入**。实现与测试证据 head 为 `33866a4e7d6fd8b6d2930f195e11c35f5ee7de95`（PR #72）：闭集 return intent、原子 OAuth 登录 context、`rev_0016` 与激活来源/意图已经离线实现，等待独立复审。W2-B1/B2 尚未开始；I3 延期未取消。
+- **W2-A 已合入，W2-B1 已形成离线候选但尚未合入**。W2-A 由 PR #72 合入当前基线；W2-B1 实现证据提交为 `4c75ec028f8a1d6a4fa6dd7f79c99bc07ede99cc`（PR #73）：独立登录、工作台、管理中心与结果详情壳、闭集角色导航、按请求重建角色、脱敏集成状态投影已经离线实现，等待独立精确 SHA 复审。W2-B2 尚未开始；I3 延期未取消。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -29,7 +29,7 @@
 | I2 | I2 限定领域普通对话已完成离线实施并归档，详见 [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。回答只投影当前 CapabilitySnapshot，无工具/外部系统/长期记忆；knowledge_lookup/log_analysis 仍拒绝 |
 | W1a | `rev_0014`、用户目录与 Admin 审计写内核、旧身份原子迁移已离线实现。`UserDirectoryStore.apply()` 是唯一授权写入口，每次授权改变与命令派生审计同事务提交；审计不可写则回滚 |
 | W1b | `rev_0015`、ActivationRequest/ActivationStore、身份激活流程与单次群通知已离线实现。未知 OAuth 身份返回 `403 activation_pending` 且无 Session；未知群成员当次事件只发通用卡片，私聊未知身份拒绝。运行时从数据库目录重建主体，停用/撤权不进入重新激活，静态文件仅作发布前一次性迁移输入 |
-| W2 及以后 | W2 计划 Approved V0.2 已合入；A（契约/迁移）实现候选待独立复审与合入，B1（登录/角色/壳）和 B2（配置 UI/API 搬迁）尚未开始。W3/W4/W5 保持后续阶段；W4c 与 R1 独立，不由 W2 解锁 |
+| W2 及以后 | W2 计划 Approved V0.2 与 A（契约/迁移）已合入；B1（登录/角色/壳）实现候选待独立复审与合入，B2（配置 UI/API 搬迁）尚未开始。W3/W4/W5 保持后续阶段；W4c 与 R1 独立，不由 W2 解锁 |
 
 W1a 最终受审 head `ed8c9e82db46d75e47e4761d8897d0d2d23f9831` 已由 PR #65 合入
 `f92aa88b9016b52c35ebce4052a8609fd574d8fb`，历史 CI [35681783752](https://github.com/shixian66/xiaowei-agent/actions/runs/35681783752)
@@ -46,16 +46,23 @@ W2-A 实现与测试证据 head `33866a4e7d6fd8b6d2930f195e11c35f5ee7de95` 本�
 专用一次性 PostgreSQL 16.15 容器全量 `4752 passed, 0 skipped`，容器已删除且未触碰既有实例。
 四项隔离反证分别证明 context 必填、缺 context 回滚、收割级联与数据库 source/intent CHECK 承重。
 GitHub CI [35827515879](https://github.com/shixian66/xiaowei-agent/actions/runs/35827515879)
-在同一 head 上 8/8 通过且每个 job 都有真实 steps；该候选尚未取得独立代码复审、合并、部署、真实调用或用户验收证据。
+在同一 head 上 8/8 通过且每个 job 都有真实 steps；该候选已由 PR #72 squash 合入
+`869be7ae20887fb3cda7c3de3d07a15b166c543c`。这不构成部署、真实调用或用户验收证据。
+
+W2-B1 实现证据提交 `4c75ec028f8a1d6a4fa6dd7f79c99bc07ede99cc`（PR #73）的本机离线全量为
+`4428 passed, 362 skipped`，security 为 `1508 passed, 83 skipped`，Ruff/mypy 通过；聚焦 Web 回归为
+`208 passed`。锁定 wheel 实测包含 `login/admin/index/detail` 的 HTML、CSS 与 JS；本机 headless Chrome
+只完成登录壳 1440/1280/1024/390、管理壳 1440/1024、工作台 1440 与低于 1024 静态提示的视觉核对。
+这批证据不包含 PostgreSQL、GitHub CI、正式浏览器交互、部署、真实飞书或用户验收。
 
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/w2-a-navigation-context`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `claude/w2-b1-login-shells`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-23（Asia/Shanghai） |
-| 阶段 | W2 详细计划已批准并合入；W2-A 源码候选已完成本地深档验证，尚待独立复审与合入 |
-| 下一步 | 按最终 PR head 独立复审 W2-A；合入后从最新 main 开始 W2-B1，不提前实施 B2/W3/W4 或真实调用 |
+| 阶段 | W2-A 已合入；W2-B1 源码候选已完成本地深档验证，尚待独立复审与合入 |
+| 下一步 | 按最终 PR head 独立复审 W2-B1；合入后从最新 main 开始 W2-B2，不提前实施 W3/W4 或真实调用 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5，Web 序列与各阶段硬门保持原定义 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -84,7 +91,7 @@ GitHub CI [35827515879](https://github.com/shixian66/xiaowei-agent/actions/runs/
 - W1a/W1b 各自批准计划与交付记录见 [W1a 计划](docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md)、
   [W1b 计划](docs/superpowers/plans/2026-09-22-w1b-identity-activation-and-notification.md) 和原文快照。
   登录 context 表 `web_oauth_login_contexts` 归 W2，私聊 Admin 通知与可靠重试归 W3。
-- W2 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md) 已由 PR #71 合入并取得负责人开工口令；授权范围是 W2-A（闭集 intent/context/迁移）、W2-B1（登录、角色路由与四个 shell）和 W2-B2（配置 UI/API 搬迁），不包含 W3/W4/真实调用。W2-A 合并仍需独立代码复审。
+- W2 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md) 已由 PR #71 合入并取得负责人开工口令；授权范围是 W2-A（闭集 intent/context/迁移）、W2-B1（登录、角色路由与四个 shell）和 W2-B2（配置 UI/API 搬迁），不包含 W3/W4/真实调用。W2-A 已由 PR #72 合入，W2-B1 仍须独立代码复审与合入。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
 - M6b 仅离线实现并合入，真实验证被负责人延期，未验收归档。重新进入需唯一 canonical target、物理身份、带外 version/grants/DDL/identity digest、
@@ -128,7 +135,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. 产品下一步是完成 W2-A 的独立代码复审与合入；之后从最新 main 开始 W2-B1，再做 W2-B2。W2 不提前建设 W3 或后续范围。
+2. 产品下一步是完成 W2-B1 的独立代码复审与合入；之后从最新 main 开始 W2-B2。W2 不提前建设 W3 或后续范围。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 
@@ -189,9 +196,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 
 ## 9. 未覆盖的边界
 
-- 真机浏览器、RI5 首启/改密/配置保存、正式部署、canary 与产品用户验收仍未取得；ASGI、HTML/CSS 或 CI smoke 不替代。
+- W2-B1 只完成本机 headless Chrome 静态视觉核对；真机浏览器交互、RI5 首启/改密/配置保存、正式部署、canary 与产品用户验收仍未取得。ASGI、HTML/CSS、截图或 CI smoke 不替代这些证据。
 - RI3 离线 corpus 不证明真实模型质量、配额、延迟、usage、远端取消或 preview 稳定性；没有真实 Gemini key/网络证据。
-- 飞书真实 OAuth、长连接、消息、成员分页、身份和测试企业权限仍待 RI2；Web 视觉与窄屏详情尚无真实浏览器人工验收。
+- 飞书真实 OAuth、长连接、消息、成员分页、身份和测试企业权限仍待 RI2；窄屏详情与完整正式用户路径尚无真实浏览器人工验收。
 - M6b 无真实 StarRocks 连接、credential reference readback、physical identity、DDL/grants、字段与销毁证据，不能标记 test-env verified。
 - 本机各轮 DSN、Docker/Compose 能力、端口占用与 credential helper 状态只描述当时环境，本轮未重新运行容器；恢复验证时重新预检。历史 CI 不替代当前版本或长期运行。
 - `EVIDENCE_FIELD_ABSENT` 尚无实际能力消费；审批恢复后真正执行 E1 未开放；StarRocks 方言只经锁定 sqlglot 验证，未与真实服务端核对。
