@@ -74,6 +74,7 @@ class ActivationSource(StrEnum):
     """W1b 允许创建申请的入口闭集。"""
 
     WEB_LOGIN = "web_login"
+    SAFE_TASK_LINK = "safe_task_link"
     FEISHU_GROUP = "feishu_group"
 
 
@@ -84,6 +85,15 @@ class ActivationStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     EXPIRED = "expired"
+
+
+class WebReturnIntentKind(StrEnum):
+    """服务端可重建的 Web 登录目标闭集；成员本身不携带 URL。"""
+
+    WORKBENCH = "workbench"
+    SAFE_TASK_DETAIL = "safe_task_detail"
+    ADMIN_CENTER = "admin_center"
+    ACTIVATION_STATUS = "activation_status"
 
 
 class ProductRole(StrEnum):

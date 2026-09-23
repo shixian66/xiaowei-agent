@@ -5,6 +5,8 @@ from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditTargetKind,
     IdentitySource,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.activation import (
     ActivationRequest,
@@ -48,15 +50,26 @@ class IdentityActivationService:
         self._tenant_id = tenant_id
         self._environment_id = environment_id
 
-    async def request_web(self, *, subject_ref: str) -> ActivationRequest:
+    async def request_web(
+        self,
+        *,
+        subject_ref: str,
+        return_intent: WebReturnIntent,
+    ) -> ActivationRequest:
         """为一次未知 OAuth 身份创建或复用待办。"""
+        source = (
+            ActivationSource.SAFE_TASK_LINK
+            if return_intent.kind is WebReturnIntentKind.SAFE_TASK_DETAIL
+            else ActivationSource.WEB_LOGIN
+        )
         return await self._activations.create_or_reuse(
             command=CreateActivationCommand(
                 tenant_id=self._tenant_id,
                 environment_id=self._environment_id,
                 provider=IdentitySource.FEISHU,
                 subject_ref=subject_ref,
-                source=ActivationSource.WEB_LOGIN,
+                source=source,
+                return_intent=return_intent,
             )
         )
 
@@ -75,6 +88,7 @@ class IdentityActivationService:
                 provider=IdentitySource.FEISHU,
                 subject_ref=subject_ref,
                 source=ActivationSource.FEISHU_GROUP,
+                return_intent=None,
                 source_event_ref=event_ref,
                 source_chat_ref=chat_ref,
             )

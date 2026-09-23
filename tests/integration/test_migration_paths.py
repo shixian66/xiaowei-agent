@@ -889,6 +889,12 @@ async def _restore_head(engine: AsyncEngine, run_upgrade: Any) -> None:
     assert revision == _head_revision()
     assert _W1A_TABLES <= await _table_names(engine)
     assert "user_id" in await _column_names(engine, "local_admins")
+    assert "web_oauth_login_contexts" in await _table_names(engine)
+    assert {
+        "return_intent_kind",
+        "return_intent_task_id",
+        "return_intent_request_id",
+    } <= await _column_names(engine, "activation_requests")
 
 
 async def _seed_directory_and_audit(engine: AsyncEngine) -> None:
@@ -997,10 +1003,13 @@ async def _seed_activation_request(engine: AsyncEngine) -> None:
                 "INSERT INTO activation_requests "
                 "(request_id, tenant_id, environment_id, provider, subject_ref, "
                 "subject_ref_digest, source, source_event_digest, source_chat_digest, "
-                "requested_at, expires_at, status, decided_at, decided_by, "
+                "return_intent_kind, return_intent_task_id, "
+                "return_intent_request_id, requested_at, expires_at, status, "
+                "decided_at, decided_by, "
                 "approved_role) VALUES "
                 "('activation-1', 't-1', 'dev', 'feishu', 'ou_subject', :digest, "
-                "'web_login', NULL, NULL, now(), now() + interval '1 day', "
+                "'web_login', NULL, NULL, 'workbench', NULL, NULL, "
+                "now(), now() + interval '1 day', "
                 "'pending', NULL, NULL, NULL)"
             ),
             {"digest": "b" * 64},
@@ -1094,6 +1103,165 @@ async def test_rev_0015_never_discards_activation_audit_even_when_authorized(
     finally:
         await _restore_head(clean_database, run_upgrade)
     assert "activation_requests" in await _table_names(clean_database)
+
+
+async def test_rev_0016_upgrade_invalidates_old_states_and_backfills_intents(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0015_activation_requests")
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO web_oauth_states "
+                    "(state_digest, issued_at, expires_at, consumed_at) VALUES "
+                    "(:digest, now(), now() + interval '10 minutes', NULL)"
+                ),
+                {"digest": "c" * 64},
+            )
+            for request_id, source, event_digest, chat_digest in (
+                ("old-web", "web_login", None, None),
+                ("old-group", "feishu_group", "d" * 64, "e" * 64),
+            ):
+                await connection.execute(
+                    sa.text(
+                        "INSERT INTO activation_requests "
+                        "(request_id, tenant_id, environment_id, provider, "
+                        "subject_ref, subject_ref_digest, source, "
+                        "source_event_digest, source_chat_digest, requested_at, "
+                        "expires_at, status, decided_at, decided_by, approved_role) "
+                        "VALUES (:request_id, 't-1', 'dev', 'feishu', :subject, "
+                        ":subject_digest, :source, :event_digest, :chat_digest, "
+                        "now(), now() + interval '1 day', 'pending', NULL, NULL, NULL)"
+                    ),
+                    {
+                        "request_id": request_id,
+                        "subject": f"ou_{request_id}",
+                        "subject_digest": (
+                            "f" if request_id == "old-web" else "1"
+                        )
+                        * 64,
+                        "source": source,
+                        "event_digest": event_digest,
+                        "chat_digest": chat_digest,
+                    },
+                )
+            await connection.run_sync(run_upgrade, "head")
+
+        async with clean_database.connect() as connection:
+            state_count = await connection.scalar(
+                sa.text("SELECT count(*) FROM web_oauth_states")
+            )
+            context_count = await connection.scalar(
+                sa.text("SELECT count(*) FROM web_oauth_login_contexts")
+            )
+            rows = (
+                await connection.execute(
+                    sa.text(
+                        "SELECT request_id, return_intent_kind FROM "
+                        "activation_requests ORDER BY request_id"
+                    )
+                )
+            ).all()
+        assert state_count == 0
+        assert context_count == 0
+        assert rows == [("old-group", None), ("old-web", "workbench")]
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0016_downgrade_rejects_each_w2_only_fact_with_exact_counts(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        async with clean_database.begin() as connection:
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO web_oauth_states "
+                    "(state_digest, issued_at, expires_at, consumed_at) VALUES "
+                    "(:digest, now(), now() + interval '10 minutes', NULL)"
+                ),
+                {"digest": "2" * 64},
+            )
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO web_oauth_login_contexts "
+                    "(state_digest, return_intent_kind, return_intent_task_id, "
+                    "return_intent_request_id) VALUES (:digest, 'workbench', NULL, NULL)"
+                ),
+                {"digest": "2" * 64},
+            )
+            for request_id, source, kind, task_id in (
+                ("deep-link", "safe_task_link", "safe_task_detail", "task-1"),
+                ("admin-login", "web_login", "admin_center", None),
+            ):
+                await connection.execute(
+                    sa.text(
+                        "INSERT INTO activation_requests "
+                        "(request_id, tenant_id, environment_id, provider, "
+                        "subject_ref, subject_ref_digest, source, "
+                        "return_intent_kind, return_intent_task_id, "
+                        "return_intent_request_id, source_event_digest, "
+                        "source_chat_digest, requested_at, expires_at, status, "
+                        "decided_at, decided_by, approved_role) VALUES "
+                        "(:request_id, 't-1', 'dev', 'feishu', :subject, "
+                        ":subject_digest, :source, :kind, :task_id, NULL, NULL, NULL, "
+                        "now(), now() + interval '1 day', 'pending', NULL, NULL, NULL)"
+                    ),
+                    {
+                        "request_id": request_id,
+                        "subject": f"ou_{request_id}",
+                        "subject_digest": (
+                            "3" if request_id == "deep-link" else "4"
+                        )
+                        * 64,
+                        "source": source,
+                        "kind": kind,
+                        "task_id": task_id,
+                    },
+                )
+
+        with pytest.raises(MigrationSafetyError) as exc_info:
+            async with clean_database.begin() as connection:
+                await connection.run_sync(
+                    run_downgrade, "0015_activation_requests", True
+                )
+        assert exc_info.value.counts == (
+            ("active_login_context", 1),
+            ("safe_task_link_activation", 1),
+            ("non_workbench_web_activation", 1),
+        )
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            ) == _head_revision()
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0016_downgrade_preserves_every_w1b_activation_shape(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        await _seed_activation_request(clean_database)
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0015_activation_requests")
+        assert "web_oauth_login_contexts" not in await _table_names(clean_database)
+        assert "return_intent_kind" not in await _column_names(
+            clean_database, "activation_requests"
+        )
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT count(*) FROM activation_requests")
+            ) == 1
+    finally:
+        await _restore_head(clean_database, run_upgrade)
 
 
 async def _insert_audit_event(engine: AsyncEngine, **values: Any) -> None:

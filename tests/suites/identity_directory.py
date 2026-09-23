@@ -58,6 +58,10 @@ from xiaowei_agent.contracts.identity import (
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
 )
+from xiaowei_agent.contracts.web_navigation import (
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
 from xiaowei_agent.persistence.admin_audit import (
     AdminAuditConflictError,
     AdminAuditMissingStartError,
@@ -114,6 +118,7 @@ def activation_command(
         provider=IdentitySource.FEISHU,
         subject_ref=subject_ref,
         source=ActivationSource.WEB_LOGIN,
+        return_intent=WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
     )
 
 

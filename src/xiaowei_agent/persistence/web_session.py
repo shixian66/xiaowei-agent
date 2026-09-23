@@ -12,6 +12,7 @@ from xiaowei_agent.contracts import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 DEFAULT_OAUTH_STATE_CAPACITY: Final[int] = 1024
 
@@ -32,6 +33,13 @@ class OAuthStateCapacityError(WebSessionStoreError):
 
     def __init__(self) -> None:
         super().__init__("oauth state capacity exhausted")
+
+
+class OAuthLoginContextNotFoundError(WebSessionStoreError, LookupError):
+    """登录域 state 存在但它的必需 context 缺失。"""
+
+    def __init__(self) -> None:
+        super().__init__("oauth login context missing")
 
 
 class WebSessionNotFoundError(WebSessionStoreError, LookupError):
@@ -67,6 +75,12 @@ class OAuthState(Contract):
         return self
 
 
+class OAuthLoginState(OAuthState):
+    """一次登录 state 与其不可分割的闭集返回意图。"""
+
+    return_intent: WebReturnIntent
+
+
 class WebSession(Contract):
     """只保存随机 cookie 摘要、主体引用、签发来源与时效事实。"""
 
@@ -92,8 +106,18 @@ class IssueOAuthStateCommand(Contract):
     ttl_seconds: StrictInt = Field(gt=0, le=600)
 
 
+class IssueOAuthLoginStateCommand(IssueOAuthStateCommand):
+    """登录专用签发命令；无法构造一个没有 context 的登录 state。"""
+
+    return_intent: WebReturnIntent
+
+
 class ConsumeOAuthStateCommand(Contract):
     state_digest: Sha256Hex
+
+
+class ConsumeOAuthLoginStateCommand(ConsumeOAuthStateCommand):
+    """登录专用消费命令；缺 context 是独立不变量错误。"""
 
 
 class RotateWebSessionCommand(Contract):
@@ -146,6 +170,16 @@ class WebSessionStore(Protocol):
     ) -> OAuthState:
         """原子消费仍有效的 state；未知、过期和重放统一拒绝。"""
 
+    async def issue_oauth_login_state(
+        self, *, command: IssueOAuthLoginStateCommand
+    ) -> OAuthLoginState:
+        """同一提交签发登录 state 与它的闭集返回意图。"""
+
+    async def consume_oauth_login_state(
+        self, *, command: ConsumeOAuthLoginStateCommand
+    ) -> OAuthLoginState:
+        """同一提交消费登录 state 并读取唯一 context。"""
+
     async def rotate_session(
         self, *, command: RotateWebSessionCommand
     ) -> WebSession:
@@ -171,8 +205,12 @@ def validate_oauth_state_capacity(value: int) -> int:
 
 __all__ = [
     "DEFAULT_OAUTH_STATE_CAPACITY",
+    "ConsumeOAuthLoginStateCommand",
     "ConsumeOAuthStateCommand",
+    "IssueOAuthLoginStateCommand",
     "IssueOAuthStateCommand",
+    "OAuthLoginContextNotFoundError",
+    "OAuthLoginState",
     "OAuthState",
     "OAuthStateCapacityError",
     "OAuthStateNotFoundError",

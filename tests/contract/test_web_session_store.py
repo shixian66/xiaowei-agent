@@ -14,17 +14,28 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
 
 from xiaowei_agent.contracts import IdentitySource
+from xiaowei_agent.contracts.web_navigation import (
+    WebReturnIntent,
+    WebReturnIntentKind,
+)
 from xiaowei_agent.persistence.fake import InMemoryWebSessionStore
 from xiaowei_agent.persistence.postgres import PostgresWebSessionStore
 from xiaowei_agent.persistence.rows import (
     oauth_state_to_row,
     row_to_oauth_state,
+    row_to_web_return_intent,
     row_to_web_session,
+    web_return_intent_to_row,
     web_session_to_row,
 )
-from xiaowei_agent.persistence.schema import WEB_OAUTH_STATES, WEB_SESSIONS
+from xiaowei_agent.persistence.schema import (
+    WEB_OAUTH_LOGIN_CONTEXTS,
+    WEB_OAUTH_STATES,
+    WEB_SESSIONS,
+)
 from xiaowei_agent.persistence.web_session import (
     DEFAULT_OAUTH_STATE_CAPACITY,
+    IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
     OAuthState,
     OAuthStateCapacityError,
@@ -56,6 +67,22 @@ def oauth_state_digests(memory_state):
     return load
 
 
+@pytest.fixture
+def oauth_login_context_digests(memory_state):
+    async def load() -> set[str]:
+        return set(memory_state.oauth_login_contexts)
+
+    return load
+
+
+@pytest.fixture
+def delete_oauth_login_context(memory_state):
+    async def delete(state_digest: str) -> None:
+        memory_state.oauth_login_contexts.pop(state_digest, None)
+
+    return delete
+
+
 bind(globals(), WEB_SESSION_STORE_CASES)
 
 _NOW = dt.datetime(2026, 9, 9, 9, 0, tzinfo=dt.UTC)
@@ -67,6 +94,13 @@ def test_oauth_state_capacity_contract_is_fixed_and_non_sensitive() -> None:
     error = OAuthStateCapacityError()
     assert str(error) == "oauth state capacity exhausted"
     assert error.args == ("oauth state capacity exhausted",)
+
+
+def test_login_state_command_cannot_exist_without_a_return_context() -> None:
+    with pytest.raises(ValidationError):
+        IssueOAuthLoginStateCommand.model_validate(
+            {"state_digest": "a" * 64, "ttl_seconds": 60}
+        )
 
 
 @pytest.mark.parametrize("invalid", [True, 0, -1, 1025, 10**9])
@@ -166,6 +200,12 @@ def test_web_session_schema_is_digest_only_and_mirrors_time_invariants() -> None
         "auth_source",
         "public_origin_digest",
     }
+    assert set(WEB_OAUTH_LOGIN_CONTEXTS.columns.keys()) == {
+        "state_digest",
+        "return_intent_kind",
+        "return_intent_task_id",
+        "return_intent_request_id",
+    }
     state_constraints = {
         item.name for item in WEB_OAUTH_STATES.constraints if item.name is not None
     }
@@ -261,6 +301,22 @@ def test_oauth_state_and_session_row_mappings_are_exact_round_trips() -> None:
     assert set(session_row) == set(WebSession.model_fields)
     assert row_to_oauth_state(state_row) == state
     assert row_to_web_session(session_row) == session
+
+
+def test_login_context_row_mapping_is_an_exact_closed_intent_round_trip() -> None:
+    intent = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="task-1",
+    )
+
+    row = web_return_intent_to_row(intent)
+
+    assert set(row) == {
+        "return_intent_kind",
+        "return_intent_task_id",
+        "return_intent_request_id",
+    }
+    assert row_to_web_return_intent(row) == intent
 
 
 @pytest.mark.parametrize(

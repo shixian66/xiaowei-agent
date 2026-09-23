@@ -22,6 +22,8 @@ from xiaowei_agent.contracts import (
     IdentitySource,
     StrictStr,
     WebMode,
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.interfaces.feishu_identity import (
     FeishuIdentityDirectory,
@@ -510,7 +512,10 @@ class WebAuthService:
         if identity_missing:
             try:
                 await self._activations.request_web(
-                    subject_ref=identity.subject_ref
+                    subject_ref=identity.subject_ref,
+                    return_intent=WebReturnIntent(
+                        kind=WebReturnIntentKind.WORKBENCH
+                    ),
                 )
             except ActivationCapacityError:
                 raise WebOAuthUnavailableError from None

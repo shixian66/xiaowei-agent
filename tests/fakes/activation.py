@@ -7,16 +7,21 @@ from xiaowei_agent.application.activation_notification import (
 )
 from xiaowei_agent.application.identity_activation import IdentityActivationService
 from xiaowei_agent.contracts.activation import ActivationRequest
+from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 
 class RecordingActivationRequests:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.failure = failure
         self.web_subjects: list[str] = []
+        self.web_intents: list[WebReturnIntent] = []
         self.groups: list[tuple[str, str, str]] = []
 
-    async def request_web(self, *, subject_ref: str) -> ActivationRequest:
+    async def request_web(
+        self, *, subject_ref: str, return_intent: WebReturnIntent
+    ) -> ActivationRequest:
         self.web_subjects.append(subject_ref)
+        self.web_intents.append(return_intent)
         if self.failure is not None:
             raise self.failure
         return cast(ActivationRequest, object())

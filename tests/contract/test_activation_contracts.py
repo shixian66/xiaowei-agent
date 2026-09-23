@@ -6,6 +6,9 @@ import pytest
 from pydantic import ValidationError
 
 from xiaowei_agent.contracts.activation import (
+    ACTIVATION_SOURCE_INTENT_KINDS,
+    ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS,
+    ACTIVATION_STATUS_DECISION_RULES,
     ActivationLookup,
     ActivationRequest,
     ActivationSource,
@@ -17,6 +20,10 @@ from xiaowei_agent.contracts.enums import IdentitySource, ProductRole
 from xiaowei_agent.contracts.identity import (
     ApproveActivationCommand,
     RejectActivationCommand,
+)
+from xiaowei_agent.contracts.web_navigation import (
+    WebReturnIntent,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.persistence.identity import derive_audit
 from xiaowei_agent.persistence.rows import (
@@ -37,6 +44,7 @@ def _request(**updates: object) -> ActivationRequest:
         "subject_ref": "ou_subject",
         "subject_ref_digest": "a" * 64,
         "source": ActivationSource.WEB_LOGIN,
+        "return_intent": WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
         "source_event_digest": None,
         "source_chat_digest": None,
         "requested_at": _NOW,
@@ -54,6 +62,7 @@ def test_web_and_group_sources_have_closed_reference_shapes() -> None:
     assert _request().source is ActivationSource.WEB_LOGIN
     group = _request(
         source=ActivationSource.FEISHU_GROUP,
+        return_intent=None,
         source_event_digest="b" * 64,
         source_chat_digest="c" * 64,
     )
@@ -62,7 +71,71 @@ def test_web_and_group_sources_have_closed_reference_shapes() -> None:
     with pytest.raises(ValidationError):
         _request(source_event_digest="b" * 64)
     with pytest.raises(ValidationError):
-        _request(source=ActivationSource.FEISHU_GROUP)
+        _request(source=ActivationSource.FEISHU_GROUP, return_intent=None)
+
+
+def test_activation_sources_have_total_reference_and_intent_policies() -> None:
+    assert set(ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS) == set(ActivationSource)
+    assert set(ACTIVATION_SOURCE_INTENT_KINDS) == set(ActivationSource)
+    assert ACTIVATION_SOURCE_INTENT_KINDS[ActivationSource.WEB_LOGIN] == {
+        WebReturnIntentKind.WORKBENCH,
+        WebReturnIntentKind.ADMIN_CENTER,
+        WebReturnIntentKind.ACTIVATION_STATUS,
+    }
+    assert ACTIVATION_SOURCE_INTENT_KINDS[ActivationSource.SAFE_TASK_LINK] == {
+        WebReturnIntentKind.SAFE_TASK_DETAIL
+    }
+    assert ACTIVATION_SOURCE_INTENT_KINDS[ActivationSource.FEISHU_GROUP] == set()
+
+
+@pytest.mark.parametrize(
+    ("source", "intent"),
+    (
+        (
+            ActivationSource.WEB_LOGIN,
+            WebReturnIntent(kind=WebReturnIntentKind.SAFE_TASK_DETAIL, task_id="task-1"),
+        ),
+        (
+            ActivationSource.SAFE_TASK_LINK,
+            WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH),
+        ),
+        (ActivationSource.FEISHU_GROUP, WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)),
+    ),
+)
+def test_activation_source_and_return_intent_must_match(
+    source: ActivationSource,
+    intent: WebReturnIntent,
+) -> None:
+    event_digest = "b" * 64 if source is ActivationSource.FEISHU_GROUP else None
+    chat_digest = "c" * 64 if source is ActivationSource.FEISHU_GROUP else None
+    with pytest.raises(ValidationError):
+        _request(
+            source=source,
+            return_intent=intent,
+            source_event_digest=event_digest,
+            source_chat_digest=chat_digest,
+        )
+
+
+def test_safe_task_link_has_no_group_reference_digests() -> None:
+    intent = WebReturnIntent(
+        kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+        task_id="task-1",
+    )
+    assert (
+        _request(source=ActivationSource.SAFE_TASK_LINK, return_intent=intent).source
+        is ActivationSource.SAFE_TASK_LINK
+    )
+    with pytest.raises(ValidationError):
+        _request(
+            source=ActivationSource.SAFE_TASK_LINK,
+            return_intent=intent,
+            source_event_digest="b" * 64,
+        )
+
+
+def test_activation_status_policy_is_total_over_the_status_enum() -> None:
+    assert set(ACTIVATION_STATUS_DECISION_RULES) == set(ActivationStatus)
 
 
 @pytest.mark.parametrize(
@@ -134,6 +207,7 @@ def test_raw_subject_and_source_references_are_not_dumped_or_represented() -> No
         provider=IdentitySource.FEISHU,
         subject_ref="ou_subject",
         source=ActivationSource.FEISHU_GROUP,
+        return_intent=None,
         source_event_ref="event-1",
         source_chat_ref="chat-1",
     )
@@ -165,6 +239,7 @@ def test_lookup_requires_request_id_and_explicit_scope() -> None:
 def test_activation_request_row_round_trip_preserves_closed_types() -> None:
     request = _request(
         source=ActivationSource.FEISHU_GROUP,
+        return_intent=None,
         source_event_digest="b" * 64,
         source_chat_digest="c" * 64,
     )

@@ -323,8 +323,8 @@ def test_every_web_session_store_implementation_keeps_protocol_keywords(
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(WebSessionStore)
-    # 5：state 签发/消费 + session 轮换/读取/撤销，扩约必须显式过审。
-    assert len(methods) == 5, f"WebSessionStore 的方法集变了：{methods}"
+    # 7：连接测试 state、登录 state 各自签发/消费 + session 轮换/读取/撤销。
+    assert len(methods) == 7, f"WebSessionStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(WebSessionStore, method)

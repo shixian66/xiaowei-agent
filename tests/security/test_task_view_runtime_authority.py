@@ -38,6 +38,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.config
     xiaowei_agent.contracts
     xiaowei_agent.contracts.activation
+    xiaowei_agent.contracts.web_navigation
     xiaowei_agent.contracts.admin_audit
     xiaowei_agent.contracts.answerability
     xiaowei_agent.contracts.approval

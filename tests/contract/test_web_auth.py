@@ -76,7 +76,8 @@ class _ActivationRequests:
         self.capacity = capacity
         self.subjects: list[str] = []
 
-    async def request_web(self, *, subject_ref: str):
+    async def request_web(self, *, subject_ref: str, return_intent):
+        assert return_intent.kind.value == "workbench"
         self.subjects.append(subject_ref)
         if self.capacity:
             raise ActivationCapacityError

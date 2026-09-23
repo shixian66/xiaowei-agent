@@ -520,6 +520,39 @@ WEB_OAUTH_STATES: Final = sa.Table(
 )
 """OAuth state 的单次消费事实；只保存不可逆摘要。"""
 
+WEB_OAUTH_LOGIN_CONTEXTS: Final = sa.Table(
+    "web_oauth_login_contexts",
+    METADATA,
+    sa.Column("state_digest", sa.CHAR(64), primary_key=True),
+    sa.Column("return_intent_kind", sa.Text, nullable=False),
+    sa.Column("return_intent_task_id", sa.Text, nullable=True),
+    sa.Column("return_intent_request_id", sa.Text, nullable=True),
+    sa.ForeignKeyConstraint(
+        ["state_digest"],
+        ["web_oauth_states.state_digest"],
+        name="fk_web_oauth_login_contexts_state_digest",
+        ondelete="CASCADE",
+    ),
+    sa.CheckConstraint(
+        "return_intent_kind IN"
+        " ('activation_status', 'admin_center', 'safe_task_detail', 'workbench')",
+        name="ck_web_oauth_login_contexts_kind_closed",
+    ),
+    sa.CheckConstraint(
+        "(return_intent_kind IN ('workbench', 'admin_center')"
+        " AND return_intent_task_id IS NULL"
+        " AND return_intent_request_id IS NULL)"
+        " OR (return_intent_kind = 'safe_task_detail'"
+        " AND return_intent_task_id IS NOT NULL"
+        " AND return_intent_request_id IS NULL)"
+        " OR (return_intent_kind = 'activation_status'"
+        " AND return_intent_task_id IS NULL"
+        " AND return_intent_request_id IS NOT NULL)",
+        name="ck_web_oauth_login_contexts_intent_shape",
+    ),
+)
+"""登录域 state 的闭集返回意图；state 收割时由外键级联删除。"""
+
 WEB_SESSIONS: Final = sa.Table(
     "web_sessions",
     METADATA,
@@ -748,6 +781,9 @@ ACTIVATION_REQUESTS: Final = sa.Table(
     sa.Column("subject_ref", sa.Text, nullable=False),
     sa.Column("subject_ref_digest", sa.CHAR(64), nullable=False),
     sa.Column("source", sa.Text, nullable=False),
+    sa.Column("return_intent_kind", sa.Text, nullable=True),
+    sa.Column("return_intent_task_id", sa.Text, nullable=True),
+    sa.Column("return_intent_request_id", sa.Text, nullable=True),
     sa.Column("source_event_digest", sa.CHAR(64), nullable=True),
     sa.Column("source_chat_digest", sa.CHAR(64), nullable=True),
     sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False),
@@ -779,11 +815,34 @@ ACTIVATION_REQUESTS: Final = sa.Table(
         name="ck_activation_requests_expiration_after_request",
     ),
     sa.CheckConstraint(
-        "(source = 'web_login' AND source_event_digest IS NULL"
-        " AND source_chat_digest IS NULL)"
+        "(source IN ('web_login', 'safe_task_link')"
+        " AND source_event_digest IS NULL AND source_chat_digest IS NULL)"
         " OR (source = 'feishu_group' AND source_event_digest IS NOT NULL"
         " AND source_chat_digest IS NOT NULL)",
         name="ck_activation_requests_source_digests_match",
+    ),
+    sa.CheckConstraint(
+        "(return_intent_kind IS NULL AND return_intent_task_id IS NULL"
+        " AND return_intent_request_id IS NULL)"
+        " OR (return_intent_kind IN ('workbench', 'admin_center')"
+        " AND return_intent_task_id IS NULL"
+        " AND return_intent_request_id IS NULL)"
+        " OR (return_intent_kind = 'safe_task_detail'"
+        " AND return_intent_task_id IS NOT NULL"
+        " AND return_intent_request_id IS NULL)"
+        " OR (return_intent_kind = 'activation_status'"
+        " AND return_intent_task_id IS NULL"
+        " AND return_intent_request_id IS NOT NULL)",
+        name="ck_activation_requests_return_intent_shape",
+    ),
+    sa.CheckConstraint(
+        "(source = 'feishu_group' AND return_intent_kind IS NULL)"
+        " OR (source = 'safe_task_link'"
+        " AND return_intent_kind = 'safe_task_detail')"
+        " OR (source = 'web_login'"
+        " AND return_intent_kind IN"
+        " ('workbench', 'admin_center', 'activation_status'))",
+        name="ck_activation_requests_source_intent_match",
     ),
     sa.CheckConstraint(
         "(status IN ('pending', 'expired') AND decided_at IS NULL"
@@ -939,6 +998,7 @@ ALL_TABLES: Final = (
     CHANNEL_BINDINGS,
     PROJECTION_SUBSCRIPTIONS,
     WEB_OAUTH_STATES,
+    WEB_OAUTH_LOGIN_CONTEXTS,
     WEB_SESSIONS,
     LOCAL_ADMINS,
     SERVICE_CONFIG_STATE,

@@ -1,6 +1,6 @@
 """W1b 身份激活申请的不可变契约。"""
 
-from typing import Annotated, Literal, Self, TypeAlias
+from typing import Annotated, Final, Literal, Self, TypeAlias
 
 from pydantic import Field, model_validator
 
@@ -16,8 +16,62 @@ from xiaowei_agent.contracts.enums import (
     ActivationStatus,
     IdentitySource,
     ProductRole,
+    WebReturnIntentKind,
 )
 from xiaowei_agent.contracts.identity import BoundedId, ControlledPiiField
+from xiaowei_agent.contracts.web_navigation import WebReturnIntent
+
+ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS: Final = {
+    ActivationSource.WEB_LOGIN: False,
+    ActivationSource.SAFE_TASK_LINK: False,
+    ActivationSource.FEISHU_GROUP: True,
+}
+"""每个来源是否必须携带 event/chat 摘要；键集合必须等于枚举全集。"""
+
+ACTIVATION_SOURCE_INTENT_KINDS: Final = {
+    ActivationSource.WEB_LOGIN: frozenset(
+        {
+            WebReturnIntentKind.WORKBENCH,
+            WebReturnIntentKind.ADMIN_CENTER,
+            WebReturnIntentKind.ACTIVATION_STATUS,
+        }
+    ),
+    ActivationSource.SAFE_TASK_LINK: frozenset(
+        {WebReturnIntentKind.SAFE_TASK_DETAIL}
+    ),
+    ActivationSource.FEISHU_GROUP: frozenset(),
+}
+"""每个来源允许的 return intent；空集合表示必须为 ``None``。"""
+
+ACTIVATION_STATUS_DECISION_RULES: Final = {
+    ActivationStatus.PENDING: (False, frozenset()),
+    ActivationStatus.EXPIRED: (False, frozenset()),
+    ActivationStatus.REJECTED: (True, frozenset()),
+    ActivationStatus.APPROVED: (
+        True,
+        frozenset({ProductRole.USER, ProductRole.OPERATOR}),
+    ),
+}
+"""状态到（是否需要决定字段、允许角色）的总映射。"""
+
+
+def _validate_source_shape(
+    *,
+    source: ActivationSource,
+    has_event: bool,
+    has_chat: bool,
+    return_intent: WebReturnIntent | None,
+) -> None:
+    requires_references = ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS[source]
+    if has_event is not requires_references or has_chat is not requires_references:
+        raise ValueError("activation source references do not match source")
+    allowed_kinds = ACTIVATION_SOURCE_INTENT_KINDS[source]
+    if not allowed_kinds:
+        if return_intent is not None:
+            raise ValueError("activation source must not carry a return intent")
+        return
+    if return_intent is None or return_intent.kind not in allowed_kinds:
+        raise ValueError("activation return intent does not match source")
 
 ControlledPiiOptionalField: TypeAlias = Annotated[
     ControlledPii | None,
@@ -39,6 +93,7 @@ class CreateActivationCommand(Contract):
     provider: Literal[IdentitySource.FEISHU]
     subject_ref: ControlledPiiField
     source: ActivationSource
+    return_intent: WebReturnIntent | None
     source_event_ref: ControlledPiiOptionalField = None
     source_chat_ref: ControlledPiiOptionalField = None
 
@@ -46,10 +101,12 @@ class CreateActivationCommand(Contract):
     def _source_references_match_source(self) -> Self:
         has_event = self.source_event_ref is not None
         has_chat = self.source_chat_ref is not None
-        if self.source is ActivationSource.WEB_LOGIN and (has_event or has_chat):
-            raise ValueError("web login activation must not carry event or chat refs")
-        if self.source is ActivationSource.FEISHU_GROUP and not (has_event and has_chat):
-            raise ValueError("group activation requires event and chat refs")
+        _validate_source_shape(
+            source=self.source,
+            has_event=has_event,
+            has_chat=has_chat,
+            return_intent=self.return_intent,
+        )
         return self
 
 
@@ -71,6 +128,7 @@ class ActivationRequest(Contract):
     subject_ref: ControlledPiiField
     subject_ref_digest: Sha256Hex
     source: ActivationSource
+    return_intent: WebReturnIntent | None
     source_event_digest: Sha256Hex | None = None
     source_chat_digest: Sha256Hex | None = None
     requested_at: AwareDatetime
@@ -90,10 +148,12 @@ class ActivationRequest(Contract):
     def _source_digests_match_source(self) -> Self:
         has_event = self.source_event_digest is not None
         has_chat = self.source_chat_digest is not None
-        if self.source is ActivationSource.WEB_LOGIN and (has_event or has_chat):
-            raise ValueError("web login activation must not carry event or chat digests")
-        if self.source is ActivationSource.FEISHU_GROUP and not (has_event and has_chat):
-            raise ValueError("group activation requires event and chat digests")
+        _validate_source_shape(
+            source=self.source,
+            has_event=has_event,
+            has_chat=has_chat,
+            return_intent=self.return_intent,
+        )
         return self
 
     @model_validator(mode="after")
@@ -102,22 +162,19 @@ class ActivationRequest(Contract):
         has_partial_decision = (self.decided_at is None) != (self.decided_by is None)
         if has_partial_decision:
             raise ValueError("decision time and actor must be present together")
-        if self.status in {ActivationStatus.PENDING, ActivationStatus.EXPIRED}:
-            if has_decision or self.approved_role is not None:
-                raise ValueError("pending or expired activation has no decision fields")
-            return self
-        if not has_decision:
-            raise ValueError("a decided activation requires decision time and actor")
-        if self.status is ActivationStatus.REJECTED:
-            if self.approved_role is not None:
-                raise ValueError("a rejected activation must not carry a role")
-            return self
-        if self.approved_role not in {ProductRole.USER, ProductRole.OPERATOR}:
-            raise ValueError("activation may approve only user or operator")
+        decision_required, allowed_roles = ACTIVATION_STATUS_DECISION_RULES[self.status]
+        if has_decision is not decision_required:
+            raise ValueError("activation decision fields do not match status")
+        if self.approved_role not in allowed_roles:
+            if self.approved_role is not None or allowed_roles:
+                raise ValueError("activation approved role does not match status")
         return self
 
 
 __all__ = [
+    "ACTIVATION_SOURCE_INTENT_KINDS",
+    "ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS",
+    "ACTIVATION_STATUS_DECISION_RULES",
     "ActivationLookup",
     "ActivationRequest",
     "ActivationSource",
