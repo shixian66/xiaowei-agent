@@ -2,54 +2,8 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
-> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
-> 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
-> `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机有
-> Docker client、standalone Compose 与可用的 Colima daemon，但未提供 PostgreSQL DSN；
-> 隔离 PostgreSQL/Compose 运行证据仍来自旧版 GitHub CI。项目负责人已于
-> 2026-09-09 按**离线范围**验收并授权归档，历史事实见
-> [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
-> 真实渠道退出标准已经通过。
-> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。W0 文档与 ADR 真源收口已由
-> PR #61 合入 `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`，该轮只改 Markdown 与一个
-> 文档契约测试，**没有产品源码**。**W1a 用户、权限与 Admin 审计写内核已离线实现**：按批准计划
-> `docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md` 分三个切片交付——A 契约与
-> `rev_0014` 四张表、B 两个 Store 与审计原子性、C 旧身份一次性迁移三者均已合入 `main`。授权事实只有
-> `UserDirectoryStore.apply()` 一条写路径，审计由 store 从命令派生并与授权改变同事务提交。
-> **W1b 身份激活流程与单次群通知已离线实现**：未知 OAuth 身份只创建申请并返回
-> `activation_pending`，未知群身份只创建申请并发送不含正文或 Admin 名单的通用卡片；批准仍复用
-> W1a 的目录与审计原子写路径，重新登录后才生效。运行时身份解析只读数据库目录，静态身份文件
-> 只作部署前一次性迁移输入。证据等级仍到 `tests` 为止：没有登录页改造、Admin 待办/用户职责/
-> 审计 UI、可靠通知、真实飞书调用、部署、canary 或用户验收。当前切片通过精确 SHA 复审并合入后，
-> 下一步是 W2 详细计划与实现；I3 受治理资料查询**延期但未取消**。
-> RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
-> `tests`。它没有部署或连接真实飞书。
-> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
-> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、模型调用端口只在 task worker 装配、
-> durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
-> PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
-> Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
-> preserved Runner's one-shot grant renewal, fixed projector package ownership and
-> completed its test surface. PR 3B is an offline SDK boundary only. Host
-> Gemini key stays outside Settings and `.env.example`. Since RI5 it lives in the
-> Git-ignored host file `.config/integrations.json` (mounted as
-> `/run/xiaowei-config/integrations.json`), written by the Web admin plane and mounted
-> read-only into the processes that need it; `api` does not mount it.
-> 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
-> 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
-> 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
-> I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档。普通对话的回答是**由当前 `CapabilitySnapshot`
-> 确定性投影出来的能力目录**：逐条列出已注册能力、操作、`read_class` 与所经 gateway，并带上
-> 快照标识作为来源；回答只由声明决定，与用户文本无关，不调用工具、不访问外部系统、不读取历史。
-> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4；I3 尚未开始。
-> 能力目录只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**——不能把 I2
-> 写成真实模型、资料查询、日志分析、真实渠道、真实目标、部署或用户验收。
-> 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
-
-未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现
-事实。M7 主工作台只适配桌面端，窄屏仅保证从飞书卡片进入的单任务安全详情可读。
+> 当前状态：请查 [当前状态](AGENT_HANDOFF.md#current-status)，其中记录精确基线、能力证据、有效授权、风险与下一步。
+> 开发与复审使用 [AGENTS.md](AGENTS.md#开发与评审流程)；本文件负责定位、导航和启动，不维护阶段进度副本。
 
 ## 先看什么
 

@@ -1,6 +1,6 @@
 # 小维 Agent 2.0 目标架构
 
-> 状态：Target V1 / 架构基线草案。本文描述从 0 开始建设的稳定目标，不声称当前代码、依赖、容器或线上环境已经存在。当前实际进度只看 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 状态：Target V1 / 架构基线草案。本文描述从 0 开始建设的稳定目标，不声称当前代码、依赖、容器或线上环境已经存在。实施进度与证据只看 [当前状态](AGENT_HANDOFF.md#current-status)。
 
 ## 1. 定位与设计结论
 
@@ -386,7 +386,7 @@ Evidence 或 capability，不产生 `ToolResult`，不进入 Policy/SQLGuard/App
 该边界是显式决策而非实现推断，见
 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md) §RI5 修订 R4 与
 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R3（两者已于 2026-09-14
-接受；接受设计边界不等于已实现，源码仍待 RI5 实现计划通过后按 TDD 落地）。任何让探针顺手做真实工作的扩展——执行查询、
+接受；设计授权与实现、真实调用证据分别记录于 handoff）。任何让探针顺手做真实工作的扩展——执行查询、
 读取业务数据、写入运维目标——都必须回到完整安全链，或先修订上述 ADR。
 
 真实 connector 必须注册为 target-bound adapter，由 Gateway 按
@@ -682,15 +682,15 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 
 `ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于
 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，入口不直接
-依赖 Engine。RI3 的 Gemini adapter 复用现有 `interfaces.secret_file.read_secret_file()`，不借模型
-接入重构飞书、StarRocks 或 PostgreSQL 的凭证读取。共同的 owner/mode/中间目录 symlink hardening 若
-确有必要，应在对应真实接入阶段按真实调用方范围单独实施。
+依赖 Engine。Provider 凭据按 RI5 的受信装配从 `integration_config_file` JSON 边界读取；
+单行 `interfaces.secret_file` 不是该 JSON 的第二条读取路径。owner/mode/中间目录等宿主权限边界
+必须在对应真实接入阶段结合挂载与实际调用方验证，不能从静态配置推定完成。
 
 Secrets are mounted only through fixed file references resolved by a trusted composition
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
 worker, listener and channel worker publish no host ports.
 
-**当前已实现口径（RI5，证据等级 `tests`，未部署）**：Provider 凭据不再走 Docker secret。
+**Provider 凭据与进程权限契约（ADR-015 RI5 修订）**：Provider 凭据不走 Docker secret。
 Gemini 与飞书的明文唯一真源是宿主 Git-ignored 的 `.config/integrations.json`，容器内以
 `/run/xiaowei-config/integrations.json` 出现：`web-app` 读写挂载该目录，实际需要凭据的进程
 只读挂载，`api` 不挂载。模型 override 只剩装配开关，在 `services.worker.environment` 下声明
@@ -714,18 +714,15 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-**RI5 修订的实现状态**：[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-§RI5 修订 R1 用 `.config/integrations.json` 取代原 Gemini/飞书 Secret 文件，并把镜像内
-`xiaowei` 用户固定为 UID/GID `10001:10001`。该修订于 2026-09-14 被接受，**已离线实现**，
-上一段就是当前口径；证据等级到 `tests` 为止，没有部署、canary 或真机验收证据。
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 的 RI5 修订 R1
+规定 `.config/integrations.json` 与镜像内 UID/GID `10001:10001`；实施与运行证据见 handoff。
 
 基础 Compose 继续只发布 loopback 端口，局域网发布只能由独立 override 打开。
 **2026-09-20 修订**：`ADR-014` Web 产品修订 R2 取消了"首次强制改密必须在 loopback 阶段完成"
 的先后硬门；`WebMode.LAN_HTTP` 只接受 loopback/RFC1918 Host 的形态约束不在替代范围内，
 继续生效。
 
-**W1a 写内核的实现状态**：持久用户目录与 Admin 审计的**写内核已离线实现**。迁移 `rev_0014`
-建了 `user_accounts`、`user_role_assignments`、`external_identities` 与 `admin_audit_events` 四张表，
+**用户目录与 Admin 审计契约（W1a）**：迁移 `rev_0014` 定义 `user_accounts`、`user_role_assignments`、`external_identities` 与 `admin_audit_events` 四张表，
 并给 `local_admins` 补上 `user_id` 外键。`UserDirectoryStore.apply()` 是前三张表与
 `local_admins.user_id` 的**唯一写入口**：本地管理员 bootstrap 与旧身份迁移都是它的命令成员，
 不另开写方法、不另开事务。每一次授权改变都在**同一个事务**里带上一条审计事件，而那条事件的
@@ -734,10 +731,8 @@ this topology must not be described as an activated channel or model.
 `append_denied` / `load` 四个窄方法，`persistence/` 里不存在针对 `admin_audit_events` 的
 `UPDATE` / `DELETE`。飞书 `open_id` 只以 domain-separated 摘要落库。旧静态身份文档由一次性、
 整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。
-**证据等级到 `tests` 为止**：这是离线写内核，不是 Admin 页面、审计查询 API、真实飞书调用、
-部署或用户验收。
 
-**W1b 激活流程的实现状态**：身份激活的两个切片已离线实现。`rev_0015` 建立
+**身份激活契约（W1b）**：`rev_0015` 建立
 `activation_requests`，申请创建/过期由 `ActivationStore` 承载，批准或拒绝仍只经
 `UserDirectoryStore.apply()`，使申请终态、目录授权与审计保持同事务。入口层通过
 `IdentityActivationService` 复用该写路径，并以 `DirectoryFeishuIdentityDirectory` 每次从
@@ -749,18 +744,13 @@ Session；已经绑定但停用或失去当前作用域角色的身份仍按普�
 正文、链接、按钮、Admin 名单或 @ 的通用卡片；私聊未知身份继续 fail-closed。批准/拒绝当前只有
 模块级一次性入口，W1b 不建设管理页面、通知人绑定或可靠投递队列。
 
-**证据等级仍到 `tests` 为止**：离线与一次性 PostgreSQL 16.15 测试验证了申请幂等、拒绝后新建、
-批准后重新登录和群卡片路径；没有连接**真实飞书**，没有真实应用/凭据/网络证据，也没有**部署**、
-**canary** 或**用户验收**。部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时
-自动迁移。
+部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时自动迁移。
 
-**仍无实现载体的未来产品目标**：W2 的登录改造与 `LocalCredential.username`、
-W3 的 Admin 待办/用户职责/审计 UI 与可靠通知、**W4a** 的三域配置文件与进程挂载矩阵、
-**W5** 的 release override 与边缘限流。
-字段级定义见
+**产品边界与阶段归属**：W2 的登录改造与 `LocalCredential.username`，W3 的 Admin 待办/
+用户职责/审计 UI 与可靠通知，W4a 的三域配置文件和进程挂载矩阵，W5 的 release override 与
+边缘限流，按 [总体开发计划](DEVELOPMENT_PLAN.md) 分阶段交付。字段级定义见
 [Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
-与修订后的 ADR-007/013/014/015，本节不复制。这些目标当前**没有**源码、迁移、运行、部署或
-用户验收证据。
+及 ADR-007/013/014/015。各阶段实施、测试、真实运行、部署与验收状态只由 handoff 记录。
 
 `.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
@@ -832,14 +822,13 @@ Multi-Agent 必须在 Runner 准入结论之后**另设独立里程碑和独立 
   → 复测
 ```
 
-支撑该闭环的 trace 必须能把一次失败定位到具体阶段。截至当前 `main`，M2/M3 已建立 Intent、
-Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 九个阶段；RI3
-获批并实现后才新增 Model，形成十个阶段。Model 只描述 provider/结构化复验；Intent 仍描述最终被
+支撑该闭环的 trace 必须能把一次失败定位到具体阶段。业务阶段包括 Intent、Resolver、Planner、
+Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 与 Model。Model 只描述 provider/结构化复验；Intent 仍描述最终被
 接受的 model/rule draft。模型失败并成功 fallback 时 Model 为失败、Intent 为成功，根因不会被重复
 记到两个阶段。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3 与 RI3。
 
-ADR-017/I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，位于 PlanStore
-读回/投影校验之后、StepAdmission/Gateway 之前；当前错误归因阶段为十一个阶段。Disclosure
+ADR-017/I1-D 定义 `PipelineStage.DISCLOSURE`，位于 PlanStore
+读回/投影校验之后、StepAdmission/Gateway 之前；完整错误归因闭集为十一个阶段。Disclosure
 只表示披露事实与审计持久化，不表示渠道送达、用户已读、审批通过或真实目标已联网。
 
 ### 13.2 eval 的边界
