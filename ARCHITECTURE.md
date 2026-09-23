@@ -1,6 +1,6 @@
 # 小维 Agent 2.0 目标架构
 
-> 状态：Target V1 / 架构基线草案。本文描述从 0 开始建设的稳定目标，不声称当前代码、依赖、容器或线上环境已经存在。当前实际进度只看 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 状态：Target V1 / 架构基线草案。本文描述从 0 开始建设的稳定目标，不声称当前代码、依赖、容器或线上环境已经存在。实施进度与证据只看 [当前状态](AGENT_HANDOFF.md#current-status)。
 
 ## 1. 定位与设计结论
 
@@ -242,7 +242,7 @@ attempt. Each attempt has exactly one owner; the public Runtime stays small.
 
 ### 5.3 Interaction Context / Clarification
 
-I1/I2 目标是淘汰通用父任务历史与 `ContextAssembler` 目标语义。TaskStore 不保存普通 conversation
+I1/I2 不使用通用父任务历史或 `ContextAssembler`。TaskStore 不保存普通 conversation
 history，provider chat/session 也不是任务事实源。I2 的普通对话只返回由当前 `CapabilitySnapshot`
 投影出来的能力目录：回答与用户文本无关，不读取历史、不保存长期记忆、不调用工具、不进入
 Resolver/Planner/Gateway。带 `clarification_parent_task_id` 的子任务不能走这条通道，否则一次性
@@ -261,21 +261,18 @@ constants; RI3 does not enable provider caching or sessions. Variable evidence i
 projected separately. Typed builders apply raw per-field character/UTF-8-validity checks
 and aggregate character/count limits before the total `redaction.scrub_text()` function;
 there is no redaction-exception branch. Model ports never receive `RequestEnvelope`.
-The 8,192-character current/history field limit itself implies a 32 KiB UTF-8 ceiling;
-it is not duplicated as an unreachable second guard. The 64,000-character history limit
-likewise implies at most 256,000 UTF-8 bytes (less than 256 KiB), so there is no duplicate
-history-byte branch. Because replacement can expand text, every scrubbed history round
-and the retained aggregate are rechecked against the same 8,192/64,000-character budgets;
-an overflowing round and all older rounds are omitted. The complete typed request is then
-serialized again and must fit the independent 512 KiB cap. If the current request alone
-cannot fit, the call is rejected.
+`InteractionClassifierRequest` 只接受 `user_text` 与可选 `clarification`，不接收通用 history
+或已保存 advisory。`user_text` 在脱敏前检查 8,192 字符上限与 UTF-8 有效性，脱敏后的 typed
+request 再复验字段约束；澄清内容来自 Runtime 读取的 `ClarificationRecord`。
+8,192 字符本身隐含 32 KiB UTF-8 上限，不重复设置不可达的第二门。完整 typed request 的
+序列化 JSON 另受 512 KiB 总量上限约束，超限拒绝；不存在旧通用历史的截断/保留预算。
 
 The StarRocks advisory projector derives names and order directly from
 `SLOW_QUERY_SURFACE.allowed_columns`, takes at most 20 rows, and applies closed type
 rules to every derived field. Missing, extra or invalid columns reject the whole batch.
 `stmt`, `clientIp`, `digest`, target/config internals, full rows, secrets, connections
-and raw objects never enter model context. History and advisory evidence remain
-understanding/explanation input; they are not a side channel into planner arguments.
+and raw objects never enter model context. Advisory evidence is explanation input;
+it is not a side channel into planner arguments or later classifier requests.
 The projector runs only after successful deterministic execution and a sufficient
 Answerability verdict. Rendering includes a stored advisory only for a `SUCCEEDED` task
 whose rebuilt typed input digest still matches.
@@ -345,7 +342,7 @@ owner/token 续租验证，再启动唯一 heartbeat。Runner 仍在具体持久
 自建 heartbeat。`plan`、`target` 与 `context` 出现在两个方法里，是因为**恢复时的漂移检测需要活的
 对照物**：调用方必须以持久化 submission 重新解析并编译，再把当前计划、目标与 policy revision 交给
 Runner，与 `PlanStore` 中最初保存的事实逐项比较。这里的“重新解析”只消费已持久化的
-`AcceptedIntentDraft`，不重新调模型。若两边都从存储读最初计划，比较的是同一个值，检查恒真——
+`AcceptedInteractionArtifact`，不重新调模型。若两边都从存储读最初计划，比较的是同一个值，检查恒真——
 安全检查会静默退化成空操作。恢复通过后仍执行存储中的原计划；当前计划只用于验证。Runner 不拥有
 领域安全规则，因此不能自行重算这些值。
 
@@ -386,7 +383,7 @@ Evidence 或 capability，不产生 `ToolResult`，不进入 Policy/SQLGuard/App
 该边界是显式决策而非实现推断，见
 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md) §RI5 修订 R4 与
 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) §RI5 修订 R3（两者已于 2026-09-14
-接受；接受设计边界不等于已实现，源码仍待 RI5 实现计划通过后按 TDD 落地）。任何让探针顺手做真实工作的扩展——执行查询、
+接受；设计授权与实现、真实调用证据分别记录于 handoff）。任何让探针顺手做真实工作的扩展——执行查询、
 读取业务数据、写入运维目标——都必须回到完整安全链，或先修订上述 ADR。
 
 真实 connector 必须注册为 target-bound adapter，由 Gateway 按
@@ -405,9 +402,9 @@ preflight 闭合逻辑目标和物理集群；完整决策见
   与 preflight verdict；Evidence builder 逐项比对获批策略。失败结果只允许记为
   `preflight=unverified`，不能借 adapter payload 或 limitations 把失败伪装成已验证。
 - `ExternalContent` 统一包装日志、错误、知识、网页和用户粘贴文本，标记来源和不可信级别。
-- working memory 存在 TaskStore；result memory 只存脱敏、限长、可重建摘要，不存完整 rows 或 secret。I1
-  目标删除普通显式父任务历史；澄清补槽只走 `clarification_parent_task_id`，无父引用时不自动推断历史。
-- `AcceptedIntentDraft` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
+- 任务状态与证据分别由 TaskStore 与 EvidenceLedger 持久化，不由模型会话承载。普通显式父任务历史
+  不进入模型；澄清补槽只走 `clarification_parent_task_id`，无父引用时不自动推断历史。
+- `AcceptedInteractionArtifact` 是任务级 insert-once 的不可信输入事实；任务 retry 读回它，仍以当前 capability snapshot、target 和 policy 重跑确定性解析。provider 已收到请求但保存前崩溃时允许再次调用，这是 RI3 明确接受的无执行副作用 at-least-once 语义。
 - Reflection 只读消费 `EvidenceEnvelope`，产出结构化的可答性结论（充分性、限制、缺失项、是否降级、是否需补充信息）；它不产生 `ToolCall`、不修改 `ExecutionPlan`、不写 TaskStore。边界见 §4.2。
 - `ModelAdvisory` 是 task 级 insert-once 的可选展示事实；失败时不保存并保留确定性答案。TaskView 只在
   原任务已终态时附加它，它不能修改事实、限制、状态、证据引用或 `next_steps`，也不能触发新模型调用。
@@ -422,7 +419,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
 | `RequestEnvelope` | request_id、tenant_id、actor、channel、text、idempotency_key、environment_id（可选） | 入口统一上下文，禁止入口自造业务字段；Web 的 parent selector 不成为执行字段 |
-| `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选，I1 目标） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
+| `TaskSubmission` | envelope、context、as_of、clarification_parent_task_id（可选） | 只消费 `CLARIFICATION_REQUIRED` 父任务；不表达普通历史、最近消息或任意终态继续 |
 | `RequestContext` | tenant_id、actor、environment_id、trace_id、policy_revision | 三项执行上下文必填；模块边界显式传递，不从全局变量读取 |
 | `InteractionDraft` | proposed_kind、capability_draft、confidence、source | 模型/规则的不可信交互候选；`InteractionKind` 与 `RoutingDisposition` 由确定性 Router 采纳或拒绝 |
 | `AcceptedInteractionArtifact` | task_id、artifact_version、draft、origin、provider/model metadata、input/result digest、usage、fencing | I1 的 insert-once 交互事实；替代新运行路径的 accepted intent，artifact version 2 才会被 Runtime loader 解释，模型元数据不来自模型响应 |
@@ -523,16 +520,15 @@ sha256(canonical_json({
 TaskStore 是任务事实真源，至少提供：幂等创建、CAS 状态迁移、worker lease、heartbeat、fencing token、stale recovery、终态保护、审批记录和审计事件。所有写入都必须采纳存储层返回的 winner；调用方不能用本地旧对象覆盖 winner。
 
 After real-model integration, TaskStore additionally carries only insert-once
-`AcceptedIntentDraft` and `ModelAdvisory` artifacts. Both writes bind the current
+`AcceptedInteractionArtifact` and `ModelAdvisory` artifacts. Both writes bind the current
 grant/lease/fencing state. Exact digest replay returns the winner; different content,
 an expired lease or stale fencing is rejected. Recovery reads accepted artifacts first.
 If the provider received a call before local save, only that unsaved model call may
 repeat under ADR-015's no-execution-side-effect at-least-once rule.
 Model call count, latency, usage and fallback enter the existing safe trace/audit path.
-PR 3B ports already return accepted DTO plus nullable bounded usage atomically, while the
-composition root exposes the same immutable invocation profile to the adapter and future
-application service; PR 3C therefore does not hardcode provider/model/revision or inspect
-the concrete adapter when persisting artifacts.
+Model ports return accepted DTO plus nullable bounded usage atomically. The composition
+root exposes the same immutable invocation profile to the adapter and application service;
+artifact persistence does not inspect the concrete adapter or duplicate its profile.
 The trace contract adds `PipelineStage.MODEL` plus typed `ModelCallObservation` (call
 kind, total elapsed milliseconds, request count, nullable input/output usage and a
 closed fallback code). Model-stage free-form detail remains empty. Prompt, response,
@@ -567,9 +563,9 @@ A task can therefore remain RUNNING for up to 180 extra seconds. On recovery, co
 steps are adopted from the step journal without Gateway replay; only an advisory not
 yet saved may be requested again.
 
-渠道 ingress 当前仍是 task submission 后写 binding/projection 的既有路径。RI3 的 Web parent 只增加
-scoped lookup 与 Worker 二次核验，不把渠道原子性债务混入模型接入。若后续要修半聚合窗口，应单独
-立项并覆盖 Web/飞书全部失败和幂等路径。
+渠道 ingress 仍是 task submission 后写 binding/projection 的既有路径；澄清子任务只消费
+`CLARIFICATION_REQUIRED` 父任务，并在创建与 Worker 执行时重新核验。通用 Web parent 不再是
+受支持路径。若后续要修渠道半聚合窗口，应单独立项并覆盖 Web/飞书全部失败和幂等路径。
 
 `CANCELED` 只是终态闭集成员，不等于本阶段已有用户取消命令。RI3 不新增取消 API；进程级
 `CancelledError`/SIGTERM 取消并等待正在运行的模型 coroutine，随后依赖现有 lease/stale recovery，
@@ -682,15 +678,15 @@ channel worker 与 Web app 只装配各自所需的窄端口，不复制业务�
 
 `ReadinessProbe` Protocol 与只含数据库、migration head 和装配状态的 `ReadinessReport` 位于
 `contracts/`；具体检查实现位于 `persistence/` 并由 `interfaces/local_stack.py` 注入，入口不直接
-依赖 Engine。RI3 的 Gemini adapter 复用现有 `interfaces.secret_file.read_secret_file()`，不借模型
-接入重构飞书、StarRocks 或 PostgreSQL 的凭证读取。共同的 owner/mode/中间目录 symlink hardening 若
-确有必要，应在对应真实接入阶段按真实调用方范围单独实施。
+依赖 Engine。Provider 凭据按 RI5 的受信装配从 `integration_config_file` JSON 边界读取；
+单行 `interfaces.secret_file` 不是该 JSON 的第二条读取路径。owner/mode/中间目录等宿主权限边界
+必须在对应真实接入阶段结合挂载与实际调用方验证，不能从静态配置推定完成。
 
 Secrets are mounted only through fixed file references resolved by a trusted composition
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
 worker, listener and channel worker publish no host ports.
 
-**当前已实现口径（RI5，证据等级 `tests`，未部署）**：Provider 凭据不再走 Docker secret。
+**Provider 凭据与进程权限契约（ADR-015 RI5 修订）**：Provider 凭据不走 Docker secret。
 Gemini 与飞书的明文唯一真源是宿主 Git-ignored 的 `.config/integrations.json`，容器内以
 `/run/xiaowei-config/integrations.json` 出现：`web-app` 读写挂载该目录，实际需要凭据的进程
 只读挂载，`api` 不挂载。模型 override 只剩装配开关，在 `services.worker.environment` 下声明
@@ -714,18 +710,15 @@ Offline smoke proves only default-off behavior in the shared image. Until separa
 real-application, credential, network, deployment and canary authorization exists,
 this topology must not be described as an activated channel or model.
 
-**RI5 修订的实现状态**：[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-§RI5 修订 R1 用 `.config/integrations.json` 取代原 Gemini/飞书 Secret 文件，并把镜像内
-`xiaowei` 用户固定为 UID/GID `10001:10001`。该修订于 2026-09-14 被接受，**已离线实现**，
-上一段就是当前口径；证据等级到 `tests` 为止，没有部署、canary 或真机验收证据。
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 的 RI5 修订 R1
+规定 `.config/integrations.json` 与镜像内 UID/GID `10001:10001`；实施与运行证据见 handoff。
 
 基础 Compose 继续只发布 loopback 端口，局域网发布只能由独立 override 打开。
 **2026-09-20 修订**：`ADR-014` Web 产品修订 R2 取消了"首次强制改密必须在 loopback 阶段完成"
 的先后硬门；`WebMode.LAN_HTTP` 只接受 loopback/RFC1918 Host 的形态约束不在替代范围内，
 继续生效。
 
-**W1a 写内核的实现状态**：持久用户目录与 Admin 审计的**写内核已离线实现**。迁移 `rev_0014`
-建了 `user_accounts`、`user_role_assignments`、`external_identities` 与 `admin_audit_events` 四张表，
+**用户目录与 Admin 审计契约（W1a）**：迁移 `rev_0014` 定义 `user_accounts`、`user_role_assignments`、`external_identities` 与 `admin_audit_events` 四张表，
 并给 `local_admins` 补上 `user_id` 外键。`UserDirectoryStore.apply()` 是前三张表与
 `local_admins.user_id` 的**唯一写入口**：本地管理员 bootstrap 与旧身份迁移都是它的命令成员，
 不另开写方法、不另开事务。每一次授权改变都在**同一个事务**里带上一条审计事件，而那条事件的
@@ -734,10 +727,8 @@ this topology must not be described as an activated channel or model.
 `append_denied` / `load` 四个窄方法，`persistence/` 里不存在针对 `admin_audit_events` 的
 `UPDATE` / `DELETE`。飞书 `open_id` 只以 domain-separated 摘要落库。旧静态身份文档由一次性、
 整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。
-**证据等级到 `tests` 为止**：这是离线写内核，不是 Admin 页面、审计查询 API、真实飞书调用、
-部署或用户验收。
 
-**W1b 激活流程的实现状态**：身份激活的两个切片已离线实现。`rev_0015` 建立
+**身份激活契约（W1b）**：`rev_0015` 建立
 `activation_requests`，申请创建/过期由 `ActivationStore` 承载，批准或拒绝仍只经
 `UserDirectoryStore.apply()`，使申请终态、目录授权与审计保持同事务。入口层通过
 `IdentityActivationService` 复用该写路径，并以 `DirectoryFeishuIdentityDirectory` 每次从
@@ -749,18 +740,13 @@ Session；已经绑定但停用或失去当前作用域角色的身份仍按普�
 正文、链接、按钮、Admin 名单或 @ 的通用卡片；私聊未知身份继续 fail-closed。批准/拒绝当前只有
 模块级一次性入口，W1b 不建设管理页面、通知人绑定或可靠投递队列。
 
-**证据等级仍到 `tests` 为止**：离线与一次性 PostgreSQL 16.15 测试验证了申请幂等、拒绝后新建、
-批准后重新登录和群卡片路径；没有连接**真实飞书**，没有真实应用/凭据/网络证据，也没有**部署**、
-**canary** 或**用户验收**。部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时
-自动迁移。
+部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时自动迁移。
 
-**仍无实现载体的未来产品目标**：W2 的登录改造与 `LocalCredential.username`、
-W3 的 Admin 待办/用户职责/审计 UI 与可靠通知、**W4a** 的三域配置文件与进程挂载矩阵、
-**W5** 的 release override 与边缘限流。
-字段级定义见
+**产品边界与阶段归属**：W2 的登录改造与 `LocalCredential.username`，W3 的 Admin 待办/
+用户职责/审计 UI 与可靠通知，W4a 的三域配置文件和进程挂载矩阵，W5 的 release override 与
+边缘限流，按 [总体开发计划](DEVELOPMENT_PLAN.md) 分阶段交付。字段级定义见
 [Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
-与修订后的 ADR-007/013/014/015，本节不复制。这些目标当前**没有**源码、迁移、运行、部署或
-用户验收证据。
+及 ADR-007/013/014/015。各阶段实施、测试、真实运行、部署与验收状态只由 handoff 记录。
 
 `.gitignore` 与 `.dockerignore` 必须排除 `.secrets`、`.env`/`.env.*`；模型 runbook 禁止执行或留存会打印解析环境的
 `docker compose config --environment`。普通 `docker compose config` 只可记录不含 secret 值的脱敏
@@ -832,14 +818,13 @@ Multi-Agent 必须在 Runner 准入结论之后**另设独立里程碑和独立 
   → 复测
 ```
 
-支撑该闭环的 trace 必须能把一次失败定位到具体阶段。截至当前 `main`，M2/M3 已建立 Intent、
-Resolver、Planner、Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 九个阶段；RI3
-获批并实现后才新增 Model，形成十个阶段。Model 只描述 provider/结构化复验；Intent 仍描述最终被
+支撑该闭环的 trace 必须能把一次失败定位到具体阶段。业务阶段包括 Intent、Resolver、Planner、
+Admission、Gateway、Evidence、Reflection、Rendering、Lifecycle 与 Model。Model 只描述 provider/结构化复验；Intent 仍描述最终被
 接受的 model/rule draft。模型失败并成功 fallback 时 Model 为失败、Intent 为成功，根因不会被重复
 记到两个阶段。相应契约的建立时点见 `DEVELOPMENT_PLAN.md` 的 M1/M2/M3 与 RI3。
 
-ADR-017/I1-D 实现 `ExecutionDisclosure` 后新增 `PipelineStage.DISCLOSURE`，位于 PlanStore
-读回/投影校验之后、StepAdmission/Gateway 之前；当前错误归因阶段为十一个阶段。Disclosure
+ADR-017/I1-D 定义 `PipelineStage.DISCLOSURE`，位于 PlanStore
+读回/投影校验之后、StepAdmission/Gateway 之前；完整错误归因闭集为十一个阶段。Disclosure
 只表示披露事实与审计持久化，不表示渠道送达、用户已读、审批通过或真实目标已联网。
 
 ### 13.2 eval 的边界

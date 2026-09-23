@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
 _PLAN = _ROOT / "docs/plans/M4-postgres-taskstore.md"
 _REPORT = _ROOT / "docs/handoff/M4-acceptance-report.md"
@@ -21,6 +23,65 @@ _PLAN_TEXT = _PLAN.read_text(encoding="utf-8")
 _REPORT_TEXT = _REPORT.read_text(encoding="utf-8")
 
 _VERSION = re.compile(r"V(\d+\.\d+)")
+
+
+def _check_current_status_reference(source: str, handoff: str) -> None:
+    """当前状态入口必须指向唯一真源及真实存在的锚点。"""
+    targets = re.findall(r"\[当前状态\]\(([^)]+)\)", source)
+    assert targets == ["AGENT_HANDOFF.md#current-status"], targets
+    assert handoff.count('<a id="current-status"></a>') == 1
+    # 状态链接之外的阶段流水会再次产生可独立漂移的副本。
+    for pattern in (
+        r"main@[0-9a-f]+",
+        r"\d+ passed",
+        r"已离线实现",
+        r"当前开发机",
+        r"当前状态[：:]\s*(?:W\d|RI\d|M\d|I\d)",
+    ):
+        assert not re.search(pattern, source), pattern
+
+
+@pytest.mark.parametrize("name", ["README.md", "ARCHITECTURE.md"])
+def test_current_status_entry_points_to_the_single_handoff(name: str) -> None:
+    source = (_ROOT / name).read_text(encoding="utf-8")
+    _check_current_status_reference(source, (_ROOT / "AGENT_HANDOFF.md").read_text())
+
+
+@pytest.mark.parametrize(
+    ("source", "handoff", "valid"),
+    [
+        ('[当前状态](AGENT_HANDOFF.md#current-status)', '<a id="current-status"></a>', True),
+        ('[当前状态](README.md#current-status)', '<a id="current-status"></a>', False),
+        ('[当前状态](AGENT_HANDOFF.md#missing)', '<a id="current-status"></a>', False),
+        ('[当前状态](AGENT_HANDOFF.md#current-status)', '', False),
+        ('无链接', '<a id="current-status"></a>', False),
+        (
+            '[当前状态](AGENT_HANDOFF.md#current-status)\nW1b 已离线实现',
+            '<a id="current-status"></a>',
+            False,
+        ),
+        (
+            '[当前状态](AGENT_HANDOFF.md#current-status)\n## 启动\n说明\n'
+            '当前状态：W1a 详细实施计划送审，计划获批后才可开始',
+            '<a id="current-status"></a>',
+            False,
+        ),
+        (
+            '[当前状态](AGENT_HANDOFF.md#current-status)\n## 验证\n'
+            '当前开发机缺少 Docker，本轮没有运行验证',
+            '<a id="current-status"></a>',
+            False,
+        ),
+    ],
+)
+def test_current_status_reference_rejects_broken_or_duplicated_truth(
+    source: str, handoff: str, valid: bool
+) -> None:
+    if valid:
+        _check_current_status_reference(source, handoff)
+    else:
+        with pytest.raises(AssertionError):
+            _check_current_status_reference(source, handoff)
 
 
 def plan_version() -> str:
@@ -192,15 +253,12 @@ _I0_TRUTH_DOC_TERMS = {
         "SlotVerifier → PlanCompiler",
     ),
     "README.md": (
-        "智能交互入口 I0-DOC 已绑定",
-        "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档",
-        "`knowledge_lookup` 与 `log_analysis` 仍保持拒绝",
+        "[当前状态](AGENT_HANDOFF.md#current-status)",
         "InteractionArtifact → Router → Resolver → SlotVerifier → PlanCompiler",
     ),
     "AGENT_HANDOFF.md": (
-        "I0-DOC 目标",
-        "`main` 已包含 I1-A Task 1.1–1.3",
-        "Runtime 在 Resolver 前读写",
+        "I1-D Eval/closure",
+        "Task 1.4/1.5",
         "ADR-017",
     ),
 }
@@ -252,27 +310,13 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     """反例：删除 I0 承重段落时，绑定测试必须能红。"""
     docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
 
-    readme_i0_status = (
-        "> 智能交互入口 I0-DOC 已绑定 "
-        "[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。\n"
-        "> I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档。普通对话的回答是"
-        "**由当前 `CapabilitySnapshot`\n"
-        "> 确定性投影出来的能力目录**：逐条列出已注册能力、操作、`read_class` 与所经 "
-        "gateway，并带上\n"
-        "> 快照标识作为来源；回答只由声明决定，与用户文本无关，不调用工具、"
-        "不访问外部系统、不读取历史。\n"
-        "> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4；I3 尚未开始。\n"
-        "> 能力目录只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**"
-        "——不能把 I2\n"
-        "> 写成真实模型、资料查询、日志分析、真实渠道、真实目标、部署或用户验收。\n"
-    )
-    without_readme_status = {
+    without_readme_link = {
         **docs,
-        "README.md": _replace_once(docs["README.md"], readme_i0_status, ""),
+        "README.md": _replace_once(
+            docs["README.md"], "[当前状态](AGENT_HANDOFF.md#current-status)", ""
+        ),
     }
-    readme_missing = _missing_i0_truth_terms(without_readme_status)
-    assert "README.md" in readme_missing
-    assert "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档" in readme_missing["README.md"]
+    assert "README.md" in _missing_i0_truth_terms(without_readme_link)
 
     arch_i0_chain = (
         "            → load-or-create AcceptedInteractionArtifact\n"
@@ -289,34 +333,48 @@ def test_i0_truth_doc_binding_is_discriminating() -> None:
     ]
 
 
-def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
-    stale_phrases = (
-        "Context → IntentDraft → Resolver → PlanCompiler",
-        "ContextAssembler（只有显式 parent 时）",
-    )
-    found = [
+_STALE_I0_ENTRY_SHAPES = (
+    "Context → IntentDraft → Resolver → PlanCompiler",
+    "ContextAssembler（只有显式 parent 时）",
+    "RI3 的已保存 advisory 可作为后续显式父链的模型输入",
+    "显式历史会把既存文本再次发送给 provider",
+    "The 64,000-character history limit",
+    "RI3 的 Web parent 只增加",
+)
+
+
+def _stale_i0_entry_shapes(docs: dict[str, str]) -> list[tuple[str, str]]:
+    return [
         (name, phrase)
-        for name in _I0_TRUTH_DOC_TERMS
-        for phrase in stale_phrases
-        if phrase in (_ROOT / name).read_text(encoding="utf-8")
+        for name, text in docs.items()
+        for phrase in _STALE_I0_ENTRY_SHAPES
+        if phrase in text
     ]
+
+
+def test_i0_truth_docs_do_not_revive_stale_entry_shapes() -> None:
+    docs = {name: (_ROOT / name).read_text(encoding="utf-8") for name in _I0_TRUTH_DOC_TERMS}
+    found = _stale_i0_entry_shapes(docs)
     assert not found, f"I0 真相文档仍在使用旧入口/父上下文形状：{found}"
 
 
+@pytest.mark.parametrize("stale", _STALE_I0_ENTRY_SHAPES)
+def test_i0_entry_guard_rejects_restored_legacy_parent_requirements(stale: str) -> None:
+    current = "分类请求仅含本轮文本与澄清，真实调用仍须独立 GO。"
+    assert not _stale_i0_entry_shapes({"AGENT_HANDOFF.md": current})
+    restored = f"{current}\n## 当前验收要求\n{stale}"
+    assert _stale_i0_entry_shapes({"AGENT_HANDOFF.md": restored}) == [
+        ("AGENT_HANDOFF.md", stale)
+    ]
+
+
 _I1D_TRUTH_DOC_TERMS = {
-    "README.md": (
-        "I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档",
-        "不能把 I2\n> 写成真实模型",
-        # 能力目录是**投影**出来的，不是模型答的；README 必须说清这一点，
-        # 否则"小维会介绍自己的能力"很容易被读成模型自由问答已经开放。
-        "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
-    ),
     "AGENT_HANDOFF.md": (
         "I1-D Eval/closure",
         "`SlotVerifier`/可信槽位升级已完成离线实现",
         "ReadClass/Plan schema V2 已完成离线实现",
         "ExecutionDisclosure 执行披露屏障已完成离线实现",
-        "真实 PostgreSQL 证据仅来自下条记录的隔离临时容器",
+        "`tests`",
     ),
 }
 
@@ -357,10 +415,8 @@ def test_i1d_truth_docs_do_not_revive_stale_i1c_scope() -> None:
 _I2_ARCHIVE = "docs/handoff/archive/2026-09-20-I2-bounded-conversation.md"
 
 _I2B_TRUTH_DOC_TERMS = {
-    # README 的"目标能力"段和顶部状态块是**两处独立叙述**，只钉住顶部时下面那段可以
-    # 长期停在旧口径上——I2-B 就是这么漏的。两段各自钉一条。
+    # README 仅保留能力行为说明；实施进度在 handoff / I2 归档。
     "README.md": (
-        "由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
         "I2 的普通对话只返回由当前 `CapabilitySnapshot` 确定性投影出来的能力目录",
     ),
     "ARCHITECTURE.md": (
@@ -1006,13 +1062,12 @@ _CURRENT_BASELINE_MARKER: Final[str] = "- **当前基线**："
 
 
 def _current_baseline(text: str) -> str:
-    """取第 0 节那一行规范声明里的 `main` SHA。"""
-    for line in text.splitlines():
-        if line.startswith(_CURRENT_BASELINE_MARKER):
-            found = _MAIN_BASELINE_PATTERN.findall(line)
-            assert len(found) == 1, f"当前基线行必须恰好一个 SHA：{line}"
-            return found[0]
-    raise AssertionError("AGENT_HANDOFF.md 第 0 节缺少「- **当前基线**：」规范声明")
+    """只接受唯一的当前基线声明，历史 SHA 不能冒充它。"""
+    declarations = [line for line in text.splitlines() if line.startswith(_CURRENT_BASELINE_MARKER)]
+    assert len(declarations) == 1, "handoff 必须恰有一条当前基线声明"
+    found = _MAIN_BASELINE_PATTERN.findall(declarations[0])
+    assert len(found) == 1, "当前基线必须恰好一个完整 SHA"
+    return found[0]
 _W0_WEB_STAGES: Final[tuple[str, ...]] = (
     "W0",
     "W1a",
@@ -1169,52 +1224,34 @@ def _next_step_statements(text: str) -> list[str]:
     return statements
 
 
-def test_handoff_baseline_table_agrees_with_the_recorded_merge() -> None:
-    """第 1 节基线表引用的 `main` SHA 必须也出现在第 0 节的合入记录里。
-
-    两处各自记录"当前基线"，因此它们漂移是必然风险而不是偶发错误：第 0 节
-    换了新的合入事实、第 1 节还留着上一轮的分支和 SHA，下一位实现者就会从
-    错误的基线开工，而两处单独看都言之成理。
-    """
+def test_handoff_baseline_table_references_the_single_declaration() -> None:
+    """表格直接指向唯一声明，不能复制 SHA 或机器专属路径。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     project_dir = _handoff_baseline_field(handoff, "项目目录")
-    # 机器专属绝对路径对下一位实现者毫无意义，且必然过期。
-    assert "/Users/" not in project_dir, f"handoff 固化了机器专属路径：{project_dir}"
-
-    cited = _MAIN_BASELINE_PATTERN.findall(project_dir)
-    assert len(cited) == 1, (
-        f"项目目录字段必须恰好引用一个 `main@<40 位 SHA>` 基线：{project_dir}"
-    )
-    assert cited[0] == _current_baseline(handoff), (
-        f"第 1 节基线 {cited[0]} 与第 0 节的当前基线声明不一致"
-    )
+    assert "/Users/" not in project_dir
+    assert not _MAIN_BASELINE_PATTERN.findall(project_dir)
+    assert "(#current-baseline)" in project_dir
+    assert handoff.count('<a id="current-baseline"></a>') == 1
+    assert len(_current_baseline(handoff)) == 40
 
 
-def test_handoff_baseline_agreement_guard_is_discriminating() -> None:
-    """反例：把第 1 节的基线换成一个第 0 节没有的 SHA，必须转红。
-
-    没有这条，上面那条在正则写错时会静默通过——匹配不到任何 SHA 和
-    字段里本来就没有 SHA，表现是一样的。
-    """
+def test_handoff_baseline_declaration_guard_is_discriminating() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    project_dir = _handoff_baseline_field(handoff, "项目目录")
-    # 只改第 1 节那一处；当前 SHA 在第 0 节也出现，全文替换会把两处一起改掉
-    # 而使漂移重新"自洽"——那样反例就证明不了任何事。
-    drifted_field = _MAIN_BASELINE_PATTERN.sub(f"`main@{'0' * 40}`", project_dir)
-    drifted = handoff.replace(project_dir, drifted_field, 1)
-
-    # 反例走真正的解析器，不是断言自己刚拼上去的字符串。
-    refetched = _handoff_baseline_field(drifted, "项目目录")
-    cited = _MAIN_BASELINE_PATTERN.findall(refetched)
-    assert cited == ["0" * 40]
-    assert cited[0] != _current_baseline(drifted)
+    current = _current_baseline(handoff)
+    declaration = f"{_CURRENT_BASELINE_MARKER}`main@{current}`"
+    with pytest.raises(AssertionError):
+        _current_baseline(handoff + "\n" + declaration)
+    with pytest.raises(AssertionError):
+        _current_baseline(handoff.replace(_CURRENT_BASELINE_MARKER, "历史基线："))
+    drifted = _replace_once(handoff, f"`main@{current}`", "`main@short`")
+    with pytest.raises(AssertionError):
+        _current_baseline(drifted)
 
 
-def test_readme_current_status_records_the_w0_stage() -> None:
-    readme = _truth_doc_text("README.md")
-    status = _section_between(readme, start="> 当前状态：", end="## 先看什么")
-    assert "W0" in status and "W1a" in status
-    assert "I3" in status and ("延期" in status or "暂缓" in status)
+def test_handoff_retains_web_stages_and_i3_deferral() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert "W0" in handoff and "W1a" in handoff
+    assert "I3" in handoff and "延期" in handoff
 
 
 def test_w0_handoff_binding_is_discriminating() -> None:
@@ -1252,9 +1289,7 @@ def test_w0_handoff_binding_is_discriminating() -> None:
         assert handoff.count(retired) == 0
     readme = _truth_doc_text("README.md")
     assert "worker-only Compose secret" not in readme
-    revived_topology = _replace_once(
-        readme, "模型调用端口只在 task worker 装配", "worker-only Compose secret"
-    )
+    revived_topology = readme + "\nworker-only Compose secret\n"
     assert any(
         revived_topology.count(retired) > 0 for retired in _RETIRED_GEMINI_SECRET_PATHS
     )
@@ -1377,8 +1412,8 @@ _W1A_ARCHITECTURE_FACTS: Final[tuple[str, ...]] = (
     "`UserDirectoryStore.apply()`",
     "`AdminAuditStore`",
 )
-_W1A_SECTION_START: Final[str] = "**W1a 写内核的实现状态**"
-_W1A_SECTION_END: Final[str] = "`.gitignore` 与 `.dockerignore`"
+_W1A_SECTION_START: Final[str] = "**用户目录与 Admin 审计契约（W1a）**"
+_W1A_SECTION_END: Final[str] = "**身份激活契约（W1b）**"
 
 
 def _w1a_architecture_section() -> str:
@@ -1389,13 +1424,13 @@ def _w1a_architecture_section() -> str:
     )
 
 
-def test_architecture_records_the_w1a_write_kernel_as_implemented() -> None:
+def test_w1a_contract_and_current_evidence_have_separate_owners() -> None:
     section = _w1a_architecture_section()
     for fact in _W1A_ARCHITECTURE_FACTS:
-        assert fact in section, f"ARCHITECTURE.md 的 W1a 段落缺少承重事实：{fact}"
-    assert "已离线实现" in section
-    # 证据等级必须同时写出来：离线实现不是部署、canary 或用户验收。
-    assert "`tests`" in section
+        assert fact in section, f"ARCHITECTURE.md 的 W1a 契约缺少：{fact}"
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert "W1a 写内核与 W1b 两个切片已离线实现" in handoff
+    assert "`tests`" in handoff
 
 
 def test_architecture_states_the_single_write_path_invariant() -> None:
@@ -1498,8 +1533,8 @@ _W1B_ARCHITECTURE_FACTS: Final[tuple[str, ...]] = (
     "`activation_pending`",
     "`ActivationNotificationService`",
 )
-_W1B_SECTION_START: Final[str] = "**W1b 激活流程的实现状态**"
-_W1B_SECTION_END: Final[str] = "**仍无实现载体的未来产品目标**"
+_W1B_SECTION_START: Final[str] = "**身份激活契约（W1b）**"
+_W1B_SECTION_END: Final[str] = "**产品边界与阶段归属**"
 
 
 def _w1b_architecture_section() -> str:
@@ -1510,28 +1545,22 @@ def _w1b_architecture_section() -> str:
     )
 
 
-def test_architecture_records_w1b_as_offline_implemented_without_live_claims() -> None:
+def test_w1b_contract_and_handoff_keep_live_evidence_separate() -> None:
     section = _w1b_architecture_section()
     for fact in _W1B_ARCHITECTURE_FACTS:
-        assert fact in section, f"ARCHITECTURE.md 的 W1b 段落缺少承重事实：{fact}"
-    assert "已离线实现" in section
+        assert fact in section, f"ARCHITECTURE.md 的 W1b 契约缺少：{fact}"
     assert "数据库目录" in section
     assert "单次" in section
-    assert "`tests`" in section
-    for unverified in ("真实飞书", "部署", "canary", "用户验收"):
-        assert unverified in section
-
-
-def test_readme_and_handoff_advance_from_w1b_to_w2_without_overclaiming() -> None:
-    status = _readme_status()
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert "已离线实现" in handoff and "`tests`" in handoff
+    for unverified in ("真实飞书", "部署", "canary", "用户验收"):
+        assert unverified in handoff
 
-    assert "W1b" in status and "已离线实现" in status
-    assert "激活流程" in status and "单次群通知" in status
-    assert "尚未获批" not in status
-    assert "没有**激活流程" not in status
 
+def test_handoff_advances_from_w1b_to_w2_without_overclaiming() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
     assert "W1b 两个切片已离线实现" in handoff
+    assert "激活流程" in handoff and "单次群通知" in handoff
     for statement in _next_step_statements(handoff):
         assert "W2" in statement, f"W1b 收口后的下一步没有指向 W2：{statement}"
 
@@ -1550,12 +1579,11 @@ def _readme_status() -> str:
     )
 
 
-def test_readme_no_longer_says_w1a_has_no_source() -> None:
+def test_readme_status_links_to_handoff_without_stale_w1a_claims() -> None:
     status = _readme_status()
+    _check_current_status_reference(status, _truth_doc_text("AGENT_HANDOFF.md"))
     for phrase in _RETIRED_README_W1A_PHRASES:
         assert phrase not in status, f"README 顶部仍写着 W1a 没有源码：{phrase}"
-    assert "W1a" in status and "写内核" in status and "已离线实现" in status
-    assert "W1b" in status
 
 
 def test_the_readme_guard_is_discriminating() -> None:
@@ -1588,8 +1616,7 @@ _HANDOFF_PROGRESS_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 def test_development_plan_carries_no_implementation_progress() -> None:
     """`AGENTS.md:155`：进度与证据只放 handoff，计划只写顺序、门与退出标准。
 
-    这一条同时说明本切片为什么**不**改 `DEVELOPMENT_PLAN.md`：W1a 没有改变任何
-    交付物或退出标准，它一行不动才是对的。
+    日常执行细则可以改为引用 AGENTS，但阶段进度仍只归 handoff。
     """
     plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
     for pattern in _HANDOFF_PROGRESS_PATTERNS:

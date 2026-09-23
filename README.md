@@ -2,54 +2,8 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
-> 当前状态：M0–M6a 已通过项目里程碑验收并归档。M6b 默认关闭的 StarRocks 测试环境只读
-> adapter 已完成离线实现、审查并合入 `main`，真实验证已延期，最强证据仍为 `tests`。M7 PR 1–8
-> 已全部审查并合入；PR #27 的最终受审 head `c50d820` 已以 squash commit `ba5ecfe5` 合入
-> `main`，至此 M7 离线实现范围 8/8 完成。最终 PR 与合入后 main 的八项 CI 均全绿；本机有
-> Docker client、standalone Compose 与可用的 Colima daemon，但未提供 PostgreSQL DSN；
-> 隔离 PostgreSQL/Compose 运行证据仍来自旧版 GitHub CI。项目负责人已于
-> 2026-09-09 按**离线范围**验收并授权归档，历史事实见
-> [M7 离线范围归档](docs/handoff/archive/2026-09-09-M7-web-feishu-offline.md)；这不表示 M7 的
-> 真实渠道退出标准已经通过。
-> I2 限定领域普通对话已归档；Web 运维工作台总体设计已合入。W0 文档与 ADR 真源收口已由
-> PR #61 合入 `main@a12578cd59cfaccf3fe6702e6437502b9462c28d`，该轮只改 Markdown 与一个
-> 文档契约测试，**没有产品源码**。**W1a 用户、权限与 Admin 审计写内核已离线实现**：按批准计划
-> `docs/superpowers/plans/2026-09-21-w1a-identity-authz-admin-audit.md` 分三个切片交付——A 契约与
-> `rev_0014` 四张表、B 两个 Store 与审计原子性、C 旧身份一次性迁移三者均已合入 `main`。授权事实只有
-> `UserDirectoryStore.apply()` 一条写路径，审计由 store 从命令派生并与授权改变同事务提交。
-> **W1b 身份激活流程与单次群通知已离线实现**：未知 OAuth 身份只创建申请并返回
-> `activation_pending`，未知群身份只创建申请并发送不含正文或 Admin 名单的通用卡片；批准仍复用
-> W1a 的目录与审计原子写路径，重新登录后才生效。运行时身份解析只读数据库目录，静态身份文件
-> 只作部署前一次性迁移输入。证据等级仍到 `tests` 为止：没有登录页改造、Admin 待办/用户职责/
-> 审计 UI、可靠通知、真实飞书调用、部署、canary 或用户验收。当前切片通过精确 SHA 复审并合入后，
-> 下一步是 W2 详细计划与实现；I3 受治理资料查询**延期但未取消**。
-> RI1 默认关闭的真实 OAuth adapter、Web 装配与 Compose 契约通过 PR #31 交付；最高证据仍为
-> `tests`。它没有部署或连接真实飞书。
-> RI3 的 Gemini 接入按 5 个 PR、2 次 migration 设计；ADR-015 与 V7.1 详细实施计划已于
-> 2026-09-12 通过复审并获“开始 RI3”离线开工授权。PR 3A–3D 已合入；当前源码已有严格
-> DTO、两个窄 port、固定 Gemini SDK adapter、默认关闭装配、模型调用端口只在 task worker 装配、
-> durable Runtime、持久模型 artifact、MODEL trace、慢查询 advisory 和显式 Web 父任务上下文。
-> PR #38 已以 `fb6718cc` 合入；真实 key 读取与 Gemini 网络调用均为 0。
-> Independent review V7 has corrected the plan's timeout/idempotency/Compose facts,
-> preserved Runner's one-shot grant renewal, fixed projector package ownership and
-> completed its test surface. PR 3B is an offline SDK boundary only. Host
-> Gemini key stays outside Settings and `.env.example`. Since RI5 it lives in the
-> Git-ignored host file `.config/integrations.json` (mounted as
-> `/run/xiaowei-config/integrations.json`), written by the Web admin plane and mounted
-> read-only into the processes that need it; `api` does not mount it.
-> 真实应用、凭据、网络连接、部署与 canary 仍被独立硬门阻塞。项目**尚未连接任何真实
-> 运维系统或模型 API**，也未部署、未 canary、未取得产品用户验收。
-> 智能交互入口 I0-DOC 已绑定 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。
-> I1-A–I1-D 与 I2 均已合入 `main`，I2 已归档。普通对话的回答是**由当前 `CapabilitySnapshot`
-> 确定性投影出来的能力目录**：逐条列出已注册能力、操作、`read_class` 与所经 gateway，并带上
-> 快照标识作为来源；回答只由声明决定，与用户文本无关，不调用工具、不访问外部系统、不读取历史。
-> `knowledge_lookup` 与 `log_analysis` 仍保持拒绝并分别留给 I3/I4；I3 尚未开始。
-> 能力目录只是把 Registry 声明重排给用户看，**不表示这些能力已经连接真实系统**——不能把 I2
-> 写成真实模型、资料查询、日志分析、真实渠道、真实目标、部署或用户验收。
-> 当前精确进度见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
-
-未来产品可包含 Admin 配置治理与模型 API 等控制面，但这些不是 M7 交付物，也不是当前已实现
-事实。M7 主工作台只适配桌面端，窄屏仅保证从飞书卡片进入的单任务安全详情可读。
+> 当前状态：请查 [当前状态](AGENT_HANDOFF.md#current-status)，其中记录精确基线、能力证据、有效授权、风险与下一步。
+> 开发与复审使用 [AGENTS.md](AGENTS.md#开发与评审流程)；本文件负责定位、导航和启动，不维护阶段进度副本。
 
 ## 先看什么
 
@@ -66,8 +20,8 @@
 已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
 [总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
-**这些是未来目标，不是当前启动步骤**——当前可照做的首启流程见下文，仍是单一
-`.config/integrations.json` 与 loopback 发布。
+各阶段进度见顶部交接入口；当前可照做的首启流程见下文，仍是单一
+`.config/integrations.json` 与 loopback 发布，不能提前套用后续配置设计。
 
 ## 目标能力
 
@@ -141,10 +95,8 @@
   port 和离线测试均不加载 SDK 或连接飞书。
 - Redis、pgvector、消息队列、LangGraph 等均不是第一阶段的强依赖；只有评估证明需要时才引入。
 
-截至 M5 的基础依赖与 Compose 文件已合入 `main`，M6b 的 PyMySQL 与 M7 PR 4 的
-`lark-oapi` 也已合入；RI3 PR 3B 离线增加锁版 `google-genai`，并把已解析的 `httpx` 从 dev
-提升为生产直接依赖。隔离 Compose smoke 已在既有合并后 CI 实际通过，生产
-兼容性仍需独立部署与运行证据。
+依赖声明与锁定版本以 `pyproject.toml` / `uv.lock` 为准；已执行的 CI、Compose 及其证据
+限制统一记录于 [交接文档](AGENT_HANDOFF.md#current-status)，不由依赖安装成功推定运行兼容性。
 
 ## 预期目录
 
@@ -276,8 +228,9 @@ code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 
 watchdog，且不重试；两者都没有读取
 `XIAOWEI_FEISHU_API_TIMEOUT_SECONDS`；后者目前只装配给渠道消息发送路径。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
-两个文件字段必须是绝对路径。App secret 只接受文件引用，不接受环境变量中的明文。身份文件是版本化 JSON，按飞书
-`open_id` 精确映射，不按姓名或群角色猜权限：
+`XIAOWEI_FEISHU_IDENTITY_FILE` 必须是绝对路径；当前 Settings 的启动校验与飞书 Compose
+override 仍保留这个文件输入。它不是在线授权真源，也不会在启动时自动导入数据库。旧文件的
+版本化 JSON 仅供显式一次性迁移，按飞书 `open_id` 精确关联，不按姓名或群角色猜权限：
 
 ```json
 {
@@ -294,9 +247,12 @@ watchdog，且不重试；两者都没有读取
 }
 ```
 
-`operator`、`dba`、`oncall` 可查看安全任务并发起只读任务；`viewer`、`approver` 只可查看；
-`admin` 拥有当前渠道权限闭集。映射在 listener 或 Web app 装配时一次读取，修改后必须重启对应
-进程才生效。
+Web 与 listener 使用 `DirectoryFeishuIdentityDirectory`，每次身份解析都从数据库目录重建主体，
+停用或撤权不依赖重启。旧文件的 labels 由
+[迁移适配器](src/xiaowei_agent/interfaces/legacy_identity_migration.py) 转为产品角色；在线权限由
+[角色映射](src/xiaowei_agent/governance/product_roles.py) 确定，仍受结果 ACL 与认证来源限制。
+不能通过编辑旧文件授予在线权限；未知身份须经明确 Admin 激活，迁移与发布核验门见
+[交接文档](AGENT_HANDOFF.md#current-status)。
 
 Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 
@@ -500,30 +456,25 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
-当前开发机有 Docker client、standalone Compose 5.5.1 与可用的 Colima daemon；但 Docker credential
-helper 缺失，且用户已有容器占用 `127.0.0.1:8000`，所以本轮没有取得 PR 3B 完整 Compose/model
-mount audit 证据。本任务未停止或修改用户容器；本机仍只有脚本测试与 Compose 静态合并证据。PR #31 的补修实现基线
-`2d67b59` 已在 GitHub 隔离 runner 实际执行 Compose smoke 与隔离 PostgreSQL integration，八项
-CI 全绿；这仍只是 `tests` 证据，不是飞书测试环境、部署、canary 或用户验收。
+执行前检查本机 Docker daemon、Compose 版本、credential helper 与端口占用；历史环境记录不能
+替代当次预检。已取得的 CI/本机证据与缺口统一见
+[交接文档](AGENT_HANDOFF.md#current-status)。隔离 smoke 只证明对应 `tests`，不替代真实服务、
+部署、canary 或用户验收。
 
-### 尚未完成与能力边界
+### 模型与真实服务的激活边界
 
-当前默认装配仍使用确定性无模型 interpreter。[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)
-与 [RI3 详细计划](docs/superpowers/plans/2026-09-10-model-provider-adapter.md) 已获批准；PR 3B–3D 已离线新增
-固定 Gemini SDK adapter、严格 DTO/窄 port、worker-only secret override、durable 模型编排、持久 artifact、
-MODEL trace、慢查询 advisory 与显式 Web 父任务上下文，但未读取真实 key，也未进行真实 provider 调用。M6a 增加了
-Alertmanager 告警读取、Prometheus 固定模板指标取证和资产精确查询。最终 [PR #14](https://github.com/shixian66/xiaowei-agent/pull/14)
-已以 fast-forward 合入；合入后 main run `33976421909` 在 GitHub 隔离 runner 实跑
-PostgreSQL integration 与三能力 Compose smoke，八个 job 全绿。该证据只能证明隔离
-环境中的 fake 闭环，不能推出任何真实运维系统兼容、部署、canary 或产品用户验收。
+默认装配使用确定性无模型 interpreter。Gemini 的窄端口与数据边界见
+[ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)，当前分类与澄清契约见
+[ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)。模型开关、凭据配置与离线
+实现都不自动授权真实调用；现场 GO、供应商条款与数据范围仍须按有效授权核对。
 
-M6b 已实现默认关闭的 StarRocks 测试环境只读 adapter、精确 target binding、固定 preflight、
-证据归属与离线 Eval。当前测试目标仍故意保持歧义，生产 API/Worker 也未注入获批的物理身份探针，
+StarRocks 测试环境只读 adapter 默认关闭，要求精确 target binding、固定 preflight 与证据归属。
+测试目标仍故意保持歧义，API/Worker 也未注入获批的物理身份探针，
 所以 `test` 环境会在目标解析阶段拒绝 recording 和真实装配；`dev` recording 仍可用，且环境变量
 不能单独激活真实连接。只有离线候选经审查、唯一目标、identity、secret reference、
 证据处置与窗口全部获批、负责人再次明确“现场 GO”后，才允许补齐激活并运行
-`docker-compose.m6b-test.yml`。当前仍没有真实 StarRocks 连接、真实模型 API 调用或任何 E1
-（写）能力；`tools/gateway.py` 的 `_E1_EXECUTION_ENABLED` 保持 `False`。
+`docker-compose.m6b-test.yml`。E1（写）的独立授权门见 ADR-007；`tools/gateway.py` 的
+`_E1_EXECUTION_ENABLED` 保持 `False`。实际能力与证据等级只在 handoff 维护。
 
 ## 旧项目关系
 
