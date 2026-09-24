@@ -1896,3 +1896,50 @@ def test_w2_plan_resolves_login_window_admin_projection_and_slice_boundaries() -
         assert required in plan, f"W2 计划仍留有实现期选择：{required}"
     assert "当前账号不能进入此页面" in spec
     assert "把 W2 已迁入 Admin shell 的当前 RI5 Gemini/飞书配置" in spec
+
+
+# --- W4 计划批准与授权边界 ---------------------------------------------------
+#
+# 批准来源只能如实记录：没有公开审批 permalink 时写明"在 Codex 会话批准"，
+# 合入事实不能冒充批准来源，也不能把 W4a 开工口令外推成 W4b 或真实调用许可。
+
+_W4_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md"
+
+
+def _w4_plan_header(text: str) -> str:
+    return text[: text.find("## 1. 目标与交付方式")]
+
+
+def _check_w4_plan_header(header: str) -> None:
+    assert "Approved V0.1" in header
+    assert "Review Draft" not in header
+    assert "在 Codex 会话中批准" in header
+    assert "没有公开的 GitHub 审批 permalink" in header
+    assert "2cef6aa52e17eece8eb70ebce0057cfdddd8167a" in header
+    assert "24e01d69f6c89367eb4d27bd7d93d990af5824dc" in header
+    assert "合入事实本身不是批准来源" in header
+    assert "Task 0–7（W4a）" in header
+    assert "Task 8–11（W4b）" in header
+    for gate in ("W4c", "W5", "真实 Provider", "真实 Secret", "联网", "部署", "canary", "UAT"):
+        assert gate in header, f"W4 计划头部缺少未授权项：{gate}"
+    assert "均未授权" in header
+
+
+def test_w4_plan_header_records_the_approval_and_the_w4a_only_authority() -> None:
+    _check_w4_plan_header(_w4_plan_header(_W4_PLAN.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("Approved V0.1", "Review Draft V0.1"),
+        ("没有公开的 GitHub 审批 permalink", "见审批链接"),
+        ("合入事实本身不是批准来源", "合入即批准"),
+        ("Task 8–11（W4b）", "Task 8–11"),
+        ("均未授权", "已随本计划授权"),
+    ],
+)
+def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
+    header = _w4_plan_header(_W4_PLAN.read_text(encoding="utf-8"))
+    with pytest.raises(AssertionError):
+        _check_w4_plan_header(_replace_once(header, old, new))
