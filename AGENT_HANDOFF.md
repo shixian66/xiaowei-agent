@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@dcef09a903224fb86e8b053a15ab4865a7b731d1`（2026-09-24，PR #81 已 squash 合入 W4a）。
+- **当前基线**：`main@88a63a054062db2041e51f4105846920040f3037`（2026-09-24，PR #82 已 squash 合入 W4b）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -28,12 +28,15 @@
   `66d8b7e4cd45323f6e6009ab9a1b3a516f28c580` 复核通过，负责人授权后由 PR #81 squash 合入
   `dcef09a903224fb86e8b053a15ab4865a7b731d1`。证据见下文「W4a 离线证据」。**配置没有在任何真实环境迁移**，
   没有部署、canary、真实 Provider 调用或用户验收。
-- **W4b 离线参数登记完成（离线候选，待独立审查）**：负责人在 W4a 合入后于本会话指示继续开发（无 GitHub
+- **W4a/W4b 已离线实现并合入**：W4b 负责人在 W4a 合入后于本会话指示继续开发（无 GitHub
   permalink），据此从 `dcef09a` 开始计划内的 Task 8–11。分支 `claude/hopeful-rubin-1g51tl` 离线实现：
   StarRocks / Prometheus 资源契约与 `.config/resources/config.json` 文件边界、Local Admin 资源维护 API
   （服务端 ID、两阶段审计、Secret 保留/显式清除）、管理页"已保存，尚未接入"、worker 的
-  `(worker, resources)` 回执与零网络证明、smoke 与真库回执证明。证据见下文「W4b 离线候选证据」。
-  没有真实目标、连接、DNS、部署、canary 或用户验收；W4c、W5 与真实调用均未授权。
+  `(worker, resources)` 回执与零网络证明、smoke 与真库回执证明。首轮 head `f4c45be` 经独立复审打回
+  2 个阻塞，修复后 head `048c1bd4295d8101a438ef3b927905bce29b5f50` 复核通过，CI
+  [36006554930](https://github.com/shixian66/xiaowei-agent/actions/runs/36006554930) 八项全绿；负责人授权后由
+  PR #82 squash 合入 `88a63a054062db2041e51f4105846920040f3037`。证据见下文「W4b 离线证据」。
+  W4a/W4b 都没有真实目标、连接、DNS、部署、canary 或用户验收；W4c、W5 源码与真实调用仍未授权。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -52,7 +55,7 @@
 | I2 | I2 限定领域普通对话已完成离线实施并归档，详见 [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。回答只投影当前 CapabilitySnapshot，无工具/外部系统/长期记忆；knowledge_lookup/log_analysis 仍拒绝 |
 | W1a | `rev_0014`、用户目录与 Admin 审计写内核、旧身份原子迁移已离线实现。`UserDirectoryStore.apply()` 是唯一授权写入口，每次授权改变与命令派生审计同事务提交；审计不可写则回滚 |
 | W1b | `rev_0015`、ActivationRequest/ActivationStore、身份激活流程与单次群通知已离线实现。未知 OAuth 身份返回 `403 activation_pending` 且无 Session；未知群成员当次事件只发通用卡片，私聊未知身份拒绝。运行时从数据库目录重建主体，停用/撤权不进入重新激活，静态文件仅作发布前一次性迁移输入 |
-| W2 / W3 V1 | W2 离线范围已收口；W3 V1 两个实现切片与收口 PR 均已合入。W3 后续增强仍未实现，但不再阻塞 W4a/W4b；W4/W5 源码、W4c 与 R1 均未由此解锁 |
+| W2 / W3 / W4a/W4b | W2、W3 V1 已离线收口；W4a/W4b 已离线实现并合入。W3 后续增强仍未实现但不阻塞 W5；W4c、W5 源码、真实调用、部署、R1 均未由此解锁 |
 
 W1a 最终受审 head `ed8c9e82db46d75e47e4761d8897d0d2d23f9831` 已由 PR #65 合入
 `f92aa88b9016b52c35ebce4052a8609fd574d8fb`，历史 CI [35681783752](https://github.com/shixian66/xiaowei-agent/actions/runs/35681783752)
@@ -131,7 +134,7 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 这些只是离线证据：没有真实环境配置迁移、部署、canary、真实 Provider 调用或用户验收。
 
 <a id="w4b-offline-candidate-evidence"></a>
-**W4b 离线候选证据**（基线 `dcef09a`，分支 `claude/hopeful-rubin-1g51tl`；四门与真库在实现 head `aa5b0af` 上运行，其后只有
+**W4b 离线证据（已由 PR #82 合入；以下为合入前候选证据原文）**（基线 `dcef09a`，分支 `claude/hopeful-rubin-1g51tl`；四门与真库在实现 head `aa5b0af` 上运行，其后只有
 一处按钮配色 CSS 与本文档提交）：本机 Python 3.11.16、依赖按 uv.lock、去掉代理环境变量。`python -m pytest -q` 为
 `4965 passed, 416 skipped`，`python -m pytest -m security -q` 为 `1594 passed, 83 skipped`，`ruff check .` 与 `mypy src`
 （213 个源文件）通过；一次性 PostgreSQL 16.10 容器上全量 `5381 passed`、零 skip（含 `(worker, resources)` 回执真库往返与
@@ -154,10 +157,10 @@ resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/hopeful-rubin-1g51tl`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `codex/w5-deployment-plan`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-24（Asia/Shanghai） |
-| 阶段 | W4a 已由 PR #81 合入；W4b 离线参数登记完成，Task 8–11 在 `claude/hopeful-rubin-1g51tl` 待独立 exact-SHA 审查 |
-| 下一步 | 由独立审查者对 W4b PR 做 exact-SHA 复审并核对 CI；W4a 已合入，W4b 合入前不开始 W4c 或 W5，真实连接、真实环境配置迁移与部署均不在本轮授权内 |
+| 阶段 | W4a/W4b 已离线实现并合入；W5 详细计划为 Review Draft V0.1，尚未批准 |
+| 下一步 | 对 W5 详细计划做 exact-SHA 复审、批准并合入；计划合入前不开始 W5 源码、部署、真实调用、canary 或 UAT |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -174,7 +177,7 @@ resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。�
 | [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) / [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md) | Plan schema V2、read_class、审批绑定、智能分流、澄清与执行披露 |
 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) | 里程碑顺序、进入/退出门与已批准窄例外 |
 
-已合入代码中 Provider 明文配置为 `.config/ai/config.json` 与 `.config/feishu/config.json`；W4b 候选另把运维资源登记在
+已合入代码中 Provider 明文配置为 `.config/ai/config.json` 与 `.config/feishu/config.json`；W4b 已把运维资源登记在
 `.config/resources/config.json`（只登记、不接入），
 `web-app` 三域读写、consumer 只读自己的域、`api` 不挂任何域；模型调用端口只在 task worker 装配。旧
 `.config/integrations.json` 只作显式一次性迁移输入，运行时不读；README 首启步骤已按三域与迁移命令更新，
@@ -194,7 +197,8 @@ resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。�
 - W4 [总实施计划](docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md) 已由 PR #80
   合入 `2cef6aa52e17eece8eb70ebce0057cfdddd8167a`；负责人在 Codex 会话批准该计划并授权 W4a（Task 0–7）离线实现，
   该批准没有公开 GitHub 审批 permalink，合入事实本身不是批准来源。W4a 经独立复审后由负责人授权合入（PR #81）；
-  W4a 合入后负责人在本会话指示继续开发，据此开始 W4b（Task 8–11）离线实现。两段授权都不含 W4c、W5、
+  W4a 合入后负责人在本会话指示继续开发，据此开始 W4b（Task 8–11）离线实现；W4b 已由 PR #82 合入。
+  两段授权均已用完，且都不含 W4c、W5、
   真实 Provider、真实 Secret、真实资源目标、联网、部署、canary 或 UAT。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
@@ -239,8 +243,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. W3 V1 已按精简范围离线收口；W4 总实施计划已获批，W4a 已由 PR #81 合入。W4b 离线候选下一步是独立
-   exact-SHA 审查与 CI 核对；不把 W4c、R1、真实调用、真实环境配置迁移或 W5 部署一并带入。
+2. W3 V1 已按精简范围离线收口；W4a/W4b 已分别由 PR #81/#82 合入。下一步只对
+   [W5 详细计划](docs/superpowers/plans/2026-09-24-w5-product-deployment.md)做 exact-SHA 审查；计划批准与合入
+   不等于 W5 源码、真实调用、真实环境配置迁移、部署、canary 或 UAT 已获授权。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 
@@ -248,8 +253,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 
 - M8 审批主体/渠道/有效期、拒绝/过期/冲突恢复语义与 ADR-005；生产写独立授权与验收计划。
 - RI3 首次 GO、供应商保留/训练/区域条款与 synthetic corpus；M6b 现场输入与证据处置、现场 GO。
-- W5 发布环境、边缘限流、旧静态身份显式迁移与核验、终态激活申请受控 PII 保留/清理。
-  1024 上限只限制活跃申请，不能据此取消终态清理门。
+- W5 计划建议终态激活申请固定保留 30 天，并要求正式发布前证明清理、每日调度、边缘限流、旧静态身份
+  显式迁移与发布预检；该决定仍待计划审查批准。1024 上限只限制活跃申请，不能据此取消终态清理门。
 - W3 后续增强：DBA/值班/激活通知人绑定，群 @ Admin、私聊通知、持久化通知状态、重试/dead-letter，
   以及私人或敏感任务内容查看与查看审计；须另写增量计划并获批，不能从 W3 V1 外推，且不作为
   W4a/W4b 或 W5 的进入条件。

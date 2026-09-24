@@ -1712,8 +1712,8 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    # W4a 离线候选阶段：下一步是独立 exact-SHA 审查；W4b 在 W4a 合入前不得开始。
-    assert "W4a" in next_step and "W4b" in next_step
+    # W4a/W4b 已合入后，延期的 W3 增强仍不应把当前动作从 W5 计划审查拉回去。
+    assert "W5" in next_step and "计划" in next_step and "exact-SHA" in next_step
     assert "exact-SHA" in next_step and "合入前" in next_step and "不" in next_step
 
     development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
@@ -1990,11 +1990,14 @@ def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
         _check_w4_plan_header(_replace_once(header, old, new))
 
 
-# --- W4b 文档门 ------------------------------------------------------------
+# --- W4 收口与 W5 计划门 ---------------------------------------------------
 #
-# W4a 已由 PR #81 合入；W4b 只能写到"离线参数登记完成"——没有真实目标、连接、部署或验收。
+# W4a/W4b 已分别由 PR #81/#82 合入；两者都只到离线证据。下一步只能送审
+# W5 详细计划，不能把计划、实现、部署、canary 或 UAT 写成同一件事。
 
 _W4A_MERGE_COMMIT: Final[str] = "dcef09a903224fb86e8b053a15ab4865a7b731d1"
+_W4B_MERGE_COMMIT: Final[str] = "88a63a054062db2041e51f4105846920040f3037"
+_W5_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w5-product-deployment.md"
 _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
     "W4b 已部署",
     "W4b 已上线",
@@ -2006,17 +2009,48 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 )
 
 
-def test_handoff_records_the_w4a_merge_and_an_offline_only_w4b() -> None:
+def test_handoff_records_both_w4_merges_and_points_only_to_w5_plan_review() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _W4A_MERGE_COMMIT
-    assert "PR #81" in handoff
-    assert "W4b 离线参数登记完成" in handoff
+    assert _current_baseline(handoff) == _W4B_MERGE_COMMIT
+    assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
+    assert _W4B_MERGE_COMMIT in handoff and "PR #82" in handoff
+    assert "W4a/W4b 已离线实现并合入" in handoff
     for overclaim in _W4B_OVERCLAIMS:
         assert overclaim not in handoff, overclaim
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "W4b" in next_step and "exact-SHA" in next_step and "不" in next_step
-    for gate in ("W4c", "W5"):
-        assert gate in next_step
+    assert "W5" in next_step and "计划" in next_step and "exact-SHA" in next_step
+    for forbidden_claim in ("开始实现", "开始部署", "开始 canary", "开始 UAT"):
+        assert forbidden_claim not in next_step
+
+
+def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:
+    assert _W5_PLAN.is_file(), "W5 详细计划尚未落盘"
+    plan = _W5_PLAN.read_text(encoding="utf-8")
+    header = "\n".join(plan.splitlines()[:24])
+    assert header.startswith("# W5 产品发布与分级验收实施计划")
+    assert "状态：Review Draft V0.1" in header
+    assert _W4B_MERGE_COMMIT in header
+    assert "计划送审不授权" in header
+    for gate in ("源码", "部署", "真实调用", "canary", "UAT"):
+        assert gate in header
+    assert "2026-09-10-compose-deployment-canary-uat.md" in plan
+    assert "历史输入" in plan and "不再作为可执行计划" in plan
+    assert "30 天" in plan and "终态激活" in plan
+    assert "offline_recording" in plan and "release" in plan
+    assert "fake/recording" in plan and "release" in plan
+    assert "docker-compose.release.yml" in plan
+    for route in (
+        "/login/api/login",
+        "/oauth/feishu/start",
+        "/oauth/feishu/callback",
+        "/admin/api/activations/approve",
+        "/admin/api/activations/reject",
+    ):
+        assert route in plan
+    for independent_gate in ("W4c", "H 层", "E1", "RI2", "RI3"):
+        assert independent_gate in plan
+    for evidence_level in ("deployed SHA", "canary", "user-accepted"):
+        assert evidence_level in plan
 
 
 def test_readme_and_architecture_describe_resources_as_registration_only() -> None:
