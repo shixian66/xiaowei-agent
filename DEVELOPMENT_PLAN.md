@@ -180,7 +180,7 @@ I2–I4 不是 M8 前置。主动连接 Loki、ELK、Kubernetes、服务器或�
 - **W1b 激活内核**：`ActivationRequest` / `ActivationStore` 与 CAS 审批，复用 W1a 的审计写入且
   审计不可写时 fail-closed。
 - **W2 登录与多 shell**：登录入口、`web_oauth_login_contexts` 与闭集 return intent。
-- **W3 用户 / 职责 / 审计 UI**：只增查询 UI 与敏感查看审计，不新增写路径。
+- **W3 用户 / 职责 / 审计 UI**：增加查询 UI、受管授权变更与敏感查看审计；所有授权写仍复用唯一入口，不新增第二条授权写路径。
 - **W4a AI / 飞书配置迁移**：迁移到三域配置文件与进程挂载矩阵，新旧并存时 fail-closed 为
   `migration_required`。
 - **W4b 数据库 / Prometheus 参数登记**：只保存参数并做本地校验，**网络调用为 0**。
