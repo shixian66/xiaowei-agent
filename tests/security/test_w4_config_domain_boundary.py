@@ -58,6 +58,16 @@ _EXPECTED_MOUNTS: Final[dict[str, set[tuple[str, str, bool]]]] = {
 }
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """``!override`` / ``!reset`` 是 Compose 渲染期指令，静态读取时按普通序列对待。"""
+
+
+for _tag in ("!override", "!reset"):
+    _ComposeLoader.add_constructor(
+        _tag, lambda loader, node: loader.construct_sequence(node, deep=True)
+    )
+
+
 def _compose_services() -> dict[str, Any]:
     document = yaml.safe_load((_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -97,6 +107,24 @@ def test_no_service_mounts_the_parent_config_directory() -> None:
         for source, target, _ in _config_mounts(service):
             assert source.rstrip("/") not in {"./.config", ".config"}, name
             assert target.rstrip("/") != "/run/xiaowei-config", name
+
+
+def test_no_override_file_reintroduces_a_parent_or_foreign_domain_mount() -> None:
+    """override 与基础文件按 target 合并：任何一个 override 挂回父目录或别的域，
+    叠加后的进程就又能读到兄弟域——只查基础文件等于没查。"""
+    for path in sorted(_ROOT.glob("docker-compose*.yml")):
+        document = (
+            yaml.load(
+                path.read_text(encoding="utf-8"),
+                Loader=_ComposeLoader,  # noqa: S506 -- 派生自 SafeLoader，只多认两个标签
+            )
+            or {}
+        )
+        for name, service in (document.get("services") or {}).items():
+            for source, target, read_only in _config_mounts(service or {}):
+                assert source.rstrip("/") not in {"./.config", ".config"}, (path.name, name)
+                assert target.rstrip("/") != "/run/xiaowei-config", (path.name, name)
+                assert (source, target, read_only) in _EXPECTED_MOUNTS[name], (path.name, name)
 
 
 def test_every_config_mount_refuses_to_create_the_host_path() -> None:
