@@ -1,8 +1,17 @@
-"""`integrations.json` 的唯一读写边界。
+"""三域配置文件的唯一读写边界。
+
+W4a 起 AI 与飞书各有一份固定文件、一个独立 ``generation``；resources 域只预留路径。
+公开入口全部是**固定类型**的窄函数：不接受 schema class、动态 domain 字符串或自定义
+serializer，也不返回任意 ``dict``。共同的文件安全逻辑保持私有，只有两份：一个严格
+读取器、一个原子写入器——预检的哨兵写入也只能经 :func:`write_preflight_probe` 走同一个
+写入器，不另抄一套 ``open/write/replace``。
 
 与 :mod:`xiaowei_agent.interfaces.secret_file` 并列而不是复用它：那个 reader 面向
-单行无控制字符的 credential，这里面向一份严格 schema 的 JSON 文档。两条路径各自
-收敛，避免出现「同一个文件两种读法」。
+单行无控制字符的 credential，这里面向严格 schema 的 JSON 文档。
+
+旧 ``integrations.json`` 只剩 :func:`read_legacy_integration_config` 这一条读取路径，
+且只准一次性迁移器调用（``tests/contract/test_w4_config_domain_contracts.py``）；
+这里**没有**旧文档的写入器，运行时也没有任何回落到旧文件的分支。
 """
 
 import json
@@ -13,14 +22,37 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from xiaowei_agent.contracts import IntegrationConfig
+from xiaowei_agent.contracts import (
+    AiConfig,
+    FeishuConfig,
+    FeishuIntegration,
+    GeminiIntegration,
+    IntegrationConfig,
+)
 
 _MAX_CONFIG_BYTES: Final[int] = 65_536
-DEFAULT_INTEGRATION_CONFIG_PATH: Final[str] = "/run/xiaowei-config/integrations.json"
+
+CONFIG_ROOT: Final[str] = "/run/xiaowei-config"
+"""容器内三个域目录的共同父路径。**不得**作为挂载目标：consumer 只挂自己的域目录。"""
+
+CONFIG_FILE_NAME: Final[str] = "config.json"
+LEGACY_CONFIG_FILE_NAME: Final[str] = "integrations.json"
+"""旧单文件的名字。只有迁移器与预检用它来**发现**旧文件；运行时不读它。"""
+
+DEFAULT_AI_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/ai/{CONFIG_FILE_NAME}"
+DEFAULT_FEISHU_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/feishu/{CONFIG_FILE_NAME}"
+DEFAULT_RESOURCES_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/resources/{CONFIG_FILE_NAME}"
+"""W4a 只预留：W4b 才有 resources 文档契约与读写器。"""
+
+_PROBE_DOCUMENT: Final[dict[str, object]] = {"preflight_probe": 1}
+"""哨兵内容：不含任何凭据，也**不是**任何一个域的合法文档。
+
+预检残留的哨兵因此永远不会被某个域的 reader 当成配置读进去。
+"""
 
 
 class IntegrationConfigError(RuntimeError):
-    """integration 配置无法安全读取或不满足 schema。"""
+    """配置文件无法安全读取、写入或不满足 schema。异常文本固定，不带路径或内容。"""
 
 
 class IntegrationConfigMissingError(IntegrationConfigError):
@@ -31,15 +63,20 @@ class IntegrationConfigMissingError(IntegrationConfigError):
     """
 
 
-def read_integration_config(path: str) -> IntegrationConfig:
-    """从绝对路径读取严格 schema 的 integration 配置。
+class PreflightProbeUnreadableError(IntegrationConfigError):
+    """哨兵写进去了，却没能原样读回。"""
+
+    def __init__(self) -> None:
+        super().__init__("preflight probe unreadable")
+
+
+def _read_document(path: str) -> object:
+    """严格读取一个 JSON 文档；只有 ``ENOENT`` 算「不存在」。
 
     「不存在」与「存在但坏」的分流只做在 ``os.open`` 这一处，因为只有这里拿得到
     errno。调用方**不得**用 ``os.path.exists()`` 预检：它跟随符号链接，断链会报
-    ``False``，于是指向不存在目标的符号链接被误判成「尚未配置」，绕过「符号链接
-    一律故障」；``lexists()`` 只补这一例，仍分不出 ``EACCES`` / ``ELOOP``，也仍有
-    检查与使用之间的时间窗。带 ``O_NOFOLLOW`` 的 ``os.open`` 对任何符号链接都抛
-    ``ELOOP``，只有真正不存在的路径才抛 ``ENOENT``。
+    ``False``，于是指向不存在目标的符号链接被误判成「尚未配置」。带 ``O_NOFOLLOW``
+    的 ``os.open`` 对任何符号链接都抛 ``ELOOP``，只有真正不存在的路径才抛 ``ENOENT``。
     """
     if not isinstance(path, str) or not os.path.isabs(path):
         raise IntegrationConfigError("integration config unavailable")
@@ -69,70 +106,159 @@ def read_integration_config(path: str) -> IntegrationConfig:
     if failed or not payload or len(payload) > _MAX_CONFIG_BYTES:
         raise IntegrationConfigError("integration config unavailable")
     try:
-        document = json.loads(payload.decode("utf-8"))
-        return IntegrationConfig.model_validate(document)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise IntegrationConfigError("integration config invalid") from None
 
 
-def _to_document(config: IntegrationConfig) -> dict[str, object]:
-    """构造**含 secret** 的落盘文档。
+def _atomic_write(path: str, document: dict[str, object], *, prefix: str) -> None:
+    """同目录临时文件 + ``0600`` + ``fsync`` + ``os.replace()`` + 目录 ``fsync``。
 
-    不能用 ``model_dump()``：secret 字段 ``exclude=True``，dump 出来的文档少了
-    凭据，写回去就把已保存的 Key 清空了。
-    """
-    gemini: dict[str, object] = {"enabled": config.gemini.enabled}
-    if config.gemini.api_key is not None:
-        gemini["api_key"] = config.gemini.api_key
-    feishu: dict[str, object] = {"enabled": config.feishu.enabled}
-    if config.feishu.app_id is not None:
-        feishu["app_id"] = config.feishu.app_id
-    if config.feishu.app_secret is not None:
-        feishu["app_secret"] = config.feishu.app_secret
-    return {"generation": config.generation, "gemini": gemini, "feishu": feishu}
-
-
-def write_integration_config(path: str, config: IntegrationConfig) -> None:
-    """同目录临时文件 + ``0600`` + ``os.replace()`` 原子替换。
+    任一步失败都抛闭集 :class:`IntegrationConfigError`，替换前失败会清掉临时文件。目录
+    ``fsync`` 失败发生在替换**之后**：新内容可能已经可见但持久性未知，此时仍报失败
+    而不是成功——调用方的两阶段审计因此停在 ``FAILED``（或只剩 ``STARTED``），诚实
+    表达"结果未知"，而不是回报一次无法证明已持久化的成功。
 
     ``indent=2`` 不只是可读性：多行文档必然含换行，因此
     :func:`~xiaowei_agent.interfaces.secret_file.read_secret_file` 一定会拒绝它，
-    旧 reader 不会意外成为这份 JSON 的第二条读取路径。
+    单行 reader 不会意外成为这份 JSON 的第二条读取路径。
     """
     if not isinstance(path, str) or not os.path.isabs(path):
         raise IntegrationConfigError("integration config unavailable")
     directory = os.path.dirname(path)
-    payload = json.dumps(
-        _to_document(config), ensure_ascii=False, sort_keys=True, indent=2
-    ).encode("utf-8")
+    payload = json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2).encode(
+        "utf-8"
+    )
     if len(payload) > _MAX_CONFIG_BYTES:
         raise IntegrationConfigError("integration config invalid")
-    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".integrations-", suffix=".tmp")
     try:
-        os.fchmod(descriptor, 0o600)
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
+        descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
     except OSError:
-        os.close(descriptor)
-        os.unlink(temporary)
         raise IntegrationConfigError("integration config unavailable") from None
-    os.close(descriptor)
+    replaced = False
     try:
+        try:
+            os.fchmod(descriptor, 0o600)
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("short write")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temporary, path)
+        replaced = True
+        directory_descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     except OSError:
-        os.unlink(temporary)
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
         raise IntegrationConfigError("integration config unavailable") from None
-    directory_descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+
+
+def _gemini_section(gemini: GeminiIntegration) -> dict[str, object]:
+    """**含 secret** 的落盘片段。
+
+    不能用 ``model_dump()``：secret 字段 ``exclude=True``，dump 出来的文档少了
+    凭据，写回去就把已保存的 Key 清空了。
+    """
+    section: dict[str, object] = {"enabled": gemini.enabled}
+    if gemini.api_key is not None:
+        section["api_key"] = gemini.api_key
+    return section
+
+
+def _feishu_section(feishu: FeishuIntegration) -> dict[str, object]:
+    section: dict[str, object] = {"enabled": feishu.enabled}
+    if feishu.app_id is not None:
+        section["app_id"] = feishu.app_id
+    if feishu.app_secret is not None:
+        section["app_secret"] = feishu.app_secret
+    return section
+
+
+def read_ai_config(path: str = DEFAULT_AI_CONFIG_PATH) -> AiConfig:
+    """读取 AI 域；不存在抛 :class:`IntegrationConfigMissingError`，其余一律故障。"""
+    document = _read_document(path)
     try:
-        os.fsync(directory_descriptor)
-    finally:
-        os.close(directory_descriptor)
+        return AiConfig.model_validate(document)
+    except ValidationError:
+        raise IntegrationConfigError("integration config invalid") from None
+
+
+def write_ai_config(path: str, config: AiConfig) -> None:
+    """原子写入 AI 域；不触碰任何其他域的文件。"""
+    if not isinstance(config, AiConfig):
+        raise IntegrationConfigError("integration config invalid")
+    _atomic_write(
+        path,
+        {"generation": config.generation, "gemini": _gemini_section(config.gemini)},
+        prefix=".ai-",
+    )
+
+
+def read_feishu_config(path: str = DEFAULT_FEISHU_CONFIG_PATH) -> FeishuConfig:
+    """读取飞书域；不存在抛 :class:`IntegrationConfigMissingError`，其余一律故障。"""
+    document = _read_document(path)
+    try:
+        return FeishuConfig.model_validate(document)
+    except ValidationError:
+        raise IntegrationConfigError("integration config invalid") from None
+
+
+def write_feishu_config(path: str, config: FeishuConfig) -> None:
+    """原子写入飞书域；不触碰任何其他域的文件。"""
+    if not isinstance(config, FeishuConfig):
+        raise IntegrationConfigError("integration config invalid")
+    _atomic_write(
+        path,
+        {"generation": config.generation, "feishu": _feishu_section(config.feishu)},
+        prefix=".feishu-",
+    )
+
+
+def read_legacy_integration_config(path: str) -> IntegrationConfig:
+    """严格读取旧组合文档。**只供一次性迁移器调用**，运行时不得引用。"""
+    document = _read_document(path)
+    try:
+        return IntegrationConfig.model_validate(document)
+    except ValidationError:
+        raise IntegrationConfigError("integration config invalid") from None
+
+
+def write_preflight_probe(path: str) -> None:
+    """经同一个原子写入器写一份哨兵，再用同一个严格读取器读回核对。
+
+    写不进去抛 :class:`IntegrationConfigError`，读不回来抛
+    :class:`PreflightProbeUnreadableError`；调用方不需要知道任何文件原语。
+    """
+    _atomic_write(path, dict(_PROBE_DOCUMENT), prefix=".preflight-")
+    try:
+        document = _read_document(path)
+    except IntegrationConfigError:
+        raise PreflightProbeUnreadableError from None
+    if document != _PROBE_DOCUMENT:
+        raise PreflightProbeUnreadableError
 
 
 __all__ = [
-    "DEFAULT_INTEGRATION_CONFIG_PATH",
+    "CONFIG_FILE_NAME",
+    "CONFIG_ROOT",
+    "DEFAULT_AI_CONFIG_PATH",
+    "DEFAULT_FEISHU_CONFIG_PATH",
+    "DEFAULT_RESOURCES_CONFIG_PATH",
+    "LEGACY_CONFIG_FILE_NAME",
     "IntegrationConfigError",
     "IntegrationConfigMissingError",
-    "read_integration_config",
-    "write_integration_config",
+    "PreflightProbeUnreadableError",
+    "read_ai_config",
+    "read_feishu_config",
+    "read_legacy_integration_config",
+    "write_ai_config",
+    "write_feishu_config",
+    "write_preflight_probe",
 ]

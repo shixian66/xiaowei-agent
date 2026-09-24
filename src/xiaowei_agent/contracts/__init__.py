@@ -191,6 +191,9 @@ from xiaowei_agent.contracts.ids import (
     TaskId,
 )
 from xiaowei_agent.contracts.integration_config import (
+    AiConfig,
+    ConfigDomain,
+    FeishuConfig,
     FeishuIntegration,
     GeminiIntegration,
     IntegrationConfig,
@@ -323,6 +326,7 @@ __all__ = [
     "AdmissionCertificate",
     "AdvisoryModelResult",
     "AgentError",
+    "AiConfig",
     "AlwaysTrue",
     "AnswerabilityVerdict",
     "ApprovalRequest",
@@ -351,6 +355,7 @@ __all__ = [
     "ClarificationReasonCode",
     "ClarificationRecord",
     "ClarificationSubject",
+    "ConfigDomain",
     "ConfirmedSlot",
     "ConfirmedTextValue",
     "ConfirmedTimeRangeValue",
@@ -375,6 +380,7 @@ __all__ = [
     "ExternalInput",
     "ExternalInputKind",
     "ExternalSource",
+    "FeishuConfig",
     "FeishuIntegration",
     "FeishuProjectionInput",
     "FiniteFloat",

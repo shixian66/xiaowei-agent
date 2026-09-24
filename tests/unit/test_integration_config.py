@@ -1,9 +1,14 @@
-"""`integrations.json` 契约：代次为正整数，secret 只走显式访问器。"""
+"""配置契约：代次为正整数，secret 只走显式访问器。
+
+``IntegrationConfig`` 只剩迁移输入的角色；AI/飞书两个域文档各自一个代次。
+"""
 
 import pytest
 from pydantic import ValidationError
 
 from xiaowei_agent.contracts import (
+    AiConfig,
+    FeishuConfig,
     FeishuIntegration,
     GeminiIntegration,
     IntegrationConfig,
@@ -79,3 +84,34 @@ def test_secret_rejects_control_characters_and_oversize() -> None:
         GeminiIntegration(enabled=True, api_key="bad\nvalue")
     with pytest.raises(ValidationError):
         GeminiIntegration(enabled=True, api_key="x" * 4097)
+
+
+def test_domain_documents_keep_secrets_out_of_every_projection() -> None:
+    fake_key = "AIza" + "-not-a-real-key"
+    fake_secret = "app" + "-secret-placeholder"
+    ai = AiConfig(generation=1, gemini=GeminiIntegration(enabled=True, api_key=fake_key))
+    feishu = FeishuConfig(
+        generation=1,
+        feishu=FeishuIntegration(enabled=True, app_id="cli_x", app_secret=fake_secret),
+    )
+    for rendered in (repr(ai), str(ai), ai.model_dump_json(), repr(ai.model_dump())):
+        assert fake_key not in rendered
+    for rendered in (
+        repr(feishu),
+        str(feishu),
+        feishu.model_dump_json(),
+        repr(feishu.model_dump()),
+    ):
+        assert fake_secret not in rendered
+    assert ai.gemini.secret_value() == fake_key
+    assert feishu.feishu.secret_value() == fake_secret
+
+
+def test_domain_equality_includes_the_secret() -> None:
+    """迁移器用相等性判断"已写入的一域与映射结果一致"：Secret 不同必须不等。"""
+    first = AiConfig(generation=1, gemini=GeminiIntegration(enabled=True, api_key="k" * 8))
+    second = AiConfig(generation=1, gemini=GeminiIntegration(enabled=True, api_key="j" * 8))
+    assert first != second
+    assert first == AiConfig(
+        generation=1, gemini=GeminiIntegration(enabled=True, api_key="k" * 8)
+    )

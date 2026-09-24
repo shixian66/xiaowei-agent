@@ -201,6 +201,8 @@ def _referenced_names(path: Path) -> set[str]:
             names.add(node.attr)
         elif isinstance(node, ast.alias):
             names.add(node.asname or node.name.rsplit(".", 1)[-1])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
     return names
 
 

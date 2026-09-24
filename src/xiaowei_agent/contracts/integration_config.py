@@ -1,4 +1,9 @@
-"""`integrations.json` 的严格契约：Provider 明文凭据的唯一真源。
+"""三域配置文件的严格契约：Provider 明文凭据的唯一真源。
+
+W4a 起 AI 与飞书各自一份固定文件（``ai/config.json`` / ``feishu/config.json``），
+各自一个 ``generation``；resources 域只预留名字与挂载，W4b 才有文档契约。
+旧的组合文档 :class:`IntegrationConfig` **只是一次性迁移的输入契约**：运行时 consumer
+与 Web 路由都不得再引用它（``tests/contract/test_w4_config_domain_contracts.py``）。
 
 Secret 字段必须**同时**写 ``exclude=True`` 与 ``repr=False``，取值只能过
 :meth:`GeminiIntegration.secret_value` / :meth:`FeishuIntegration.secret_value`。
@@ -11,6 +16,7 @@ Secret 字段必须**同时**写 ``exclude=True`` 与 ``repr=False``，取值只
 """
 
 import unicodedata
+from enum import StrEnum
 from typing import Annotated, Final
 
 from pydantic import AfterValidator, Field
@@ -58,8 +64,39 @@ class FeishuIntegration(Contract):
         return self.app_secret
 
 
+class ConfigDomain(StrEnum):
+    """配置域闭集：一个宿主目录、一份固定文件、一个独立 ``generation``。
+
+    加载回执的键、``service_config_state.config_domain`` 的 CHECK 与 Web 投影都用它，
+    不再借 :class:`~xiaowei_agent.contracts.enums.ProviderName` 冒充配置域——后者只服务
+    现有 Gemini/飞书探针分类。``RESOURCES`` 在 W4a 只占名字与挂载，没有文档契约。
+    """
+
+    AI = "ai"
+    FEISHU = "feishu"
+    RESOURCES = "resources"
+
+
+class AiConfig(Contract):
+    """AI 域的完整文档。``generation`` 恒 ``> 0``，每次成功保存自增。"""
+
+    generation: StrictInt = Field(gt=0)
+    gemini: GeminiIntegration
+
+
+class FeishuConfig(Contract):
+    """飞书域的完整文档；与 AI 域的代次互不相干。"""
+
+    generation: StrictInt = Field(gt=0)
+    feishu: FeishuIntegration
+
+
 class IntegrationConfig(Contract):
-    """一份完整配置。``generation`` 恒 ``> 0``，每次成功保存自增。"""
+    """旧 ``integrations.json`` 的组合文档，**只作一次性迁移的输入**。
+
+    运行时不得再读它、写它或据它判断状态；迁移器把它映射成同一代次的
+    :class:`AiConfig` 与 :class:`FeishuConfig` 后即删除旧文件。
+    """
 
     generation: StrictInt = Field(gt=0)
     gemini: GeminiIntegration
@@ -67,6 +104,9 @@ class IntegrationConfig(Contract):
 
 
 __all__ = [
+    "AiConfig",
+    "ConfigDomain",
+    "FeishuConfig",
     "FeishuIntegration",
     "GeminiIntegration",
     "IntegrationConfig",
