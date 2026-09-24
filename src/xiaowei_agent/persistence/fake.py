@@ -1059,7 +1059,7 @@ class InMemoryUserDirectoryStore:
             return self._approve_activation(command, context, now)
         if isinstance(command, RejectActivationCommand):
             return self._reject_activation(command, context, now)
-        raise AssertionError(f"unhandled directory command: {type(command).__name__}")
+        raise AssertionError("unhandled directory command")
 
     def _write_audit(
         self, candidate: AdminAuditCandidate, *, now: _dt.datetime
