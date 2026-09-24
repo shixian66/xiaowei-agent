@@ -17,13 +17,21 @@ def _protocol_surface(protocol: type) -> frozenset[str]:
     )
 
 
-def test_activation_store_has_only_two_narrow_methods() -> None:
-    assert _protocol_surface(ActivationStore) == {"create_or_reuse", "load"}
+def test_activation_store_has_only_three_narrow_methods() -> None:
+    assert _protocol_surface(ActivationStore) == {
+        "create_or_reuse",
+        "list_pending",
+        "load",
+    }
     assert set(inspect.signature(ActivationStore.create_or_reuse).parameters) == {
         "self",
         "command",
     }
     assert set(inspect.signature(ActivationStore.load).parameters) == {"self", "query"}
+    assert set(inspect.signature(ActivationStore.list_pending).parameters) == {
+        "self",
+        "query",
+    }
 
 
 @pytest.fixture
