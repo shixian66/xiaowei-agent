@@ -84,12 +84,13 @@ Compose smoke 通过。受审 head 与 squash merge 的 tree 均为
 
 W3-lite 计划已由 PR #76 合入 `17462b7f6c38549818081b5a704f6ec381dea1e7`。切片 A 已由
 PR #77 合入当前基线 `4e488a48d6b0fe483ad3714970aecc7acc44c954`。切片 B 的代码候选
-`0e7e836a773c2682b1b7b3c1d5411b97266529dc` 位于 PR #78；GitHub CI
-[35954284776](https://github.com/shixian66/xiaowei-agent/actions/runs/35954284776) 对该候选 8/8
-通过且各 job 有真实 steps：普通测试 `4508 passed, 382 skipped`，security 为
-`1513 passed, 83 skipped`，PostgreSQL integration 为 `4890 passed`、零 skip，Ruff/mypy 与
+`50065f15177d56af03139dd9b18a67e87a1d9bae` 位于 PR #78；GitHub CI
+[35957575611](https://github.com/shixian66/xiaowei-agent/actions/runs/35957575611) 对该候选 8/8
+通过且各 job 有真实 steps：普通测试 `4510 passed, 382 skipped`，security 为
+`1513 passed, 83 skipped`，PostgreSQL integration 为 `4892 passed`、零 skip，Ruff/mypy 与
 Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1440 管理壳、低于 1024 静态提示
-及确认对话框；这只是本地 UI 检查，不是正式浏览器 UAT。最终文档 head 仍须重新跑 CI 并接受独立复审。
+及确认对话框；这只是本地 UI 检查，不是正式浏览器 UAT。其后的证据收口提交仍须重新跑 CI，
+PR 最终 head 仍待独立复审和负责人合入。
 
 ## 1. 当前基线
 

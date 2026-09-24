@@ -1632,9 +1632,9 @@ def test_handoff_tracks_the_w3_lite_candidate_without_closing_full_w3() -> None:
     for fact in (
         "17462b7f6c38549818081b5a704f6ec381dea1e7",
         "4e488a48d6b0fe483ad3714970aecc7acc44c954",
-        "0e7e836a773c2682b1b7b3c1d5411b97266529dc",
-        "35954284776",
-        "4890 passed",
+        "50065f15177d56af03139dd9b18a67e87a1d9bae",
+        "35957575611",
+        "4892 passed",
     ):
         assert fact in handoff, f"W3-lite 交付链缺少稳定证据：{fact}"
     for stale in (
