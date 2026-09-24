@@ -49,6 +49,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
     UserDirectoryConflictError,
     UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
@@ -122,7 +123,14 @@ def _raise_closed(error: Exception) -> Never:
         raise AdminIdentityForbiddenError from None
     if isinstance(error, UserDirectoryNotFoundError):
         raise AdminIdentityNotFoundError from None
-    if isinstance(error, (UserDirectoryConflictError, AdminAuditConflictError)):
+    if isinstance(
+        error,
+        (
+            UserDirectoryConflictError,
+            AdminAuditConflictError,
+            AdminAuditUnwritableError,
+        ),
+    ):
         raise AdminIdentityConflictError from None
     if isinstance(error, (PersistenceUnavailableError, PersistenceIntegrityError)):
         raise AdminIdentityUnavailableError from None

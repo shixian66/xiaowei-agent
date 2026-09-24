@@ -48,6 +48,7 @@ from xiaowei_agent.persistence.errors import (
     PersistenceUnavailableError,
 )
 from xiaowei_agent.persistence.identity import (
+    AdminAuditUnwritableError,
     UserDirectoryConflictError,
     UserDirectoryDecisionDeniedError,
     UserDirectoryNotFoundError,
@@ -206,6 +207,22 @@ def test_actor_surface_does_not_carry_principal_or_subject() -> None:
     }
 
 
+def test_service_exposes_only_the_seven_approved_operations() -> None:
+    assert {
+        name
+        for name, value in vars(AdminIdentityService).items()
+        if not name.startswith("_") and callable(value)
+    } == {
+        "list_users",
+        "list_pending_activations",
+        "list_audit",
+        "set_user_status",
+        "change_user_role",
+        "approve_activation",
+        "reject_activation",
+    }
+
+
 async def test_capabilities_are_checked_by_the_service() -> None:
     service, _ = _service()
 
@@ -358,4 +375,19 @@ async def test_store_errors_are_mapped_to_the_closed_application_family(
             actor=_actor(AdminCapability.MANAGE_USERS),
             after_actor=None,
             limit=50,
+        )
+
+
+async def test_unwritable_managed_audit_is_a_closed_conflict() -> None:
+    directory = _Directory()
+    directory.error = AdminAuditUnwritableError()
+    service, _ = _service(directory)
+
+    with pytest.raises(AdminIdentityConflictError):
+        await service.change_user_role(
+            actor=_actor(AdminCapability.MANAGE_USERS),
+            user_id="user-1",
+            expected_role=ProductRole.USER,
+            role=ProductRole.OPERATOR,
+            trace_id="5" * 32,
         )
