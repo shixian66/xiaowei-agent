@@ -93,7 +93,7 @@ def test_every_command_has_a_declared_action_and_effect() -> None:
     多一个：说明某个命令被删掉了而声明没跟着删，下一个读者会以为它还在。
     """
     commands = _command_types()
-    assert len(commands) == 10
+    assert len(commands) == 12
     assert frozenset(ACTION_FOR_COMMAND) == commands
     assert frozenset(EFFECT_FOR_COMMAND) == commands
 

@@ -16,6 +16,7 @@
 """
 
 import hashlib
+from itertools import pairwise
 from typing import Annotated, Final, Self, TypeAlias
 
 from pydantic import Field, model_validator
@@ -24,6 +25,7 @@ from xiaowei_agent.contracts.base import (
     AwareDatetime,
     Contract,
     Sha256Hex,
+    StrictInt,
     StrictStr,
 )
 from xiaowei_agent.contracts.enums import (
@@ -311,3 +313,51 @@ class AdminAuditDenial(Contract):
     target_kind: AdminAuditTargetKind
     target_ref_digest: Sha256Hex
     reason_code: AdminAuditReasonCode
+
+
+class AdminAuditListQuery(Contract):
+    """Admin 审计读取的作用域、复合游标与闭集过滤。"""
+
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    before_created_at: AwareDatetime | None = None
+    before_event_id: BoundedId | None = None
+    action: AdminAuditAction | None = None
+    outcome: AdminAuditOutcome | None = None
+    target_kind: AdminAuditTargetKind | None = None
+    target_ref_digest: Sha256Hex | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    limit: StrictInt = Field(default=50, gt=0, le=100)
+
+    @model_validator(mode="after")
+    def _cursor_and_target_are_complete(self) -> Self:
+        if (self.before_created_at is None) != (self.before_event_id is None):
+            raise ValueError("admin audit cursor must be complete")
+        if (self.target_kind is None) != (self.target_ref_digest is None):
+            raise ValueError("admin audit target filter must be complete")
+        return self
+
+
+class AdminAuditPage(Contract):
+    """按 ``(created_at, event_id)`` 严格降序的审计页。"""
+
+    items: tuple[AdminAuditEvent, ...] = Field(max_length=100)
+    next_created_at: AwareDatetime | None = None
+    next_event_id: BoundedId | None = None
+
+    @model_validator(mode="after")
+    def _ordering_and_cursor_are_consistent(self) -> Self:
+        keys = tuple((item.created_at, item.event_id) for item in self.items)
+        if any(left <= right for left, right in pairwise(keys)):
+            raise ValueError("admin audit events must be strictly descending")
+        if (self.next_created_at is None) != (self.next_event_id is None):
+            raise ValueError("admin audit page cursor must be complete")
+        if not self.items and self.next_created_at is not None:
+            raise ValueError("an empty admin audit page cannot have a cursor")
+        if self.next_created_at is not None and (
+            self.next_created_at,
+            self.next_event_id,
+        ) != keys[-1]:
+            raise ValueError("admin audit cursor must match the last item")
+        return self

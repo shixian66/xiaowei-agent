@@ -1,5 +1,6 @@
 """W1b 身份激活申请的不可变契约。"""
 
+from itertools import pairwise
 from typing import Annotated, Final, Literal, Self, TypeAlias
 
 from pydantic import Field, model_validator
@@ -10,6 +11,7 @@ from xiaowei_agent.contracts.base import (
     Contract,
     ControlledPii,
     Sha256Hex,
+    StrictInt,
 )
 from xiaowei_agent.contracts.enums import (
     ActivationSource,
@@ -171,6 +173,45 @@ class ActivationRequest(Contract):
         return self
 
 
+class PendingActivationListQuery(Contract):
+    """有效 pending 申请的显式 scope 与复合 keyset 游标。"""
+
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    before_requested_at: AwareDatetime | None = None
+    before_request_id: BoundedId | None = None
+    limit: StrictInt = Field(default=50, gt=0, le=100)
+
+    @model_validator(mode="after")
+    def _cursor_is_complete(self) -> Self:
+        if (self.before_requested_at is None) != (self.before_request_id is None):
+            raise ValueError("pending activation cursor must be complete")
+        return self
+
+
+class PendingActivationPage(Contract):
+    """按 ``(requested_at, request_id)`` 严格降序的 pending 页。"""
+
+    items: tuple[ActivationRequest, ...] = Field(max_length=100)
+    next_requested_at: AwareDatetime | None = None
+    next_request_id: BoundedId | None = None
+
+    @model_validator(mode="after")
+    def _ordering_and_cursor_are_consistent(self) -> Self:
+        keys = tuple((item.requested_at, item.request_id) for item in self.items)
+        if any(left <= right for left, right in pairwise(keys)):
+            raise ValueError("pending activations must be strictly descending")
+        if (self.next_requested_at is None) != (self.next_request_id is None):
+            raise ValueError("pending activation page cursor must be complete")
+        if not self.items and self.next_requested_at is not None:
+            raise ValueError("an empty pending activation page cannot have a cursor")
+        if self.next_requested_at is not None and (
+            self.next_requested_at,
+            self.next_request_id,
+        ) != keys[-1]:
+            raise ValueError("pending activation cursor must match the last item")
+        return self
+
 __all__ = [
     "ACTIVATION_SOURCE_INTENT_KINDS",
     "ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS",
@@ -180,4 +221,6 @@ __all__ = [
     "ActivationSource",
     "ActivationStatus",
     "CreateActivationCommand",
+    "PendingActivationListQuery",
+    "PendingActivationPage",
 ]

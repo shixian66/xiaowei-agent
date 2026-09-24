@@ -11,6 +11,11 @@ from xiaowei_agent.contracts import admin_audit as audit_contracts
 from xiaowei_agent.contracts import identity as identity_contracts
 from xiaowei_agent.contracts.activation import ActivationRequest
 from xiaowei_agent.contracts.admin_audit import AdminAuditEffect, AdminAuditEvent
+from xiaowei_agent.contracts.admin_identity import (
+    AdminAuditSummary,
+    AdminPendingActivationSummary,
+    AdminUserSummary,
+)
 from xiaowei_agent.contracts.enums import (
     ActivationSource,
     ActivationStatus,
@@ -22,7 +27,12 @@ from xiaowei_agent.contracts.enums import (
     UserStatus,
     WebReturnIntentKind,
 )
-from xiaowei_agent.contracts.identity import UserAccount, UserRoleAssignment
+from xiaowei_agent.contracts.identity import (
+    ChangeManagedUserRoleCommand,
+    SetManagedUserStatusCommand,
+    UserAccount,
+    UserRoleAssignment,
+)
 from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 _NOW = dt.datetime(2026, 9, 24, 9, 0, tzinfo=dt.UTC)
@@ -216,3 +226,64 @@ def test_audit_page_is_strictly_descending_and_cursor_matches_tail() -> None:
     with pytest.raises(ValidationError):
         page_type(items=(newer,), next_created_at=older.created_at, next_event_id=older.event_id)
     assert page_type(items=()).next_event_id is None
+
+
+def test_managed_commands_reject_noops_and_admin_role_values() -> None:
+    with pytest.raises(ValidationError):
+        SetManagedUserStatusCommand(
+            user_id="user-1",
+            tenant_id="tenant-a",
+            environment_id="dev",
+            expected_status=UserStatus.ACTIVE,
+            expected_role=ProductRole.USER,
+            status=UserStatus.ACTIVE,
+        )
+    with pytest.raises(ValidationError):
+        ChangeManagedUserRoleCommand(
+            user_id="user-1",
+            tenant_id="tenant-a",
+            environment_id="dev",
+            expected_role=ProductRole.USER,
+            role=ProductRole.USER,
+        )
+    for field in ("expected_role", "role"):
+        values = {
+            "user_id": "user-1",
+            "tenant_id": "tenant-a",
+            "environment_id": "dev",
+            "expected_role": ProductRole.USER,
+            "role": ProductRole.OPERATOR,
+        }
+        values[field] = ProductRole.ADMIN
+        with pytest.raises(ValidationError):
+            ChangeManagedUserRoleCommand(**values)  # type: ignore[arg-type]
+
+
+def test_safe_admin_projection_models_have_no_sensitive_identity_fields() -> None:
+    forbidden = {
+        "subject_ref",
+        "subject_ref_digest",
+        "target_ref_digest",
+        "decided_by",
+    }
+    for model in (AdminUserSummary, AdminPendingActivationSummary, AdminAuditSummary):
+        assert not (forbidden & set(model.model_fields))
+
+
+def test_pending_subject_hint_has_a_closed_shape() -> None:
+    valid = AdminPendingActivationSummary(
+        request_id="request-1",
+        subject_hint="申请 · 12ab34cd",
+        source=ActivationSource.WEB_LOGIN,
+        requested_at=_NOW,
+        expires_at=_NOW + dt.timedelta(hours=1),
+    )
+    assert valid.subject_hint == "申请 · 12ab34cd"
+    with pytest.raises(ValidationError):
+        AdminPendingActivationSummary(
+            request_id="request-1",
+            subject_hint="申请 · request-1",
+            source=ActivationSource.WEB_LOGIN,
+            requested_at=_NOW,
+            expires_at=_NOW + dt.timedelta(hours=1),
+        )

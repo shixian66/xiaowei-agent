@@ -19,6 +19,8 @@ from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
     AdminAuditEvent,
+    AdminAuditListQuery,
+    AdminAuditPage,
     AdminAuditStart,
     AdminAuditTerminal,
 )
@@ -134,6 +136,9 @@ class AdminAuditStore(Protocol):
 
     async def load(self, *, event_id: str) -> AdminAuditEvent | None:
         """按 id 读回一条事件；不存在返回 ``None``。"""
+
+    async def list_events(self, *, query: AdminAuditListQuery) -> AdminAuditPage:
+        """按复合 keyset 分页读取显式作用域内的审计事件。"""
 
 
 __all__ = [

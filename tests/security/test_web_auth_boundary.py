@@ -210,6 +210,7 @@ def _service(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal},
             web_roles={principal.subject_ref: ProductRole.ADMIN},
+            web_user_ids={principal.subject_ref: "user-admin"},
         ),
         activations=(activations or RecordingActivationRequests()).as_service(),
         oauth=oauth,
@@ -345,6 +346,7 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal},
             web_roles={principal.subject_ref: ProductRole.ADMIN},
+            web_user_ids={principal.subject_ref: "user-admin"},
         ),
         activations=RecordingActivationRequests().as_service(),
         oauth=oauth,
@@ -494,6 +496,7 @@ def test_public_origin_is_an_origin_not_a_url_path(
             identities=StaticFeishuIdentityDirectory(
                 principals={principal.subject_ref: principal},
                 web_roles={principal.subject_ref: ProductRole.ADMIN},
+                web_user_ids={principal.subject_ref: "user-admin"},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),

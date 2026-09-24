@@ -30,10 +30,13 @@ from xiaowei_agent.contracts.enums import (
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    AdminUserListQuery,
+    AdminUserPage,
     ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     DirectoryCommand,
     DirectoryPrincipalFacts,
@@ -41,6 +44,7 @@ from xiaowei_agent.contracts.identity import (
     MigrateLegacyIdentitiesCommand,
     RejectActivationCommand,
     RevokeRoleCommand,
+    SetManagedUserStatusCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
 )
@@ -66,7 +70,9 @@ _ACTIVATION_USER_ID_DOMAIN: Final[str] = "xiaowei.identity.activation_user.v1"
 ACTION_FOR_COMMAND: Final[dict[type, AdminAuditAction]] = {
     CreateUserCommand: AdminAuditAction.USER_CREATED,
     SetUserStatusCommand: AdminAuditAction.USER_STATUS_CHANGED,
+    SetManagedUserStatusCommand: AdminAuditAction.USER_STATUS_CHANGED,
     AssignRoleCommand: AdminAuditAction.ROLE_ASSIGNED,
+    ChangeManagedUserRoleCommand: AdminAuditAction.ROLE_ASSIGNED,
     RevokeRoleCommand: AdminAuditAction.ROLE_REVOKED,
     BindExternalIdentityCommand: AdminAuditAction.EXTERNAL_IDENTITY_BOUND,
     UnbindExternalIdentityCommand: AdminAuditAction.EXTERNAL_IDENTITY_UNBOUND,
@@ -135,7 +141,9 @@ def _approve_activation_effect(
 EFFECT_FOR_COMMAND: Final[dict[type, Callable[..., AdminAuditEffect]]] = {
     CreateUserCommand: _create_user_effect,
     SetUserStatusCommand: _status_effect,
+    SetManagedUserStatusCommand: _status_effect,
     AssignRoleCommand: _assign_role_effect,
+    ChangeManagedUserRoleCommand: _assign_role_effect,
     RevokeRoleCommand: _no_effect,
     BindExternalIdentityCommand: _no_effect,
     UnbindExternalIdentityCommand: _no_effect,
@@ -245,10 +253,10 @@ class UserDirectoryNotFoundError(UserDirectoryError):
 
 
 class UserDirectoryDecisionDeniedError(UserDirectoryError):
-    """激活决定被事务内权限/作用域校验拒绝。"""
+    """Admin 目录决定被事务内权限/作用域校验拒绝。"""
 
     def __init__(self, reason_code: AdminAuditReasonCode) -> None:
-        super().__init__("activation decision denied")
+        super().__init__("admin directory decision denied")
         self.reason_code = reason_code
 
 
@@ -293,6 +301,9 @@ class UserDirectoryStore(Protocol):
         摘要化在 store 内部完成。让调用方自己算摘要，算错了就会永远判成"未绑定"
         ——而"未绑定"是一个不报错的结果。
         """
+
+    async def list_admin_users(self, *, query: AdminUserListQuery) -> AdminUserPage:
+        """按 actor keyset 分页读取当前作用域账号；不执行逐行查询。"""
 
     async def apply(
         self, *, command: DirectoryCommand, context: AdminOperationContext

@@ -54,6 +54,7 @@ from xiaowei_agent.config import (
     load_settings,
 )
 from xiaowei_agent.contracts import (
+    LOCAL_ADMIN_USER_ID,
     TASK_ID_PATTERN,
     AdminCapability,
     AuthenticatedPrincipal,
@@ -1124,6 +1125,7 @@ class _WebPrincipalSession:
     """
 
     cookie: str = field(repr=False)
+    user_id: str
     principal: AuthenticatedPrincipal
     role: ProductRole
     admin_capabilities: frozenset[AdminCapability]
@@ -1155,6 +1157,7 @@ async def _authenticated(
     else:
         return _WebPrincipalSession(
             cookie=cookie,
+            user_id=LOCAL_ADMIN_USER_ID,
             principal=local.principal,
             role=local.role,
             admin_capabilities=local.admin_capabilities,
@@ -1166,6 +1169,7 @@ async def _authenticated(
     session = await auth.authenticate(session_cookie=cookie)
     return _WebPrincipalSession(
         cookie=cookie,
+        user_id=session.user_id,
         principal=session.principal,
         role=session.role,
         admin_capabilities=session.admin_capabilities,

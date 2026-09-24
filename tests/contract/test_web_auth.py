@@ -185,6 +185,7 @@ def _service(
     directory = identities or StaticFeishuIdentityDirectory(
         principals={principal.subject_ref: principal},
         web_roles={principal.subject_ref: role},
+        web_user_ids={principal.subject_ref: "user-alice"},
     )
     return (
         WebAuthService(
@@ -569,6 +570,7 @@ async def test_login_rotates_old_session_and_current_directory_is_authoritative(
     with pytest.raises(WebAuthenticationError):
         await service.authenticate(session_cookie=first.session_cookie)
     authenticated = await service.authenticate(session_cookie=second.session_cookie)
+    assert authenticated.user_id == "user-alice"
     assert authenticated.principal.actor == "alice"
 
     empty_directory = StaticFeishuIdentityDirectory(principals={})
@@ -745,6 +747,7 @@ async def test_a_local_admin_session_is_not_accepted_as_a_feishu_session(
         identities=StaticFeishuIdentityDirectory(
             principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)},
             web_roles={LOCAL_ADMIN_SUBJECT_REF: ProductRole.OPERATOR},
+            web_user_ids={LOCAL_ADMIN_SUBJECT_REF: "user-shadow"},
         ),
     )
     await _session_in(sessions, cookie, auth_source=IdentitySource.LOCAL_ADMIN)
@@ -769,12 +772,14 @@ async def test_a_feishu_session_of_the_same_shape_is_still_accepted(
         identities=StaticFeishuIdentityDirectory(
             principals={LOCAL_ADMIN_SUBJECT_REF: _principal(LOCAL_ADMIN_SUBJECT_REF)},
             web_roles={LOCAL_ADMIN_SUBJECT_REF: ProductRole.OPERATOR},
+            web_user_ids={LOCAL_ADMIN_SUBJECT_REF: "user-shadow"},
         ),
     )
     await _session_in(sessions, cookie, auth_source=IdentitySource.FEISHU)
 
     authenticated = await service.authenticate(session_cookie=cookie)
 
+    assert authenticated.user_id == "user-shadow"
     assert authenticated.principal.subject_ref == LOCAL_ADMIN_SUBJECT_REF
 
 

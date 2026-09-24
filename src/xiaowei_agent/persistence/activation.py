@@ -7,6 +7,8 @@ from xiaowei_agent.contracts.activation import (
     ActivationLookup,
     ActivationRequest,
     CreateActivationCommand,
+    PendingActivationListQuery,
+    PendingActivationPage,
 )
 
 ACTIVATION_TTL_SECONDS: Final[int] = 24 * 60 * 60
@@ -55,6 +57,11 @@ class ActivationStore(Protocol):
 
     async def load(self, *, query: ActivationLookup) -> ActivationRequest | None:
         """按 request id 与显式作用域读取；作用域不匹配按不存在处理。"""
+
+    async def list_pending(
+        self, *, query: PendingActivationListQuery
+    ) -> PendingActivationPage:
+        """按复合 keyset 分页读取当前仍有效的 pending 申请。"""
 
 
 __all__ = [
