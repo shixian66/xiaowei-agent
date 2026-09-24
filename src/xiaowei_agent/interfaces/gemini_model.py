@@ -233,7 +233,7 @@ class GeminiModelAdapter:
             raise ValueError("Gemini adapter requires the fixed RI3 profile")
         self.profile = profile
         self._client_factory = client_factory
-        # Key 由装配层从 `integrations.json` 注入；adapter 不持有任何路径常量，
+        # Key 由装配层从 AI 域 `config.json` 注入；adapter 不持有任何路径常量，
         # 也不再自己去文件系统找凭据。
         self._api_key = api_key
 

@@ -151,7 +151,7 @@ async def probe_gemini_connection(
 ) -> ProbeOutcome:
     """验证这把 Key 现在能不能换到一次真实回应。
 
-    ``enabled`` 是 `.env` 的真实测试开关，``api_key`` 是 `integrations.json` 与
+    ``enabled`` 是 `.env` 的真实测试开关，``api_key`` 是 AI 域 `config.json` 与
     JSON 侧开关共同决定的结果——两层都为真才会有出站。顺序不能反：开关关闭时连
     "有没有配 Key"都不该被回答，那已经是一次信息泄露。
     """

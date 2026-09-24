@@ -448,7 +448,7 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _feishu_profiles_are_closed(self) -> "Settings":
-        # Provider 凭据自 RI5 起只有 `integrations.json` 一个真源；`.env` 侧只剩
+        # Provider 凭据只有各配置域的 `config.json` 一个真源；`.env` 侧只剩
         # "这个进程装配了哪条链路"。凭据是否齐备由装配点在读 JSON 时判断。
         shared: tuple[object, ...] = ()
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
