@@ -200,7 +200,10 @@ def _referenced_names(path: Path) -> set[str]:
         elif isinstance(node, ast.Attribute):
             names.add(node.attr)
         elif isinstance(node, ast.alias):
-            names.add(node.asname or node.name.rsplit(".", 1)[-1])
+            # 原名与别名都算：``import … as _x`` 不能把旧入口藏过扫描。
+            names.add(node.name.rsplit(".", 1)[-1])
+            if node.asname:
+                names.add(node.asname)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
     return names
