@@ -499,7 +499,14 @@ def test_file_config_adapter_keeps_the_port_keyword_signatures() -> None:
         FileIntegrationConfigRepository,
     )
 
-    for name in ("read_ai", "write_ai", "read_feishu", "write_feishu"):
+    for name in (
+        "read_ai",
+        "write_ai",
+        "read_feishu",
+        "write_feishu",
+        "read_resources",
+        "write_resources",
+    ):
         assert inspect.signature(
             getattr(FileIntegrationConfigRepository, name)
         ) == inspect.signature(getattr(IntegrationConfigRepository, name)), name

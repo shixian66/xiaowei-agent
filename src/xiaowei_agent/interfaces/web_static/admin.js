@@ -457,8 +457,13 @@ function renderDomain(domain) {
   addText(card, "p", domain.configured ? "已登记配置" : "未登记配置", "integration-primary");
   const load = domain.restart_required ? "pending_restart" : domain.load_status;
   addText(card, "p", LOAD[load] || "状态不可用", "integration-secondary");
-  const test = domain.last_test_status === null ? "暂无测试记录" : `最近测试：${domain.last_test_status === "passed" ? "通过" : "失败"}`;
-  addText(card, "p", test, "integration-secondary");
+  if (domain.domain === "resources") {
+    // 资源只有登记，没有测试项：不显示"暂无测试记录"，免得暗示存在一个测试入口。
+    addText(card, "p", "已保存，尚未接入", "integration-secondary");
+  } else {
+    const test = domain.last_test_status === null ? "暂无测试记录" : `最近测试：${domain.last_test_status === "passed" ? "通过" : "失败"}`;
+    addText(card, "p", test, "integration-secondary");
+  }
   grid.append(card);
 }
 
@@ -642,6 +647,250 @@ identityElements.cancel.addEventListener("click", () => {
 });
 identityElements.form.addEventListener("submit", submitIdentityAction);
 
+// ---------------------------------------------------------------- W4b 资源登记
+//
+// 只登记参数：这里没有任何测试或连接入口。写入后一律重读，不自动重放写请求。
+
+const RESOURCE_KIND_LABELS = Object.freeze({ starrocks: "StarRocks", prometheus: "Prometheus" });
+
+const resourceElements = Object.freeze({
+  panel: document.querySelector("#resources-panel"),
+  generation: document.querySelector("#resources-generation"),
+  pending: document.querySelector("#resources-pending"),
+  notice: document.querySelector("#resources-notice"),
+  message: document.querySelector("#resources-message"),
+  body: document.querySelector("#resources-body"),
+  empty: document.querySelector("#resources-empty"),
+  form: document.querySelector("#resource-form"),
+  formTitle: document.querySelector("#resource-form-title"),
+  id: document.querySelector("#resource-id"),
+  kind: document.querySelector("#resource-kind"),
+  displayName: document.querySelector("#resource-display-name"),
+  environment: document.querySelector("#resource-environment"),
+  tlsMode: document.querySelector("#resource-tls-mode"),
+  host: document.querySelector("#resource-host"),
+  port: document.querySelector("#resource-port"),
+  database: document.querySelector("#resource-database"),
+  username: document.querySelector("#resource-username"),
+  password: document.querySelector("#resource-password"),
+  baseUrl: document.querySelector("#resource-base-url"),
+  authMode: document.querySelector("#resource-auth-mode"),
+  promUsername: document.querySelector("#resource-prom-username"),
+  secret: document.querySelector("#resource-secret"),
+  enabled: document.querySelector("#resource-enabled"),
+  cancel: document.querySelector("#resource-cancel"),
+});
+
+function setResourceMessage(value) {
+  resourceElements.message.textContent = value || "";
+  setVisible(resourceElements.message, Boolean(value));
+}
+
+function showKindFields(kind) {
+  for (const group of resourceElements.form.querySelectorAll("[data-kind]")) {
+    setVisible(group, group.dataset.kind === kind);
+  }
+}
+
+function setEditOnlyOptions(editing) {
+  // "保持不变"只在修改时存在：新建时每个闭集字段都必须显式选择。
+  for (const option of resourceElements.form.querySelectorAll("option[data-edit-only]")) {
+    option.hidden = !editing;
+    option.disabled = !editing;
+  }
+}
+
+function resetResourceForm() {
+  resourceElements.form.reset();
+  resourceElements.id.value = "";
+  resourceElements.kind.disabled = false;
+  resourceElements.formTitle.textContent = "登记新资源";
+  setEditOnlyOptions(false);
+  resourceElements.environment.value = "dev";
+  resourceElements.tlsMode.value = "disabled";
+  resourceElements.authMode.value = "none";
+  setVisible(resourceElements.cancel, false);
+  showKindFields(resourceElements.kind.value);
+}
+
+function startResourceEdit(resource) {
+  resetResourceForm();
+  resourceElements.id.value = resource.resource_id;
+  resourceElements.kind.value = resource.kind;
+  resourceElements.kind.disabled = true;
+  resourceElements.formTitle.textContent = `修改资源：${resource.display_name}`;
+  setEditOnlyOptions(true);
+  // 修改时空白 = 保持不变；安全投影里本来就没有用户名、数据库、TLS 与凭据。
+  resourceElements.environment.value = "";
+  resourceElements.tlsMode.value = "";
+  resourceElements.authMode.value = "";
+  resourceElements.enabled.checked = resource.enabled === true;
+  setVisible(resourceElements.cancel, true);
+  showKindFields(resource.kind);
+  resourceElements.displayName.focus();
+}
+
+function resourceAddress(resource) {
+  return resource.kind === "starrocks" ? `${resource.host}:${resource.port}` : resource.base_url;
+}
+
+function renderResources(view) {
+  resourceElements.generation.textContent = `代次 ${view.generation}`;
+  renderPending(resourceElements.pending, view.pending_restart_services);
+  replaceChildren(resourceElements.body);
+  for (const resource of view.resources) {
+    const row = document.createElement("tr");
+    addText(row, "td", resource.display_name);
+    addText(row, "td", RESOURCE_KIND_LABELS[resource.kind] || resource.kind);
+    addText(row, "td", resource.environment);
+    addText(row, "td", resourceAddress(resource), "resource-address");
+    addText(row, "td", resource.configured ? "已配置" : "未配置");
+    addText(row, "td", resource.enabled ? "启用" : "停用");
+    addText(row, "td", "尚未接入");
+    const actions = document.createElement("td");
+    actions.className = "resource-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "button button-quiet";
+    edit.textContent = "修改";
+    edit.addEventListener("click", () => startResourceEdit(resource));
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "button button-quiet";
+    clear.textContent = "清除凭据…";
+    clear.disabled = resource.configured !== true;
+    clear.addEventListener("click", () => confirmResourceAction(resource, "clear"));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button button-quiet";
+    remove.textContent = "删除…";
+    remove.addEventListener("click", () => confirmResourceAction(resource, "delete"));
+    actions.append(edit, clear, remove);
+    row.append(actions);
+    resourceElements.body.append(row);
+  }
+  setVisible(resourceElements.empty, view.resources.length === 0);
+}
+
+async function loadResources() {
+  const view = await requestJson("/admin/api/resources");
+  renderResources(view);
+  setVisible(resourceElements.panel, true);
+}
+
+function showResourceSaved(saved) {
+  resourceElements.notice.textContent =
+    `资源已保存，运维资源代次 ${saved.generation}。重启任务 worker 后才会被读取；尚未接入任何目标。`;
+  setVisible(resourceElements.notice, saved.restart_required === true);
+}
+
+async function writeResource(path, body, rejectedText) {
+  setResourceMessage("");
+  setVisible(resourceElements.notice, false);
+  let ok = false;
+  try {
+    const saved = await requestJson(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify(body),
+    });
+    showResourceSaved(saved);
+    ok = true;
+  } catch (error) {
+    if (error.code === "unavailable") {
+      setResourceMessage("结果未知；请刷新后核对代次再决定是否重试。");
+    } else if (error.code === "not_found") {
+      setResourceMessage("该资源已不存在，列表已刷新。");
+    } else if (error.code === "conflict") {
+      setResourceMessage("资源编号冲突，未做任何修改，请重试。");
+    } else {
+      setResourceMessage(rejectedText);
+    }
+  }
+  try {
+    await loadResources();
+  } catch (_) {
+    setResourceMessage("资源列表暂时无法读取，请稍后刷新。");
+  }
+  return ok;
+}
+
+async function confirmResourceAction(resource, action) {
+  const prompt = action === "clear"
+    ? `确认清除"${resource.display_name}"的凭据？资源本身与其他资源都保留。`
+    : `确认删除"${resource.display_name}"？其他资源不受影响。`;
+  if (!window.confirm(prompt)) return;
+  const path = action === "clear" ? "/admin/api/resources/clear-secret" : "/admin/api/resources/delete";
+  await writeResource(path, { resource_id: resource.resource_id, confirm: true }, "操作被拒绝，资源未改变。");
+}
+
+function putIfFilled(target, name, value) {
+  if (typeof value === "string" && value.length > 0) target[name] = value;
+}
+
+function resourceCreateBody(kind) {
+  const body = {
+    environment: resourceElements.environment.value,
+    display_name: resourceElements.displayName.value,
+    tls_mode: resourceElements.tlsMode.value,
+    enabled: resourceElements.enabled.checked,
+  };
+  if (kind === "starrocks") {
+    body.host = resourceElements.host.value;
+    body.port = Number.parseInt(resourceElements.port.value, 10);
+    body.database = resourceElements.database.value;
+    body.username = resourceElements.username.value;
+    body.password = resourceElements.password.value;
+    return body;
+  }
+  body.base_url = resourceElements.baseUrl.value;
+  body.auth_mode = resourceElements.authMode.value;
+  putIfFilled(body, "username", resourceElements.promUsername.value);
+  putIfFilled(body, "secret", resourceElements.secret.value);
+  return body;
+}
+
+function resourceUpdateBody(kind) {
+  // 只带填写过的字段：省略 = 保持不变；从不发送 null 或空串。
+  const body = { resource_id: resourceElements.id.value, enabled: resourceElements.enabled.checked };
+  putIfFilled(body, "display_name", resourceElements.displayName.value);
+  putIfFilled(body, "environment", resourceElements.environment.value);
+  putIfFilled(body, "tls_mode", resourceElements.tlsMode.value);
+  if (kind === "starrocks") {
+    putIfFilled(body, "host", resourceElements.host.value);
+    if (resourceElements.port.value.length > 0) {
+      body.port = Number.parseInt(resourceElements.port.value, 10);
+    }
+    putIfFilled(body, "database", resourceElements.database.value);
+    putIfFilled(body, "username", resourceElements.username.value);
+    putIfFilled(body, "password", resourceElements.password.value);
+    return body;
+  }
+  putIfFilled(body, "base_url", resourceElements.baseUrl.value);
+  putIfFilled(body, "auth_mode", resourceElements.authMode.value);
+  putIfFilled(body, "username", resourceElements.promUsername.value);
+  putIfFilled(body, "secret", resourceElements.secret.value);
+  return body;
+}
+
+async function submitResource(event) {
+  event.preventDefault();
+  const kind = resourceElements.kind.value;
+  const editing = resourceElements.id.value.length > 0;
+  const ok = editing
+    ? await writeResource("/admin/api/resources/update", resourceUpdateBody(kind), "修改被拒绝，资源未改变；请检查字段组合。改为无认证前需先使用「清除凭据…」。")
+    : await writeResource(`/admin/api/resources/${kind}`, resourceCreateBody(kind), "登记被拒绝，请检查字段组合；未保存任何内容。");
+  if (ok) resetResourceForm();
+  // Secret 只进不出：无论成败都清空输入。
+  resourceElements.password.value = "";
+  resourceElements.secret.value = "";
+}
+
+resourceElements.kind.addEventListener("change", () => showKindFields(resourceElements.kind.value));
+resourceElements.cancel.addEventListener("click", () => resetResourceForm());
+resourceElements.form.addEventListener("submit", submitResource);
+resetResourceForm();
+
 async function boot() {
   try {
     const [me, status] = await Promise.all([
@@ -665,7 +914,7 @@ async function boot() {
       await Promise.all(reads);
     }
     if (mayConfigure) {
-      await loadConfig();
+      await Promise.all([loadConfig(), loadResources()]);
     }
   } catch (error) {
     if (error.code !== "unauthorized") {

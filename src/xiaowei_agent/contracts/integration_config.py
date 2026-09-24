@@ -1,7 +1,8 @@
 """三域配置文件的严格契约：Provider 明文凭据的唯一真源。
 
 W4a 起 AI 与飞书各自一份固定文件（``ai/config.json`` / ``feishu/config.json``），
-各自一个 ``generation``；resources 域只预留名字与挂载，W4b 才有文档契约。
+各自一个 ``generation``；W4b 的 resources 域文档契约在
+:mod:`xiaowei_agent.contracts.resource_config`，复用这里的 :data:`SecretRef`。
 旧的组合文档 :class:`IntegrationConfig` **只是一次性迁移的输入契约**：运行时 consumer
 与 Web 路由都不得再引用它（``tests/contract/test_w4_config_domain_contracts.py``）。
 

@@ -241,6 +241,11 @@ from xiaowei_agent.contracts.provider_state import (
 from xiaowei_agent.contracts.readiness import ReadinessProbe, ReadinessReport
 from xiaowei_agent.contracts.render import RenderPayload, RenderSection
 from xiaowei_agent.contracts.request import RequestContext, RequestEnvelope
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusResource,
+    ResourcesConfig,
+    StarRocksResource,
+)
 from xiaowei_agent.contracts.sql_surface import (
     MAX_ROW_LIMIT,
     MAX_WINDOW_MINUTES,
@@ -428,6 +433,7 @@ __all__ = [
     "ProductRole",
     "ProjectionErrorCode",
     "ProjectionState",
+    "PrometheusResource",
     "PromqlGuardRejection",
     "PromqlSurface",
     "ProviderIntentResponse",
@@ -445,6 +451,7 @@ __all__ = [
     "RequestContext",
     "RequestEnvelope",
     "ResolvedTarget",
+    "ResourcesConfig",
     "RetryDecision",
     "RetryReason",
     "RevokeRoleCommand",
@@ -465,6 +472,7 @@ __all__ = [
     "SqlGuardRejection",
     "SqlSurface",
     "StageOutcome",
+    "StarRocksResource",
     "StepAttemptDecision",
     "StepCommitRejection",
     "StepCondition",

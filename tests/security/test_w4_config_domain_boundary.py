@@ -330,6 +330,9 @@ _PUBLIC_FILE_API: Final = {
     "write_ai_config": ("path", "config"),
     "read_feishu_config": ("path",),
     "write_feishu_config": ("path", "config"),
+    # W4b：resources 域同样只有一对固定类型入口。
+    "read_resources_config": ("path",),
+    "write_resources_config": ("path", "config"),
     "read_legacy_integration_config": ("path",),
     "write_preflight_probe": ("path",),
 }

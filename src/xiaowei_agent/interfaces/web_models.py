@@ -33,6 +33,11 @@ from xiaowei_agent.contracts import (
     WebReturnIntent,
 )
 from xiaowei_agent.contracts.identity import BoundedActor, BoundedId, BoundedName
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusAuthMode,
+    ResourceEnvironment,
+    TlsMode,
+)
 from xiaowei_agent.interfaces.web_navigation import web_task_detail_path
 
 SecretPassword: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
@@ -286,6 +291,118 @@ class WebConfigSaved(_WebModel):
     restart_required: bool
 
 
+# ---------------------------------------------------------------------- W4b 资源
+
+ResourceText: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=128)]
+"""资源的非 secret 文本字段；只做长度边界，语法（主机、URL、控制字符）由契约校验。"""
+
+ResourceLocator: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=2048)]
+ResourceIdText: TypeAlias = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{32}$")]
+
+
+class WebStarRocksResourceCreate(_WebModel):
+    """``POST /admin/api/resources/starrocks``。
+
+    没有 ``resource_id``、``kind`` 或任意参数 dict：ID 由服务端生成，kind 由路径决定，
+    多一个字段即 ``extra="forbid"`` 拒绝。组合与语法规则不在这里另抄，合并后交契约校验。
+    """
+
+    environment: ResourceEnvironment
+    display_name: ResourceText
+    host: ResourceText
+    port: StrictInt
+    database: ResourceText
+    username: ResourceText
+    password: SecretRef = Field(exclude=True, repr=False)
+    tls_mode: TlsMode
+    enabled: bool
+
+
+class WebPrometheusResourceCreate(_WebModel):
+    """``POST /admin/api/resources/prometheus``；认证组合由契约判定。"""
+
+    environment: ResourceEnvironment
+    display_name: ResourceText
+    base_url: ResourceLocator
+    auth_mode: PrometheusAuthMode
+    username: ResourceText | None = None
+    secret: SecretRef | None = Field(default=None, exclude=True, repr=False)
+    tls_mode: TlsMode
+    enabled: bool
+
+
+class WebResourceUpdate(_ConfigUpdate):
+    """``POST /admin/api/resources/update``：按 ID 部分修改，省略即保留。
+
+    ``resource_id`` 只用于**寻址**，不能被改写；``kind`` 不在字段里，传了即拒绝。
+    显式 ``null`` / 空串同 W4a 一样被拒：清除 Secret 走 ``clear-secret`` 确认动作。
+    """
+
+    resource_id: ResourceIdText
+    environment: ResourceEnvironment | None = None
+    display_name: ResourceText | None = None
+    enabled: bool | None = None
+    tls_mode: TlsMode | None = None
+    host: ResourceText | None = None
+    port: StrictInt | None = None
+    database: ResourceText | None = None
+    username: ResourceText | None = None
+    password: SecretRef | None = Field(default=None, exclude=True, repr=False)
+    base_url: ResourceLocator | None = None
+    auth_mode: PrometheusAuthMode | None = None
+    secret: SecretRef | None = Field(default=None, exclude=True, repr=False)
+
+
+class WebResourceConfirm(_WebModel):
+    """清除 Secret 与删除资源：ID 寻址 + 二次确认。"""
+
+    resource_id: ResourceIdText
+    confirm: AlwaysTrue
+
+
+class WebStarRocksResourceView(_WebModel):
+    """StarRocks 安全投影：没有 username、password、database 或 TLS 细节。"""
+
+    kind: Literal["starrocks"] = "starrocks"
+    resource_id: StrictStr
+    environment: ResourceEnvironment
+    display_name: StrictStr
+    enabled: bool
+    host: StrictStr
+    port: StrictInt
+    configured: bool
+
+
+class WebPrometheusResourceView(_WebModel):
+    """Prometheus 安全投影：``base_url`` 在契约层已禁止 userinfo/query/fragment。"""
+
+    kind: Literal["prometheus"] = "prometheus"
+    resource_id: StrictStr
+    environment: ResourceEnvironment
+    display_name: StrictStr
+    enabled: bool
+    base_url: StrictStr
+    configured: bool
+
+
+class WebResourcesView(_WebModel):
+    """``GET /admin/api/resources``。``connected`` 恒为假：W4b 只登记参数，尚未接入。"""
+
+    domain: Literal["resources"] = "resources"
+    generation: StrictInt
+    connected: Literal[False] = False
+    pending_restart_services: tuple[StrictStr, ...]
+    resources: tuple[WebStarRocksResourceView | WebPrometheusResourceView, ...]
+
+
+class WebResourceSaved(_WebModel):
+    """资源写入成功：只点名被写的资源 ID 与 resources 新代次。"""
+
+    resource_id: StrictStr
+    generation: StrictInt
+    restart_required: bool
+
+
 class WebOAuthTestStarted(_WebModel):
     """飞书 OAuth 连接测试**已签发**的响应；与失败响应是两种形状。
 
@@ -466,8 +583,16 @@ __all__ = [
     "WebIntegrationStatusView",
     "WebLoginRequest",
     "WebOAuthTestStarted",
+    "WebPrometheusResourceCreate",
+    "WebPrometheusResourceView",
     "WebRejectActivationRequest",
+    "WebResourceConfirm",
+    "WebResourceSaved",
+    "WebResourceUpdate",
+    "WebResourcesView",
     "WebSetUserStatusRequest",
+    "WebStarRocksResourceCreate",
+    "WebStarRocksResourceView",
     "WebTaskAccepted",
     "WebTaskDetail",
     "WebTaskPage",

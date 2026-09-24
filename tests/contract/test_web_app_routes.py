@@ -738,6 +738,12 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("GET", "/admin/api/config/feishu"),
         ("PUT", "/admin/api/config/feishu"),
         ("POST", "/admin/api/config/feishu/clear"),
+        ("GET", "/admin/api/resources"),
+        ("POST", "/admin/api/resources/starrocks"),
+        ("POST", "/admin/api/resources/prometheus"),
+        ("POST", "/admin/api/resources/update"),
+        ("POST", "/admin/api/resources/clear-secret"),
+        ("POST", "/admin/api/resources/delete"),
         # 字面量在前、路径参数在后：Starlette 按注册顺序匹配，反过来会让
         # feishu_oauth 落进凭据探针那条分支。
         ("POST", "/admin/api/config/test/feishu_oauth"),

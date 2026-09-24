@@ -21,8 +21,8 @@
 [总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
 各阶段进度见顶部交接入口；当前可照做的首启流程见下文：W4a 起 Provider 配置拆为 AI、飞书、
-resources 三个固定配置域并仍走 loopback 发布；W4b 的资源参数维护、W4c 连接测试与 W5 部署尚未实现，
-不能提前套用。
+resources 三个固定配置域并仍走 loopback 发布；W4b 起 resources 域可登记 StarRocks 与 Prometheus
+参数，但只登记、不接入。W4c 连接测试与 W5 部署尚未实现，不能提前套用。
 
 ## 目标能力
 
@@ -268,13 +268,20 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 | --- | --- | --- | --- |
 | AI | `.config/ai/config.json` | `/run/xiaowei-config/ai/config.json` | `web-app` 读写；`worker` 只读 |
 | 飞书 | `.config/feishu/config.json` | `/run/xiaowei-config/feishu/config.json` | `web-app` 读写；`feishu-listener` / `channel-worker` 只读 |
-| resources | `.config/resources/`（W4a 只预留目录，无文件） | `/run/xiaowei-config/resources` | `web-app` 读写；`worker` 只读 |
+| resources | `.config/resources/config.json` | `/run/xiaowei-config/resources/config.json` | `web-app` 读写；`worker` 只读 |
 
 任何服务都不挂父目录 `.config/`，`api` / `migrate` / `postgres` 一个域都不挂；consumer 只看得见
 自己的域。`.config/` 已被 `.gitignore` 与 `.dockerignore` 忽略，由本地管理面按域写入：保存 AI 域
 不改变飞书域的文件或 `generation`，反之亦然。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
 旧单文件 `.config/integrations.json` 只作为下文显式一次性迁移的输入：运行时既不读它，也不自动迁移；
 它还在时预检固定报 `migration_required`。
+
+**运维资源登记（W4b）**：本地 Admin 在 `/admin` 的"运维资源登记"区新增、修改、清除凭据或删除
+StarRocks 与 Prometheus 资源，写进 `.config/resources/config.json`（最多 100 个，资源 ID 由服务端生成）。
+这里只做本地语法与字段组合校验：不解析 DNS、不探测端口、不发 HTTP、不登录，也没有"测试连接"
+按钮；页面固定标注"已保存，尚未接入"。凭据只进不出：修改时留空表示不修改，清除走单独确认动作。
+task worker 重启时只读取这份文件并签 `(worker, resources)` 加载回执，随即丢弃内容，不把资源交给任何
+能力或工具。真实连接、目标网络策略与调用路径属于 W4c，另需独立授权。
 本地 Admin 在 `/admin` 维护配置；`/app` 只承担运维任务工作台，不再承载配置表单。
 飞书 Admin 进入 `/admin` 时只能看脱敏集成状态，不能读取、保存、清除或测试 raw config。
 W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审计三个桌面管理区，对应
@@ -481,7 +488,9 @@ python -m scripts.compose_smoke
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
 下创建**四个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令、身份文件与不含
 secret 值的 JSON Compose override，另外三个分别是 AI、飞书、resources 域目录（前两个各放一份
-合成的 `config.json`，resources 为空）。分开是必要的——每个域目录是**整目录**挂进容器的，与口令
+合成的 `config.json`，resources 放一份目标在 `.invalid` 域下的合成登记文档，其两个假凭据同样进脱敏
+名单；worker 基线任务完成后，脚本用一条固定只读 SQL 核对 `(worker, resources)` 回执恰为第 1 代
+`loaded`）。分开是必要的——每个域目录是**整目录**挂进容器的，与口令
 或兄弟域同目录时那些文件会一起出现在只该看到本域的容器里。override 把三个域目录与身份文件的
 引用都指向这些私有目录，不读取或
 覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离目录，再核对目录与

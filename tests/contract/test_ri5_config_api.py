@@ -117,6 +117,7 @@ class _Built:
     memory_state: Any
     ai_path: Path
     feishu_path: Path
+    resources_path: Path
 
     def audit(self) -> list[tuple[AdminAuditAction, AdminAuditOutcome, Any]]:
         """只看 W4a 的三个配置动作；首启 bootstrap 等目录审计不在考察范围。"""
@@ -141,6 +142,7 @@ def _build(
     memory_state: Any,
     *,
     with_feishu_auth: bool = False,
+    resource_id_factory: Any = None,
     **settings_updates: object,
 ) -> _Built:
     root = tmp_path / ".config"
@@ -148,6 +150,7 @@ def _build(
         (root / domain).mkdir(parents=True, exist_ok=True)
     ai_path = root / "ai" / "config.json"
     feishu_path = root / "feishu" / "config.json"
+    resources_path = root / "resources" / "config.json"
     sessions = InMemoryWebSessionStore(clock=clock, state=memory_state)
     admins = InMemoryLocalAdminStore(clock=clock, state=memory_state)
     provider_state = InMemoryProviderStateStore(clock=clock, state=memory_state)
@@ -182,10 +185,13 @@ def _build(
     )
     integration_config = IntegrationConfigService(
         repository=FileIntegrationConfigRepository(
-            ai_path=str(ai_path), feishu_path=str(feishu_path)
+            ai_path=str(ai_path),
+            feishu_path=str(feishu_path),
+            resources_path=str(resources_path),
         ),
         audit=InMemoryAdminAuditStore(clock=clock, state=memory_state),
         provider_state=provider_state,
+        **({} if resource_id_factory is None else {"resource_id_factory": resource_id_factory}),
     )
     app = create_app(
         auth=auth,
@@ -214,6 +220,7 @@ def _build(
         memory_state=memory_state,
         ai_path=ai_path,
         feishu_path=feishu_path,
+        resources_path=resources_path,
     )
 
 

@@ -574,6 +574,50 @@ def _synthetic_feishu_config(*, feishu_value: str) -> str:
     )
 
 
+def _synthetic_resources_config(*, password_value: str, token_value: str) -> str:
+    """一份**合成的** resources 域登记文档（W4b）：一个 StarRocks、一个 Prometheus。
+
+    目标主机都在保留的 ``.invalid`` 顶级域下；W4b 本来就不解析、不连接，这只是第二道保险。
+    两个 Secret 都是随机假串，随整份输入一起进入脱敏名单。
+    """
+    return (
+        json.dumps(
+            {
+                "generation": 1,
+                "resources": [
+                    {
+                        "kind": "starrocks",
+                        "resource_id": secrets.token_hex(16),
+                        "environment": "dev",
+                        "display_name": "smoke starrocks",
+                        "host": "sr-fe.smoke.invalid",
+                        "port": 9030,
+                        "database": "smoke",
+                        "username": "smoke_reader",
+                        "password": password_value,
+                        "tls_mode": "verify_identity",
+                        "enabled": True,
+                    },
+                    {
+                        "kind": "prometheus",
+                        "resource_id": secrets.token_hex(16),
+                        "environment": "dev",
+                        "display_name": "smoke prometheus",
+                        "base_url": "https://prom.smoke.invalid/prometheus",
+                        "auth_mode": "bearer",
+                        "secret": token_value,
+                        "tls_mode": "verify_ca",
+                        "enabled": True,
+                    },
+                ],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
 def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
     config_namespaces: dict[str, _PrivateInputNamespace] = {}
@@ -601,7 +645,16 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
                 _synthetic_feishu_config(feishu_value=feishu_value),
             )
         )
-        # resources 域在 W4a 只预留：目录存在、挂载成立，但没有任何文件。
+        resources_password = secrets.token_urlsafe(32)
+        resources_token = secrets.token_urlsafe(32)
+        config_created["resources"].append(
+            _create_input(
+                config_namespaces["resources"].path / _CONFIG_FILE_NAME,
+                _synthetic_resources_config(
+                    password_value=resources_password, token_value=resources_token
+                ),
+            )
+        )
         # 每个域目录都作为目录 bind mount 给 UID 10001 的非 root 容器。宿主侧仍在
         # 0700 的 input_root 下面；mount 根目录本身只需可遍历、不需可列目录，否则
         # 容器读不到 /run/xiaowei-config/<domain>/config.json，OAuth smoke 会退化成未装配。
@@ -658,7 +711,13 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     return _SmokeInputs(
         namespace=namespace,
         config_namespaces=config_namespaces,
-        sensitive_values=(postgres_value, feishu_value, gemini_value),
+        sensitive_values=(
+            postgres_value,
+            feishu_value,
+            gemini_value,
+            resources_password,
+            resources_token,
+        ),
         owned_inputs=tuple(created),
         config_inputs={domain: tuple(owned) for domain, owned in config_created.items()},
         override_path=override,
@@ -1353,6 +1412,36 @@ FROM task_evidence WHERE task_id = :'task_id'
 """
 
 
+_WORKER_RESOURCES_RECEIPT_SQL = (
+    "SELECT loaded_generation || '|' || load_status FROM service_config_state"
+    " WHERE service_name = 'worker' AND config_domain = 'resources'"
+)
+
+
+def _require_worker_resources_receipt(session: ComposeSession) -> None:
+    """W4b：worker 启动后必须为合成的 resources 第 1 代签下 ``loaded`` 回执。
+
+    固定只读语句、不拼接任何参数；它证明的只是"worker 读到了这一代格式"，与接入无关。
+    """
+    observed = session.run(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "xiaowei",
+        "-d",
+        "xiaowei",
+        "-At",
+        "-c",
+        _WORKER_RESOURCES_RECEIPT_SQL,
+        timeout=30.0,
+        failure_code="SMOKE_POSTGRES_OBSERVATION_FAILED",
+    ).stdout
+    if observed.splitlines() != ["1|loaded"]:
+        raise SmokeError("SMOKE_RESOURCES_RECEIPT_MISSING")
+
+
 def _normalised_evidence(session: ComposeSession, task_id: str) -> object:
     raw = _psql(session, task_id, _NORMALISED_EVIDENCE_SQL)
     try:
@@ -1539,6 +1628,7 @@ def _full_workflow(session: ComposeSession) -> None:
     baseline_key = f"baseline-{uuid.uuid4().hex}"
     baseline_id = _submit(session, key=baseline_key, text=f"{_TEXT} {sensitive_canary}")
     _require_succeeded(_wait_task(session, baseline_id, timeout=120.0))
+    _require_worker_resources_receipt(session)
     baseline_evidence = _normalised_evidence(session, baseline_id)
     session.run(
         "stop",

@@ -211,3 +211,41 @@ def test_the_login_script_never_derives_the_csrf_token_itself() -> None:
 
     assert "document.cookie" not in login
     assert 'meta[name="csrf-token"]' in login
+
+
+def _resources_panel(admin: str) -> str:
+    start = admin.find('id="resources-panel"')
+    assert start >= 0, "管理页缺少资源登记区"
+    end = admin.find("</section>", start)
+    assert end > start
+    return admin[start:end]
+
+
+def test_the_resources_panel_says_saved_but_not_connected_and_has_no_test_button() -> None:
+    """W4b 只登记参数：页面必须说清"尚未接入"，也不能出现任何测试/连接按钮。"""
+    admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
+    index = (_STATIC / "index.html").read_text(encoding="utf-8")
+    panel = _resources_panel(admin)
+    assert "已保存，尚未接入" in panel
+    assert 'id="resources-generation"' in panel
+    assert 'id="resources-pending"' in panel
+    for forbidden in ("测试", "连接测试", "测试连接", "test-", "check-"):
+        assert forbidden not in panel, forbidden
+    assert 'id="resources-panel"' not in index
+
+
+def test_the_resources_script_only_uses_the_registration_routes() -> None:
+    admin_script = (_STATIC / "admin.js").read_text(encoding="utf-8")
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+    for required in (
+        '"/admin/api/resources"',
+        "`/admin/api/resources/${kind}`",
+        '"/admin/api/resources/update"',
+        '"/admin/api/resources/clear-secret"',
+        '"/admin/api/resources/delete"',
+    ):
+        assert required in admin_script, required
+    assert "/admin/api/resources" not in app_script
+    # 没有资源测试或连接入口：W4c 才决定真实调用路径。
+    for forbidden in ("/admin/api/resources/test", "resources/probe", "resources/connect"):
+        assert forbidden not in admin_script

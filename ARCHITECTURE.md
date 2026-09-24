@@ -689,10 +689,21 @@ worker, listener and channel worker publish no host ports.
 **Provider 凭据与进程权限契约（ADR-015 RI5 修订，W4a 三域化）**：Provider 凭据不走 Docker secret。
 配置分为 `ConfigDomain` 闭集 `ai` / `feishu` / `resources` 三个固定域，每域一个宿主 Git-ignored
 目录、一份固定文件与一个独立 `generation`：Gemini 在 `/run/xiaowei-config/ai/config.json`，飞书在
-`/run/xiaowei-config/feishu/config.json`，`resources` 在 W4a 只预留目录与挂载、没有文档契约。
+`/run/xiaowei-config/feishu/config.json`，W4b 的运维资源登记在 `/run/xiaowei-config/resources/config.json`。
 Compose 只挂域目录、从不挂父目录：`web-app` 三域读写；`worker` 只读 `ai` 与 `resources`；
 `feishu-listener` / `channel-worker` 只读 `feishu`；`api` / `migrate` / `postgres` 不挂任何域。
 每个进程只读取自己消费的域、只为 `(service, domain)` 签加载回执，不替兄弟进程作证。
+**运维资源登记契约（W4b）**：`contracts/resource_config.py` 以 `kind` 判别 StarRocks 与 Prometheus 两种
+资源，文档最多 100 个、`resource_id` 为服务端 CSPRNG 生成的 32 位小写十六进制且全局唯一；主机只接受
+ASCII hostname / IPv4 / 不带方括号的 IPv6 字面量，Prometheus base URL 只接受 http/https 且禁止
+userinfo/query/fragment，scheme 与 TLS、认证方式与 username/secret 的组合在契约层一次闭合。校验只用
+`ipaddress` / `urlsplit` 这类纯函数：不解析 DNS、不探测端口、不发 HTTP、不登录。资源 Secret 与 Provider
+Secret 同一规则；清除 Secret 后资源保留、`configured` 为假，新建时按 kind 要求必须带 Secret。写入只经唯一
+配置写服务的 create/update/clear-secret/delete，复用两阶段审计（target 为 `resource:<id>`），每次整份
+重写并推进一次 resources `generation`，其余资源对象与其 Secret 原样复用；ID 撞车是闭集 `conflict`，不覆盖、
+不重试。Web 安全投影只返回 ID、kind、环境、显示名、启用、host/port 或 base URL 与 `configured`，页面标注
+"已保存，尚未接入"且没有测试入口。task worker 只为签 `(worker, resources)` 加载回执读取该文件并随即丢弃，
+资源不进入 Runtime、Resolver、Registry、ToolGateway 或任何 adapter；真实连接与目标注册属于 W4c。
 旧单文件 `.config/integrations.json` 只是 `interfaces/integration_config_migrate.py` 的一次性迁移输入：
 运行时不双读、不回落、不自动迁移；旧文件仍在时预检固定报 `migration_required`，迁移器遇到新旧内容
 不一致同样返回 `migration_required` 且不覆盖任何一边。模型 override 只剩装配开关，在 `services.worker.environment` 下声明

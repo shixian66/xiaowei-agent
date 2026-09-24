@@ -1,7 +1,7 @@
 """三域配置文件的读写边界：符号链接、非正规文件、超长、schema 与原子写失败一律故障。
 
-AI 与飞书两个域共用同一对私有 primitive，因此每条边界用例都对两个域各跑一遍：只测一个
-域的套件无法发现另一个域的窄入口绕过了 primitive。
+AI、飞书与 resources（W4b）三个域共用同一对私有 primitive，因此每条边界用例都对三个域
+各跑一遍：只测一个域的套件无法发现另一个域的窄入口绕过了 primitive。
 """
 
 import json
@@ -19,6 +19,11 @@ from xiaowei_agent.contracts import (
     FeishuIntegration,
     GeminiIntegration,
 )
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusResource,
+    ResourcesConfig,
+    StarRocksResource,
+)
 from xiaowei_agent.interfaces import integration_config_file
 from xiaowei_agent.interfaces.integration_config_file import (
     IntegrationConfigError,
@@ -27,15 +32,51 @@ from xiaowei_agent.interfaces.integration_config_file import (
     read_ai_config,
     read_feishu_config,
     read_legacy_integration_config,
+    read_resources_config,
     write_ai_config,
     write_feishu_config,
     write_preflight_probe,
+    write_resources_config,
 )
 
 pytestmark = pytest.mark.security
 
 _FAKE_KEY: Final = "AIza" + "-boundary-not-real"
 _FAKE_SECRET: Final = "app" + "-boundary-not-real"
+_FAKE_DB_PASSWORD: Final = "sr" + "-boundary-not-real"
+_FAKE_TOKEN: Final = "prom" + "-boundary-not-real"
+
+
+def _resources(generation: int) -> ResourcesConfig:
+    return ResourcesConfig(
+        generation=generation,
+        resources=(
+            StarRocksResource(
+                kind="starrocks",
+                resource_id="1" * 32,
+                environment="prod",
+                display_name="sr",
+                host="10.0.0.1",
+                port=9030,
+                database="ods",
+                username="reader",
+                password=_FAKE_DB_PASSWORD,
+                tls_mode="verify_ca",
+                enabled=True,
+            ),
+            PrometheusResource(
+                kind="prometheus",
+                resource_id="2" * 32,
+                environment="prod",
+                display_name="prom",
+                base_url="https://prom.example.internal/p",
+                auth_mode="bearer",
+                secret=_FAKE_TOKEN,
+                tls_mode="verify_identity",
+                enabled=False,
+            ),
+        ),
+    )
 
 Reader = Callable[[str], Any]
 Writer = Callable[[str, Any], None]
@@ -58,6 +99,12 @@ _DOMAINS: Final[dict[str, tuple[Reader, Writer, Callable[[int], Any], dict[str, 
             feishu=FeishuIntegration(enabled=True, app_id="cli_b", app_secret=_FAKE_SECRET),
         ),
         {"generation": 1, "feishu": {"enabled": False}},
+    ),
+    "resources": (
+        read_resources_config,
+        write_resources_config,
+        _resources,
+        {"generation": 1, "resources": []},
     ),
 }
 
@@ -150,12 +197,16 @@ def test_empty_oversize_or_malformed_file_is_refused(
 
 def test_schema_violations_are_refused(tmp_path: Path, domain: str) -> None:
     reader, _, _, minimal = _DOMAINS[domain]
-    section = "gemini" if domain == "ai" else "feishu"
+    wrong_section: dict[str, object] = {
+        "ai": {"gemini": {"enabled": False, "model": "x"}},
+        "feishu": {"feishu": {"enabled": False, "model": "x"}},
+        "resources": {"resources": [{"kind": "kafka", "resource_id": "3" * 32}]},
+    }[domain]
     for payload in (
         {**minimal, "generation": 0},
         {key: value for key, value in minimal.items() if key != "generation"},
         {**minimal, "extra": 1},
-        {**minimal, section: {"enabled": False, "model": "x"}},
+        {**minimal, **wrong_section},
         # 旧组合文档放在新路径上必须失败，不能被当成"只看自己那一节"。
         {"generation": 1, "gemini": {"enabled": False}, "feishu": {"enabled": False}},
     ):
@@ -256,7 +307,7 @@ def test_write_into_a_missing_directory_is_a_closed_failure(
 
 def test_writer_refuses_the_other_domain_document(tmp_path: Path, domain: str) -> None:
     _, writer, _, _ = _DOMAINS[domain]
-    other = "feishu" if domain == "ai" else "ai"
+    other = {"ai": "feishu", "feishu": "resources", "resources": "ai"}[domain]
     with pytest.raises(IntegrationConfigError):
         writer(str(tmp_path / "config.json"), _DOMAINS[other][2](1))
     assert not (tmp_path / "config.json").exists()
@@ -320,3 +371,86 @@ def test_preflight_probe_reports_an_unreadable_readback(
     monkeypatch.setattr(integration_config_file, "_read_document", _unreadable)
     with pytest.raises(PreflightProbeUnreadableError):
         write_preflight_probe(str(tmp_path / ".preflight-probe.json"))
+
+
+# --------------------------------------------------------------------------
+# resources：Secret 落盘但不外泄，大小上限按 100 个资源设计
+# --------------------------------------------------------------------------
+
+
+def test_resources_writer_keeps_every_secret_and_the_reader_restores_them(
+    tmp_path: Path,
+) -> None:
+    """不能用 ``model_dump()`` 落盘：Secret 字段 ``exclude=True``，写回去就清空了凭据。"""
+    target = tmp_path / "config.json"
+    write_resources_config(str(target), _resources(4))
+    document = json.loads(target.read_text(encoding="utf-8"))
+    assert [item["resource_id"] for item in document["resources"]] == ["1" * 32, "2" * 32]
+    restored = read_resources_config(str(target))
+    assert restored == _resources(4)
+    starrocks, prometheus = restored.resources
+    assert isinstance(starrocks, StarRocksResource) and starrocks.password == _FAKE_DB_PASSWORD
+    assert isinstance(prometheus, PrometheusResource) and prometheus.secret == _FAKE_TOKEN
+
+
+def test_a_full_document_of_one_hundred_resources_with_maximal_secrets_fits(
+    tmp_path: Path,
+) -> None:
+    big = "s" * 4096
+    config = ResourcesConfig(
+        generation=1,
+        resources=tuple(
+            StarRocksResource(
+                kind="starrocks",
+                resource_id=f"{index:032x}",
+                environment="prod",
+                display_name="d" * 128,
+                host="h" * 63 + ".example",
+                port=9030,
+                database="b" * 128,
+                username="u" * 128,
+                password=big,
+                tls_mode="verify_identity",
+                enabled=True,
+            )
+            for index in range(100)
+        ),
+    )
+    target = tmp_path / "config.json"
+    write_resources_config(str(target), config)
+    assert read_resources_config(str(target)) == config
+
+
+def test_a_resources_file_above_the_size_bound_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "config.json"
+    target.write_bytes(b'{"generation": 1, "resources": [], "pad": "' + b"x" * 1_100_000 + b'"}')
+    with pytest.raises(IntegrationConfigError) as caught:
+        read_resources_config(str(target))
+    assert not isinstance(caught.value, IntegrationConfigMissingError)
+
+
+def test_resources_errors_never_repeat_a_secret(tmp_path: Path) -> None:
+    target = tmp_path / "config.json"
+    _write_raw(
+        target,
+        {
+            "generation": 1,
+            "resources": [
+                {
+                    "kind": "prometheus",
+                    "resource_id": "4" * 32,
+                    "environment": "prod",
+                    "display_name": "p",
+                    "base_url": "http://prom",
+                    "auth_mode": "none",
+                    "secret": _FAKE_TOKEN,
+                    "tls_mode": "disabled",
+                    "enabled": True,
+                }
+            ],
+        },
+    )
+    with pytest.raises(IntegrationConfigError) as caught:
+        read_resources_config(str(target))
+    assert _FAKE_TOKEN not in str(caught.value)
+    assert _FAKE_TOKEN not in repr(caught.value)

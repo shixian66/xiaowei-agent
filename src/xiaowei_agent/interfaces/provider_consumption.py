@@ -1,7 +1,10 @@
 """从本进程挂载的**配置域文件**读出实际要用的 Provider 凭据。
 
 W4a 起每个进程只读自己的域：worker 读 AI 域，listener/channel-worker 读飞书域，Web 只在
-启用 OAuth 时读飞书域。进程看不见也不读其他域，更不读旧 ``integrations.json``——运行时
+启用 OAuth 时读飞书域。W4b 起 worker 另外读 resources 域，但**只**为了签
+``(worker, resources)`` 回执：解析完即丢弃，资源参数不进返回值，不交给 Runtime、
+Resolver、Registry、ToolGateway 或任何 adapter，也不解析 DNS、不连接任何目标。
+进程看不见也不读其他域，更不读旧 ``integrations.json``——运行时
 没有双读、回落或自动迁移。
 
 **双层与关系**：`.env` 的装配开关决定这个进程里有没有这条链路，域文件的 ``enabled``
@@ -27,14 +30,17 @@ from xiaowei_agent.contracts import (
     LoadReceipt,
     ReceiptKey,
 )
+from xiaowei_agent.contracts.resource_config import ResourcesConfig
 from xiaowei_agent.interfaces.integration_config_file import (
     DEFAULT_AI_CONFIG_PATH,
     DEFAULT_FEISHU_CONFIG_PATH,
+    DEFAULT_RESOURCES_CONFIG_PATH,
     read_ai_config,
     read_feishu_config,
+    read_resources_config,
 )
 
-_ConfigT = TypeVar("_ConfigT", AiConfig, FeishuConfig)
+_ConfigT = TypeVar("_ConfigT", AiConfig, FeishuConfig, ResourcesConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +62,8 @@ def required_services(settings: Settings) -> Mapping[ConfigDomain, tuple[str, ..
     """本次部署实际启用、且需要某个域的服务名。
 
     未启用的服务不写回执——否则页面会永远显示一个没人会去加载的「待应用」。
-    resources 域在 W4a 没有消费者：W4b 才让 worker 读取并签它。
+    resources 域（W4b）恒由 task worker 读取并签回执：worker 没有独立开关，它总在部署里。
+    worker 只证明"格式已被读到"，不把资源交给 Runtime、Registry 或任何 adapter。
     """
     ai: list[str] = []
     feishu: list[str] = []
@@ -68,7 +75,11 @@ def required_services(settings: Settings) -> Mapping[ConfigDomain, tuple[str, ..
         feishu.append(SERVICE_CHANNEL_WORKER)
     if settings.feishu_oauth_enabled:
         feishu.append(SERVICE_WEB)
-    return {ConfigDomain.AI: tuple(ai), ConfigDomain.FEISHU: tuple(feishu)}
+    return {
+        ConfigDomain.AI: tuple(ai),
+        ConfigDomain.FEISHU: tuple(feishu),
+        ConfigDomain.RESOURCES: (SERVICE_WORKER,),
+    }
 
 
 def required_services_for_check(settings: Settings, check_name: str) -> frozenset[str]:
@@ -101,6 +112,7 @@ def load_provider_credentials(
     service_name: str | None,
     ai_path: str = DEFAULT_AI_CONFIG_PATH,
     feishu_path: str = DEFAULT_FEISHU_CONFIG_PATH,
+    resources_path: str = DEFAULT_RESOURCES_CONFIG_PATH,
 ) -> tuple[ProviderCredentials, Mapping[ReceiptKey, LoadReceipt]]:
     """只读**本服务**消费的域，同时产出本进程的凭据与它自己要写的加载回执。
 
@@ -153,6 +165,16 @@ def load_provider_credentials(
             if usable:
                 feishu_app_id = feishu.feishu.app_id
                 feishu_app_secret = feishu.feishu.app_secret
+
+    if service_name in required[ConfigDomain.RESOURCES]:
+        # 只取代次：解析成功即 ``loaded``，随即丢弃文档本身。W4b 没有"可用"与否之分，
+        # 因为没有任何消费者——回执只说明这一代格式已被 worker 读到。
+        resources = _read_domain(read_resources_config, resources_path)
+        if resources is not None:
+            receipts[(service_name, ConfigDomain.RESOURCES)] = LoadReceipt(
+                generation=resources.generation, status="loaded"
+            )
+        del resources
 
     return (
         ProviderCredentials(

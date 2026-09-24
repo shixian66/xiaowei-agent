@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +30,34 @@ _GEMINI_KEY = "gemini-unit-" + "test-key"
 _FEISHU_SECRET = "feishu-unit-" + "test-secret"
 
 
+_DB_PASSWORD = "sr-unit-" + "test-password"
+
+
 def _config_files(tmp_path: Path, generation: int = 6) -> dict[str, str]:
-    """两域各一份固定形状文件；返回 ``load_provider_credentials`` 的路径实参。"""
+    """三域各一份固定形状文件；返回 ``load_provider_credentials`` 的路径实参。"""
     documents = {
         "ai": {"generation": generation, "gemini": {"enabled": True, "api_key": _GEMINI_KEY}},
         "feishu": {
             "generation": generation,
             "feishu": {"enabled": True, "app_id": "cli_unit", "app_secret": _FEISHU_SECRET},
+        },
+        "resources": {
+            "generation": generation,
+            "resources": [
+                {
+                    "kind": "starrocks",
+                    "resource_id": "9" * 32,
+                    "environment": "dev",
+                    "display_name": "sr",
+                    "host": "10.0.0.1",
+                    "port": 9030,
+                    "database": "ods",
+                    "username": "reader",
+                    "password": _DB_PASSWORD,
+                    "tls_mode": "disabled",
+                    "enabled": True,
+                }
+            ],
         },
     }
     paths: dict[str, str] = {}
@@ -144,17 +166,17 @@ def _every_switch_on(tmp_path: Path) -> Settings:
 
 
 @pytest.mark.parametrize(
-    ("service_name", "provider"),
+    ("service_name", "domains"),
     [
-        (SERVICE_WORKER, ConfigDomain.AI),
-        (SERVICE_FEISHU_LISTENER, ConfigDomain.FEISHU),
-        (SERVICE_CHANNEL_WORKER, ConfigDomain.FEISHU),
-        (SERVICE_WEB, ConfigDomain.FEISHU),
+        (SERVICE_WORKER, {ConfigDomain.AI, ConfigDomain.RESOURCES}),
+        (SERVICE_FEISHU_LISTENER, {ConfigDomain.FEISHU}),
+        (SERVICE_CHANNEL_WORKER, {ConfigDomain.FEISHU}),
+        (SERVICE_WEB, {ConfigDomain.FEISHU}),
     ],
     ids=["worker", "listener", "channel-worker", "web"],
 )
 def test_no_process_signs_a_receipt_for_a_sibling(
-    tmp_path: Path, service_name: str, provider: ConfigDomain
+    tmp_path: Path, service_name: str, domains: set[ConfigDomain]
 ) -> None:
     """反例：四个开关全开时，任何一个进程都不得写出兄弟进程的回执。
 
@@ -165,11 +187,16 @@ def test_no_process_signs_a_receipt_for_a_sibling(
     from xiaowei_agent.interfaces.integration_config_file import (
         DEFAULT_AI_CONFIG_PATH,
         DEFAULT_FEISHU_CONFIG_PATH,
+        DEFAULT_RESOURCES_CONFIG_PATH,
     )
     from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
 
     paths = _config_files(tmp_path)
-    assert {DEFAULT_AI_CONFIG_PATH, DEFAULT_FEISHU_CONFIG_PATH}.isdisjoint(paths.values())
+    assert {
+        DEFAULT_AI_CONFIG_PATH,
+        DEFAULT_FEISHU_CONFIG_PATH,
+        DEFAULT_RESOURCES_CONFIG_PATH,
+    }.isdisjoint(paths.values())
 
     _, receipts = load_provider_credentials(
         settings=_every_switch_on(tmp_path),
@@ -177,8 +204,62 @@ def test_no_process_signs_a_receipt_for_a_sibling(
         **paths,
     )
 
-    assert set(receipts) == {(service_name, provider)}
-    assert receipts[(service_name, provider)].generation == 6
+    assert set(receipts) == {(service_name, domain) for domain in domains}
+    assert all(receipt.generation == 6 for receipt in receipts.values())
+
+
+def test_the_worker_signs_resources_without_gemini_and_keeps_no_resource_value(
+    tmp_path: Path,
+) -> None:
+    """W4b：worker 只证明"resources 格式已被读到"——签回执后立即丢弃值。
+
+    凭据对象里没有任何资源字段，也就没有把资源交给 Runtime / adapter 的通道。
+    """
+    from xiaowei_agent.interfaces.provider_consumption import (
+        ProviderCredentials,
+        load_provider_credentials,
+    )
+
+    credentials, receipts = load_provider_credentials(
+        settings=Settings(environment_id="dev"),
+        service_name=SERVICE_WORKER,
+        **_config_files(tmp_path, generation=4),
+    )
+
+    assert set(receipts) == {(SERVICE_WORKER, ConfigDomain.RESOURCES)}
+    assert receipts[(SERVICE_WORKER, ConfigDomain.RESOURCES)].status == "loaded"
+    assert receipts[(SERVICE_WORKER, ConfigDomain.RESOURCES)].generation == 4
+    assert credentials == ProviderCredentials()
+    assert {field.name for field in fields(ProviderCredentials)} == {
+        "gemini_api_key",
+        "feishu_app_id",
+        "feishu_app_secret",
+    }
+    assert _DB_PASSWORD not in repr((credentials, receipts))
+
+
+@pytest.mark.parametrize("shape", ["missing", "corrupt", "symlink"])
+def test_an_unreadable_resources_file_yields_no_forged_receipt(
+    tmp_path: Path, shape: str
+) -> None:
+    from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
+
+    paths = _config_files(tmp_path)
+    resources = Path(paths["resources_path"])
+    if shape == "missing":
+        resources.unlink()
+    elif shape == "corrupt":
+        resources.write_text("{not json", encoding="utf-8")
+    else:
+        real = resources.with_name("real.json")
+        resources.rename(real)
+        resources.symlink_to(real)
+
+    _, receipts = load_provider_credentials(
+        settings=Settings(environment_id="dev"), service_name=SERVICE_WORKER, **paths
+    )
+
+    assert (SERVICE_WORKER, ConfigDomain.RESOURCES) not in receipts
 
 
 def test_a_stack_that_attests_for_nobody_writes_no_receipt(tmp_path: Path) -> None:

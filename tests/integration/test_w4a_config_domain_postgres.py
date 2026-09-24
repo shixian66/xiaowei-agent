@@ -454,6 +454,48 @@ async def test_downgrade_refuses_w4a_facts_before_any_ddl(
         contexts = await connection.scalar(
             sa.text("SELECT count(*) FROM web_oauth_test_contexts")
         )
+        resources_receipts = await connection.scalar(
+            sa.text(
+                "SELECT count(*) FROM service_config_state"
+                " WHERE config_domain = 'resources'"
+            )
+        )
     assert "config_domain" in columns and "provider" not in columns
     assert audit_rows == (1 if category == "w4a_admin_audit_event" else 0)
     assert contexts == (1 if category == "oauth_test_context" else 0)
+    # W4b：拒绝发生在任何 DDL 之前，resources 回执原样留在库里。
+    assert resources_receipts == (1 if category == "resources_load_receipt" else 0)
+
+
+# --------------------------------------------------------------------------
+# W4b：worker 的 resources 回执真正落库
+# --------------------------------------------------------------------------
+
+
+async def test_the_worker_resources_receipt_round_trips_through_postgres(
+    clean_database: AsyncEngine, clock: Any, tmp_path: Any
+) -> None:
+    """用真实 worker 读取路径产出回执，再经 PostgreSQL 存储写入并读回。
+
+    只在内存 fake 上绿不算证据：``config_domain`` 的 CHECK 与主键都只在真库里承重。
+    """
+    from xiaowei_agent.config import Settings
+    from xiaowei_agent.contracts.resource_config import ResourcesConfig
+    from xiaowei_agent.interfaces.integration_config_file import write_resources_config
+    from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
+
+    target = tmp_path / "config.json"
+    write_resources_config(str(target), ResourcesConfig(generation=3, resources=()))
+    _, receipts = load_provider_credentials(
+        settings=Settings(environment_id="dev"),
+        service_name="worker",
+        ai_path=str(tmp_path / "missing-ai.json"),
+        resources_path=str(target),
+    )
+    store = PostgresProviderStateStore(engine=clean_database, clock=clock)
+    await store.record_load(receipts=receipts)
+
+    snapshot = await store.snapshot()
+    receipt = snapshot.receipts[("worker", ConfigDomain.RESOURCES)]
+    assert (receipt.generation, receipt.status) == (3, "loaded")
+    assert set(snapshot.receipts) == {("worker", ConfigDomain.RESOURCES)}
