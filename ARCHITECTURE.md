@@ -748,7 +748,7 @@ Session；已经绑定但停用或失去当前作用域角色的身份仍按普�
 
 部署启用前，W5 必须先显式迁移并核验旧静态身份，不能依赖进程启动时自动迁移。
 
-**W3-lite Admin 身份管理面**：现有 `/admin` shell 通过
+**W3 V1 Admin 身份管理面**：现有 `/admin` shell 通过
 `/admin/api/users`、`/admin/api/activations` 与 `/admin/api/audit` 提供用户、待激活申请和
 Admin 审计的分页投影；状态/角色变更及激活决定继续只经 `UserDirectoryStore.apply()`，审计仍与
 授权事实同事务提交，不创建第二条授权写路径。本地 Admin 与当前作用域内仍为 ACTIVE ADMIN 的
@@ -757,10 +757,14 @@ Admin 审计的分页投影；状态/角色变更及激活决定继续只经 `Us
 浏览器只接收安全投影，不接收 `subject_ref`、`open_id`、目标摘要、Secret、正文或原始异常；
 普通用户仍只通过具体任务或结果链接进入，不提供“我的结果”门户。批准身份或授予产品角色不等于授予任务
 结果访问权，Admin 不绕过结果 ACL。没有 OAuth adapter 时，本地 Admin 的三类管理能力仍可装配；
-这组离线能力不表示完整 W3、真实飞书、部署、canary 或用户验收已经完成。
+这组离线能力已经构成负责人确认的 W3 V1，但不表示真实飞书、部署、canary 或用户验收已经完成。
 
-**产品边界与阶段归属**：W2 的登录改造与 `LocalCredential.username`，W3 的 Admin 待办/
-用户职责/审计 UI 与可靠通知，W4a 的三域配置文件和进程挂载矩阵，W5 的 release override 与
+**W3 后续增强**包括 DBA/值班/激活通知人职责绑定、可靠/私聊通知及敏感内容查看审计。它们延期但
+未取消，须另行计划与授权，且不作为 W4a/W4b 或 W5 的进入条件；W4b 只登记资源参数，不得在资源
+文件中夹带职责或结果 ACL。
+
+**产品边界与阶段归属**：W2 的登录改造与 `LocalCredential.username`，W3 V1 的 Admin 待办/
+用户与审计 UI，W3 后续增强的职责绑定与可靠通知，W4a 的三域配置文件和进程挂载矩阵，W5 的 release override 与
 边缘限流，按 [总体开发计划](DEVELOPMENT_PLAN.md) 分阶段交付。字段级定义见
 [Web 运维工作台总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)
 及 ADR-007/013/014/015。各阶段实施、测试、真实运行、部署与验收状态只由 handoff 记录。

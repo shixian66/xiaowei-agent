@@ -1,17 +1,23 @@
 # 小维 Web 运维工作台、身份激活与未来结果访问边界总体设计
 
-- 状态：Approved V0.3；书面复核已通过，**只授权 W0 文档/ADR 真源收口**，不授权任何源码实现
+- 状态：Approved V0.4；V0.3 书面复核已通过，V0.4 按 2026-09-24 项目负责人决定收口 W3 V1 并进入 W4 总计划
 - 规划基线：`origin/main@cc617f5e2d18c53b4a92528663edb1bd16aab557`
 - 合入基线：PR #58 squash 合入 `origin/main@4e5a844620b700e25d6a29e43687c1a4c876db16`
-- 批准来源：项目负责人 2026-09-20 决策记录
+- V0.3 批准来源：项目负责人 2026-09-20 决策记录
   <https://github.com/shixian66/xiaowei-agent/pull/59#issuecomment-5750387268>；
   该记录逐条批准第 19.2 节四项修订、R2 安全边界替换与 `I3 → W0/W1a` 优先级切换
+- V0.4 决策来源：项目负责人于 2026-09-24 明确确认 W3 已按精简范围离线完成，并批准编写一份
+  W4a/W4b 总实施计划；持久证据以本次计划 PR 的复审与合入记录为准
 - 证据等级：当前源码事实 + 已确认产品决策 + 只读架构设计；没有本修订对应的源码、运行、部署、真实外部调用或用户验收证据
-- 日期：2026-09-20
+- 日期：2026-09-24
 
 > 本文定义小维 Web 的产品目标、交付切片和安全边界，不表示目标功能已经实现，也不授权读取真实
 > Secret、连接飞书/数据库/Prometheus/模型服务、部署或执行 canary。批准状态只覆盖文档口径：
-> 当前只授权 W0 文档/ADR 收口；W0 合入后才可编写 W1a 详细实施计划，该计划获批后才可按 TDD 写源码。
+> W3 V1 已按精简范围离线完成；当前只授权编写 W4a/W4b 总实施计划，该计划获批后才可按 TDD 写源码。
+
+**V0.4 范围修订（2026-09-24）**：已经交付的 W3-lite 固化为 **W3 V1**。DBA/值班/激活通知人
+职责绑定、可靠/私聊通知与敏感内容查看审计归入 **W3 后续增强**，延期但未取消，且**不作为
+W4a/W4b 或 W5 的进入条件**。因此 W4b 只登记资源参数，不依赖或创建 `RoleAndDutyService`。
 
 ## 1. 大白话结论
 
@@ -63,7 +69,7 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
 - 未登记身份必须进入待激活流程，不能自动成为 `USER`、`OPERATOR` 或 `ADMIN`。
 - 小维负责通知，Admin 负责决定；模型和系统都不能自动批准。
 - 群内触发时，W1b 只在当次事件里返回不含原始问题、结果信息、链接或 Admin 名单的通用卡片；不解析、
-  不 @ 具体 Admin。W3 交付激活通知人绑定后，才允许按明确绑定 @/私聊收件人并提供可恢复投递。
+  不 @ 具体 Admin。按明确绑定 @/私聊收件人与可恢复投递属于 W3 后续增强，不由 W3 V1 或 W4 推定完成。
 - 激活状态复用登录页壳，不建设独立 `/activation/pending` 前端应用。
 - 激活完成后，群内用户重新提交原请求；系统不保存或自动执行激活前的原始任务。
 - 未来数据库结果链接若成为首次入口，仍复用同一激活服务；在结果域落地前只保留这条规则，不注册结果路由。
@@ -76,7 +82,8 @@ Admin 是最高产品角色，但**产品角色和认证来源不是一回事**�
   审计等权限硬塞进渠道权限。
 - 群成员可查看该群任务的完整**安全证据摘要**和“还有更多证据”提示；数据库真实结果行不进入群卡片。
 - 未来数据库结果预览与导出仍只允许该次查询申请人和审批人。
-- Admin 可查看任务与私聊内容，每次敏感查看必须写独立 Admin 审计；该能力不扩展到无关数据库结果行。
+- Admin 查看任务与私聊内容的产品规则保留为 W3 后续增强；实现后每次敏感查看必须写独立 Admin 审计，
+  且该能力不扩展到无关数据库结果行。W3 V1 不提供该入口。
 - Admin 可以发起自己的任务。未来受控写能力若允许 Admin 自审，必须由明确的 `ApprovalGate` 策略实现；
   本文不开放 E1，也不授予任何真实写操作。
 
@@ -288,13 +295,14 @@ ToolPolicy、ApprovalGate 或 `ToolGateway`。
 
 ### 6.5 职责名单不是全局角色
 
-当前 W0–W5 只交付有当前消费者的独立、封闭范围绑定：
+W3 V1 不交付资源职责绑定。下列能力属于 W3 后续增强，只有形成实际消费者与独立计划后才可实现：
 
 - DBA/值班名单：用于通知、运营职责和已定义的 capability policy；
 - 群管理员/激活通知人：用于通知，不自动授予查询或结果权限。
 
 数据库查询人和审批人必须等 R1 同结果 artifact、requester/approver ACL 真源一起设计和交付；
-W0–W5 不先存一张没有消费者的“授权名单”，也不得把 DBA/值班绑定误当作结果 ACL。
+W0–W5 不先存一张没有消费者的“授权名单”，也不得把 DBA/值班绑定误当作结果 ACL。上述 W3 后续
+增强不作为 W4a/W4b 或 W5 的进入条件。
 
 这些绑定只能引用已激活的 `UserAccount` 和受信资源 ID；不能携带任意 SQL、工具名或自定义策略表达式。
 
@@ -302,8 +310,8 @@ W0–W5 不先存一张没有消费者的“授权名单”，也不得把 DBA/�
 
 | 旧标签 | 新产品角色 | 额外迁移 |
 | --- | --- | --- |
-| `admin` | `ADMIN` | 保留必要的资源职责绑定 |
-| `operator` / `dba` / `oncall` | `OPERATOR` | DBA/值班身份迁入范围名单 |
+| `admin` | `ADMIN` | 只迁移产品角色；资源职责留待 W3 后续增强 |
+| `operator` / `dba` / `oncall` | `OPERATOR` | 只迁移产品角色；旧职责标签列入迁移报告，当前不生效资源授权 |
 | `viewer` / `approver` | `USER` | 只迁移产品角色；旧 approver 标签列入迁移报告，等 R1 有 ACL 真源后再决定映射，当前不生效授权 |
 
 迁移必须可重复、可审计，并在同一 `tenant_id/environment_id` 内拒绝 actor、subject 或本地账号冲突。
@@ -398,8 +406,8 @@ Admin 审批时默认角色为 `USER`；提升为 `OPERATOR` 必须显式选择�
 ```
 
 群卡片不得包含原始提问、SQL、数据库名、结果是否存在、Admin 私人联系方式或尚未由 W2 交付的状态
-链接。W1b 不查询群内 Admin，因此有没有 Admin 都不影响申请，只提示“已提交管理员处理”。W3 有明确
-激活通知人绑定后才增加 @/私聊；Admin 中心待办也随 W3 UI 交付。群事件创建申请时，
+链接。W1b 不查询群内 Admin，因此有没有 Admin 都不影响申请，只提示“已提交管理员处理”。Admin 中心
+待办已由 W3 V1 交付；明确 @/私聊激活通知人属于 W3 后续增强。群事件创建申请时，
 必须把经过 SDK 验证的 sender `open_id` 作为受控 `subject_ref`，并保存 event/conversation digest；不能只靠
 卡片 URL 里的 request ID 认人。
 
@@ -477,8 +485,8 @@ digest domain 互不相认：
 左侧一级导航固定为：
 
 1. **概览与系统状态**：服务可用性、待激活数、已保存/待重启配置、加载回执和脱敏诊断；
-2. **用户与权限**：用户、角色、状态、飞书绑定、DBA/值班范围和激活通知人；查询人/
-   审批人等 R1 有真实消费者后再进入管理中心；
+2. **用户与权限**：W3 V1 提供用户、角色、状态、飞书绑定和待激活申请；DBA/值班范围与激活通知人
+   属于 W3 后续增强，查询人/审批人等 R1 有真实消费者后再进入管理中心；
 3. **资源配置**：数据库与 Prometheus；
 4. **AI 与飞书**：AI API、飞书应用、OAuth 回调、连接测试；
 5. **审计**：配置变化、激活审批、权限变化和敏感内容查看记录。
@@ -543,9 +551,9 @@ TLS 模式               关闭 / 校验证书等受支持闭集
 ```
 
 页面不能编辑 SQL 模板、SQLGuard、capability、工具类、任意驱动模块、任意连接参数字典或网络代理。
-保存时只做类型、长度、host/port 和 TLS 组合的本地校验，不做 DNS、socket、登录或 SQL。DBA/值班职责
-由数据库内 `RoleAndDutyService` 按系统生成的 `resource_id` 维护，不写入含 Secret 的资源文件。
-查询人/审批人不在 W4b 预存，随 R1 的结果 ACL 真源一起实现。
+保存时只做类型、长度、host/port 和 TLS 组合的本地校验，不做 DNS、socket、登录或 SQL。W4b 不创建
+DBA/值班职责绑定，也不把职责写入含 Secret 的资源文件；该能力留给 W3 后续增强。查询人/审批人
+不在 W4b 预存，随 R1 的结果 ACL 真源一起实现。
 
 ### 10.3 Prometheus 资源
 
@@ -559,9 +567,9 @@ TLS 模式
 启用状态
 ```
 
-URL 必须经过目标类型、协议、主机和网络策略校验；不能借配置页把任意 URL 变成服务器端请求代理。
-W4b 只保存参数，不发 HTTP 请求；允许范围由 `RoleAndDutyService` 关联 `resource_id` 保存。真实 adapter 尚未
-获准消费前，页面明确显示“已保存，尚未接入”。
+URL 必须经过目标类型、协议、主机和网络策略的**纯本地形状校验**；不能借配置页把任意 URL 变成
+服务器端请求代理。W4b 只保存参数，不发 HTTP 请求，也不创建资源职责绑定。真实 adapter 尚未获准
+消费前，页面明确显示“已保存，尚未接入”。
 
 ### 10.4 AI API
 
@@ -697,7 +705,7 @@ result_ref
 | `UserDirectoryStore.apply()` | 批准/拒绝 CAS；批准时目录事实、申请终态与审计同事务 | 第二条授权写路径、事务外终态更新 |
 | `IdentityActivationService` | 创建申请、编排批准/拒绝、闭集拒绝审计 | 飞书网络、Task/Tool 调用、只在事务外预读 Admin 后授权 |
 | `WebAuthService` | OAuth state、Session、认证来源 | 自动注册或提权 |
-| `RoleAndDutyService` | 当前交付作用域角色、DBA/值班与激活通知绑定；R1 才扩展 requester/approver | 自定义策略表达式、结果 ACL 猜测 |
+| `RoleAndDutyService`（W3 后续增强） | 未来承载 DBA/值班与激活通知绑定；R1 才扩展 requester/approver | W3 V1/W4b 提前创建、自定义策略表达式、结果 ACL 猜测 |
 | `IntegrationConfigService` | 三域类型化配置、Secret 保留/清除、加载状态 | capability/Policy/SQL 编辑、目标网络调用 |
 | `AdminAuditStore` | append-only Admin 操作事件与查询 | 任务生命周期事件、Secret、正文、结果行 |
 | Web/飞书 interfaces | 协议解析、认证上下文、页面/卡片投影 | 业务路由、审批和工具执行 |
@@ -769,7 +777,7 @@ Admin 审计和未来结果五类事实不互相复制。未来 `ResultAccessSer
 下列动作写入结构化审计：
 
 - 激活批准/拒绝、角色改变、账号禁用/启用；
-- DBA/值班/激活通知范围改变；未来 R1 再纳入 requester/approver 范围改变；
+- W3 后续增强中的 DBA/值班/激活通知范围改变；未来 R1 再纳入 requester/approver 范围改变；
 - 配置保存、Secret 替换/清除、连接测试开始与闭集结果；
 - 查看私人聊天或敏感任务正文；
 - 新增 Admin、飞书身份绑定/解绑；
@@ -899,13 +907,13 @@ fake 结果页提前勾掉该验收项。
    审计写契约并 fail-closed；不改页面。
 4. **W2 登录与页面壳**：成熟登录/改密/激活状态，`web_oauth_login_contexts` 与闭集 return intent，
    拆分工作台和 Admin shell，并把当前 I2 统一 Runtime/RenderPayload 接进新工作台；不新增聊天路由。
-5. **W3 用户、职责与审计界面**：Admin 用户/激活/角色、DBA/值班/激活通知管理（含私聊 Admin 激活
-   通知与可恢复投递重试），
-   `AdminAuditStore` 查询 API/UI 与敏感查看审计；不在此阶段才补审计写底座，也不提前建 requester/approver 名单。
+5. **W3 V1 用户、激活与审计界面**：Admin 用户/激活/角色管理、受管授权变更与 `AdminAuditStore` 查询 API/UI；
+   不在此阶段才补审计写底座，也不提前建 requester/approver 名单。DBA/值班/激活通知管理、私聊/
+   可靠通知与敏感查看审计归入 W3 后续增强，延期但未取消，且不作为 W4a/W4b 的进入条件。
 6. **W4a AI/飞书配置迁移**：把 W2 已迁入 Admin shell 的当前 RI5 Gemini/飞书配置从单文件迁到
    按消费域拆分的 AI/飞书文件与挂载；固定 model/origin 只读，保留现有探针语义和现场 GO。
-7. **W4b 数据库/Prometheus 参数登记**：新增资源 DTO、DBA/值班引用、resources 文件与
-   task-worker-only 挂载；只做本地校验，真实目标网络调用次数为 0，不建 requester/approver 数据。
+7. **W4b 数据库/Prometheus 参数登记**：新增资源 DTO、resources 文件与 task-worker-only 挂载；
+   只做本地校验，真实目标网络调用次数为 0，不建职责绑定或 requester/approver 数据。
 8. **W5 产品部署**：release override、listener/channel-worker 可审计开关、边缘限流、配置目录预检、
    明确重启、加载回执、浏览器视觉和分级运行证据。W5 只依赖 W2–W4b，不以 W4c 或 R1 为必经前置。
 
@@ -913,7 +921,7 @@ fake 结果页提前勾掉该验收项。
 `DEVELOPMENT_PLAN.md` 的 Web 序列把它放在 W2；两份都是已批准真源，实现者按哪一份做都能自称
 合规。现按 `DEVELOPMENT_PLAN.md` 收敛：该表与闭集 return intent 属于 W2，第 7.2 节
 `ActivationRequest` 的对应字段和 `SAFE_TASK_LINK` 来源成员也随 W2 添加。同一轮把私聊 Admin 激活通知与可恢复投递重试移到
-W3：它们的收件人真源是 W3 的激活通知人绑定，而当前 `external_identities` 只保存不可逆的
+W3 后续增强：它们的收件人真源是未来的激活通知人绑定，而当前 `external_identities` 只保存不可逆的
 `subject_ref_digest`，`UserDirectoryStore` 也没有列出 Admin 的读路径——W1b 没有能力把通知投到
 具体的人。W1b 保留群事件当次响应内、不带链接且不 @ Admin 的通用激活卡片，这条不依赖任何持久化
 收件人。W1b 的终态写也收敛到 `UserDirectoryStore.apply()`：`ActivationStore` 只写
@@ -1012,9 +1020,10 @@ ADR-005 不在 W0 被臆造完成；它是 R1 requester/approver 审批语义的
 - 接受三域 Secret 文件/进程挂载矩阵，以及旧 `integrations.json` 不长期双读；
 - 接受 W4b 数据库/Prometheus 只保存参数、网络调用为 0，W4c 另修 ADR-007 并单独授权；
 - 接受 `AdminAuditStore` 独立于任务审计、append-only 且敏感操作在审计不可写时 fail-closed；
-- 接受 `AdminAuditStore` 持久化/写契约在 W1a 先于 W1b 激活审批落地；W3 增加查询 UI、受管授权变更
-  和敏感查看审计，受管变更仍复用唯一授权写入口，不新增第二条授权写路径；
-- 接受 W0–W5 只交付 DBA/值班/激活通知职责，requester/approver 名单随 R1 一起交付；
+- 接受 `AdminAuditStore` 持久化/写契约在 W1a 先于 W1b 激活审批落地；W3 V1 增加查询 UI 与受管
+  用户/角色/激活变更，仍复用唯一授权写入口，不新增第二条授权写路径；
+- 接受 DBA/值班/激活通知职责与敏感查看审计作为 W3 后续增强延期，不作为 W4a/W4b 或 W5 的
+  进入条件；requester/approver 名单随 R1 一起交付；
 - 接受应用当前没有 HTTP rate limiter，正式 release 必须由边缘限流提供运行证据；
 - 接受数据库结果 ACL 规则保留但 R1 延后，当前不实现 `/results`、预览、导出或结果服务；
 - 接受 §17.1 的 W0–W5 是当前交付序列，§17.2 的 W4c/R1 是独立阻塞门，不把后者排成产品部署必经步骤，

@@ -266,7 +266,7 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 只读挂载，`api` 完全不挂。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
 本地 Admin 在 `/admin` 维护配置；`/app` 只承担运维任务工作台，不再承载配置表单。
 飞书 Admin 进入 `/admin` 时只能看脱敏集成状态，不能读取、保存、清除或测试 raw config。
-W3-lite 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审计三个桌面管理区，对应
+W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审计三个桌面管理区，对应
 `/admin/api/users`、`/admin/api/activations`、`/admin/api/audit`；身份管理可供当前有效的本地或
 飞书 Admin 使用，但配置写入与连接测试仍只允许本地 Admin。普通用户不获得后台或“我的结果”列表，
 仍只从具体任务/结果链接进入并接受原有 ACL 判定。

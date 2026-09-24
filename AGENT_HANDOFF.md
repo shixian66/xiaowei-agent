@@ -7,18 +7,19 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@72201a8718a00c7f1bb0828056cbb20b836e1f48`（2026-09-24，PR #78 已合入 W3-lite 切片 B）。
+- **当前基线**：`main@43151623fe420cfe63581b9117ed3838c7f7cb6e`（2026-09-24，PR #79 已合入 W3-lite 收口）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
   角色路由、四个独立 shell 及 Admin 配置 UI/API 迁移均已有离线测试和独立复审证据。
   本次收口只关闭 W2 离线实施范围，不表示正式部署、真实 Provider 调用、canary 或产品用户验收完成；
   I3 延期未取消。
-- **W3-lite 部分范围离线完成并收口，完整 W3 未完成**。详细计划 PR #76 与切片 A/B 的
-  PR #77/#78 均已合入；用户、待激活申请和 Admin 审计三个离线闭环已有测试与 CI 证据。
+- **W3 V1 已按精简范围离线完成并收口**。详细计划 PR #76、切片 A/B 的 PR #77/#78 与收口
+  PR #79 均已合入；用户、待激活申请和 Admin 审计三个离线闭环已有测试与 CI 证据。
   PR #77/#78 的负责人合入记录可定位；独立复审内容未在 GitHub PR 中持久留存。
-  **W3-lite != 完整 W3**：本次收口不含可靠 Admin 通知、私聊/敏感任务内容查看及其审计，也不表示
-  真实飞书、部署、canary 或用户验收完成，不自动授权 W4a 源码。
+  **W3 后续增强**包括职责绑定、可靠/私聊通知与敏感内容查看审计，延期但未取消；它们不再作为 W4a/W4b 的进入条件。
+  该收口仍不表示真实飞书、部署、canary 或用户验收完成，也不自动授权
+  W4a/W4b 源码。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -37,7 +38,7 @@
 | I2 | I2 限定领域普通对话已完成离线实施并归档，详见 [I2 归档](docs/handoff/archive/2026-09-20-I2-bounded-conversation.md)。回答只投影当前 CapabilitySnapshot，无工具/外部系统/长期记忆；knowledge_lookup/log_analysis 仍拒绝 |
 | W1a | `rev_0014`、用户目录与 Admin 审计写内核、旧身份原子迁移已离线实现。`UserDirectoryStore.apply()` 是唯一授权写入口，每次授权改变与命令派生审计同事务提交；审计不可写则回滚 |
 | W1b | `rev_0015`、ActivationRequest/ActivationStore、身份激活流程与单次群通知已离线实现。未知 OAuth 身份返回 `403 activation_pending` 且无 Session；未知群成员当次事件只发通用卡片，私聊未知身份拒绝。运行时从数据库目录重建主体，停用/撤权不进入重新激活，静态文件仅作发布前一次性迁移输入 |
-| W2 / W3-lite | W2 离线范围已收口；W3-lite 两个切片均已合入，批准的部分范围离线完成并收口。完整 W3、W4/W5、W4c 与 R1 均未由此解锁 |
+| W2 / W3 V1 | W2 离线范围已收口；W3 V1 两个实现切片与收口 PR 均已合入。W3 后续增强仍未实现，但不再阻塞 W4a/W4b；W4/W5 源码、W4c 与 R1 均未由此解锁 |
 
 W1a 最终受审 head `ed8c9e82db46d75e47e4761d8897d0d2d23f9831` 已由 PR #65 合入
 `f92aa88b9016b52c35ebce4052a8609fd574d8fb`，历史 CI [35681783752](https://github.com/shixian66/xiaowei-agent/actions/runs/35681783752)
@@ -97,11 +98,11 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `codex/w3-lite-closeout`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `codex/w4-configuration-plan`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-24（Asia/Shanghai） |
-| 阶段 | W3-lite 部分范围离线完成并收口；完整 W3 未完成，W4a 尚未开始 |
-| 下一步 | 负责人须先明确：按现行 DEVELOPMENT_PLAN.md 的必经顺序为完整 W3 剩余范围编写并送审增量详细计划；或先批准对 DEVELOPMENT_PLAN.md 的显式修订，再编写并送审 W4a 详细计划。任一路线的详细计划获批前均不写对应源码 |
-| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.5，Web 序列与各阶段硬门保持原定义 |
+| 阶段 | W3 V1 已按精简范围离线完成并收口；W4a/W4b 总实施计划在编写，源码尚未开始 |
+| 下一步 | 将 W4a/W4b 总详细计划送审；计划获批前不写源码，W4a 独立验收通过后才进入 W4b，W4c/真实调用与 W5 部署不在本计划内 |
+| 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
 | 运行状态 | 三能力与模型/渠道离线闭环为 tests；真实运行、部署、canary、产品用户验收未取得 |
@@ -130,7 +131,7 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
   [W1b 计划](docs/superpowers/plans/2026-09-22-w1b-identity-activation-and-notification.md) 和原文快照。
   登录 context 表 `web_oauth_login_contexts` 归 W2，私聊 Admin 通知与可靠重试归 W3。
 - W2 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-23-w2-login-and-multi-shell.md) 已由 PR #71 合入并取得负责人开工口令；授权范围是 W2-A（闭集 intent/context/迁移）、W2-B1（登录、角色路由与四个 shell）和 W2-B2（配置 UI/API 搬迁），不包含 W3/W4/真实调用。W2-A、W2-B1、W2-B2 已分别由 PR #72、#73、#74 合入；该授权已经用完，不能外推为 W3 实现许可。
-- W3-lite [详细计划](docs/superpowers/plans/2026-09-23-w3-lite-admin-identity.md) 已由 PR #76 合入并取得负责人开工口令；授权范围仅为用户、激活、审计三个离线闭环。切片 A/B 已由 PR #77/#78 合入并完成该部分范围的离线收口；该授权已经用完，不授权完整 W3、W4、真实调用或部署。
+- W3-lite [详细计划](docs/superpowers/plans/2026-09-23-w3-lite-admin-identity.md) 已由 PR #76 合入并取得负责人开工口令；授权范围仅为用户、激活、审计三个离线闭环。切片 A/B 已由 PR #77/#78 合入，PR #79 完成收口；负责人现将该精简范围定为 W3 V1。该授权已经用完，不授权 W3 后续增强、W4 源码、真实调用或部署。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
 - M6b 仅离线实现并合入，真实验证被负责人延期，未验收归档。重新进入需唯一 canonical target、物理身份、带外 version/grants/DDL/identity digest、
@@ -174,7 +175,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. W3-lite 批准的部分范围已离线收口。后续不预设具体阶段：负责人须先明确是按现行 `DEVELOPMENT_PLAN.md` 补完整 W3，还是先显式修订总体计划后进入 W4a；任一路线的详细计划获批前均不实现对应源码，也不把 W4c、R1 或真实调用一并带入。
+2. W3 V1 已按精简范围离线收口。下一步只编写并送审 W4a/W4b 总实施计划；计划获批前不实现
+   对应源码，W4a 未独立验收前不进入 W4b，也不把 W4c、R1、真实调用或 W5 部署一并带入。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 
@@ -184,8 +186,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 - RI3 首次 GO、供应商保留/训练/区域条款与 synthetic corpus；M6b 现场输入与证据处置、现场 GO。
 - W5 发布环境、边缘限流、旧静态身份显式迁移与核验、终态激活申请受控 PII 保留/清理。
   1024 上限只限制活跃申请，不能据此取消终态清理门。
-- 完整 W3 剩余范围：DBA/值班/激活通知人绑定，群 @ Admin、私聊通知、持久化通知状态、重试/dead-letter，
-  以及私聊或敏感任务内容查看与查看审计；须另写增量计划并获批，不能从 W3-lite 外推。
+- W3 后续增强：DBA/值班/激活通知人绑定，群 @ Admin、私聊通知、持久化通知状态、重试/dead-letter，
+  以及私人或敏感任务内容查看与查看审计；须另写增量计划并获批，不能从 W3 V1 外推，且不作为
+  W4a/W4b 或 W5 的进入条件。
 - 分支保护的可用条件与实施；当前不能将 CI 状态视为 GitHub 强制合并限制。
 - ADR-001 至 ADR-006 的待决项目按各自首次承重阶段处理；I3 资料源形态尚未决。
 
