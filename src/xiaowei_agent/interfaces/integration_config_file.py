@@ -29,8 +29,15 @@ from xiaowei_agent.contracts import (
     GeminiIntegration,
     IntegrationConfig,
 )
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusResource,
+    ResourcesConfig,
+    StarRocksResource,
+)
 
 _MAX_CONFIG_BYTES: Final[int] = 65_536
+_MAX_RESOURCES_CONFIG_BYTES: Final[int] = 1_048_576
+"""resources 域上限：100 个资源各带上限 4096 的 Secret 时约 0.5 MiB，留一倍余量。"""
 
 CONFIG_ROOT: Final[str] = "/run/xiaowei-config"
 """容器内三个域目录的共同父路径。**不得**作为挂载目标：consumer 只挂自己的域目录。"""
@@ -42,7 +49,7 @@ LEGACY_CONFIG_FILE_NAME: Final[str] = "integrations.json"
 DEFAULT_AI_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/ai/{CONFIG_FILE_NAME}"
 DEFAULT_FEISHU_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/feishu/{CONFIG_FILE_NAME}"
 DEFAULT_RESOURCES_CONFIG_PATH: Final[str] = f"{CONFIG_ROOT}/resources/{CONFIG_FILE_NAME}"
-"""W4a 只预留：W4b 才有 resources 文档契约与读写器。"""
+"""W4b：StarRocks / Prometheus 的闭集登记参数（:class:`ResourcesConfig`）。"""
 
 _PROBE_DOCUMENT: Final[dict[str, object]] = {"preflight_probe": 1}
 """哨兵内容：不含任何凭据，也**不是**任何一个域的合法文档。
@@ -70,7 +77,7 @@ class PreflightProbeUnreadableError(IntegrationConfigError):
         super().__init__("preflight probe unreadable")
 
 
-def _read_document(path: str) -> object:
+def _read_document(path: str, *, max_bytes: int = _MAX_CONFIG_BYTES) -> object:
     """严格读取一个 JSON 文档；只有 ``ENOENT`` 算「不存在」。
 
     「不存在」与「存在但坏」的分流只做在 ``os.open`` 这一处，因为只有这里拿得到
@@ -92,7 +99,7 @@ def _read_document(path: str) -> object:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             failed = True
         else:
-            payload = os.read(descriptor, _MAX_CONFIG_BYTES + 1)
+            payload = os.read(descriptor, max_bytes + 1)
     except FileNotFoundError:
         # 只有 ENOENT 才是「尚未配置」。必须排在下面这条之前，否则会被它吞掉。
         missing = True
@@ -103,7 +110,7 @@ def _read_document(path: str) -> object:
             os.close(descriptor)
     if missing:
         raise IntegrationConfigMissingError("integration config absent")
-    if failed or not payload or len(payload) > _MAX_CONFIG_BYTES:
+    if failed or not payload or len(payload) > max_bytes:
         raise IntegrationConfigError("integration config unavailable")
     try:
         return json.loads(payload.decode("utf-8"))
@@ -111,7 +118,13 @@ def _read_document(path: str) -> object:
         raise IntegrationConfigError("integration config invalid") from None
 
 
-def _atomic_write(path: str, document: dict[str, object], *, prefix: str) -> None:
+def _atomic_write(
+    path: str,
+    document: dict[str, object],
+    *,
+    prefix: str,
+    max_bytes: int = _MAX_CONFIG_BYTES,
+) -> None:
     """同目录临时文件 + ``0600`` + ``fsync`` + ``os.replace()`` + 目录 ``fsync``。
 
     任一步失败都抛闭集 :class:`IntegrationConfigError`，替换前失败会清掉临时文件。目录
@@ -129,7 +142,7 @@ def _atomic_write(path: str, document: dict[str, object], *, prefix: str) -> Non
     payload = json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2).encode(
         "utf-8"
     )
-    if len(payload) > _MAX_CONFIG_BYTES:
+    if len(payload) > max_bytes:
         raise IntegrationConfigError("integration config invalid")
     try:
         descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
@@ -221,6 +234,44 @@ def write_feishu_config(path: str, config: FeishuConfig) -> None:
     )
 
 
+def _resource_section(resource: StarRocksResource | PrometheusResource) -> dict[str, object]:
+    """**含 secret** 的单个资源落盘片段；同 :func:`_gemini_section` 不能用 ``model_dump()``。"""
+    section = resource.model_dump(mode="json")
+    if isinstance(resource, StarRocksResource):
+        if resource.password is not None:
+            section["password"] = resource.password
+    elif resource.secret is not None:
+        section["secret"] = resource.secret
+    return section
+
+
+def read_resources_config(path: str = DEFAULT_RESOURCES_CONFIG_PATH) -> ResourcesConfig:
+    """读取 resources 域；不存在抛 :class:`IntegrationConfigMissingError`，其余一律故障。
+
+    只做文件读取与契约校验：不解析 DNS、不连接任何目标。
+    """
+    document = _read_document(path, max_bytes=_MAX_RESOURCES_CONFIG_BYTES)
+    try:
+        return ResourcesConfig.model_validate(document)
+    except ValidationError:
+        raise IntegrationConfigError("integration config invalid") from None
+
+
+def write_resources_config(path: str, config: ResourcesConfig) -> None:
+    """原子写入整份 resources 域；不触碰 AI / 飞书域的文件。"""
+    if not isinstance(config, ResourcesConfig):
+        raise IntegrationConfigError("integration config invalid")
+    _atomic_write(
+        path,
+        {
+            "generation": config.generation,
+            "resources": [_resource_section(resource) for resource in config.resources],
+        },
+        prefix=".resources-",
+        max_bytes=_MAX_RESOURCES_CONFIG_BYTES,
+    )
+
+
 def read_legacy_integration_config(path: str) -> IntegrationConfig:
     """严格读取旧组合文档。**只供一次性迁移器调用**，运行时不得引用。"""
     document = _read_document(path)
@@ -258,7 +309,9 @@ __all__ = [
     "read_ai_config",
     "read_feishu_config",
     "read_legacy_integration_config",
+    "read_resources_config",
     "write_ai_config",
     "write_feishu_config",
     "write_preflight_probe",
+    "write_resources_config",
 ]

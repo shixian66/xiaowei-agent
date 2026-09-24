@@ -84,6 +84,9 @@ def test_the_scan_actually_finds_the_known_secret_fields() -> None:
         ("WebChangePasswordRequest", "new_password"),
         ("WebGeminiConfigUpdate", "api_key"),
         ("WebFeishuConfigUpdate", "app_secret"),
+        # W4b：资源 Secret 与 Provider Secret 同一条规则。
+        ("StarRocksResource", "password"),
+        ("PrometheusResource", "secret"),
     } <= names
 
 
