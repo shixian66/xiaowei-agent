@@ -1626,46 +1626,62 @@ def test_development_plan_carries_no_implementation_progress() -> None:
     assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
 
 
-def test_handoff_tracks_the_w3_lite_candidate_without_closing_full_w3() -> None:
-    """W3-lite 候选须可追溯，但不能被写成完整 W3 或运行验收。"""
+def test_handoff_closes_w3_lite_without_closing_full_w3() -> None:
+    """W3-lite 合入事实须可追溯，但不能被写成完整 W3 或运行验收。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     for fact in (
         "17462b7f6c38549818081b5a704f6ec381dea1e7",
         "4e488a48d6b0fe483ad3714970aecc7acc44c954",
-        "50065f15177d56af03139dd9b18a67e87a1d9bae",
-        "35957575611",
+        "c391caf3f44f370f5e8a4d53478589a19a001b29",
+        "72201a8718a00c7f1bb0828056cbb20b836e1f48",
+        "35957857929",
         "4892 passed",
     ):
-        assert fact in handoff, f"W3-lite 交付链缺少稳定证据：{fact}"
+        assert fact in handoff, f"W3-lite 收口缺少稳定证据：{fact}"
     for stale in (
         "W3 尚无获批详细计划",
         "只能先编写并送审 W3 详细计划",
         "W3 尚未开始",
+        "W3-lite 正在交付",
+        "切片 B 为待复审候选",
+        "仍待最终 exact-SHA",
+        "产品下一步是对 PR #78",
     ):
-        assert stale not in handoff, f"handoff 仍含 W3-lite 开工前旧口径：{stale}"
+        assert stale not in handoff, f"handoff 仍含 W3-lite 过期口径：{stale}"
 
     assert "W3-lite != 完整 W3" in handoff
+    assert "W3-lite 部分范围离线完成并收口" in handoff
     assert "真实飞书" in handoff and "用户验收" in handoff
+    assert "当前精简产品路线" not in handoff
+    assert "独立复审内容未在 GitHub PR 中持久留存" in handoff
 
     statements = _next_step_statements(handoff)
     assert statements, "handoff 没有任何可解析的下一步声明"
     for statement in statements:
-        assert "PR #78" in statement, f"下一步没有指向 W3-lite 实现候选：{statement}"
+        assert "PR #78" not in statement, f"下一步仍指向已合入的 W3-lite 候选：{statement}"
         if "I3" in statement:
             assert "延期" in statement or "未取消" in statement, (
                 f"下一步仍把 I3 写成当前动作：{statement}"
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "复审" in next_step and "合入" in next_step, (
-        f"W3-lite 候选仍缺独立复审或合入门：{next_step}"
-    )
+    assert "负责人" in next_step and "详细计划" in next_step
+    assert "源码" in next_step and "获批前" in next_step and "不" in next_step
+    if "W4a" in next_step:
+        assert "DEVELOPMENT_PLAN.md" in next_step and "显式修订" in next_step, (
+            f"W4a 不能在未修订总体计划时被写成既定下一步：{next_step}"
+        )
 
 
 def test_w3_lite_admin_identity_boundary_is_stable_documentation() -> None:
     """稳定文档必须描述能力与边界，而不是只在在途计划里留一份副本。"""
     architecture = _truth_doc_text("ARCHITECTURE.md")
+    channel_adr = _truth_doc_text("docs/adr/ADR-013-m7-channel-boundary.md")
+    development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
     readme = _truth_doc_text("README.md")
+    web_spec = _truth_doc_text(
+        "docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md"
+    )
 
     for route in (
         "/admin/api/users",
@@ -1682,6 +1698,10 @@ def test_w3_lite_admin_identity_boundary_is_stable_documentation() -> None:
         "普通用户仍只通过具体任务或结果链接进入",
     ):
         assert fact in architecture, f"W3-lite 稳定边界缺失：{fact}"
+
+    for stable_truth in (channel_adr, development_plan, web_spec):
+        assert "受管授权变更" in stable_truth
+        assert "不新增第二条授权写路径" in stable_truth
 
 
 # ---------------------------------------------------------------------------

@@ -1012,7 +1012,8 @@ ADR-005 不在 W0 被臆造完成；它是 R1 requester/approver 审批语义的
 - 接受三域 Secret 文件/进程挂载矩阵，以及旧 `integrations.json` 不长期双读；
 - 接受 W4b 数据库/Prometheus 只保存参数、网络调用为 0，W4c 另修 ADR-007 并单独授权；
 - 接受 `AdminAuditStore` 独立于任务审计、append-only 且敏感操作在审计不可写时 fail-closed；
-- 接受 `AdminAuditStore` 持久化/写契约在 W1a 先于 W1b 激活审批落地，W3 只增查询 UI 和敏感查看审计；
+- 接受 `AdminAuditStore` 持久化/写契约在 W1a 先于 W1b 激活审批落地；W3 增加查询 UI、受管授权变更
+  和敏感查看审计，受管变更仍复用唯一授权写入口，不新增第二条授权写路径；
 - 接受 W0–W5 只交付 DBA/值班/激活通知职责，requester/approver 名单随 R1 一起交付；
 - 接受应用当前没有 HTTP rate limiter，正式 release 必须由边缘限流提供运行证据；
 - 接受数据库结果 ACL 规则保留但 R1 延后，当前不实现 `/results`、预览、导出或结果服务；
