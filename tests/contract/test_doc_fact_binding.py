@@ -666,11 +666,12 @@ def _spec_header(text: str) -> str:
 def test_web_product_spec_records_approval_without_claiming_implementation() -> None:
     text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
     header = _spec_header(text)
-    assert "Approved V0.3" in header
+    assert "Approved V0.4" in header
     assert "Review Draft" not in header
-    assert "只授权 W0" in header
-    # 批准来源必须是负责人评论永久链接，而不是「已合入」这个事实本身。
+    assert "只授权编写 W4a/W4b 总实施计划" in header
+    # V0.3 的负责人永久链接必须保留；V0.4 范围决定由本次计划 PR 持久化，不能拿旧链接冒充。
     assert _W0_OWNER_APPROVAL in header
+    assert "V0.4 决策来源" in header and "本次计划 PR" in header
     assert "4e5a844620b700e25d6a29e43687c1a4c876db16" in header
     # 批准状态不等于实现状态：证据等级一栏必须继续否认这五类证据。
     assert "没有本修订对应的源码、运行、部署、真实外部调用或用户验收证据" in header
@@ -679,14 +680,13 @@ def test_web_product_spec_records_approval_without_claiming_implementation() -> 
     )
 
 
-def test_web_product_spec_keeps_w1a_and_live_use_outside_w0_authority() -> None:
+def test_web_product_spec_keeps_w4_source_and_live_use_outside_plan_authority() -> None:
     text = _WEB_PRODUCT_SPEC.read_text(encoding="utf-8")
     header = _spec_header(text)
-    assert "W0 合入后才可" in header
     assert "计划获批后才可" in header
     for overclaim in (
-        "W0 已完成",
-        "W1a 已开始",
+        "W4a 已开始",
+        "W4b 已开始",
         "已实现",
         "已部署",
         "已 canary",
@@ -712,8 +712,8 @@ def test_web_product_spec_approval_gates_are_discriminating() -> None:
     without_source = _replace_once(text, _W0_OWNER_APPROVAL, "https://example.invalid/pr/59")
     assert _W0_OWNER_APPROVAL not in _spec_header(without_source)
 
-    back_to_draft = _replace_once(text, "Approved V0.3", "Review Draft V0.3")
-    assert "Approved V0.3" not in _spec_header(back_to_draft)
+    back_to_draft = _replace_once(text, "Approved V0.4", "Review Draft V0.4")
+    assert "Approved V0.4" not in _spec_header(back_to_draft)
 
 
 # --- W0 ADR 修订门 --------------------------------------------------------
@@ -1105,21 +1105,22 @@ def test_w0_stable_docs_distinguish_current_runtime_from_future_targets() -> Non
 
 def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
     plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    sequence = _section_between(
+        plan,
+        start="### Web 产品线交付序列（V2.5 新增）",
+        end="### 独立阻塞门（不在上述必经序列内）",
+    )
     positions = []
     for stage in _W0_WEB_STAGES:
-        at = plan.find(f"**{stage} ")
+        at = sequence.find(f"**{stage} ")
         assert at >= 0, f"DEVELOPMENT_PLAN.md 缺少 Web 产品阶段 {stage}"
         positions.append(at)
     assert positions == sorted(positions), "W0–W5 顺序不是文档中的实际先后"
     # W4c 与 R1 是独立阻塞门，不得混进必经序列。
-    sequence_start = positions[0]
-    sequence_end = plan.find("### 独立阻塞门", sequence_start)
-    assert sequence_end > sequence_start, "DEVELOPMENT_PLAN.md 缺少独立阻塞门小节"
-    sequence = plan[sequence_start:sequence_end]
     assert "**W4c " not in sequence and "**R1 " not in sequence
-    gates = plan[sequence_end:]
+    gates = plan[plan.find("### 独立阻塞门（不在上述必经序列内）") :]
     assert "W4c" in gates and "R1" in gates
-    assert "Approved V2.5" in plan
+    assert "Approved V2.6" in plan
     assert _W0_OWNER_APPROVAL in plan
     # I3 延期不等于取消。
     assert "I3" in plan and "延期" in plan
@@ -1626,8 +1627,8 @@ def test_development_plan_carries_no_implementation_progress() -> None:
     assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
 
 
-def test_handoff_closes_w3_lite_without_closing_full_w3() -> None:
-    """W3-lite 合入事实须可追溯，但不能被写成完整 W3 或运行验收。"""
+def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> None:
+    """负责人已把 W3-lite 定为 W3 V1；延期增强不能继续阻塞 W4。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     for fact in (
         "17462b7f6c38549818081b5a704f6ec381dea1e7",
@@ -1649,8 +1650,9 @@ def test_handoff_closes_w3_lite_without_closing_full_w3() -> None:
     ):
         assert stale not in handoff, f"handoff 仍含 W3-lite 过期口径：{stale}"
 
-    assert "W3-lite != 完整 W3" in handoff
-    assert "W3-lite 部分范围离线完成并收口" in handoff
+    assert "W3 V1 已按精简范围离线完成并收口" in handoff
+    assert "W3 后续增强" in handoff
+    assert "不再作为 W4a/W4b 的进入条件" in handoff
     assert "真实飞书" in handoff and "用户验收" in handoff
     assert "当前精简产品路线" not in handoff
     assert "独立复审内容未在 GitHub PR 中持久留存" in handoff
@@ -1665,12 +1667,19 @@ def test_handoff_closes_w3_lite_without_closing_full_w3() -> None:
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "负责人" in next_step and "详细计划" in next_step
+    assert "W4" in next_step and "详细计划" in next_step
+    assert "W4a" in next_step and "W4b" in next_step
     assert "源码" in next_step and "获批前" in next_step and "不" in next_step
-    if "W4a" in next_step:
-        assert "DEVELOPMENT_PLAN.md" in next_step and "显式修订" in next_step, (
-            f"W4a 不能在未修订总体计划时被写成既定下一步：{next_step}"
-        )
+
+    development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    web_spec = _truth_doc_text(
+        "docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md"
+    )
+    channel_adr = _truth_doc_text("docs/adr/ADR-013-m7-channel-boundary.md")
+    for stable_truth in (development_plan, web_spec, channel_adr):
+        assert "W3 V1" in stable_truth
+        assert "W3 后续增强" in stable_truth
+        assert "不作为 W4a/W4b" in stable_truth
 
 
 def test_w3_lite_admin_identity_boundary_is_stable_documentation() -> None:
