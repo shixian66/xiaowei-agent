@@ -29,8 +29,10 @@ from xiaowei_agent.contracts import (
     StrictStr,
     TaskId,
     TaskStatus,
+    UserStatus,
     WebReturnIntent,
 )
+from xiaowei_agent.contracts.identity import BoundedActor, BoundedId, BoundedName
 from xiaowei_agent.interfaces.web_navigation import web_task_detail_path
 
 SecretPassword: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
@@ -102,6 +104,78 @@ class WebChangePasswordRequest(_WebReturnIntentRequest):
     current_password: SecretPassword = Field(exclude=True, repr=False)
     new_password: SecretNewPassword = Field(exclude=True, repr=False)
     return_intent: WebReturnIntent
+
+
+class _AdminIdentityRequest(_WebModel):
+    """把 JSON 字符串还原成闭集枚举，同时保留全局 strict/extra 约束。"""
+
+    @field_validator("expected_status", "status", mode="before", check_fields=False)
+    @classmethod
+    def _parse_status(cls, value: object) -> UserStatus:
+        if isinstance(value, UserStatus):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("invalid user status")
+        return UserStatus(value)
+
+    @field_validator(
+        "expected_role", "role", "approved_role", mode="before", check_fields=False
+    )
+    @classmethod
+    def _parse_role(cls, value: object) -> ProductRole:
+        if isinstance(value, ProductRole):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("invalid product role")
+        return ProductRole(value)
+
+
+class WebSetUserStatusRequest(_AdminIdentityRequest):
+    """受管账号状态写；scope 与操作者只能来自当前 Session。"""
+
+    user_id: BoundedId
+    expected_status: UserStatus
+    expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+    status: UserStatus
+    confirm: Literal[True]
+
+    @model_validator(mode="after")
+    def _status_must_change(self) -> Self:
+        if self.expected_status is self.status:
+            raise ValueError("status change must not be a no-op")
+        return self
+
+
+class WebChangeUserRoleRequest(_AdminIdentityRequest):
+    """受管角色写；目标 Admin 在 Store 层统一拒绝。"""
+
+    user_id: BoundedId
+    expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+    role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+    confirm: Literal[True]
+
+    @model_validator(mode="after")
+    def _role_must_change(self) -> Self:
+        if self.expected_role is self.role:
+            raise ValueError("role change must not be a no-op")
+        return self
+
+
+class WebApproveActivationRequest(_AdminIdentityRequest):
+    """激活批准只接受建账号所需字段；绝不接收 subject/open_id。"""
+
+    request_id: BoundedId
+    actor: BoundedActor
+    display_name: BoundedName
+    approved_role: Literal[ProductRole.USER, ProductRole.OPERATOR] = ProductRole.USER
+    confirm: Literal[True]
+
+
+class WebRejectActivationRequest(_AdminIdentityRequest):
+    """激活拒绝只需申请 ID 与显式确认。"""
+
+    request_id: BoundedId
+    confirm: Literal[True]
 
 
 ConfigText: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
@@ -378,7 +452,9 @@ class WebTaskDetail(_WebModel):
 __all__ = [
     "SecretNewPassword",
     "SecretPassword",
+    "WebApproveActivationRequest",
     "WebChangePasswordRequest",
+    "WebChangeUserRoleRequest",
     "WebCurrentUser",
     "WebIntegrationDomain",
     "WebIntegrationDomainStatus",
@@ -386,6 +462,8 @@ __all__ = [
     "WebIntegrationStatusView",
     "WebLoginRequest",
     "WebOAuthTestStarted",
+    "WebRejectActivationRequest",
+    "WebSetUserStatusRequest",
     "WebTaskAccepted",
     "WebTaskDetail",
     "WebTaskPage",

@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from tests.fakes.admin_identity import UnusedAdminIdentity
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
 from xiaowei_agent.application.identity_activation import IdentityActivationService
@@ -209,6 +210,7 @@ def _web_app(
             clock=clock,
             policy_revision="policy-2026-09-01",
             provider_state=EmptyProviderState(),
+            admin_identity=UnusedAdminIdentity(),
         ),
         oauth,
     )
@@ -1105,6 +1107,7 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
+        admin_identity_service = UnusedAdminIdentity()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0
@@ -1497,6 +1500,7 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
+        admin_identity_service = UnusedAdminIdentity()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0

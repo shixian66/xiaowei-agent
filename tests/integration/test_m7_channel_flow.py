@@ -433,6 +433,7 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
         submissions=web.submission_service,
         clock=clock,
         policy_revision=web.policy_revision,
+        admin_identity=web.admin_identity_service,
     )
 
     assert await listener.listener.handle_event(event=_group_event()) is True
@@ -591,6 +592,7 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
         submissions=web.submission_service,
         clock=clock,
         policy_revision=web.policy_revision,
+        admin_identity=web.admin_identity_service,
     )
     rejected_text = _i1_rejected_text()
 

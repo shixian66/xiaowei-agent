@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 from tests.fakes.activation import RecordingActivationRequests
+from tests.fakes.admin_identity import UnusedAdminIdentity
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
@@ -186,6 +187,7 @@ def _build(
         integration_config_path=str(config_path),
         gemini_probe=gemini_probe if gemini_probe is not None else _Spy(),
         feishu_probe=feishu_probe if feishu_probe is not None else _Spy(),
+        admin_identity=UnusedAdminIdentity(),
     )
     return {
         "app": app,

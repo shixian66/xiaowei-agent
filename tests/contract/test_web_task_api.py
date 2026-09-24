@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.admin_identity import UnusedAdminIdentity
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
 from xiaowei_agent.application.channel_access import (
@@ -251,6 +252,7 @@ def _client(
         clock=lambda: _NOW,
         policy_revision="policy-2026-09-01",
         provider_state=EmptyProviderState(),
+        admin_identity=UnusedAdminIdentity(),
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(

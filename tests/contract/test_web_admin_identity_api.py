@@ -19,7 +19,6 @@ from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditOutcome,
     AdminAuditTargetKind,
-    AdminCapability,
     AuthenticatedPrincipal,
     IdentitySource,
     ProductRole,
@@ -364,6 +363,69 @@ async def test_safe_pages_do_not_serialize_controlled_identifiers_or_digests() -
     assert "target_ref_digest" not in serialized
 
 
+async def test_admin_query_parsers_reject_ambiguous_or_unbounded_input() -> None:
+    service = _AdminIdentity()
+    app = _app(service)
+    invalid = (
+        "/admin/api/users?unknown=1",
+        "/admin/api/users?limit=0",
+        "/admin/api/users?limit=101",
+        "/admin/api/users?limit=abc",
+        "/admin/api/users?limit=2&limit=3",
+        "/admin/api/activations?before_request_id=request-1",
+        "/admin/api/activations?before_requested_at=2026-09-24T10%3A30%3A00Z",
+        "/admin/api/audit?before_event_id=event-1",
+        "/admin/api/audit?action=not-an-action",
+        "/admin/api/audit?outcome=not-an-outcome",
+        "/admin/api/audit?target_user_id=user-1&target_request_id=request-1",
+    )
+    async with _client(app, cookie=_LOCAL_COOKIE) as client:
+        responses = [await client.get(path) for path in invalid]
+
+    assert [response.status_code for response in responses] == [400] * len(invalid)
+    assert service.calls == []
+
+
+async def test_admin_query_cursors_and_filters_reach_only_the_safe_service_surface() -> None:
+    service = _AdminIdentity()
+    app = _app(service)
+    async with _client(app, cookie=_LOCAL_COOKIE) as client:
+        activations = await client.get(
+            "/admin/api/activations",
+            params={
+                "before_requested_at": "2026-09-24T10:30:00Z",
+                "before_request_id": "request-2",
+                "limit": "25",
+            },
+        )
+        audit = await client.get(
+            "/admin/api/audit",
+            params={
+                "before_created_at": "2026-09-24T10:30:00Z",
+                "before_event_id": "event-2",
+                "action": "user_status_changed",
+                "outcome": "succeeded",
+                "target_user_id": "user-1",
+                "limit": "25",
+            },
+        )
+
+    assert activations.status_code == audit.status_code == 200
+    activation_call = service.calls[0]
+    audit_call = service.calls[1]
+    assert activation_call[0] == "list_pending_activations"
+    assert activation_call[1]["before_requested_at"] == _NOW
+    assert activation_call[1]["before_request_id"] == "request-2"
+    assert activation_call[1]["limit"] == 25
+    assert audit_call[0] == "list_audit"
+    assert audit_call[1]["before_created_at"] == _NOW
+    assert audit_call[1]["before_event_id"] == "event-2"
+    assert audit_call[1]["action"] is AdminAuditAction.USER_STATUS_CHANGED
+    assert audit_call[1]["outcome"] is AdminAuditOutcome.SUCCEEDED
+    assert audit_call[1]["target_user_id"] == "user-1"
+    assert audit_call[1]["target_request_id"] is None
+
+
 @pytest.mark.parametrize(("path", "body", "method_name"), _WRITE_CASES)
 async def test_each_governed_write_returns_no_body_and_uses_server_context(
     path: str, body: dict[str, object], method_name: str
@@ -401,7 +463,10 @@ async def test_each_governed_write_requires_origin_csrf_json_and_confirmation(
             await client.post(
                 path,
                 content=json.dumps(body),
-                headers={"content-type": "application/json", "x-csrf-token": web_csrf_token(_LOCAL_COOKIE)},
+                headers={
+                    "content-type": "application/json",
+                    "x-csrf-token": web_csrf_token(_LOCAL_COOKIE),
+                },
             ),
             await client.post(
                 path,
@@ -411,15 +476,53 @@ async def test_each_governed_write_requires_origin_csrf_json_and_confirmation(
             await client.post(
                 path,
                 content=json.dumps(body),
+                headers=[
+                    ("origin", _ORIGIN),
+                    ("origin", _ORIGIN),
+                    ("content-type", "application/json"),
+                    ("x-csrf-token", web_csrf_token(_LOCAL_COOKIE)),
+                ],
+            ),
+            await client.post(
+                path,
+                content=json.dumps(body),
                 headers=_headers(_LOCAL_COOKIE, csrf=False),
             ),
-            await client.post(path, content=json.dumps(body), headers={"origin": _ORIGIN, "content-type": "text/plain", "x-csrf-token": web_csrf_token(_LOCAL_COOKIE)}),
-            await client.post(path, content=json.dumps(without_confirmation), headers=_headers(_LOCAL_COOKIE)),
-            await client.post(path, content=json.dumps(with_extra), headers=_headers(_LOCAL_COOKIE)),
+            await client.post(
+                path,
+                content=json.dumps(body),
+                headers=[
+                    ("origin", _ORIGIN),
+                    ("content-type", "application/json"),
+                    ("x-csrf-token", web_csrf_token(_LOCAL_COOKIE)),
+                    ("x-csrf-token", web_csrf_token(_LOCAL_COOKIE)),
+                ],
+            ),
+            await client.post(
+                path,
+                content=json.dumps(body),
+                headers={
+                    "origin": _ORIGIN,
+                    "content-type": "text/plain",
+                    "x-csrf-token": web_csrf_token(_LOCAL_COOKIE),
+                },
+            ),
+            await client.post(
+                path,
+                content=json.dumps(without_confirmation),
+                headers=_headers(_LOCAL_COOKIE),
+            ),
+            await client.post(
+                path,
+                content=json.dumps(with_extra),
+                headers=_headers(_LOCAL_COOKIE),
+            ),
             await client.post(path, content=b"x" * 1025, headers=_headers(_LOCAL_COOKIE)),
         ]
 
     assert [response.status_code for response in responses] == [
+        403,
+        403,
         403,
         403,
         403,
@@ -453,7 +556,7 @@ async def test_application_failures_use_only_the_closed_http_error_family(
         "error": {
             "code": {
                 404: "not_found",
-                409: "conflict",
+                409: "idempotency_conflict",
                 503: "unavailable",
             }[status]
         }

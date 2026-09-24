@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 from tests.fakes.activation import RecordingActivationRequests
+from tests.fakes.admin_identity import UnusedAdminIdentity
 
 from xiaowei_agent.application.integration_state import SERVICE_WORKER
 from xiaowei_agent.config import Settings
@@ -146,6 +147,7 @@ def _build(
         policy_revision="policy-2026-09-01",
         provider_state=provider_state,
         integration_config_path=str(config_path),
+        admin_identity=UnusedAdminIdentity(),
     )
     return app, admins, sessions, provider_state, config_path
 
