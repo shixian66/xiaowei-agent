@@ -64,11 +64,16 @@ def test_raw_configuration_ui_belongs_only_to_the_admin_shell() -> None:
     assert "/app/api/config" not in app_script + admin_script
     assert "/admin/api/config" not in app_script
     for required in (
-        "/admin/api/config",
-        "/admin/api/config/clear",
+        '"/admin/api/config/ai"',
+        '"/admin/api/config/feishu"',
+        "`/admin/api/config/${domain}`",
+        "`/admin/api/config/${domain}/clear`",
         "/admin/api/config/test/",
     ):
         assert required in admin_script
+    # W4a 不再有跨域的整体读写/清除入口：一次保存只能动一个配置域。
+    for retired in ('"/admin/api/config"', '"/admin/api/config/clear"'):
+        assert retired not in admin_script
 
 
 def test_admin_shell_contains_the_three_lite_identity_regions_and_one_confirmation() -> None:

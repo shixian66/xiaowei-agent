@@ -154,13 +154,17 @@ class AdminAuditAction(StrEnum):
     LEGACY_IDENTITY_MIGRATED = "legacy_identity_migrated"
     ACTIVATION_APPROVED = "activation_approved"
     ACTIVATION_REJECTED = "activation_rejected"
+    # W4a：文件配置与探针不能与数据库审计同事务，因此只有这三个动作走两阶段。
+    CONFIG_SAVED = "config_saved"
+    CONFIG_CLEARED = "config_cleared"
+    CONNECTION_TESTED = "connection_tested"
 
 
 class AdminAuditTargetKind(StrEnum):
     """审计目标类别闭集（规格 §14.2）。
 
-    W1b 开始由激活决策产生 ``ACTIVATION``；``DUTY_BINDING`` / ``CONFIG`` /
-    ``TASK_CONTENT`` 仍只是规格逐字列出的值域，没有对应写命令。
+    W1b 开始由激活决策产生 ``ACTIVATION``；W4a 起配置保存、清除与连接测试产生
+    ``CONFIG``；``DUTY_BINDING`` / ``TASK_CONTENT`` 仍只是规格逐字列出的值域，没有对应写命令。
     """
 
     USER = "user"
@@ -196,13 +200,31 @@ class AdminAuditReasonCode(StrEnum):
     SCOPE_MISMATCH = "scope_mismatch"
     CONFLICT = "conflict"
     AUDIT_UNWRITABLE = "audit_unwritable"
+    # W4a 两阶段配置审计的失败原因：只到闭集码，异常正文一律不进审计表。
+    CONFIG_INVALID = "config_invalid"
+    FILE_IO_FAILED = "file_io_failed"
+    PROBE_FAILED = "probe_failed"
+    SESSION_INVALID = "session_invalid"
 
 
 class ProviderName(StrEnum):
-    """`integrations.json` 里可配置的 Provider 闭集。"""
+    """Gemini/飞书探针与模型接线使用的 Provider 闭集；配置域见 :class:`ConfigDomain`。"""
 
     GEMINI = "gemini"
     FEISHU = "feishu"
+
+
+class ConfigDomain(StrEnum):
+    """配置域闭集：一个宿主目录、一份固定文件、一个独立 ``generation``。
+
+    加载回执的键、``service_config_state.config_domain`` 的 CHECK 与 Web 投影都用它，
+    不再借 :class:`ProviderName` 冒充配置域——后者只服务
+    现有 Gemini/飞书探针分类。``RESOURCES`` 在 W4a 只占名字与挂载，没有文档契约。
+    """
+
+    AI = "ai"
+    FEISHU = "feishu"
+    RESOURCES = "resources"
 
 
 class WebMode(StrEnum):

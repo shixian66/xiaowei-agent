@@ -11,6 +11,7 @@ import httpx
 import pytest
 from tests.fakes.activation import RecordingActivationRequests
 from tests.fakes.admin_identity import UnusedAdminIdentity
+from tests.fakes.integration_config import AbsentIntegrationConfig
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 from tests.security.test_task_view_runtime_authority import (
     _TASK_VIEW_PROCESS_ALLOWED_MODULES,
@@ -89,6 +90,7 @@ def _auth_app(
         clock=clock,
         policy_revision="policy-2026-09-01",
         provider_state=EmptyProviderState(),
+        integration_config=AbsentIntegrationConfig(),
         admin_identity=UnusedAdminIdentity(),
     )
 
@@ -1115,6 +1117,8 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "identity_directory",
         "activation_service",
         "admin_identity_service",
+        # W4a：唯一配置写服务；只写本地配置文件与管理审计，不持有执行面。
+        "integration_config_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -1236,6 +1240,9 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.governance.product_roles",
         "xiaowei_agent.interfaces.directory_identity",
         "xiaowei_agent.interfaces.feishu_identity",
+        # W4a：web-app 是唯一配置写入方；consumer 进程的模块面不含这两个模块。
+        "xiaowei_agent.application.integration_config_service",
+        "xiaowei_agent.interfaces.integration_config_repository",
         # RI5：本地管理员登录是 Web 的必备入口，装配时必然加载。
         "xiaowei_agent.interfaces.local_admin_auth",
         "xiaowei_agent.interfaces.web_auth",

@@ -83,13 +83,22 @@ DIRECTORY_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
 )
 """同库、单事务的目录动作。
 
-W1b 阶段它**等于当前全部 action**：本阶段写的每一件事都是同库事实，因此授权改变与
-成功审计在同一个事务里提交，不存在"先写 STARTED、再补终态"的中间态。两阶段留给
-规格 §14.2 的文件配置操作（W4a），那时会有非目录动作加进来。
+目录动作写的每一件事都是同库事实，因此授权改变与成功审计在同一个事务里提交，
+不存在"先写 STARTED、再补终态"的中间态。W4a 的三个文件配置动作**不在**这里。
 """
 
-STARTABLE_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset()
-"""W1b 没有两阶段动作；W4a 的配置动作必须在这里显式开门。"""
+STARTABLE_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
+    {
+        AdminAuditAction.CONFIG_SAVED,
+        AdminAuditAction.CONFIG_CLEARED,
+        AdminAuditAction.CONNECTION_TESTED,
+    }
+)
+"""W4a 的两阶段动作：文件配置与探针无法与 PostgreSQL 审计同事务，先写 ``STARTED``，
+再执行动作，最后写 ``SUCCEEDED``/``FAILED``；只剩 ``STARTED`` 即表示结果未知。
+
+它们都不带 role/status effect，也绝不能进入 :data:`DIRECTORY_ACTIONS`。
+"""
 
 ROLE_EFFECT_ACTIONS: Final[frozenset[AdminAuditAction]] = frozenset(
     {
@@ -245,10 +254,9 @@ class AdminAuditEvent(AdminAuditCandidate):
 class AdminAuditStart(Contract):
     """两阶段操作的第一条事件。**没有** outcome / effect / 原因码。
 
-    它在**契约层**拒绝目录动作（不变量 4）。W1a 因此没有任何可用的 action——
-    ``DIRECTORY_ACTIONS`` 恰好等于本阶段全部八个动作。这是设计结果，不是缺陷：
-    ``append_denied`` 是本阶段唯一可用的写方法。**不要**为了让某条用例跑通而放宽
-    这条校验——放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
+    它在**契约层**只接受 :data:`STARTABLE_ACTIONS`（W4a 的三个配置动作），拒绝目录
+    动作（不变量 4）。**不要**为了让某条用例跑通而放宽这条校验——放宽它等于允许目录
+    动作走两阶段，终态字段由调用方再传一遍。
     """
 
     operation_id: AuditOperationId

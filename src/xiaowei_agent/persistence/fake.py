@@ -31,6 +31,7 @@ from xiaowei_agent.contracts import (
     LeaseGrant,
     LoadReceipt,
     ProjectionState,
+    ReceiptKey,
     RetryDecision,
     ScopeTaskPageQuery,
     StepAttemptDecision,
@@ -173,10 +174,11 @@ from xiaowei_agent.persistence.local_admin import (
     bootstrap_local_admin_command,
     bootstrap_operation_context,
 )
-from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState, OAuthTestContext
 from xiaowei_agent.persistence.provider_state import (
     ProviderStateSnapshot,
     RecordTestCommand,
+    closed_receipts,
 )
 from xiaowei_agent.persistence.store import (
     ClarificationParentRequiredError,
@@ -212,14 +214,17 @@ from xiaowei_agent.persistence.store import (
 from xiaowei_agent.persistence.web_session import (
     DEFAULT_OAUTH_STATE_CAPACITY,
     ConsumeOAuthLoginStateCommand,
-    ConsumeOAuthStateCommand,
+    ConsumeOAuthTestStateCommand,
     IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
+    IssueOAuthTestStateCommand,
     OAuthLoginContextNotFoundError,
     OAuthLoginState,
     OAuthState,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
+    OAuthTestContextNotFoundError,
+    OAuthTestState,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
     WebSession,
@@ -550,14 +555,13 @@ class InMemoryProviderStateStore:
         self._state = InMemoryPersistenceState() if state is None else state
         self._lock = self._state.lock
 
-    async def record_load(
-        self, *, receipts: Mapping[tuple[str, str], LoadReceipt]
-    ) -> None:
+    async def record_load(self, *, receipts: Mapping[ReceiptKey, LoadReceipt]) -> None:
         if not receipts:
             # 空映射不是"清空"：旧回执仍是"上次加载了第几代"的事实。
             return
+        closed = closed_receipts(receipts)
         async with self._lock:
-            self._state.load_receipts.update(receipts)
+            self._state.load_receipts.update(closed)
 
     async def record_test(self, *, command: RecordTestCommand) -> None:
         async with self._lock:
@@ -1737,13 +1741,29 @@ class InMemoryWebSessionStore:
         self._state = InMemoryPersistenceState() if state is None else state
         self._lock = self._state.lock
 
-    async def issue_oauth_state(
-        self, *, command: IssueOAuthStateCommand
-    ) -> OAuthState:
+    async def issue_oauth_test_state(
+        self, *, command: IssueOAuthTestStateCommand
+    ) -> OAuthTestState:
         async with self._lock:
             now = self._clock()
             self._cleanup_oauth_states(now=now)
-            return self._issue_oauth_state(command=command, now=now)
+            if any(
+                context.operation_id == command.operation_id
+                for context in self._state.oauth_test_contexts.values()
+            ):
+                # 与 PostgreSQL 的 UNIQUE(operation_id) 同一语义：一次 STARTED
+                # 最多绑定一个 state，且冲突时什么都不落。
+                raise WebSessionConflictError
+            state = self._issue_oauth_state(command=command, now=now)
+            self._state.oauth_test_contexts[state.state_digest] = OAuthTestContext(
+                operation_id=command.operation_id,
+                config_generation=command.config_generation,
+            )
+            return OAuthTestState(
+                **state.model_dump(),
+                operation_id=command.operation_id,
+                config_generation=command.config_generation,
+            )
 
     async def issue_oauth_login_state(
         self, *, command: IssueOAuthLoginStateCommand
@@ -1760,9 +1780,9 @@ class InMemoryWebSessionStore:
                 return_intent=command.return_intent,
             )
 
-    async def consume_oauth_state(
-        self, *, command: ConsumeOAuthStateCommand
-    ) -> OAuthState:
+    async def consume_oauth_test_state(
+        self, *, command: ConsumeOAuthTestStateCommand
+    ) -> OAuthTestState:
         async with self._lock:
             state = self._state.oauth_states.get(command.state_digest)
             now = self._clock()
@@ -1772,9 +1792,16 @@ class InMemoryWebSessionStore:
                 or now >= state.expires_at
             ):
                 raise OAuthStateNotFoundError
+            context = self._state.oauth_test_contexts.get(command.state_digest)
+            if context is None:
+                raise OAuthTestContextNotFoundError
             consumed = state.model_copy(update={"consumed_at": now})
             self._state.oauth_states[state.state_digest] = consumed
-            return consumed
+            return OAuthTestState(
+                **consumed.model_dump(),
+                operation_id=context.operation_id,
+                config_generation=context.config_generation,
+            )
 
     async def consume_oauth_login_state(
         self, *, command: ConsumeOAuthLoginStateCommand
@@ -1809,6 +1836,7 @@ class InMemoryWebSessionStore:
         for digest in stale_digests:
             del self._state.oauth_states[digest]
             self._state.oauth_login_contexts.pop(digest, None)
+            self._state.oauth_test_contexts.pop(digest, None)
 
     def _issue_oauth_state(
         self,

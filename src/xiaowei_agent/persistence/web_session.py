@@ -2,7 +2,7 @@
 
 from typing import Final, Protocol, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from xiaowei_agent.contracts import (
     AwareDatetime,
@@ -12,6 +12,7 @@ from xiaowei_agent.contracts import (
     StrictInt,
     StrictStr,
 )
+from xiaowei_agent.contracts.admin_audit import AuditOperationId
 from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
 DEFAULT_OAUTH_STATE_CAPACITY: Final[int] = 1024
@@ -40,6 +41,13 @@ class OAuthLoginContextNotFoundError(WebSessionStoreError, LookupError):
 
     def __init__(self) -> None:
         super().__init__("oauth login context missing")
+
+
+class OAuthTestContextNotFoundError(WebSessionStoreError, LookupError):
+    """测试域 state 存在但它的必需 context 缺失（含：它其实是一张登录 state）。"""
+
+    def __init__(self) -> None:
+        super().__init__("oauth test context missing")
 
 
 class WebSessionNotFoundError(WebSessionStoreError, LookupError):
@@ -81,6 +89,25 @@ class OAuthLoginState(OAuthState):
     return_intent: WebReturnIntent
 
 
+def _w4_operation_id(value: str) -> str:
+    if not value.startswith("w4:"):
+        raise ValueError("oauth test operation id must be server-derived")
+    return value
+
+
+class OAuthTestState(OAuthState):
+    """一次 OAuth 连接测试 state、签发它的 W4a 审计 operation id 与被测飞书配置代次。
+
+    ``config_generation`` 是签发时 Web 已加载、且等于当前文件的那一代：Web 的 OAuth
+    adapter 持有的是启动期凭据，回调只能按这一代核对与记账，不能按回调时的文件重新归属。
+    """
+
+    operation_id: AuditOperationId
+    config_generation: StrictInt = Field(gt=0)
+
+    _operation_id_is_w4 = field_validator("operation_id")(_w4_operation_id)
+
+
 class WebSession(Contract):
     """只保存随机 cookie 摘要、主体引用、签发来源与时效事实。"""
 
@@ -112,12 +139,25 @@ class IssueOAuthLoginStateCommand(IssueOAuthStateCommand):
     return_intent: WebReturnIntent
 
 
+class IssueOAuthTestStateCommand(IssueOAuthStateCommand):
+    """测试专用签发命令；无法构造一个不绑定审计 operation 与被测代次的测试 state。"""
+
+    operation_id: AuditOperationId
+    config_generation: StrictInt = Field(gt=0)
+
+    _operation_id_is_w4 = field_validator("operation_id")(_w4_operation_id)
+
+
 class ConsumeOAuthStateCommand(Contract):
     state_digest: Sha256Hex
 
 
 class ConsumeOAuthLoginStateCommand(ConsumeOAuthStateCommand):
     """登录专用消费命令；缺 context 是独立不变量错误。"""
+
+
+class ConsumeOAuthTestStateCommand(ConsumeOAuthStateCommand):
+    """测试专用消费命令；缺测试 context 同样是独立不变量错误，且整体回滚。"""
 
 
 class RotateWebSessionCommand(Contract):
@@ -160,15 +200,19 @@ class RevokeWebSessionCommand(Contract):
 class WebSessionStore(Protocol):
     """原子保存一次性 OAuth state 与可撤销浏览器 session。"""
 
-    async def issue_oauth_state(
-        self, *, command: IssueOAuthStateCommand
-    ) -> OAuthState:
-        """保存 state 摘要；随机碰撞必须拒绝。"""
+    async def issue_oauth_test_state(
+        self, *, command: IssueOAuthTestStateCommand
+    ) -> OAuthTestState:
+        """同一提交签发测试 state 与它的审计 operation id；碰撞或 operation 复用拒绝。"""
 
-    async def consume_oauth_state(
-        self, *, command: ConsumeOAuthStateCommand
-    ) -> OAuthState:
-        """原子消费仍有效的 state；未知、过期和重放统一拒绝。"""
+    async def consume_oauth_test_state(
+        self, *, command: ConsumeOAuthTestStateCommand
+    ) -> OAuthTestState:
+        """同一提交消费测试 state 并取回 operation id 与绑定代次；未知、过期和重放统一拒绝。
+
+        state 有效但没有测试 context（包括一张登录 state）时抛
+        :class:`OAuthTestContextNotFoundError` 并回滚，绝不消费。
+        """
 
     async def issue_oauth_login_state(
         self, *, command: IssueOAuthLoginStateCommand
@@ -207,13 +251,17 @@ __all__ = [
     "DEFAULT_OAUTH_STATE_CAPACITY",
     "ConsumeOAuthLoginStateCommand",
     "ConsumeOAuthStateCommand",
+    "ConsumeOAuthTestStateCommand",
     "IssueOAuthLoginStateCommand",
     "IssueOAuthStateCommand",
+    "IssueOAuthTestStateCommand",
     "OAuthLoginContextNotFoundError",
     "OAuthLoginState",
     "OAuthState",
     "OAuthStateCapacityError",
     "OAuthStateNotFoundError",
+    "OAuthTestContextNotFoundError",
+    "OAuthTestState",
     "RevokeWebSessionCommand",
     "RotateWebSessionCommand",
     "WebSession",

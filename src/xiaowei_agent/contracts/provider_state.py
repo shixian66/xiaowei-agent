@@ -6,14 +6,21 @@
 persistence 自己抄一份行形状，正是这条链路上最容易出现的漂移。
 """
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypeAlias
 
 from pydantic import Field
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictInt
+from xiaowei_agent.contracts.enums import ConfigDomain
 
 LoadStatus = Literal["loaded", "invalid"]
 TestStatus = Literal["passed", "failed"]
+
+ReceiptKey: TypeAlias = tuple[str, ConfigDomain]
+"""加载回执的唯一键 ``(service_name, config_domain)``。
+
+与 ``service_config_state`` 的联合主键逐列相同；W4a 起第二列是配置域而不是 Provider。
+"""
 
 
 class LoadReceipt(Contract):
@@ -42,6 +49,7 @@ class TestResult(Contract):
 __all__ = [
     "LoadReceipt",
     "LoadStatus",
+    "ReceiptKey",
     "TestResult",
     "TestStatus",
 ]

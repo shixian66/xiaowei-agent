@@ -75,6 +75,16 @@ def audit_stage_key(
     return (operation_id, stage)
 
 
+def stage_event_id(*, operation_id: str, stage: AuditStage) -> str:
+    """一次操作某个阶段的确定性 ``event_id``；:func:`seal` 与读回共用这一处。
+
+    两阶段调用方（W4a OAuth 回调）需要在写终态**之前**读回那条 ``STARTED``，
+    以确认这个 operation 确实是一次尚未结束的连接测试；各自再算一遍摘要就是第二份真源。
+    """
+    material = f"{_EVENT_ID_DOMAIN}\x1f{operation_id}\x1f{stage}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def seal(candidate: AdminAuditCandidate, *, now: _dt.datetime) -> AdminAuditEvent:
     """给候选盖上 ``event_id`` 与 ``created_at``，得到一条可落库的事件。
 
@@ -93,9 +103,8 @@ def seal(candidate: AdminAuditCandidate, *, now: _dt.datetime) -> AdminAuditEven
     operation_id, stage = audit_stage_key(
         operation_id=candidate.operation_id, outcome=candidate.outcome
     )
-    material = f"{_EVENT_ID_DOMAIN}\x1f{operation_id}\x1f{stage}"
     return AdminAuditEvent(
-        event_id=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        event_id=stage_event_id(operation_id=operation_id, stage=stage),
         created_at=now,
         operation_id=candidate.operation_id,
         tenant_id=candidate.tenant_id,
@@ -123,16 +132,15 @@ class AdminAuditStore(Protocol):
     async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
         """写两阶段操作的第一条事件。
 
-        W1b 没有任何可用的 action：``DIRECTORY_ACTIONS`` 恰好等于本阶段全部十个
-        动作，而 :class:`AdminAuditStart` 在契约层就拒绝目录动作。这是设计结果，
-        不是缺陷——放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
+        只有 W4a 的三个配置动作可用：:class:`AdminAuditStart` 在契约层拒绝目录动作。
+        放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
         """
 
     async def append_terminal(self, *, terminal: AdminAuditTerminal) -> AdminAuditEvent:
         """写终态；稳定字段从已存的 ``STARTED`` 读回，找不到就抛。"""
 
     async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
-        """写一次拒绝。本阶段唯一可用的写方法。"""
+        """写一次拒绝；``outcome`` 恒为 ``DENIED``。"""
 
     async def load(self, *, event_id: str) -> AdminAuditEvent | None:
         """按 id 读回一条事件；不存在返回 ``None``。"""
@@ -149,4 +157,5 @@ __all__ = [
     "AuditStage",
     "audit_stage_key",
     "seal",
+    "stage_event_id",
 ]

@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.fakes.integration_config import AbsentIntegrationConfig
 
 from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import WebMode
+from xiaowei_agent.interfaces import (
+    integration_config_repository as integration_config_repository_module,
+)
 from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces import provider_consumption as provider_consumption_module
 from xiaowei_agent.interfaces import web_app as web_app_module
@@ -173,9 +177,16 @@ async def test_the_stack_builder_never_reads_the_integration_config(
     )
     monkeypatch.setattr(
         provider_consumption_module,
-        "read_or_absent",
-        lambda _: calls.append("read") or None,
+        "_read_domain",
+        lambda *_: calls.append("read") or None,
     )
+    # W4a：web 栈装配配置写服务，但**构造**文件 adapter 不得读取任何域文件。
+    for reader in ("read_ai_config", "read_feishu_config"):
+        monkeypatch.setattr(
+            integration_config_repository_module,
+            reader,
+            lambda *_: calls.append("read") or None,
+        )
 
     stack = await build_postgres_web_stack(
         settings=_settings(tmp_path), oauth=None, membership=None
@@ -427,6 +438,7 @@ def _app(clock: Any, memory_state: Any, *, mode: WebMode = WebMode.HTTPS) -> Any
         policy_revision="policy-2026-09-01",
         provider_state=InMemoryProviderStateStore(clock=clock, state=memory_state),
         admin_identity=_Unused(),
+        integration_config=AbsentIntegrationConfig(),
     )
     return app, admins, origin, INITIAL_LOCAL_ADMIN_PASSWORD, hash_password
 
@@ -727,8 +739,10 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
             ("POST", "/login/api/change-password"),
             # 配置保存是 PUT。中间件只认 POST 时这一条会整条绕过 body 上限，
             # 而它恰好是唯一一个会被原样写进磁盘文件的入口。
-            ("PUT", "/admin/api/config"),
-            ("POST", "/admin/api/config/clear"),
+            ("PUT", "/admin/api/config/ai"),
+            ("PUT", "/admin/api/config/feishu"),
+            ("POST", "/admin/api/config/ai/clear"),
+            ("POST", "/admin/api/config/feishu/clear"),
             ("POST", "/admin/api/config/test/gemini_connection"),
             ("POST", "/admin/api/config/test/feishu_credentials"),
             ("POST", "/admin/api/config/test/feishu_oauth"),

@@ -251,13 +251,16 @@ def test_outcome_is_the_spec_four_member_closed_set() -> None:
     }
 
 
-def test_w1b_actions_cover_only_what_this_stage_actually_writes() -> None:
-    """action 闭集不含本阶段写不出的动作。
+def test_actions_cover_only_what_the_delivered_stages_actually_write() -> None:
+    """action 闭集不含已交付阶段写不出的动作。
 
-    提前塞进 ``ACTIVATION_APPROVED`` 这类成员，会让"这个阶段能做什么"在枚举上
-    看起来比实际大一圈——而审计枚举正是复审判断范围的地方。
+    提前塞进某个成员，会让"这个阶段能做什么"在枚举上看起来比实际大一圈——而审计
+    枚举正是复审判断范围的地方。W4a 只加三个两阶段配置动作。
     """
     assert {member.value for member in AdminAuditAction} == {
+        "config_saved",
+        "config_cleared",
+        "connection_tested",
         "user_created",
         "user_status_changed",
         "role_assigned",
@@ -271,9 +274,73 @@ def test_w1b_actions_cover_only_what_this_stage_actually_writes() -> None:
     }
 
 
-def test_all_w1b_actions_are_single_phase_and_none_are_startable() -> None:
-    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction)
-    assert STARTABLE_ACTIONS == frozenset()
+_W4A_CONFIG_ACTIONS = frozenset(
+    {
+        AdminAuditAction.CONFIG_SAVED,
+        AdminAuditAction.CONFIG_CLEARED,
+        AdminAuditAction.CONNECTION_TESTED,
+    }
+)
+
+
+def test_only_the_w4a_config_actions_are_startable() -> None:
+    """文件配置与数据库审计不在一个事务里，因此只有它们走 STARTED → 终态。"""
+    assert STARTABLE_ACTIONS == _W4A_CONFIG_ACTIONS
+    assert not STARTABLE_ACTIONS & DIRECTORY_ACTIONS
+    assert DIRECTORY_ACTIONS | STARTABLE_ACTIONS == frozenset(AdminAuditAction)
+
+
+def test_w4a_reason_codes_are_the_minimal_closed_additions() -> None:
+    assert {member.value for member in AdminAuditReasonCode} == {
+        "actor_not_admin",
+        "auth_source_not_allowed",
+        "target_not_found",
+        "scope_mismatch",
+        "conflict",
+        "audit_unwritable",
+        "config_invalid",
+        "file_io_failed",
+        "probe_failed",
+        "session_invalid",
+    }
+
+
+@pytest.mark.parametrize("action", sorted(_W4A_CONFIG_ACTIONS))
+def test_a_config_action_can_start_but_carries_no_effect(
+    action: AdminAuditAction,
+) -> None:
+    start = AdminAuditStart(
+        operation_id="w4:op-config",
+        tenant_id="t-1",
+        environment_id="dev",
+        actor_user_id="admin-1",
+        actor="admin",
+        auth_source=IdentitySource.LOCAL_ADMIN,
+        action=action,
+        target_kind=AdminAuditTargetKind.CONFIG,
+        target_ref_digest=_DIGEST,
+    )
+    assert start.action is action
+    assert action not in ROLE_EFFECT_ACTIONS
+    assert action not in STATUS_EFFECT_ACTIONS
+    _candidate(
+        action=action,
+        target_kind=AdminAuditTargetKind.CONFIG,
+        outcome=AdminAuditOutcome.SUCCEEDED,
+        effect=AdminAuditEffect(),
+    )
+    _candidate(
+        action=action,
+        target_kind=AdminAuditTargetKind.CONFIG,
+        outcome=AdminAuditOutcome.STARTED,
+        effect=AdminAuditEffect(),
+    )
+    with pytest.raises(ValidationError):
+        _candidate(
+            action=action,
+            outcome=AdminAuditOutcome.SUCCEEDED,
+            effect=AdminAuditEffect(role=ProductRole.ADMIN),
+        )
 
 
 @pytest.mark.parametrize(
@@ -407,13 +474,12 @@ def test_binding_actions_carry_no_effect(action: AdminAuditAction) -> None:
         _candidate(action=action, effect=AdminAuditEffect(status=UserStatus.ACTIVE))
 
 
-def test_every_w1b_action_is_a_directory_action() -> None:
-    """W1b 的十个 action 恰好就是目录动作全集。
+def test_every_non_config_action_is_a_directory_action() -> None:
+    """除 W4a 三个配置动作外，其余 action 恰好就是目录动作全集。
 
-    这条同时解释了 ``append_started`` 在本阶段**没有可用 action**：目录动作一律
-    单阶段。不要为了让某条用例跑通而放宽那个校验。
+    目录动作一律单阶段：不要为了让某条用例跑通而把它们放进 ``STARTABLE_ACTIONS``。
     """
-    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction)
+    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction) - _W4A_CONFIG_ACTIONS
 
 
 def test_two_phase_start_refuses_a_directory_action() -> None:

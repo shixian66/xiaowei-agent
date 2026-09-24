@@ -1426,14 +1426,17 @@ async def test_one_operation_cannot_hold_two_events_at_the_same_stage(
 async def test_no_w1a_action_can_write_a_started_row(
     clean_database: AsyncEngine,
 ) -> None:
-    """W1a 的每一个 action 都写不出 ``STARTED``，逐个动作断言。
+    """W1a 的每一个目录 action 都写不出 ``STARTED``，逐个动作断言。
 
     只测一个动作时，单阶段 CHECK 的动作列表漏掉某一个不会被发现——而漏掉的那个
-    动作从此可以在数据库层留下一条"结果未知"的事件。
+    动作从此可以在数据库层留下一条"结果未知"的事件。W4a 的三个配置动作是唯一
+    合法的两阶段动作，见下一条用例；这里遍历的是它的补集。
     """
+    from xiaowei_agent.contracts.admin_audit import DIRECTORY_ACTIONS, STARTABLE_ACTIONS
     from xiaowei_agent.contracts.enums import AdminAuditAction
 
-    for index, action in enumerate(AdminAuditAction):
+    assert DIRECTORY_ACTIONS == frozenset(AdminAuditAction) - STARTABLE_ACTIONS
+    for index, action in enumerate(sorted(DIRECTORY_ACTIONS)):
         with pytest.raises(sa.exc.IntegrityError):
             await _insert_audit_event(
                 clean_database,
@@ -1449,3 +1452,30 @@ async def test_no_w1a_action_can_write_a_started_row(
             sa.text("SELECT count(*) FROM admin_audit_events")
         )
     assert remaining == 0
+
+
+async def test_w4a_config_actions_write_exactly_one_started_row_per_operation(
+    clean_database: AsyncEngine,
+) -> None:
+    """对照：rev_0018 放行三个配置动作的 ``STARTED``，但同一 operation 只能一条。"""
+    from xiaowei_agent.contracts.admin_audit import STARTABLE_ACTIONS
+
+    for index, action in enumerate(sorted(STARTABLE_ACTIONS)):
+        values = {
+            "operation_id": f"w4:{index:032x}",
+            "action": action.value,
+            "target_kind": "config",
+            "outcome": "started",
+            "effect_role": None,
+        }
+        await _insert_audit_event(clean_database, event_id=f"e-{index}", **values)
+        with pytest.raises(sa.exc.IntegrityError):
+            await _insert_audit_event(
+                clean_database, event_id=f"e-{index}-again", **values
+            )
+
+    async with clean_database.connect() as connection:
+        started = await connection.scalar(
+            sa.text("SELECT count(*) FROM admin_audit_events WHERE outcome = 'started'")
+        )
+    assert started == len(STARTABLE_ACTIONS)

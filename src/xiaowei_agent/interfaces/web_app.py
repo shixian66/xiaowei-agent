@@ -46,11 +46,20 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionService,
     ChannelSubmitCommand,
 )
+from xiaowei_agent.application.integration_config_service import (
+    FeishuUpdate,
+    GeminiUpdate,
+    IntegrationConfigForbiddenError,
+    IntegrationConfigService,
+    IntegrationConfigUnavailableError,
+    OAuthTestGenerationDriftError,
+)
 from xiaowei_agent.application.integration_state import (
     SERVICE_WEB,
     ProviderDisplayState,
     compute_display_state,
     current_generation,
+    web_holds_feishu_generation,
 )
 from xiaowei_agent.application.task_view_runtime import (
     ApplicationFailure,
@@ -69,15 +78,14 @@ from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditOutcome,
     AdminCapability,
+    AiConfig,
     AuthenticatedPrincipal,
     ChannelKind,
     ChannelPermission,
-    FeishuIntegration,
-    GeminiIntegration,
+    ConfigDomain,
+    FeishuConfig,
     IdentitySource,
-    IntegrationConfig,
     ProductRole,
-    ProviderName,
     ReadinessProbe,
     TestResult,
     WebMode,
@@ -89,17 +97,11 @@ from xiaowei_agent.contracts.identity import BoundedActor, BoundedId
 from xiaowei_agent.interfaces.auth import Clock, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
-from xiaowei_agent.interfaces.integration_config_file import (
-    DEFAULT_INTEGRATION_CONFIG_PATH,
-    IntegrationConfigError,
-    write_integration_config,
-)
 from xiaowei_agent.interfaces.local_admin_auth import (
     LocalAdminAuthenticationError,
     LocalAdminAuthService,
 )
 from xiaowei_agent.interfaces.provider_consumption import (
-    read_or_absent,
     required_services_for_check,
 )
 from xiaowei_agent.interfaces.provider_probe import (
@@ -116,6 +118,7 @@ from xiaowei_agent.interfaces.provider_probe import (
 from xiaowei_agent.interfaces.web_auth import (
     FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS,
     FeishuOAuthPort,
+    OAuthStart,
     WebActivationPendingError,
     WebAuthenticationError,
     WebAuthService,
@@ -130,20 +133,20 @@ from xiaowei_agent.interfaces.web_auth import (
     validate_unauthenticated_origin,
 )
 from xiaowei_agent.interfaces.web_models import (
+    WebAiConfigChecks,
+    WebAiConfigView,
     WebApproveActivationRequest,
     WebChangePasswordRequest,
     WebChangeUserRoleRequest,
-    WebConfigChecks,
     WebConfigClearRequest,
     WebConfigSaved,
-    WebConfigUpdateRequest,
-    WebConfigView,
     WebCurrentUser,
+    WebFeishuConfigChecks,
     WebFeishuConfigUpdate,
     WebFeishuConfigView,
+    WebFeishuDomainConfigView,
     WebGeminiConfigUpdate,
     WebGeminiConfigView,
-    WebIntegrationDomain,
     WebIntegrationDomainStatus,
     WebIntegrationLoadStatus,
     WebIntegrationStatusView,
@@ -169,7 +172,6 @@ from xiaowei_agent.persistence.provider_state import (
     CheckName,
     ProviderStateSnapshot,
     ProviderStateStore,
-    RecordTestCommand,
 )
 from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
@@ -988,154 +990,149 @@ class _WebForbiddenError(RuntimeError):
     """
 
 
-class _ConfigUnavailableError(RuntimeError):
-    """`integrations.json` 存在但读不了。
-
-    **绝不能**降级成"未配置"：那样下一次保存会拿 ``generation=0`` 起步，
-    把一份仍在被各进程使用的配置整个覆盖掉。"不存在"是未配置，"存在但坏"是故障。
-    """
+def _gemini_enabled(config: AiConfig | None) -> bool:
+    return config is not None and config.gemini.enabled
 
 
-def _integration_config_or_unavailable(path: str) -> IntegrationConfig | None:
-    """读当前配置；``None`` 表示文件尚不存在（干净部署的正常起点）。"""
-    try:
-        return read_or_absent(path)
-    except IntegrationConfigError:
-        raise _ConfigUnavailableError from None
+def _gemini_configured(config: AiConfig | None) -> bool:
+    """AI 域必填字段是否齐备——页面"已配置"与状态机问的是同一个问题，只判一处。"""
+    return config is not None and config.gemini.api_key is not None
 
 
-def _write_config_or_unavailable(path: str, config: IntegrationConfig) -> None:
-    try:
-        write_integration_config(path, config)
-    except IntegrationConfigError:
-        raise _ConfigUnavailableError from None
+def _feishu_enabled(config: FeishuConfig | None) -> bool:
+    return config is not None and config.feishu.enabled
 
 
-def _merged_gemini(
-    current: GeminiIntegration, update: WebGeminiConfigUpdate | None
-) -> GeminiIntegration:
-    """未携带的字段保留原值。
-
-    ``None`` 在这里只可能是"未携带"：显式 ``null`` 与空串都已在请求模型里被拒。
-    """
-    if update is None:
-        return current
-    return GeminiIntegration(
-        enabled=current.enabled if update.enabled is None else update.enabled,
-        api_key=current.api_key if update.api_key is None else update.api_key,
+def _feishu_configured(config: FeishuConfig | None) -> bool:
+    """飞书有两个必填字段：只看 secret 会把"填了 secret 没填 App ID"算成已配置。"""
+    return (
+        config is not None
+        and config.feishu.app_id is not None
+        and config.feishu.app_secret is not None
     )
 
 
-def _merged_feishu(
-    current: FeishuIntegration, update: WebFeishuConfigUpdate | None
-) -> FeishuIntegration:
-    if update is None:
-        return current
-    return FeishuIntegration(
-        enabled=current.enabled if update.enabled is None else update.enabled,
-        app_id=current.app_id if update.app_id is None else update.app_id,
-        app_secret=(
-            current.app_secret if update.app_secret is None else update.app_secret
-        ),
-    )
-
-
-def _next_config(
-    current: IntegrationConfig | None,
+def _pending_restart_services(
     *,
-    gemini: GeminiIntegration,
-    feishu: FeishuIntegration,
-) -> IntegrationConfig:
-    """代次自增。文件不存在时从逻辑代次 ``0`` 起步，第一次保存写 ``1``。"""
-    return IntegrationConfig(
-        generation=current_generation(current) + 1, gemini=gemini, feishu=feishu
+    domain: ConfigDomain,
+    generation: int,
+    required: frozenset[str],
+    snapshot: ProviderStateSnapshot,
+) -> tuple[str, ...]:
+    """需要这个域、却还没报告当前代次 ``loaded`` 的服务名；只看**本域**回执。"""
+    return tuple(
+        sorted(
+            service_name
+            for service_name in required
+            if (receipt := snapshot.receipts.get((service_name, domain))) is None
+            or receipt.status != "loaded"
+            or receipt.generation != generation
+        )
     )
 
 
-def _required_fields_present(
-    provider: ProviderName, config: IntegrationConfig | None
-) -> bool:
-    """该 Provider 的必填字段是否齐备。
-
-    **只有这一处判定**：页面上的"已配置"与状态机的 ``required_fields_present``
-    问的是同一个问题。各写一份会出现"显示已配置、状态却是未配置"这种自相矛盾的页面——
-    飞书尤其容易，它有两个必填字段，只看 secret 就会把"填了 secret 没填 App ID"
-    算成已配置。
-    """
-    if config is None:
-        return False
-    if provider is ProviderName.GEMINI:
-        return config.gemini.api_key is not None
-    return config.feishu.app_id is not None and config.feishu.app_secret is not None
-
-
-def _provider_of(check_name: CheckName) -> ProviderName:
-    """测试项归属的 Provider；两个飞书测试项共用同一份凭据与加载回执。"""
-    if check_name is CheckName.GEMINI_CONNECTION:
-        return ProviderName.GEMINI
-    return ProviderName.FEISHU
+def _ai_display_state(
+    *, settings: Settings, config: AiConfig | None, snapshot: ProviderStateSnapshot
+) -> ProviderDisplayState:
+    return compute_display_state(
+        domain=ConfigDomain.AI,
+        enabled=_gemini_enabled(config),
+        required_fields_present=_gemini_configured(config),
+        current_generation=current_generation(config),
+        required_service_names=required_services_for_check(
+            settings, CheckName.GEMINI_CONNECTION.value
+        ),
+        receipts=snapshot.receipts,
+        test=snapshot.tests.get(CheckName.GEMINI_CONNECTION.value),
+    )
 
 
-def _provider_enabled(
-    provider: ProviderName, config: IntegrationConfig | None
-) -> bool:
-    if config is None:
-        return False
-    if provider is ProviderName.GEMINI:
-        return config.gemini.enabled
-    return config.feishu.enabled
-
-
-def _display_state(
+def _feishu_display_state(
     *,
     check_name: CheckName,
     settings: Settings,
-    config: IntegrationConfig | None,
+    config: FeishuConfig | None,
     snapshot: ProviderStateSnapshot,
 ) -> ProviderDisplayState:
-    """把一份配置与一份持久化事实折成某个测试项的页面状态。"""
-    provider = _provider_of(check_name)
     return compute_display_state(
-        provider=provider,
-        enabled=_provider_enabled(provider, config),
-        required_fields_present=_required_fields_present(provider, config),
+        domain=ConfigDomain.FEISHU,
+        enabled=_feishu_enabled(config),
+        required_fields_present=_feishu_configured(config),
         current_generation=current_generation(config),
-        required_service_names=required_services_for_check(
-            settings, check_name.value
-        ),
+        required_service_names=required_services_for_check(settings, check_name.value),
         receipts=snapshot.receipts,
         test=snapshot.tests.get(check_name.value),
     )
 
 
-def _config_view(
-    *,
-    settings: Settings,
-    config: IntegrationConfig | None,
-    snapshot: ProviderStateSnapshot,
-) -> WebConfigView:
-    """查询投影：``configured`` 是布尔，两个 secret 永不出现在响应里。"""
-    return WebConfigView(
-        generation=current_generation(config),
+def _ai_config_view(
+    *, settings: Settings, config: AiConfig | None, snapshot: ProviderStateSnapshot
+) -> WebAiConfigView:
+    """AI 域查询投影：``configured`` 是布尔，Key 永不出现在响应里。"""
+    generation = current_generation(config)
+    return WebAiConfigView(
+        generation=generation,
         gemini=WebGeminiConfigView(
-            enabled=_provider_enabled(ProviderName.GEMINI, config),
-            configured=_required_fields_present(ProviderName.GEMINI, config),
+            enabled=_gemini_enabled(config), configured=_gemini_configured(config)
         ),
+        checks=WebAiConfigChecks(
+            gemini_connection=_ai_display_state(
+                settings=settings, config=config, snapshot=snapshot
+            )
+        ),
+        pending_restart_services=(
+            _pending_restart_services(
+                domain=ConfigDomain.AI,
+                generation=generation,
+                required=required_services_for_check(
+                    settings, CheckName.GEMINI_CONNECTION.value
+                ),
+                snapshot=snapshot,
+            )
+            if _gemini_enabled(config) and _gemini_configured(config)
+            else ()
+        ),
+    )
+
+
+def _feishu_config_view(
+    *, settings: Settings, config: FeishuConfig | None, snapshot: ProviderStateSnapshot
+) -> WebFeishuDomainConfigView:
+    """飞书域查询投影；App Secret 永不出现，App ID 不是 secret。"""
+    generation = current_generation(config)
+    required = required_services_for_check(
+        settings, CheckName.FEISHU_CREDENTIALS.value
+    ) | required_services_for_check(settings, CheckName.FEISHU_OAUTH.value)
+    return WebFeishuDomainConfigView(
+        generation=generation,
         feishu=WebFeishuConfigView(
-            enabled=_provider_enabled(ProviderName.FEISHU, config),
-            configured=_required_fields_present(ProviderName.FEISHU, config),
+            enabled=_feishu_enabled(config),
+            configured=_feishu_configured(config),
             app_id=None if config is None else config.feishu.app_id,
         ),
-        checks=WebConfigChecks(
-            **{
-                check.value: _display_state(
-                    check_name=check,
-                    settings=settings,
-                    config=config,
-                    snapshot=snapshot,
-                )
-                for check in CheckName
-            }
+        checks=WebFeishuConfigChecks(
+            feishu_credentials=_feishu_display_state(
+                check_name=CheckName.FEISHU_CREDENTIALS,
+                settings=settings,
+                config=config,
+                snapshot=snapshot,
+            ),
+            feishu_oauth=_feishu_display_state(
+                check_name=CheckName.FEISHU_OAUTH,
+                settings=settings,
+                config=config,
+                snapshot=snapshot,
+            ),
+        ),
+        pending_restart_services=(
+            _pending_restart_services(
+                domain=ConfigDomain.FEISHU,
+                generation=generation,
+                required=required,
+                snapshot=snapshot,
+            )
+            if _feishu_enabled(config) and _feishu_configured(config)
+            else ()
         ),
     )
 
@@ -1162,18 +1159,14 @@ def _latest_test(
 
 def _integration_domain_status(
     *,
-    domain: WebIntegrationDomain,
-    provider: ProviderName,
+    domain: ConfigDomain,
+    configured: bool,
+    generation: int,
     checks: tuple[CheckName, ...],
     settings: Settings,
-    config: IntegrationConfig | None,
     snapshot: ProviderStateSnapshot,
 ) -> WebIntegrationDomainStatus:
-    """从现有配置/回执/测试事实派生一个不含原值的管理面域状态。"""
-    configured = _provider_enabled(provider, config) and _required_fields_present(
-        provider, config
-    )
-    generation = current_generation(config)
+    """从本域文件/回执/测试事实派生一个不含原值的管理面域状态。"""
     required_services = frozenset().union(
         *(required_services_for_check(settings, check.value) for check in checks)
     )
@@ -1181,7 +1174,7 @@ def _integration_domain_status(
     load_status: WebIntegrationLoadStatus = "unconfigured"
     if configured:
         receipts = [
-            snapshot.receipts.get((service_name, provider.value))
+            snapshot.receipts.get((service_name, domain))
             for service_name in required_services
         ]
         if any(
@@ -1203,7 +1196,7 @@ def _integration_domain_status(
             load_status = "loaded"
     latest = _latest_test(snapshot, checks)
     return WebIntegrationDomainStatus(
-        domain=domain,
+        domain=domain.value,
         configured=configured,
         restart_required=restart_required,
         load_status=load_status,
@@ -1215,26 +1208,27 @@ def _integration_domain_status(
 def _integration_status_view(
     *,
     settings: Settings,
-    config: IntegrationConfig | None,
+    ai: AiConfig | None,
+    feishu: FeishuConfig | None,
     snapshot: ProviderStateSnapshot,
 ) -> WebIntegrationStatusView:
-    """三域脱敏状态；resources 未交付，永远明确标为 not_applicable。"""
+    """三域脱敏状态；resources 在 W4a 只预留，明确标为 not_applicable。"""
     return WebIntegrationStatusView(
         domains=(
             _integration_domain_status(
-                domain="ai",
-                provider=ProviderName.GEMINI,
+                domain=ConfigDomain.AI,
+                configured=_gemini_enabled(ai) and _gemini_configured(ai),
+                generation=current_generation(ai),
                 checks=(CheckName.GEMINI_CONNECTION,),
                 settings=settings,
-                config=config,
                 snapshot=snapshot,
             ),
             _integration_domain_status(
-                domain="feishu",
-                provider=ProviderName.FEISHU,
+                domain=ConfigDomain.FEISHU,
+                configured=_feishu_enabled(feishu) and _feishu_configured(feishu),
+                generation=current_generation(feishu),
                 checks=(CheckName.FEISHU_CREDENTIALS, CheckName.FEISHU_OAUTH),
                 settings=settings,
-                config=config,
                 snapshot=snapshot,
             ),
             WebIntegrationDomainStatus(
@@ -1271,21 +1265,17 @@ def _check_name_or_input_error(value: str) -> CheckName:
         raise _WebInputError from None
 
 
-def _usable_config(
-    provider: ProviderName, config: IntegrationConfig | None
-) -> IntegrationConfig | None:
+def _usable_ai(config: AiConfig | None) -> AiConfig | None:
     """两层与关系都为真才交出配置，否则探针看到的就是"未配置"。
 
     `.env` 的真实测试开关与这里**不是一回事**：前者回答"这台机器允许发真实请求
-    吗"，后者回答"有没有东西可以拿去发"。合并会让"关着开关"与"没填 Key"变成
-    同一个错误码，管理员看不出该去开开关还是该去填配置。
+    吗"，后者回答"有没有东西可以拿去发"。
     """
-    if not (
-        _provider_enabled(provider, config)
-        and _required_fields_present(provider, config)
-    ):
-        return None
-    return config
+    return config if _gemini_enabled(config) and _gemini_configured(config) else None
+
+
+def _usable_feishu(config: FeishuConfig | None) -> FeishuConfig | None:
+    return config if _feishu_enabled(config) and _feishu_configured(config) else None
 
 
 @dataclass(frozen=True)
@@ -1385,7 +1375,7 @@ def create_app(
     policy_revision: str,
     provider_state: ProviderStateStore,
     admin_identity: AdminIdentityService,
-    integration_config_path: str = DEFAULT_INTEGRATION_CONFIG_PATH,
+    integration_config: IntegrationConfigService,
     gemini_probe: ProbeTransport = gemini_probe_transport,
     feishu_probe: ProbeTransport = feishu_probe_transport,
 ) -> FastAPI:
@@ -1435,8 +1425,10 @@ def create_app(
                 "/app/api/tasks",
                 "/login/api/login",
                 "/login/api/change-password",
-                "/admin/api/config",
-                "/admin/api/config/clear",
+                "/admin/api/config/ai",
+                "/admin/api/config/feishu",
+                "/admin/api/config/ai/clear",
+                "/admin/api/config/feishu/clear",
                 "/admin/api/config/test/gemini_connection",
                 "/admin/api/config/test/feishu_credentials",
                 "/admin/api/config/test/feishu_oauth",
@@ -1447,9 +1439,8 @@ def create_app(
             }
         ),
     )
-    # 一个 Web 进程内串行执行"读当前代次 → 合并 → 原子替换"。本版不支持多写实例，
-    # 因此这把锁就是全部并发控制；它必须随 app 走，不能是模块级的。
-    config_lock = asyncio.Lock()
+    # "读当前代次 → 合并 → 原子替换"的串行化由唯一配置写服务那把锁承担；
+    # Web handler 不再持有第二把锁，也不直接碰文件。
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(WebAuthenticationError, _authentication_error)
@@ -1469,7 +1460,8 @@ def create_app(
     app.add_exception_handler(
         AdminIdentityUnavailableError, _admin_identity_unavailable
     )
-    app.add_exception_handler(_ConfigUnavailableError, _config_unavailable)
+    app.add_exception_handler(IntegrationConfigUnavailableError, _config_unavailable)
+    app.add_exception_handler(IntegrationConfigForbiddenError, _forbidden)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
     app.add_exception_handler(ChannelParentNotFoundError, _task_not_found)
@@ -1501,45 +1493,55 @@ def create_app(
         async def oauth_connection_test_callback(
             request: Request, *, code: str, state: str, state_cookie: str | None
         ) -> Response:
-            """OAuth 连接测试的回调分支：只记一条结果，**不签发任何会话**。
+            """OAuth 连接测试的回调分支：只记一条结果与审计终态，**不签发任何会话**。
 
-            顺序是承重的：先消费测试域 state，再核对本地管理员 session，最后才换
-            code。反过来先查 session，会把"登录 state 过期"这种常见情况误报成
-            403——那时用户会去找权限问题，而真正的原因是重新点一次登录就好。
+            顺序是承重的：先消费测试域 state 并取回服务端 operation id，再核对本地管理员
+            session，最后才换 code。state 无效或过期时拿不到可信 operation id，只能保留
+            ``STARTED``；state 已消费但会话失效时**不交换 code**，按取回的 operation id
+            写 ``FAILED``。
             """
             try:
-                await auth.consume_connection_test_state(
+                binding = await auth.consume_connection_test_state(
                     state=state, state_cookie=state_cookie
                 )
             except WebOAuthStateError:
                 return _error(400, "invalid_request")
+            actor: AdminIdentityActor | None = None
             try:
-                await local_admin_session(request)
-            except (WebAuthenticationError, LocalAdminAuthenticationError):
-                # session 已过期或被撤销：测试不再有主体可归属，什么都不写。
-                return _error(401, "unauthorized")
-            except (_WebForbiddenError, _PasswordChangeRequiredError):
-                return _error(403, "forbidden")
-            config = _integration_config_or_unavailable(integration_config_path)
-            started = time.monotonic()
-            outcome: ProbeOutcome
+                actor = identity_actor(await session_allowed_to_work(request))
+            except (
+                WebAuthenticationError,
+                LocalAdminAuthenticationError,
+                _PasswordChangeRequiredError,
+            ):
+                actor = None
+
+            async def exchange() -> ProbeOutcome:
+                started = time.monotonic()
+                try:
+                    await auth.complete_connection_test(code=code)
+                except (WebOAuthCodeError, WebAuthenticationError):
+                    return _probe_failure(ProbeErrorCode.UNAUTHORIZED, started=started)
+                except WebOAuthUnavailableError:
+                    return _probe_failure(ProbeErrorCode.UNAVAILABLE, started=started)
+                return ProbeOutcome(status="passed", duration_ms=_probe_duration_ms(started))
+
             try:
-                await auth.complete_connection_test(code=code)
-            except (WebOAuthCodeError, WebAuthenticationError):
-                outcome = _probe_failure(
-                    ProbeErrorCode.UNAUTHORIZED, started=started
+                verdict = await integration_config.finish_oauth_test(
+                    operation_id=binding.operation_id,
+                    config_generation=binding.config_generation,
+                    actor=actor,
+                    exchange=exchange,
                 )
-            except WebOAuthUnavailableError:
-                outcome = _probe_failure(
-                    ProbeErrorCode.UNAVAILABLE, started=started
+            except OAuthTestGenerationDriftError:
+                # 绑定代次已不是当前文件或 Web 已加载的代次：没有交换 code，也没有记结果；
+                # 这张 state 对现行配置已无效，与过期 state 同一个闭集回答。
+                return _error(400, "invalid_request")
+            if verdict is None:
+                # 会话已过期/撤销，或已不是本地管理员：测试结束为 FAILED，什么都不交换。
+                return _error(401, "unauthorized") if actor is None else _error(
+                    403, "forbidden"
                 )
-            else:
-                outcome = ProbeOutcome(
-                    status="passed", duration_ms=_probe_duration_ms(started)
-                )
-            await record_probe(
-                outcome, check_name=CheckName.FEISHU_OAUTH, config=config
-            )
             # 不 ``_set_secret_cookie``、不 ``rotate_session``：一次连接测试结束时
             # 浏览器手里不该多出任何东西。
             return RedirectResponse("/admin", status_code=302)
@@ -2039,113 +2041,124 @@ def create_app(
     @app.get("/admin/api/integration-status")
     async def read_integration_status(request: Request) -> dict[str, object]:
         await admin_session(request)
-        config = _integration_config_or_unavailable(integration_config_path)
+        ai = await integration_config.read_ai()
+        feishu = await integration_config.read_feishu()
         snapshot = await provider_state.snapshot()
         return _integration_status_view(
-            settings=settings,
-            config=config,
-            snapshot=snapshot,
+            settings=settings, ai=ai, feishu=feishu, snapshot=snapshot
         ).model_dump(mode="json")
 
-    @app.get("/admin/api/config")
-    async def read_config(request: Request) -> dict[str, object]:
+    # ------------------------------------------------------------------ 按域配置
+    #
+    # 读取只服务本地管理员且不审计；写与清除经唯一配置写服务，由服务同时校验来源与能力、
+    # 先写 STARTED 再动文件。operation id 只来自服务端 ``trusted_trace_id()``。
+
+    @app.get("/admin/api/config/ai")
+    async def read_ai_config(request: Request) -> dict[str, object]:
         await local_admin_session(request)
-        config = _integration_config_or_unavailable(integration_config_path)
+        config = await integration_config.read_ai()
         snapshot = await provider_state.snapshot()
-        return _config_view(
+        return _ai_config_view(
             settings=settings, config=config, snapshot=snapshot
         ).model_dump(mode="json")
 
-    @app.put("/admin/api/config")
-    async def save_config(request: Request) -> dict[str, object]:
-        session = await local_admin_session(request)
+    @app.get("/admin/api/config/feishu")
+    async def read_feishu_config(request: Request) -> dict[str, object]:
+        await local_admin_session(request)
+        config = await integration_config.read_feishu()
+        snapshot = await provider_state.snapshot()
+        return _feishu_config_view(
+            settings=settings, config=config, snapshot=snapshot
+        ).model_dump(mode="json")
+
+    @app.put("/admin/api/config/ai")
+    async def save_ai_config(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
         _validate_state_change(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
-        body = await _typed_body(request, WebConfigUpdateRequest)
-        async with config_lock:
-            current = _integration_config_or_unavailable(integration_config_path)
-            updated = _next_config(
-                current,
-                gemini=_merged_gemini(
-                    GeminiIntegration() if current is None else current.gemini,
-                    body.gemini,
-                ),
-                feishu=_merged_feishu(
-                    FeishuIntegration() if current is None else current.feishu,
-                    body.feishu,
-                ),
-            )
-            _write_config_or_unavailable(integration_config_path, updated)
+        body = await _typed_body(request, WebGeminiConfigUpdate)
+        saved = await integration_config.save_ai(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            update=GeminiUpdate(enabled=body.enabled, api_key=body.api_key),
+        )
         return WebConfigSaved(
-            generation=updated.generation, restart_required=True
+            domain="ai", generation=saved.generation, restart_required=True
         ).model_dump(mode="json")
 
-    @app.post("/admin/api/config/clear")
-    async def clear_config(request: Request) -> dict[str, object]:
-        session = await local_admin_session(request)
+    @app.put("/admin/api/config/feishu")
+    async def save_feishu_config(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
         _validate_state_change(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
-        body = await _typed_body(request, WebConfigClearRequest)
-        async with config_lock:
-            current = _integration_config_or_unavailable(integration_config_path)
-            gemini = GeminiIntegration() if current is None else current.gemini
-            feishu = FeishuIntegration() if current is None else current.feishu
-            # 清除是整段重置为默认值，不是把某个字段置空：留一半配置在文件里，
-            # 页面会显示"已配置"而实际不可用。
-            if body.provider is ProviderName.GEMINI:
-                gemini = GeminiIntegration()
-            else:
-                feishu = FeishuIntegration()
-            updated = _next_config(current, gemini=gemini, feishu=feishu)
-            _write_config_or_unavailable(integration_config_path, updated)
+        body = await _typed_body(request, WebFeishuConfigUpdate)
+        saved = await integration_config.save_feishu(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            update=FeishuUpdate(
+                enabled=body.enabled, app_id=body.app_id, app_secret=body.app_secret
+            ),
+        )
         return WebConfigSaved(
-            generation=updated.generation, restart_required=True
+            domain="feishu", generation=saved.generation, restart_required=True
         ).model_dump(mode="json")
 
-    async def record_probe(
-        outcome: ProbeOutcome,
-        *,
-        check_name: CheckName,
-        config: IntegrationConfig | None,
-    ) -> None:
-        """有可信代次才落库。
-
-        文件不存在时没有代次可归属，而 ``RecordTestCommand.generation`` 恒 ``> 0``；
-        硬凑一个值等于伪造证据。不落库的后果只是页面继续显示"未配置"——它本来就是。
-        """
-        if config is None:
-            return
-        await provider_state.record_test(
-            command=RecordTestCommand(
-                check_name=check_name,
-                generation=config.generation,
-                status=outcome.status,
-                duration_ms=outcome.duration_ms,
-                error_code=outcome.error_code,
-            )
+    @app.post("/admin/api/config/ai/clear")
+    async def clear_ai_config(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
         )
+        await _typed_body(request, WebConfigClearRequest)
+        saved = await integration_config.clear_ai(
+            actor=identity_actor(session), trace_id=trusted_trace_id()
+        )
+        return WebConfigSaved(
+            domain="ai", generation=saved.generation, restart_required=True
+        ).model_dump(mode="json")
 
-    def oauth_test_refusal(
-        config: IntegrationConfig | None, *, snapshot: ProviderStateSnapshot
-    ) -> ProbeOutcome | None:
-        """OAuth 测试的三道前置；``None`` 表示可以签发 state。
+    @app.post("/admin/api/config/feishu/clear")
+    async def clear_feishu_config(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        await _typed_body(request, WebConfigClearRequest)
+        saved = await integration_config.clear_feishu(
+            actor=identity_actor(session), trace_id=trusted_trace_id()
+        )
+        return WebConfigSaved(
+            domain="feishu", generation=saved.generation, restart_required=True
+        ).model_dump(mode="json")
 
-        最后一道——凭据测试必须在**当前代次**通过——不是礼貌，是必需：OAuth 回调
-        链路建立在应用凭据之上，凭据本身没验过时跳出去的失败无法区分"回调地址配
-        错了"与"密钥根本不对"，管理员会照着错误的方向改半天。
+    # ------------------------------------------------------------------ 探针
+
+    async def oauth_test_refusal(config: FeishuConfig | None) -> ProbeOutcome | None:
+        """OAuth 测试的四道前置；``None`` 表示可以签发 state。
+
+        第三道——凭据测试必须在**飞书域当前代次**通过——不是礼貌，是必需：OAuth 回调
+        链路建立在应用凭据之上，凭据本身没验过时跳出去的失败无法区分"回调地址配错了"
+        与"密钥根本不对"。
+
+        第四道——Web 必须已加载当前代次：交换 code 的是本进程**启动期**装配的 OAuth
+        adapter。文件已保存、Web 尚未重启时放行，测的是旧凭据，结果却会记到新代次。
+        这由服务端回执判定，不靠前端隐藏按钮。
         """
         if not settings.feishu_real_test_enabled:
             return refused_outcome(ProbeErrorCode.REAL_TEST_DISABLED)
-        if auth is None or _usable_config(ProviderName.FEISHU, config) is None:
+        if auth is None or _usable_feishu(config) is None:
             return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
+        snapshot = await provider_state.snapshot()
         credentials = snapshot.tests.get(CheckName.FEISHU_CREDENTIALS.value)
         if (
             credentials is None
             or credentials.status != "passed"
             or credentials.generation != current_generation(config)
         ):
+            return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
+        if not web_holds_feishu_generation(snapshot.receipts, current_generation(config)):
             return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
         return None
 
@@ -2154,34 +2167,45 @@ def create_app(
     # 调换了顺序，也不会静默落进"用凭据探针去测 OAuth"的错误分支。
     @app.post("/admin/api/config/test/feishu_oauth", response_model=None)
     async def start_oauth_test(request: Request) -> Response:
-        """签发一次只能被测试分支消费的 state，并返回授权 URL。
+        """写 ``STARTED`` 后签发一次只能被测试分支消费、且绑定该 operation 的 state。
 
-        ``auth is None`` 时这条路由仍然注册——它与两条 OAuth 入口不同，返回的是
-        一个闭集拒绝码而不是一次永远失败的跳转。管理员需要知道"没装配"，而不是
-        点下去毫无反应。
+        ``auth is None`` 时这条路由仍然注册——它返回的是一个闭集拒绝码而不是一次
+        永远失败的跳转。管理员需要知道"没装配"，而不是点下去毫无反应。
         """
-        session = await local_admin_session(request)
+        session = await session_allowed_to_work(request)
         _validate_state_change(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
-        config = _integration_config_or_unavailable(integration_config_path)
-        refusal = oauth_test_refusal(config, snapshot=await provider_state.snapshot())
-        if refusal is not None:
-            await record_probe(
-                refusal, check_name=CheckName.FEISHU_OAUTH, config=config
+
+        async def issue(operation_id: str, config_generation: int) -> OAuthStart:
+            return await cast(WebAuthService, auth).start_connection_test(
+                operation_id=operation_id, config_generation=config_generation
             )
-            return JSONResponse(content=refusal.model_dump(mode="json"))
-        started = await cast(WebAuthService, auth).start_connection_test()
+
+        result = await integration_config.start_oauth_test(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            refuse=oauth_test_refusal,
+            issue=issue,
+        )
+        if not isinstance(result, OAuthStart):
+            return JSONResponse(
+                content=ProbeOutcome(
+                    status=result.status,
+                    duration_ms=result.duration_ms,
+                    error_code=result.error_code,
+                ).model_dump(mode="json")
+            )
         response = JSONResponse(
             content=WebOAuthTestStarted(
-                authorization_url=started.authorization_url
+                authorization_url=result.authorization_url
             ).model_dump(mode="json")
         )
         _set_secret_cookie(
             response,
             name=oauth_state_cookie,
-            value=started.state_cookie,
-            max_age=started.max_age_seconds,
+            value=result.state_cookie,
+            max_age=result.max_age_seconds,
             secure=secure_cookies,
         )
         return response
@@ -2190,7 +2214,7 @@ def create_app(
     async def run_provider_test(
         request: Request, check_name: str
     ) -> dict[str, object]:
-        session = await local_admin_session(request)
+        session = await session_allowed_to_work(request)
         _validate_state_change(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
@@ -2199,26 +2223,40 @@ def create_app(
             # 走到这里说明上面那条字面量路由被移到了后面。宁可 400，也不能用
             # 凭据探针去回答一个 OAuth 问题——那会写下一条名不副实的测试结果。
             raise _WebInputError
-        config = _integration_config_or_unavailable(integration_config_path)
         if check is CheckName.GEMINI_CONNECTION:
-            usable = _usable_config(ProviderName.GEMINI, config)
-            outcome = await probe_gemini_connection(
-                enabled=settings.gemini_real_test_enabled,
-                api_key=None if usable is None else usable.gemini.api_key,
-                transport=gemini_probe,
-                timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+
+            async def gemini(config: AiConfig | None) -> ProbeOutcome:
+                usable = _usable_ai(config)
+                return await probe_gemini_connection(
+                    enabled=settings.gemini_real_test_enabled,
+                    api_key=None if usable is None else usable.gemini.api_key,
+                    transport=gemini_probe,
+                    timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+                )
+
+            outcome = await integration_config.test_ai_connection(
+                actor=identity_actor(session), trace_id=trusted_trace_id(), probe=gemini
             )
         else:
-            usable = _usable_config(ProviderName.FEISHU, config)
-            outcome = await probe_feishu_credentials(
-                enabled=settings.feishu_real_test_enabled,
-                app_id=None if usable is None else usable.feishu.app_id,
-                app_secret=None if usable is None else usable.feishu.app_secret,
-                transport=feishu_probe,
-                timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+
+            async def feishu(config: FeishuConfig | None) -> ProbeOutcome:
+                usable = _usable_feishu(config)
+                return await probe_feishu_credentials(
+                    enabled=settings.feishu_real_test_enabled,
+                    app_id=None if usable is None else usable.feishu.app_id,
+                    app_secret=None if usable is None else usable.feishu.app_secret,
+                    transport=feishu_probe,
+                    timeout_seconds=PROVIDER_PROBE_TIMEOUT_SECONDS,
+                )
+
+            outcome = await integration_config.test_feishu_credentials(
+                actor=identity_actor(session), trace_id=trusted_trace_id(), probe=feishu
             )
-        await record_probe(outcome, check_name=check, config=config)
-        return outcome.model_dump(mode="json")
+        return ProbeOutcome(
+            status=outcome.status,
+            duration_ms=outcome.duration_ms,
+            error_code=outcome.error_code,
+        ).model_dump(mode="json")
 
     # 路由从闭集注册表循环注册，而不是一条一条手写：漏一条就是页面静默 404，
     # 而那种 404 只有真正用浏览器打开才会发现。
@@ -2257,8 +2295,8 @@ def create_app(
 async def serve_web(settings: Settings) -> int:
     """装配真实、默认关闭的 Web 进程，并释放唯一数据库 Engine。
 
-    这里是 composition root：读 `integrations.json`、判双层开关、构造或**不构造**
-    真实飞书 adapter。装配函数只收端口，不读配置。
+    这里是 composition root：读飞书域文件、判双层开关、构造或**不构造**真实飞书
+    adapter。装配函数只收端口，不读配置。
     """
     if not settings.web_app_enabled:
         raise _WebConfigurationError
@@ -2338,6 +2376,7 @@ async def serve_web(settings: Settings) -> int:
             clock=stack.clock,
             policy_revision=stack.policy_revision,
             provider_state=stack.provider_state,
+            integration_config=stack.integration_config_service,
             admin_identity=stack.admin_identity_service,
         )
         server = uvicorn.Server(
@@ -2364,7 +2403,7 @@ def main() -> int:
         sys.stderr.write("xiaowei-web: configuration_error\n")
         return 2
     # Web 进程的启动门只有一条：``web_app_enabled``。飞书 OAuth 是不是可用由
-    # ``serve_web()`` 按 `integrations.json` 决定，不可用只是降级，不是配置错误。
+    # ``serve_web()`` 按飞书域文件决定，不可用只是降级，不是配置错误。
     # 这里多写一个条件，等于把"飞书必须装配"重新钉回真实进程入口。
     if not settings.web_app_enabled:
         return 2

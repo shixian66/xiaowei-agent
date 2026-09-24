@@ -76,10 +76,17 @@ services:
   worker:
     <<: *app-service
     command: ["python", "-m", "xiaowei_agent.interfaces.worker"]
+    # W4a：只挂自己消费的域。worker 读 AI；resources 只预留（W4b 才读取并签回执）。
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/ai
+        target: /run/xiaowei-config/ai
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.config/resources
+        target: /run/xiaowei-config/resources
         read_only: true
         bind:
           create_host_path: false
@@ -94,10 +101,11 @@ services:
     environment:
       <<: *app-environment
       XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
+    # W4a：只挂飞书域；看不见 AI 或 resources。
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/feishu
+        target: /run/xiaowei-config/feishu
         read_only: true
         bind:
           create_host_path: false
@@ -112,10 +120,11 @@ services:
     environment:
       <<: *app-environment
       XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
+    # W4a：只挂飞书域；看不见 AI 或 resources。
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/feishu
+        target: /run/xiaowei-config/feishu
         read_only: true
         bind:
           create_host_path: false
@@ -142,11 +151,22 @@ services:
       XIAOWEI_FEISHU_REAL_TEST_ENABLED: "${XIAOWEI_FEISHU_REAL_TEST_ENABLED:-false}"
       XIAOWEI_WEB_BIND_HOST: "0.0.0.0"
       XIAOWEI_WEB_BIND_PORT: "8080"
-    # 唯一可写的那一份：配置由管理面写入，其余进程只读。
+    # 唯一配置写者：三个域目录逐个读写挂载，**不挂父目录**——旧 integrations.json
+    # 因此对任何运行进程都不可见，只能由显式迁移器处理。
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/ai
+        target: /run/xiaowei-config/ai
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.config/feishu
+        target: /run/xiaowei-config/feishu
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.config/resources
+        target: /run/xiaowei-config/resources
         bind:
           create_host_path: false
     depends_on:
@@ -165,8 +185,9 @@ services:
       retries: 30
       start_period: 5s
 
-# Provider 凭据不再走 Docker secret：它们由管理面写进 ``.config/integrations.json``，
-# 一份明文、一处真源。这里只剩数据库口令，它是部署前就存在的基础设施凭据。
+# Provider 凭据不走 Docker secret：它们由管理面写进 ``.config/{ai,feishu}/config.json``，
+# 每个域一份明文、一处真源；resources 域在 W4a 只预留目录。这里只剩数据库口令，
+# 它是部署前就存在的基础设施凭据。
 secrets:
   postgres_password:
     file: ./.secrets/postgres_password

@@ -1,12 +1,14 @@
 # 启用飞书时才叠加。身份目录文件不在基础文件里，因为它是**可选插件的输入**：
 # 硬挂在基础文件上时，干净部署没有 ./.secrets/feishu-identities.json 就会让容器
 # 直接起不来（bind 的 create_host_path 是 false），runbook 第 5 步必然失败。
+# 这里重复列出的配置挂载与基础文件逐格相同（W4a 按域挂载，绝不挂父目录）：
+# Compose 按 target 合并 volumes，重复声明只是让单看本文件也能读出完整挂载面。
 services:
   feishu-listener:
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/feishu
+        target: /run/xiaowei-config/feishu
         read_only: true
         bind:
           create_host_path: false
@@ -19,8 +21,18 @@ services:
   web-app:
     volumes:
       - type: bind
-        source: ./.config
-        target: /run/xiaowei-config
+        source: ./.config/ai
+        target: /run/xiaowei-config/ai
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.config/feishu
+        target: /run/xiaowei-config/feishu
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.config/resources
+        target: /run/xiaowei-config/resources
         bind:
           create_host_path: false
       - type: bind

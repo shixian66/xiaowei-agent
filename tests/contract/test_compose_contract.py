@@ -67,14 +67,20 @@ def _yaml(name: str) -> dict[str, Any]:
 
 
 _CONFIG_TARGET = "/run/xiaowei-config"
-_CONFIG_CONSUMERS = {"worker", "feishu-listener", "channel-worker"}
+# W4a：每个进程只挂自己消费的域；``web-app`` 是唯一写入方，三域可写。
+_CONFIG_DOMAINS_BY_SERVICE = {
+    "worker": ("ai", "resources"),
+    "feishu-listener": ("feishu",),
+    "channel-worker": ("feishu",),
+}
+_CONFIG_CONSUMERS = set(_CONFIG_DOMAINS_BY_SERVICE)
 
 
-def _config_mount(*, read_only: bool) -> dict[str, Any]:
+def _config_mount(domain: str, *, read_only: bool) -> dict[str, Any]:
     mount: dict[str, Any] = {
         "type": "bind",
-        "source": "./.config",
-        "target": _CONFIG_TARGET,
+        "source": f"./.config/{domain}",
+        "target": f"{_CONFIG_TARGET}/{domain}",
         "bind": {"create_host_path": False},
     }
     if read_only:
@@ -297,7 +303,7 @@ def test_compose_resources_remain_project_scoped_named_resources() -> None:
 
 def test_secrets_are_file_references_and_never_environment_values() -> None:
     compose = _yaml("docker-compose.yml")
-    # Provider 凭据走 ``.config/integrations.json``，不再是 Docker secret；
+    # Provider 凭据走 ``.config/<域>/config.json``，不再是 Docker secret；
     # 这里只剩部署前就存在的基础设施凭据。
     assert compose["secrets"] == {
         "postgres_password": {"file": "./.secrets/postgres_password"}
@@ -342,11 +348,11 @@ def test_feishu_identity_bind_is_read_only_and_only_in_the_feishu_override() -> 
     assert set(override) == {"services"}
     assert set(override["services"]) == {"feishu-listener", "web-app"}
     assert override["services"]["feishu-listener"]["volumes"] == [
-        _config_mount(read_only=True),
+        _config_mount("feishu", read_only=True),
         expected,
     ]
     assert override["services"]["web-app"]["volumes"] == [
-        _config_mount(read_only=False),
+        *(_config_mount(domain, read_only=False) for domain in ("ai", "feishu", "resources")),
         expected,
     ]
     assert not (_ROOT / ".secrets/feishu-identities.json").exists()
@@ -359,12 +365,16 @@ def test_the_config_directory_is_writable_only_for_the_web_app() -> None:
     凭据；三个消费进程只读；只有写配置的 ``web-app`` 可写。
     """
     services = _yaml("docker-compose.yml")["services"]
-    for name in _CONFIG_CONSUMERS:
-        assert services[name]["volumes"] == [_config_mount(read_only=True)]
-    assert services["web-app"]["volumes"] == [_config_mount(read_only=False)]
+    for name, domains in _CONFIG_DOMAINS_BY_SERVICE.items():
+        assert services[name]["volumes"] == [
+            _config_mount(domain, read_only=True) for domain in domains
+        ]
+    assert services["web-app"]["volumes"] == [
+        _config_mount(domain, read_only=False) for domain in ("ai", "feishu", "resources")
+    ]
     for name in (_APP_SERVICES | {"postgres"}) - _CONFIG_CONSUMERS - {"web-app"}:
         assert all(
-            volume.get("target") != _CONFIG_TARGET
+            not str(volume.get("target", "")).startswith(_CONFIG_TARGET)
             for volume in services[name].get("volumes", [])
             if isinstance(volume, dict)
         )

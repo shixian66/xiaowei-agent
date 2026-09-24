@@ -34,6 +34,7 @@ from xiaowei_agent.persistence.schema import (
     CREATED_SEQUENCE_NAME,
     FENCING_SEQUENCE_NAME,
     LOCAL_ADMINS,
+    SERVICE_CONFIG_STATE,
     TASK_INTERACTION_ARTIFACTS,
     TASK_STEP_EXECUTIONS,
     TASK_SUBMISSIONS,
@@ -80,6 +81,8 @@ _ALTERED_AFTER_CREATION = (
     ADMIN_AUDIT_EVENTS,
     # rev_0016 adds return-intent columns and replaces source CHECK constraints.
     ACTIVATION_REQUESTS,
+    # rev_0018 renames provider -> config_domain and adds the closed domain CHECK.
+    SERVICE_CONFIG_STATE,
 )
 _RENAMED_TABLES = {
     "task_accepted_intents": "task_interaction_artifacts",
@@ -254,12 +257,21 @@ def test_rev_0014_has_the_expected_revision_chain() -> None:
     assert revision.down_revision == "0013_clarification_parent"
 
 
-def test_latest_declared_revision_is_the_alembic_head() -> None:
+def test_rev_0017_has_the_expected_revision_chain() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
         rev_0017_w3_admin_query_indexes as revision,
     )
 
+    assert revision.revision == "0017_w3_admin_query_indexes"
     assert revision.down_revision == "0016_web_login_contexts"
+
+
+def test_latest_declared_revision_is_the_alembic_head() -> None:
+    from xiaowei_agent.persistence.migrations.versions import (
+        rev_0018_w4a_config_domains as revision,
+    )
+
+    assert revision.down_revision == "0017_w3_admin_query_indexes"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )
@@ -452,3 +464,46 @@ def test_task_id_columns_are_text_not_uuid() -> None:
     for table in (table for table in ALL_TABLES if "task_id" in table.c):
         column = table.c["task_id"]
         assert isinstance(column.type, sa.Text), f"{table.name}.task_id 必须是 text"
+
+
+def _last_check_text(sql: str, name: str) -> str:
+    """offline SQL 中**最后一次**创建某个具名 CHECK 的表达式（即 head 上的那一版）。"""
+    matches = re.findall(
+        rf"CONSTRAINT {re.escape(name)} CHECK \((.*?)\)(?:,\n|\n\)|;)",
+        sql,
+        re.DOTALL,
+    )
+    assert matches, name
+    return _normalise(matches[-1])
+
+
+@pytest.mark.parametrize(
+    ("table", "name"),
+    [
+        (ADMIN_AUDIT_EVENTS, "ck_admin_audit_events_action_closed"),
+        (ADMIN_AUDIT_EVENTS, "ck_admin_audit_events_reason_code_closed"),
+        (ADMIN_AUDIT_EVENTS, "ck_admin_audit_events_directory_actions_are_single_phase"),
+        (SERVICE_CONFIG_STATE, "ck_service_config_state_domain_closed"),
+    ],
+)
+def test_head_check_text_equals_the_live_schema(table: sa.Table, name: str) -> None:
+    """ALTER 演进的 CHECK 不能只比名字：值域漏一个成员，名字照样对得上。"""
+    live = next(
+        item
+        for item in table.constraints
+        if isinstance(item, sa.CheckConstraint) and item.name == name
+    )
+    expected = _normalise(
+        str(live.sqltext.compile(dialect=postgresql.dialect()))  # type: ignore[attr-defined]
+    )
+    assert _last_check_text(_offline_upgrade_sql(), name) == expected
+
+
+def test_rev_0018_renames_the_receipt_column_and_maps_gemini_to_ai() -> None:
+    sql = _offline_upgrade_sql()
+    marker = "Running upgrade 0017_w3_admin_query_indexes -> 0018_w4a_config_domains"
+    block = sql[sql.index(marker) :]
+    compact = block.replace(" ", "")
+    assert "RENAMEproviderTOconfig_domain" in compact
+    assert "SETconfig_domain='ai'WHEREservice_config_state.config_domain='gemini'" in compact
+    assert "CREATETABLEweb_oauth_test_contexts" in compact

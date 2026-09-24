@@ -2,7 +2,8 @@
 
 探针是**控制面**：它证明凭据可用，不产生任何业务事实。这组用例的骨架就是把这句
 话拆成可证伪的几条——不写任务、不写 Evidence、不碰 ToolGateway、不动 readiness、
-不签发会话——再加上两个 state 域必须互不相认。
+不签发会话——再加上两个 state 域必须互不相认。W4a 起每次测试都经唯一配置写服务留下
+两阶段审计，OAuth 测试的 operation id 随 state 跨回调。
 """
 
 import json
@@ -11,19 +12,32 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from tests.fakes.activation import RecordingActivationRequests
 from tests.fakes.admin_identity import UnusedAdminIdentity
 
+from xiaowei_agent.application.integration_config_service import (
+    IntegrationConfigService,
+)
+from xiaowei_agent.application.integration_state import SERVICE_WEB
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
+    AdminAuditAction,
+    AdminAuditOutcome,
+    AdminAuditReasonCode,
     AuthenticatedPrincipal,
     ChannelPermission,
+    ConfigDomain,
     IdentitySource,
+    LoadReceipt,
     ProductRole,
     ReadinessReport,
     WebMode,
 )
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
+from xiaowei_agent.interfaces.integration_config_repository import (
+    FileIntegrationConfigRepository,
+)
 from xiaowei_agent.interfaces.local_admin_auth import (
     INITIAL_LOCAL_ADMIN_PASSWORD,
     LocalAdminAuthService,
@@ -39,6 +53,7 @@ from xiaowei_agent.interfaces.web_auth import (
     web_origin_digest,
 )
 from xiaowei_agent.persistence.fake import (
+    InMemoryAdminAuditStore,
     InMemoryLocalAdminStore,
     InMemoryProviderStateStore,
     InMemoryWebSessionStore,
@@ -130,9 +145,11 @@ def _build(
     with_feishu_auth: bool = True,
     **settings_updates: object,
 ) -> Any:
-    directory = tmp_path / ".config"
-    directory.mkdir(exist_ok=True)
-    config_path = directory / "integrations.json"
+    root = tmp_path / ".config"
+    for domain in ("ai", "feishu", "resources"):
+        (root / domain).mkdir(parents=True, exist_ok=True)
+    ai_path = root / "ai" / "config.json"
+    feishu_path = root / "feishu" / "config.json"
     sessions = InMemoryWebSessionStore(clock=clock, state=memory_state)
     admins = InMemoryLocalAdminStore(clock=clock, state=memory_state)
     provider_state = InMemoryProviderStateStore(clock=clock, state=memory_state)
@@ -184,7 +201,13 @@ def _build(
         clock=clock,
         policy_revision="policy-2026-09-01",
         provider_state=provider_state,
-        integration_config_path=str(config_path),
+        integration_config=IntegrationConfigService(
+            repository=FileIntegrationConfigRepository(
+                ai_path=str(ai_path), feishu_path=str(feishu_path)
+            ),
+            audit=InMemoryAdminAuditStore(clock=clock, state=memory_state),
+            provider_state=provider_state,
+        ),
         gemini_probe=gemini_probe if gemini_probe is not None else _Spy(),
         feishu_probe=feishu_probe if feishu_probe is not None else _Spy(),
         admin_identity=UnusedAdminIdentity(),
@@ -194,7 +217,8 @@ def _build(
         "admins": admins,
         "sessions": sessions,
         "provider_state": provider_state,
-        "config_path": config_path,
+        "ai_path": ai_path,
+        "feishu_path": feishu_path,
         "readiness": readiness,
         "task_access": task_access,
         "submissions": submissions,
@@ -248,12 +272,23 @@ async def _sign_in(client: httpx.AsyncClient, admins: Any) -> str:
     return str(me.json()["csrf_token"])
 
 
-def _write_config(config_path: Path, *, generation: int = 4) -> None:
-    config_path.write_text(
+def _write_config(
+    built: dict[str, Any], *, generation: int = 4, ai_generation: int | None = None
+) -> None:
+    """两个域各写一份；不指定时两域同代，便于与单文件时代的用例对照。"""
+    built["ai_path"].write_text(
+        json.dumps(
+            {
+                "generation": generation if ai_generation is None else ai_generation,
+                "gemini": {"enabled": True, "api_key": _GEMINI_KEY},
+            }
+        ),
+        encoding="utf-8",
+    )
+    built["feishu_path"].write_text(
         json.dumps(
             {
                 "generation": generation,
-                "gemini": {"enabled": True, "api_key": _GEMINI_KEY},
                 "feishu": {
                     "enabled": True,
                     "app_id": "cli_probe",
@@ -263,6 +298,31 @@ def _write_config(config_path: Path, *, generation: int = 4) -> None:
         ),
         encoding="utf-8",
     )
+
+
+_CONFIG_ACTIONS = frozenset(
+    {
+        AdminAuditAction.CONFIG_SAVED,
+        AdminAuditAction.CONFIG_CLEARED,
+        AdminAuditAction.CONNECTION_TESTED,
+    }
+)
+
+
+def _audit(memory_state: Any) -> list[tuple[str, AdminAuditOutcome, Any]]:
+    events = sorted(
+        (
+            event
+            for event in memory_state.admin_audit_events.values()
+            if event.action in _CONFIG_ACTIONS
+        ),
+        key=lambda event: (
+            event.created_at,
+            event.operation_id,
+            event.outcome is not AdminAuditOutcome.STARTED,
+        ),
+    )
+    return [(e.operation_id, e.outcome, e.reason_code) for e in events]
 
 
 # --------------------------------------------------------------------------
@@ -282,7 +342,7 @@ async def test_probe_never_creates_a_task_submission_or_evidence(
         gemini_real_test_enabled=True,
         feishu_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         for name in ("gemini_connection", "feishu_credentials", "feishu_oauth"):
@@ -355,7 +415,7 @@ async def test_probe_never_reaches_the_tool_gateway(
         gemini_probe=_Spy(result={"ok": True}),
         gemini_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -382,7 +442,7 @@ async def test_probe_does_not_change_readiness(tmp_path, clock, memory_state) ->
         gemini_probe=_Spy(error=RuntimeError("provider down")),
         gemini_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         assert (await client.get("/readyz")).status_code == 200
@@ -405,7 +465,7 @@ async def test_probe_routes_require_a_local_admin_and_a_csrf_token(
     built = _build(
         tmp_path, clock, memory_state, gemini_probe=spy, gemini_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         anonymous = await client.post(
             "/admin/api/config/test/gemini_connection", headers=_json_headers("x" * 64)
@@ -427,7 +487,7 @@ async def test_probe_routes_require_a_local_admin_and_a_csrf_token(
 
 async def test_an_unknown_check_name_is_refused(tmp_path, clock, memory_state) -> None:
     built = _build(tmp_path, clock, memory_state)
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -451,7 +511,7 @@ async def test_a_result_is_recorded_against_the_generation_that_was_tested(
         gemini_probe=_Spy(result={"ok": True}),
         gemini_real_test_enabled=True,
     )
-    _write_config(built["config_path"], generation=9)
+    _write_config(built, generation=9)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -490,7 +550,7 @@ async def test_the_response_never_carries_the_secret(
         gemini_probe=_Spy(error=RuntimeError(_GEMINI_KEY)),
         gemini_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -505,8 +565,13 @@ async def test_the_response_never_carries_the_secret(
 # --------------------------------------------------------------------------
 
 
-async def _passed_credentials(built: Any, *, generation: int = 4) -> None:
-    """把 feishu_credentials 置为当前代次通过——OAuth 测试的前置。"""
+async def _passed_credentials(
+    built: Any, *, generation: int = 4, web_loaded: int | None = None
+) -> None:
+    """OAuth 测试的两道前置：凭据在该代次通过，且 Web 进程已加载该代次。
+
+    ``web_loaded`` 缺省与 ``generation`` 同代；传别的值模拟"文件已保存、Web 尚未重启"。
+    """
     from xiaowei_agent.persistence.provider_state import CheckName, RecordTestCommand
 
     await built["provider_state"].record_test(
@@ -517,6 +582,18 @@ async def _passed_credentials(built: Any, *, generation: int = 4) -> None:
             duration_ms=5,
         )
     )
+    await _web_loaded(built, generation if web_loaded is None else web_loaded)
+
+
+async def _web_loaded(built: Any, generation: int, *, status: str = "loaded") -> None:
+    """Web 进程为飞书域签下的加载回执——OAuth adapter 实际持有的就是这一代凭据。"""
+    await built["provider_state"].record_load(
+        receipts={
+            (SERVICE_WEB, ConfigDomain.FEISHU): LoadReceipt(
+                generation=generation, status=status
+            )
+        }
+    )
 
 
 async def test_oauth_test_requires_passing_feishu_credentials_first(
@@ -526,7 +603,7 @@ async def test_oauth_test_requires_passing_feishu_credentials_first(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -550,7 +627,7 @@ async def test_oauth_test_at_a_stale_generation_is_refused(
     built = _build(
         tmp_path, clock, memory_state, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"], generation=5)
+    _write_config(built, generation=5)
     await _passed_credentials(built, generation=4)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -559,6 +636,122 @@ async def test_oauth_test_at_a_stale_generation_is_refused(
         )
     assert response.json()["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
     assert memory_state.oauth_states == {}
+
+
+@pytest.mark.parametrize(
+    ("web_loaded", "status"),
+    [(4, "loaded"), (None, "loaded"), (5, "invalid")],
+    ids=["web-still-on-old-generation", "web-never-loaded", "web-loaded-invalid"],
+)
+async def test_oauth_test_is_refused_until_the_web_process_loads_the_current_generation(
+    tmp_path, clock, memory_state, web_loaded: int | None, status: str
+) -> None:
+    """反例（P1）：文件已是第 5 代、凭据也在第 5 代通过，但 Web 仍持有第 4 代的 OAuth
+    adapter。此时放行测试，跳出去的是旧凭据，结果却会记到第 5 代——重启后页面直接显示
+    "OAuth 可用"，而新 App ID/Secret 从未走通过回调。重启前必须拒绝。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    from xiaowei_agent.persistence.provider_state import CheckName, RecordTestCommand
+
+    await built["provider_state"].record_test(
+        command=RecordTestCommand(
+            check_name=CheckName.FEISHU_CREDENTIALS,
+            generation=5,
+            status="passed",
+            duration_ms=5,
+        )
+    )
+    if web_loaded is not None:
+        await _web_loaded(built, web_loaded, status=status)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        response = await client.post(
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
+        )
+
+    body = response.json()
+    assert "authorization_url" not in body
+    assert body["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
+    assert memory_state.oauth_states == {}
+    assert oauth.exchanges == []
+    snapshot = await built["provider_state"].snapshot()
+    assert snapshot.tests["feishu_oauth"].status != "passed"
+
+
+async def test_oauth_test_state_is_bound_to_the_generation_it_started_on(
+    tmp_path, clock, memory_state
+) -> None:
+    built = _build(tmp_path, clock, memory_state, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        await _start_oauth(client, token)
+
+    (context,) = memory_state.oauth_test_contexts.values()
+    assert context.config_generation == 5
+    assert context.operation_id.startswith("w4:")
+
+
+@pytest.mark.parametrize("drift", ["file-saved", "web-reloaded", "file-and-web"])
+async def test_a_generation_drift_between_start_and_callback_fails_closed(
+    tmp_path, clock, memory_state, drift: str
+) -> None:
+    """反例（P1）：第 5 代开始测试后、回调前配置升到第 6 代。
+
+    不得用旧 adapter 交换 code，也不得给任何代次写 ``passed``——绑定代次已经不是当前
+    文件或 Web 加载的代次，这次测试的结论不属于任何一份现行配置。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        if drift in {"file-saved", "file-and-web"}:
+            _write_config(built, generation=6)
+        if drift in {"web-reloaded", "file-and-web"}:
+            await _web_loaded(built, 6)
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": {"code": "invalid_request"}}
+    assert oauth.exchanges == []
+    snapshot = await built["provider_state"].snapshot()
+    assert "feishu_oauth" not in snapshot.tests
+    assert [(o, r) for _, o, r in _audit(memory_state)] == [
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.FAILED, AdminAuditReasonCode.CONFIG_INVALID),
+    ]
+
+
+async def test_a_same_generation_oauth_test_is_recorded_against_the_bound_generation(
+    tmp_path, clock, memory_state
+) -> None:
+    """对照：文件、Web 回执、state 三者同为第 5 代时正常完成，结果只记第 5 代。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert oauth.exchanges == ["code-1"]
+    snapshot = await built["provider_state"].snapshot()
+    assert snapshot.tests["feishu_oauth"].status == "passed"
+    assert snapshot.tests["feishu_oauth"].generation == 5
 
 
 async def test_oauth_test_issues_a_state_that_the_login_path_cannot_consume(
@@ -573,7 +766,7 @@ async def test_oauth_test_issues_a_state_that_the_login_path_cannot_consume(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -607,7 +800,7 @@ async def test_login_state_cannot_be_consumed_by_the_test_path(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         await _sign_in(client, built["admins"])
@@ -638,7 +831,7 @@ async def test_oauth_test_callback_requires_a_live_local_admin_session(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -668,7 +861,7 @@ async def test_oauth_test_branch_issues_no_cookie_and_no_session(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -706,7 +899,7 @@ async def test_a_failed_oauth_exchange_is_recorded_as_a_closed_code(
     built = _build(
         tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -740,7 +933,7 @@ async def test_oauth_test_is_refused_when_feishu_is_not_assembled(
         with_feishu_auth=False,
         feishu_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
         response = await client.post(
@@ -761,7 +954,7 @@ async def test_the_literal_oauth_route_wins_over_the_parameterised_one(
         feishu_probe=feishu,
         feishu_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     async with _client(built["app"]) as client:
         token = await _sign_in(client, built["admins"])
@@ -798,7 +991,7 @@ async def test_probe_routes_reject_a_feishu_principal_with_admin_permission(
         gemini_real_test_enabled=True,
         feishu_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     cookie = "feishu_session_cookie_1234567890"
     await built["sessions"].rotate_session(
@@ -845,7 +1038,7 @@ async def test_probe_routes_refuse_before_the_forced_password_change(
         gemini_real_test_enabled=True,
         feishu_real_test_enabled=True,
     )
-    _write_config(built["config_path"])
+    _write_config(built)
     await _passed_credentials(built)
     await built["admins"].seed_if_absent(
         password_hash=hash_password(INITIAL_LOCAL_ADMIN_PASSWORD)
@@ -882,3 +1075,197 @@ async def test_probe_routes_refuse_before_the_forced_password_change(
     assert memory_state.oauth_states == {}
     snapshot = await built["provider_state"].snapshot()
     assert set(snapshot.tests) == {"feishu_credentials"}
+
+
+# --------------------------------------------------------------------------
+# W4a：测试代次取自对应域；每次测试都是两阶段审计
+# --------------------------------------------------------------------------
+
+
+async def test_each_probe_records_the_generation_of_its_own_domain(
+    tmp_path, clock, memory_state
+) -> None:
+    built = _build(
+        tmp_path,
+        clock,
+        memory_state,
+        gemini_probe=_Spy(result={"ok": True}),
+        feishu_probe=_Spy(result={"ok": True}),
+        gemini_real_test_enabled=True,
+        feishu_real_test_enabled=True,
+    )
+    _write_config(built, generation=6, ai_generation=11)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        for name in ("gemini_connection", "feishu_credentials"):
+            response = await client.post(
+                f"/admin/api/config/test/{name}", headers=_json_headers(token)
+            )
+            assert response.json()["status"] == "passed"
+    snapshot = await built["provider_state"].snapshot()
+    assert snapshot.tests["gemini_connection"].generation == 11
+    assert snapshot.tests["feishu_credentials"].generation == 6
+    outcomes = [(outcome, reason) for _, outcome, reason in _audit(memory_state)]
+    assert outcomes == [
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.SUCCEEDED, None),
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.SUCCEEDED, None),
+    ]
+
+
+async def test_a_failed_probe_is_audited_as_failed(tmp_path, clock, memory_state) -> None:
+    built = _build(
+        tmp_path,
+        clock,
+        memory_state,
+        gemini_probe=_Spy(error=RuntimeError("provider down")),
+        gemini_real_test_enabled=True,
+    )
+    _write_config(built)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        await client.post(
+            "/admin/api/config/test/gemini_connection", headers=_json_headers(token)
+        )
+    assert [(o, r) for _, o, r in _audit(memory_state)] == [
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.FAILED, AdminAuditReasonCode.PROBE_FAILED),
+    ]
+
+
+async def _start_oauth(client: httpx.AsyncClient, token: str) -> str:
+    started = await client.post(
+        "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
+    )
+    assert started.status_code == 200
+    return str(started.json()["authorization_url"].split("state=")[1])
+
+
+async def test_oauth_test_state_carries_the_started_operation_to_the_callback(
+    tmp_path, clock, memory_state
+) -> None:
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built)
+    await _passed_credentials(built)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        after_start = _audit(memory_state)
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert [outcome for _, outcome, _ in after_start] == [AdminAuditOutcome.STARTED]
+    (operation_id, _, _) = after_start[0]
+    assert re.fullmatch(r"w4:[0-9a-f]{32}", operation_id)
+    # 签发时写进 context 的就是这条 STARTED 的 operation id。
+    assert {c.operation_id for c in memory_state.oauth_test_contexts.values()} <= {
+        operation_id
+    }
+    assert _audit(memory_state) == [
+        (operation_id, AdminAuditOutcome.STARTED, None),
+        (operation_id, AdminAuditOutcome.SUCCEEDED, None),
+    ]
+
+
+@pytest.mark.parametrize("shape", ["unknown", "expired", "cookie_mismatch"])
+async def test_an_invalid_or_expired_test_state_leaves_only_started(
+    tmp_path, clock, memory_state, shape: str
+) -> None:
+    """拿不到可信 operation id 时绝不补写终态：只剩 STARTED 就是"结果未知"。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built)
+    await _passed_credentials(built)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        if shape == "unknown":
+            state = "u" * len(state)
+            client.cookies.set("__Host-xiaowei-oauth-state", state)
+        elif shape == "expired":
+            clock.advance(seconds=301)
+        else:
+            client.cookies.set("__Host-xiaowei-oauth-state", "m" * len(state))
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert oauth.exchanges == []
+    assert [outcome for _, outcome, _ in _audit(memory_state)] == [
+        AdminAuditOutcome.STARTED
+    ]
+    snapshot = await built["provider_state"].snapshot()
+    assert "feishu_oauth" not in snapshot.tests
+
+
+async def test_a_consumed_state_with_a_revoked_session_fails_without_calling_the_provider(
+    tmp_path, clock, memory_state
+) -> None:
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built)
+    await _passed_credentials(built)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        signed_out = await client.post(
+            "/app/api/logout", content="{}", headers=_json_headers(token)
+        )
+        assert signed_out.status_code == 204
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 401
+    assert oauth.exchanges == []
+    assert [(o, r) for _, o, r in _audit(memory_state)] == [
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.FAILED, AdminAuditReasonCode.SESSION_INVALID),
+    ]
+    snapshot = await built["provider_state"].snapshot()
+    assert "feishu_oauth" not in snapshot.tests
+
+
+async def test_a_feishu_admin_probe_attempt_is_denied_with_audit(
+    tmp_path, clock, memory_state
+) -> None:
+    from xiaowei_agent.interfaces.web_auth import web_csrf_token, web_session_digest
+    from xiaowei_agent.persistence.web_session import RotateWebSessionCommand
+
+    spy = _Spy(result={"ok": True})
+    built = _build(
+        tmp_path, clock, memory_state, gemini_probe=spy, gemini_real_test_enabled=True
+    )
+    _write_config(built)
+    cookie = "feishu_session_cookie_1234567890"
+    await built["sessions"].rotate_session(
+        command=RotateWebSessionCommand(
+            session_digest=web_session_digest(cookie),
+            subject_ref="subject-alice",
+            ttl_seconds=3600,
+            auth_source=IdentitySource.FEISHU,
+            public_origin_digest=web_origin_digest(_ORIGIN),
+        )
+    )
+    async with _client(built["app"]) as client:
+        client.cookies.set("__Host-xiaowei-session", cookie)
+        response = await client.post(
+            "/admin/api/config/test/gemini_connection",
+            headers=_json_headers(web_csrf_token(cookie)),
+        )
+    assert response.status_code == 403
+    assert spy.calls == []
+    assert [(o, r) for _, o, r in _audit(memory_state)] == [
+        (AdminAuditOutcome.DENIED, AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED)
+    ]

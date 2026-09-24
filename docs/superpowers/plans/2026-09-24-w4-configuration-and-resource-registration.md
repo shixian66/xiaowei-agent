@@ -1,8 +1,17 @@
 # W4 配置迁移与资源参数登记实施计划
 
-> 状态：Review Draft V0.1。本文只供技术复审；获批前不写 W4 源码、测试、migration 或 Compose 变更。
+> 状态：Approved V0.1。项目负责人在 Codex 会话中批准本计划并下达 W4a 离线实现开工口令；
+> 该批准没有公开的 GitHub 审批 permalink。计划 PR #80
+> （<https://github.com/shixian66/xiaowei-agent/pull/80>，受审 head
+> `24e01d69f6c89367eb4d27bd7d93d990af5824dc`）已由负责人 squash 合入
+> `2cef6aa52e17eece8eb70ebce0057cfdddd8167a`；合入事实本身不是批准来源。
 >
-> 规划基线：`origin/main@43151623fe420cfe63581b9117ed3838c7f7cb6e`
+> 授权范围只有 Task 0–7（W4a）的离线实现。Task 8–11（W4b）须等 W4a exact-SHA 复审、CI 与
+> 负责人合入后再从新的最新 `main` 开工；W4c、W5、真实 Provider、真实 Secret、联网、部署、
+> canary 与 UAT 均未授权。
+>
+> 规划基线：`origin/main@43151623fe420cfe63581b9117ed3838c7f7cb6e`；W4a 开工基线为合入本计划后的
+> `origin/main@2cef6aa52e17eece8eb70ebce0057cfdddd8167a`（两者之间只有本计划与文档契约变更）。
 >
 > 规格真源：[Web 运维工作台总体设计](../specs/2026-09-19-web-operations-console-identity-activation-design.md)
 >

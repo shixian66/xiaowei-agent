@@ -1098,8 +1098,15 @@ def test_w0_stable_docs_distinguish_current_runtime_from_future_targets() -> Non
     architecture = _truth_doc_text("ARCHITECTURE.md")
     for stale in _STALE_ARCHITECTURE_CLAIMS:
         assert architecture.count(stale) == 0, f"ARCHITECTURE.md 仍含过期声称：{stale}"
-    # 当前事实：RI5 已离线实现，证据等级到 tests 为止。
-    assert "/run/xiaowei-config/integrations.json" in architecture
+    # 当前事实：W4a 三域已离线实现，证据等级到 tests 为止；旧单文件只作迁移输入。
+    for domain_path in (
+        "/run/xiaowei-config/ai/config.json",
+        "/run/xiaowei-config/feishu/config.json",
+    ):
+        assert domain_path in architecture
+    for retired in _W4A_RETIRED_SINGLE_FILE_TRUTH:
+        assert retired not in architecture, f"ARCHITECTURE.md 仍把旧单文件写成当前真源：{retired}"
+    assert "migration_required" in architecture
     assert "W4a" in architecture and "W5" in architecture
 
 
@@ -1126,22 +1133,58 @@ def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
     assert "I3" in plan and "延期" in plan
 
 
-def test_readme_does_not_present_w4a_or_w5_as_current_runbook() -> None:
-    readme = _truth_doc_text("README.md")
+_W4A_DOMAIN_FILES: Final[tuple[str, ...]] = (
+    "`.config/ai/config.json`",
+    "`.config/feishu/config.json`",
+)
+_W4A_RETIRED_SINGLE_FILE_TRUTH: Final[tuple[str, ...]] = (
+    "唯一真源是 `.config/integrations.json`",
+    "唯一真源是宿主 Git-ignored 的 `.config/integrations.json`",
+    "仍是单一\n`.config/integrations.json`",
+    "/run/xiaowei-config/integrations.json` 出现",
+)
+
+
+def _readme_runbook(readme: str) -> str:
     runbook_at = readme.find("Compose 启动前只需要准备一个已被 Git 忽略的本地文件")
     assert runbook_at >= 0
-    runbook = readme[runbook_at : runbook_at + 4000]
-    # 当前 runbook 只能出现单文件形态。
-    assert "`.config/integrations.json`" in runbook
-    for future_file in (
-        "`.config/ai/config.json`",
-        "`.config/feishu/config.json`",
-        "`.config/resources/config.json`",
-    ):
-        assert future_file not in runbook, "W4a 未来三域文件被写进了当前首启步骤"
-    # 已批准的产品演进要能从 README 导航到，但只作为未来目标出现。
+    return readme[runbook_at : runbook_at + 6000]
+
+
+def test_readme_runbook_uses_the_w4a_domains_and_an_explicit_migration() -> None:
+    """W4a 起当前首启步骤就是三域形态；旧单文件只作为显式迁移的输入出现。"""
+    readme = _truth_doc_text("README.md")
+    runbook = _readme_runbook(readme)
+    for domain_file in _W4A_DOMAIN_FILES:
+        assert domain_file in runbook, f"首启步骤缺少三域文件 {domain_file}"
+    assert "`.config/resources/`" in runbook
+    # 旧文件只能经显式 CLI 迁移，且必须先停消费者；运行时不双读、不自动迁移。
+    assert "python -m xiaowei_agent.interfaces.integration_config_migrate" in runbook
+    assert "migration_required" in runbook
+    assert "先停止" in runbook
+    for retired in _W4A_RETIRED_SINGLE_FILE_TRUTH:
+        assert retired not in readme, f"README 仍把旧单文件写成当前真源：{retired}"
+    # 离线实现不等于迁移已执行或已部署。
+    for overclaim in ("迁移已执行", "已完成迁移", "已部署"):
+        assert overclaim not in runbook
+    # 已批准的产品演进要能从 README 导航到。
     assert "2026-09-19-web-operations-console-identity-activation-design.md" in readme
     assert "W0" in readme and "W1a" in readme
+
+
+def test_readme_w4a_runbook_guard_is_discriminating() -> None:
+    readme = _truth_doc_text("README.md")
+    revived = _replace_once(
+        readme,
+        "Compose 启动前只需要准备一个已被 Git 忽略的本地文件",
+        "Compose 启动前只需要准备一个已被 Git 忽略的本地文件；"
+        "唯一真源是 `.config/integrations.json`",
+    )
+    assert any(retired in revived for retired in _W4A_RETIRED_SINGLE_FILE_TRUTH)
+    runbook = _readme_runbook(readme)
+    assert all(domain_file in runbook for domain_file in _W4A_DOMAIN_FILES)
+    stripped = runbook.replace("`.config/feishu/config.json`", "")
+    assert not all(domain_file in stripped for domain_file in _W4A_DOMAIN_FILES)
 
 
 def test_w0_stable_doc_bindings_are_discriminating() -> None:
@@ -1369,8 +1412,9 @@ def test_truth_docs_scope_worker_exclusivity_to_model_ports_only() -> None:
 def test_truth_docs_state_that_the_web_plane_also_reads_the_credential() -> None:
     """正向不变量：光靠否定句挡不住漏写，得要求真源把 web-app 的角色写出来。"""
     architecture = _truth_doc_text("ARCHITECTURE.md")
-    assert "`web-app` 读写挂载该目录" in architecture
-    assert "`api` 不挂载" in architecture
+    # W4a 起按域写出：web-app 三域读写，api 与其余非消费者一个域都不挂。
+    assert "`web-app` 三域读写" in architecture
+    assert "`api` / `migrate` / `postgres` 不挂任何域" in architecture
 
 
 def test_credential_scope_binding_is_discriminating() -> None:
@@ -1393,8 +1437,8 @@ def test_credential_scope_binding_is_discriminating() -> None:
     historical = f"当时改为宿主 key 文件到 worker-only file-backed secret（{_SUPERSEDED_MARKER}）。"
     assert not _credential_scope_conflations(historical)
 
-    without_web_role = _replace_once(architecture, "`web-app` 读写挂载该目录", "该目录只读挂载")
-    assert "`web-app` 读写挂载该目录" not in without_web_role
+    without_web_role = _replace_once(architecture, "`web-app` 三域读写", "三域只读挂载")
+    assert "`web-app` 三域读写" not in without_web_role
 
 
 # --- W1a 写内核：实现状态与它的天花板 --------------------------------------
@@ -1667,9 +1711,9 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "W4" in next_step and "详细计划" in next_step
+    # W4a 离线候选阶段：下一步是独立 exact-SHA 审查；W4b 在 W4a 合入前不得开始。
     assert "W4a" in next_step and "W4b" in next_step
-    assert "源码" in next_step and "获批前" in next_step and "不" in next_step
+    assert "exact-SHA" in next_step and "合入前" in next_step and "不" in next_step
 
     development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
     web_spec = _truth_doc_text(
@@ -1896,3 +1940,50 @@ def test_w2_plan_resolves_login_window_admin_projection_and_slice_boundaries() -
         assert required in plan, f"W2 计划仍留有实现期选择：{required}"
     assert "当前账号不能进入此页面" in spec
     assert "把 W2 已迁入 Admin shell 的当前 RI5 Gemini/飞书配置" in spec
+
+
+# --- W4 计划批准与授权边界 ---------------------------------------------------
+#
+# 批准来源只能如实记录：没有公开审批 permalink 时写明"在 Codex 会话批准"，
+# 合入事实不能冒充批准来源，也不能把 W4a 开工口令外推成 W4b 或真实调用许可。
+
+_W4_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md"
+
+
+def _w4_plan_header(text: str) -> str:
+    return text[: text.find("## 1. 目标与交付方式")]
+
+
+def _check_w4_plan_header(header: str) -> None:
+    assert "Approved V0.1" in header
+    assert "Review Draft" not in header
+    assert "在 Codex 会话中批准" in header
+    assert "没有公开的 GitHub 审批 permalink" in header
+    assert "2cef6aa52e17eece8eb70ebce0057cfdddd8167a" in header
+    assert "24e01d69f6c89367eb4d27bd7d93d990af5824dc" in header
+    assert "合入事实本身不是批准来源" in header
+    assert "Task 0–7（W4a）" in header
+    assert "Task 8–11（W4b）" in header
+    for gate in ("W4c", "W5", "真实 Provider", "真实 Secret", "联网", "部署", "canary", "UAT"):
+        assert gate in header, f"W4 计划头部缺少未授权项：{gate}"
+    assert "均未授权" in header
+
+
+def test_w4_plan_header_records_the_approval_and_the_w4a_only_authority() -> None:
+    _check_w4_plan_header(_w4_plan_header(_W4_PLAN.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("Approved V0.1", "Review Draft V0.1"),
+        ("没有公开的 GitHub 审批 permalink", "见审批链接"),
+        ("合入事实本身不是批准来源", "合入即批准"),
+        ("Task 8–11（W4b）", "Task 8–11"),
+        ("均未授权", "已随本计划授权"),
+    ],
+)
+def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
+    header = _w4_plan_header(_W4_PLAN.read_text(encoding="utf-8"))
+    with pytest.raises(AssertionError):
+        _check_w4_plan_header(_replace_once(header, old, new))

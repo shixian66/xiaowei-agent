@@ -20,8 +20,9 @@
 已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
 [总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
-各阶段进度见顶部交接入口；当前可照做的首启流程见下文，仍是单一
-`.config/integrations.json` 与 loopback 发布，不能提前套用后续配置设计。
+各阶段进度见顶部交接入口；当前可照做的首启流程见下文：W4a 起 Provider 配置拆为 AI、飞书、
+resources 三个固定配置域并仍走 loopback 发布；W4b 的资源参数维护、W4c 连接测试与 W5 部署尚未实现，
+不能提前套用。
 
 ## 目标能力
 
@@ -221,8 +222,8 @@ Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没�
 三个进程都关闭时，`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
 `XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_PUBLIC_ORIGIN` 必须全部留空。listener 开启时
 前三项必须同时提供；Web app 开启时必须提供 `XIAOWEI_WEB_PUBLIC_ORIGIN`，飞书 OAuth 另外开启时
-还需要身份文件。**App ID 与 App Secret 不再是环境变量**：自 RI5 起它们的唯一真源是
-`.config/integrations.json`，由 Web 管理面写入、各进程启动时读取。不经 Compose 直接运行时，
+还需要身份文件。**App ID 与 App Secret 不再是环境变量**：自 W4a 起它们的唯一真源是飞书域
+`.config/feishu/config.json`，由 Web 管理面写入、所需进程启动时读取。不经 Compose 直接运行时，
 Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
 code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 使用严格更长的 6 秒外层
 watchdog，且不重试；两者都没有读取
@@ -260,10 +261,20 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 
 `.secrets/` 保持 `0700`，文件写完后保持 `0444`。
 
-**Provider 凭据不再是 Docker secret。** 自 RI5 起 Gemini API Key 与飞书 App ID / App Secret 的
-唯一真源是 `.config/integrations.json`，由本地管理面写入。`.config/` 已被 `.gitignore` 与
-`.dockerignore` 忽略；`web-app` 以读写方式挂载它，`worker` / `feishu-listener` / `channel-worker`
-只读挂载，`api` 完全不挂。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
+**Provider 凭据不再是 Docker secret。** 自 W4a 起配置按三个固定域分开存放，每个域一个目录、
+一份固定文件、一个独立 `generation`：
+
+| 配置域 | 宿主文件 | 容器路径 | 挂载 |
+| --- | --- | --- | --- |
+| AI | `.config/ai/config.json` | `/run/xiaowei-config/ai/config.json` | `web-app` 读写；`worker` 只读 |
+| 飞书 | `.config/feishu/config.json` | `/run/xiaowei-config/feishu/config.json` | `web-app` 读写；`feishu-listener` / `channel-worker` 只读 |
+| resources | `.config/resources/`（W4a 只预留目录，无文件） | `/run/xiaowei-config/resources` | `web-app` 读写；`worker` 只读 |
+
+任何服务都不挂父目录 `.config/`，`api` / `migrate` / `postgres` 一个域都不挂；consumer 只看得见
+自己的域。`.config/` 已被 `.gitignore` 与 `.dockerignore` 忽略，由本地管理面按域写入：保存 AI 域
+不改变飞书域的文件或 `generation`，反之亦然。模型名、endpoint、timeout 仍是代码固定值，页面上只读显示。
+旧单文件 `.config/integrations.json` 只作为下文显式一次性迁移的输入：运行时既不读它，也不自动迁移；
+它还在时预检固定报 `migration_required`。
 本地 Admin 在 `/admin` 维护配置；`/app` 只承担运维任务工作台，不再承载配置表单。
 飞书 Admin 进入 `/admin` 时只能看脱敏集成状态，不能读取、保存、清除或测试 raw config。
 W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审计三个桌面管理区，对应
@@ -279,15 +290,33 @@ W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审
 **这几步不能跳过，也不能换顺序。** 第 8 步之前套用 LAN override，初始口令 `admin/admin`
 就会暴露给同网段。
 
-1. 建目录。容器以 UID/GID `10001` 运行，属主对不上时 Web 起得来但**存不下配置**——
-   管理员会在填完表单点保存时才发现：
+1. 建目录。三个域目录都必须预先存在（Compose 挂载设置了 `create_host_path: false`，缺目录
+   时容器直接起不来，而不是由 Docker 以 root 悄悄建一个空目录）。容器以 UID/GID `10001` 运行，
+   属主对不上时 Web 起得来但**存不下配置**——管理员会在填完表单点保存时才发现：
 
    ```bash
-   mkdir -p .config && chmod 700 .config
+   mkdir -p .config/ai .config/feishu .config/resources
+   chmod 700 .config .config/ai .config/feishu .config/resources
    # Linux Docker Engine 另需（macOS Docker Desktop 跳过）：
-   sudo chown 10001:10001 .config
+   sudo chown -R 10001:10001 .config
    ```
 
+   **从 RI5 单文件升级的已有部署**另需一次显式迁移。迁移前先停止所有配置消费者，迁移器不会
+   替你停：
+
+   ```bash
+   compose stop web-app worker feishu-listener channel-worker
+   compose run --rm --no-deps \
+     -v "$PWD/.config:/run/xiaowei-config" \
+     web-app python -m xiaowei_agent.interfaces.integration_config_migrate
+   ```
+
+   它把 `.config/integrations.json` 按原 `generation` 拆成 `.config/ai/config.json` 与
+   `.config/feishu/config.json`，两份都重读比对一致后才删除旧文件；只打印一个闭集结果码。
+   `migrated` / `already_migrated` / `nothing_to_migrate` 可以继续；`migration_required` 表示
+   某个新文件已存在且与旧文件不一致（或有文件损坏），迁移器不覆盖任何一边，需人工核对后再跑；
+   `unavailable` 表示目录不可用。中途失败可原样重跑。这一步与第 4 步的预检是仅有的两个挂整个
+   `.config/` 的一次性维护容器；常驻服务永远只挂自己的域。
 2. 在 `.env` 写入首启参数。这些键现在真的会被 Compose 插值消费：
 
    ```bash
@@ -323,9 +352,10 @@ W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审
      web-app python -m xiaowei_agent.interfaces.config_preflight
    ```
 
-   只应输出 `preflight: ok`。预检写的是哨兵文件 `.preflight-probe.json` 并在退出前删除，
-   不会生成也不会改动 `integrations.json`。失败时**不要**继续——目录属主或权限不对，
-   Web 起来也存不下配置。
+   只应输出 `preflight: ok`。预检在每个域目录各写一个哨兵 `.preflight-probe-<域>.json` 并在
+   退出前删除，不会生成也不会改动任何 `config.json`。旧 `.config/integrations.json` 还在时固定
+   输出 `preflight: migration_required` 且什么都不写，先完成第 1 步的迁移。失败时**不要**继续
+   ——目录属主或权限不对，Web 起来也存不下配置。
 
 5. 启动。基础文件在回环上发布两个端口——`127.0.0.1:8000`（api）与 `127.0.0.1:8080`（web-app），`web-app` 已不在 profile 里：
 
@@ -334,7 +364,8 @@ W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审
    ```
 
 6. 宿主机浏览器打开 `http://127.0.0.1:8080`，用 `admin/admin` 登录并**完成强制改密**；
-   随后进入 `/admin` 填写 Provider 配置。任务工作台 `/app` 不提供配置入口。
+   随后进入 `/admin` 按域填写 Provider 配置：AI 与飞书各自保存、各自清除（清除需再次确认），
+   Secret 留空表示保留原值。任务工作台 `/app` 不提供配置入口。
 
 7. 改密完成后，再把 `.env` 的 public origin 改成局域网地址：
 
@@ -441,16 +472,18 @@ python -m scripts.compose_smoke
 
 脚本要求 Docker Compose 2.24.4 或更新版本。自 RI5 起同一 workflow 的末段临时叠加
 `docker-compose.model.yml`，只通过 Docker inspect 的 label/environment/mount 元数据证明
-**配置目录按各进程的角色挂载**：`worker` / `feishu-listener` / `channel-worker` 只读、
-`web-app` 可写、`api` / `migrate` / `postgres` 完全没有；脚本不打开或输出配置文件。
+**三个配置域按 W4a 矩阵逐格挂载**：`worker` 只读 AI 与 resources、`feishu-listener` /
+`channel-worker` 只读飞书、`web-app` 三域可写、`api` / `migrate` / `postgres` 一个都没有，任何
+服务都不挂父目录；脚本不打开或输出配置文件。
 基础 Compose 仍默认关闭模型。
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
-下创建**两个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令、身份文件与不含
-secret 值的 JSON Compose override，另一个只放一份合成的 `integrations.json`。两者分开是必要的
-——配置目录是**整目录**挂进容器的，与口令同目录时那份口令会一起出现在 worker 的
-`/run/xiaowei-config` 下。override 把配置目录与身份文件的引用都指向这两个私有目录，不读取或
+下创建**四个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令、身份文件与不含
+secret 值的 JSON Compose override，另外三个分别是 AI、飞书、resources 域目录（前两个各放一份
+合成的 `config.json`，resources 为空）。分开是必要的——每个域目录是**整目录**挂进容器的，与口令
+或兄弟域同目录时那些文件会一起出现在只该看到本域的容器里。override 把三个域目录与身份文件的
+引用都指向这些私有目录，不读取或
 覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离目录，再核对目录与
 各自已知文件的 inode，且不递归删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地

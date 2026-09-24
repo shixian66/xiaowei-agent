@@ -267,6 +267,7 @@ from xiaowei_agent.persistence.schema import (
     USER_ROLE_ASSIGNMENTS,
     WEB_OAUTH_LOGIN_CONTEXTS,
     WEB_OAUTH_STATES,
+    WEB_OAUTH_TEST_CONTEXTS,
     WEB_SESSIONS,
 )
 from xiaowei_agent.persistence.store import (
@@ -304,14 +305,17 @@ from xiaowei_agent.persistence.store import (
 from xiaowei_agent.persistence.web_session import (
     DEFAULT_OAUTH_STATE_CAPACITY,
     ConsumeOAuthLoginStateCommand,
-    ConsumeOAuthStateCommand,
+    ConsumeOAuthTestStateCommand,
     IssueOAuthLoginStateCommand,
     IssueOAuthStateCommand,
+    IssueOAuthTestStateCommand,
     OAuthLoginContextNotFoundError,
     OAuthLoginState,
     OAuthState,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
+    OAuthTestContextNotFoundError,
+    OAuthTestState,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
     WebSession,
@@ -987,9 +991,9 @@ class PostgresWebSessionStore:
         )
 
     @_persistence_boundary(write=True)
-    async def issue_oauth_state(
-        self, *, command: IssueOAuthStateCommand
-    ) -> OAuthState:
+    async def issue_oauth_test_state(
+        self, *, command: IssueOAuthTestStateCommand
+    ) -> OAuthTestState:
         conflict_reached = False
         capacity_reached = False
         issued: OAuthState | None = None
@@ -1003,13 +1007,35 @@ class PostgresWebSessionStore:
                     now=now,
                 )
             )
+            if issued is not None:
+                # 容量锁串行化所有签发，因此在事务体内探测 operation 复用没有竞态；
+                # 与仓库既有做法一致，不靠捕获 IntegrityError、也不读约束名。
+                reused = await connection.scalar(
+                    sa.select(WEB_OAUTH_TEST_CONTEXTS.c.state_digest).where(
+                        WEB_OAUTH_TEST_CONTEXTS.c.operation_id == command.operation_id
+                    )
+                )
+                if reused is not None:
+                    # 抛出即回滚：刚插入的 state 不会留下来。
+                    raise WebSessionConflictError
+                await connection.execute(
+                    sa.insert(WEB_OAUTH_TEST_CONTEXTS).values(
+                        state_digest=issued.state_digest,
+                        operation_id=command.operation_id,
+                        config_generation=command.config_generation,
+                    )
+                )
         if conflict_reached:
             raise WebSessionConflictError
         if capacity_reached:
             raise OAuthStateCapacityError
         if issued is None:
-            raise RuntimeError("oauth state issue result missing")
-        return issued
+            raise RuntimeError("oauth test state issue result missing")
+        return OAuthTestState(
+            **issued.model_dump(),
+            operation_id=command.operation_id,
+            config_generation=command.config_generation,
+        )
 
     @_persistence_boundary(write=True)
     async def issue_oauth_login_state(
@@ -1103,12 +1129,12 @@ class PostgresWebSessionStore:
         return row_to_oauth_state(row), False, False
 
     @_persistence_boundary(write=True)
-    async def consume_oauth_state(
-        self, *, command: ConsumeOAuthStateCommand
-    ) -> OAuthState:
+    async def consume_oauth_test_state(
+        self, *, command: ConsumeOAuthTestStateCommand
+    ) -> OAuthTestState:
         now = self._clock()
         async with _write_transaction(self._engine) as connection:
-            row = (
+            state_row = (
                 (
                     await connection.execute(
                         sa.update(WEB_OAUTH_STATES)
@@ -1124,9 +1150,25 @@ class PostgresWebSessionStore:
                 .mappings()
                 .first()
             )
-            if row is None:
+            if state_row is None:
                 raise OAuthStateNotFoundError
-            return row_to_oauth_state(row)
+            context = (
+                await connection.execute(
+                    sa.select(
+                        WEB_OAUTH_TEST_CONTEXTS.c.operation_id,
+                        WEB_OAUTH_TEST_CONTEXTS.c.config_generation,
+                    ).where(WEB_OAUTH_TEST_CONTEXTS.c.state_digest == command.state_digest)
+                )
+            ).first()
+            if context is None:
+                # 抛出即回滚：一张登录 state 或缺 context 的 state 不会被烧掉。
+                raise OAuthTestContextNotFoundError
+            state = row_to_oauth_state(state_row)
+            return OAuthTestState(
+                **state.model_dump(),
+                operation_id=context.operation_id,
+                config_generation=context.config_generation,
+            )
 
     @_persistence_boundary(write=True)
     async def consume_oauth_login_state(

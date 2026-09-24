@@ -24,6 +24,38 @@ _I1_FIXTURE = (
 )
 
 
+# W4a 三域挂载矩阵（服务 → {域: 是否可写}）。在这里**独立写死**而不是引用脚本里的
+# 同名表：两边逐格相等由下面的用例钉住，替身按这张表造"正确的"容器元数据。
+_EXPECTED_MATRIX: dict[str, dict[str, bool]] = {
+    "web-app": {"ai": True, "feishu": True, "resources": True},
+    "worker": {"ai": False, "resources": False},
+    "feishu-listener": {"feishu": False},
+    "channel-worker": {"feishu": False},
+}
+_CONFIG_SOURCES: dict[str, Path] = {
+    domain: Path(f"/workspace/fixtures/private-config-{domain}")
+    for domain in ("ai", "feishu", "resources")
+}
+
+
+def _matrix_mounts(
+    service: str, sources: dict[str, Path] = _CONFIG_SOURCES
+) -> list[dict[str, object]]:
+    return [
+        {
+            "Source": str(sources[domain]),
+            "Destination": f"/run/xiaowei-config/{domain}",
+            "RW": writable,
+        }
+        for domain, writable in _EXPECTED_MATRIX.get(service, {}).items()
+    ]
+
+
+def test_smoke_mount_matrix_equals_the_w4a_plan_cell_by_cell() -> None:
+    assert compose_smoke._CONFIG_MOUNT_MATRIX == _EXPECTED_MATRIX
+    assert compose_smoke._CONFIG_DOMAINS == ("ai", "feishu", "resources")
+
+
 class RecordingRunner:
     def __init__(self, *, collision_at: int | None = None) -> None:
         self.collision_at = collision_at
@@ -45,12 +77,14 @@ class ModelAuditRunner(RecordingRunner):
         services: tuple[str, ...],
         *,
         failure_at: str | None = None,
-        config_source: str = "/workspace/fixtures/private-config",
+        config_sources: dict[str, Path] = _CONFIG_SOURCES,
+        mount_overrides: dict[str, list[dict[str, object]]] | None = None,
         worker_environment: tuple[str, ...] = ("XIAOWEI_GEMINI_ENABLED=true",),
     ) -> None:
         super().__init__()
         self.failure_at = failure_at
-        self.config_source = config_source
+        self.config_sources = config_sources
+        self.mount_overrides = mount_overrides or {}
         self.worker_environment = worker_environment
         self.service_by_container = {
             f"model-container-{index}": service
@@ -77,14 +111,9 @@ class ModelAuditRunner(RecordingRunner):
             service = self.service_by_container[call[-1]]
             mounts: list[dict[str, object]] = []
             environment: list[str] = []
-            if service in (*compose_smoke._CONFIG_READ_ONLY_SERVICES, "web-app"):
-                mounts = [
-                    {
-                        "Source": self.config_source,
-                        "Destination": "/run/xiaowei-config",
-                        "RW": service == "web-app",
-                    }
-                ]
+            mounts = self.mount_overrides.get(
+                service, _matrix_mounts(service, self.config_sources)
+            )
             if service == "worker":
                 mounts.append(
                     {
@@ -375,8 +404,8 @@ def test_smoke_preserves_first_exception_while_all_later_cleanup_still_runs(
             else ["SMOKE_INPUT_CLEANUP_FAILED"]
         )
     assert len([call for call in runner.calls if "down" in call]) == 1
-    # 输入命名空间与配置目录命名空间各清一次。
-    assert input_cleanup_calls == 2
+    # 输入命名空间与三个配置域命名空间各清一次。
+    assert input_cleanup_calls == 4
     assert list((tmp_path / ".secrets").iterdir()) == []
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
@@ -504,18 +533,9 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
                 service = call[-1].removesuffix("-id")
                 mounts: list[dict[str, object]] = []
                 environment: list[str] = []
-                writable = service == "web-app"
-                if (
-                    service in ("worker", "feishu-listener", "channel-worker", "web-app")
-                    or leak_to_api
-                ):
-                    mounts = [
-                        {
-                            "Source": "/workspace/fixtures/private-config",
-                            "Destination": "/run/xiaowei-config",
-                            "RW": writable,
-                        }
-                    ]
+                mounts = _matrix_mounts(service)
+                if service == "api" and leak_to_api:
+                    mounts = _matrix_mounts("worker")
                 if service == "worker":
                     mounts.append(
                         {
@@ -542,7 +562,7 @@ def test_model_secret_smoke_inspects_worker_only_mount_without_reading_it(
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
         sensitive_values=("AIza" + "fake-smoke-value",),
-        config_source=Path("/workspace/fixtures/private-config"),
+        config_sources=_CONFIG_SOURCES,
     )
 
     if leak_to_api:
@@ -591,7 +611,7 @@ def test_model_secret_smoke_rejects_incomplete_unknown_or_duplicate_services(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        config_source=Path("/workspace/fixtures/private-config"),
+        config_sources=_CONFIG_SOURCES,
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -607,7 +627,7 @@ def test_model_secret_smoke_allows_multiple_worker_instances() -> None:
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        config_source=Path("/workspace/fixtures/private-config"),
+        config_sources=_CONFIG_SOURCES,
     )
 
     compose_smoke._require_model_secret_boundary(session)
@@ -618,12 +638,15 @@ def test_model_secret_smoke_rejects_an_unexpected_host_source() -> None:
         docker="/usr/bin/docker",
         runner=ModelAuditRunner(
             compose_smoke._MODEL_AUDIT_SERVICES,
-            config_source="/workspace/fixtures/unexpected-config",
+            config_sources={
+                **_CONFIG_SOURCES,
+                "feishu": Path("/workspace/fixtures/unexpected-config"),
+            },
         ),
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        config_source=Path("/workspace/fixtures/private-config"),
+        config_sources=_CONFIG_SOURCES,
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -652,7 +675,56 @@ def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
         project="isolated",
         files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
         compose_command=("/usr/bin/docker", "compose"),
-        config_source=Path("/workspace/fixtures/private-config"),
+        config_sources=_CONFIG_SOURCES,
+    )
+
+    with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
+        compose_smoke._require_model_secret_boundary(session)
+
+
+_PARENT_MOUNT: dict[str, object] = {
+    "Source": "/workspace/fixtures/private-config-root",
+    "Destination": "/run/xiaowei-config",
+    "RW": False,
+}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # 父目录挂回来：consumer 就能读到兄弟域。
+        {"worker": [_PARENT_MOUNT]},
+        {"channel-worker": [*_matrix_mounts("channel-worker"), _PARENT_MOUNT]},
+        # 兄弟域：listener 多挂了 AI 域。
+        {"feishu-listener": [*_matrix_mounts("feishu-listener"), *_matrix_mounts("worker")[:1]]},
+        # 读写属性：consumer 变成可写。
+        {"worker": [{**mount, "RW": True} for mount in _matrix_mounts("worker")]},
+        # 少挂：web-app 丢了 resources 域。
+        {"web-app": _matrix_mounts("web-app")[:2]},
+        # 同一目标挂两次。
+        {"feishu-listener": _matrix_mounts("feishu-listener") * 2},
+    ],
+    ids=[
+        "parent-only",
+        "parent-extra",
+        "sibling-domain",
+        "consumer-writable",
+        "missing-domain",
+        "duplicate-target",
+    ],
+)
+def test_model_secret_smoke_rejects_every_off_matrix_config_mount(
+    overrides: dict[str, list[dict[str, object]]],
+) -> None:
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=ModelAuditRunner(
+            compose_smoke._MODEL_AUDIT_SERVICES, mount_overrides=overrides
+        ),
+        project="isolated",
+        files=(Path("docker-compose.yml"), Path("docker-compose.smoke.yml")),
+        compose_command=("/usr/bin/docker", "compose"),
+        config_sources=_CONFIG_SOURCES,
     )
 
     with pytest.raises(SmokeError, match="SMOKE_MODEL_SECRET_BOUNDARY_FAILED"):
@@ -662,10 +734,7 @@ def test_model_secret_smoke_rejects_host_input_names_in_container_environment(
 def test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke() -> None:
     """The config fixture and OAuth response checker must not keep separate app IDs."""
     value = json.loads(
-        compose_smoke._synthetic_integration_config(
-            gemini_value="AIza" + "fake-smoke-key",
-            feishu_value="fake-feishu-secret",
-        )
+        compose_smoke._synthetic_feishu_config(feishu_value="fake-feishu-secret")
     )
 
     assert value["feishu"]["app_id"] == compose_smoke._WEB_APP_ID
@@ -674,13 +743,20 @@ def test_synthetic_feishu_config_uses_the_app_id_expected_by_oauth_smoke() -> No
 def test_synthetic_feishu_config_enables_the_oauth_smoke_provider() -> None:
     """Smoke enables both RI5 layers before expecting /oauth/feishu/start to work."""
     value = json.loads(
-        compose_smoke._synthetic_integration_config(
-            gemini_value="AIza" + "fake-smoke-key",
-            feishu_value="fake-feishu-secret",
-        )
+        compose_smoke._synthetic_feishu_config(feishu_value="fake-feishu-secret")
     )
 
     assert value["feishu"]["enabled"] is True
+    assert set(value) == {"generation", "feishu"}
+
+
+def test_synthetic_ai_config_is_its_own_domain_document_with_the_model_off() -> None:
+    value = json.loads(
+        compose_smoke._synthetic_ai_config(gemini_value="AIza" + "fake-smoke-key")
+    )
+
+    assert set(value) == {"generation", "gemini"}
+    assert value["gemini"]["enabled"] is False
 
 
 def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
@@ -868,15 +944,22 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         override = json.loads(session.files[-1].read_text(encoding="utf-8"))
         postgres = Path(override["secrets"]["postgres_password"]["file"])
         web_volumes = override["services"]["web-app"]["volumes"]
-        config_directory = Path(web_volumes[0]["source"])
-        identities = Path(web_volumes[1]["source"])
-        config_file = config_directory / "integrations.json"
-        assert session.config_source == config_directory
-        observed_paths = (postgres, identities, config_file)
+        config_directories = {
+            volume["target"].rsplit("/", 1)[-1]: Path(volume["source"])
+            for volume in web_volumes[:3]
+        }
+        identities = Path(web_volumes[3]["source"])
+        assert session.config_sources == config_directories
+        ai_file = config_directories["ai"] / "config.json"
+        feishu_file = config_directories["feishu"] / "config.json"
+        observed_paths = (postgres, identities, ai_file, feishu_file)
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(postgres.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(identities.parent.stat().st_mode) == 0o700
-        assert stat.S_IMODE(config_directory.stat().st_mode) == 0o711
+        assert all(
+            stat.S_IMODE(directory.stat().st_mode) == 0o711
+            for directory in config_directories.values()
+        )
         assert all(
             stat.S_IMODE(path.stat().st_mode) == 0o444
             for path in observed_paths
@@ -889,15 +972,21 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         }
         # 合成配置里的两个假串必须都在脱敏名单里：它们会随容器日志与 inspect
         # 输出流过多处，漏掉一个就等于漏掉一整条泄露通道。
-        document = json.loads(config_file.read_text(encoding="utf-8"))
+        ai_document = json.loads(ai_file.read_text(encoding="utf-8"))
+        feishu_document = json.loads(feishu_file.read_text(encoding="utf-8"))
+        assert set(ai_document) == {"generation", "gemini"}
+        assert set(feishu_document) == {"generation", "feishu"}
         assert postgres.read_text(encoding="utf-8").strip() in session.sensitive_values
-        assert document["gemini"]["api_key"] in session.sensitive_values
-        assert document["feishu"]["app_secret"] in session.sensitive_values
-        assert str(config_file) not in session.sensitive_values
-        # 配置目录是独占的：postgres 口令与 override 文档都不在里面。
-        assert sorted(path.name for path in config_directory.iterdir()) == [
-            "integrations.json"
-        ]
+        assert ai_document["gemini"]["api_key"] in session.sensitive_values
+        assert feishu_document["feishu"]["app_secret"] in session.sensitive_values
+        assert not {str(ai_file), str(feishu_file)} & set(session.sensitive_values)
+        # 每个域目录都是独占的：只有本域的 config.json；resources 在 W4a 为空，
+        # postgres 口令、override 文档与兄弟域文件都不在里面。
+        assert {
+            domain: sorted(path.name for path in directory.iterdir())
+            for domain, directory in config_directories.items()
+        } == {"ai": ["config.json"], "feishu": ["config.json"], "resources": []}
+        observed_paths = (*observed_paths, *config_directories.values())
 
     run_smoke(
         docker="/usr/bin/docker",
@@ -931,29 +1020,46 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         document = json.loads(override.read_text(encoding="utf-8"))
         assert set(document["secrets"]) == {"postgres_password"}
         postgres = Path(document["secrets"]["postgres_password"]["file"])
-        config_mount, identity_mount = document["services"]["web-app"]["volumes"]
+        *config_mounts, identity_mount = document["services"]["web-app"]["volumes"]
         identity = Path(identity_mount["source"])
-        config_directory = Path(config_mount["source"])
-        assert session.config_source == config_directory
+        config_directories = {
+            mount["target"].rsplit("/", 1)[-1]: Path(mount["source"])
+            for mount in config_mounts
+        }
+        assert session.config_sources == config_directories
         assert {path.parent for path in (postgres, identity)} == {override.parent}
         assert {path.name for path in (postgres, identity)} == {
             "postgres_password",
             "feishu-identities.json",
         }
-        # 配置目录是**另一个**私有命名空间：与 postgres 口令同目录时，整目录挂载
-        # 会把那份口令也送进 worker 的 /run/xiaowei-config。
-        assert config_directory.parent == input_root
-        assert config_directory != override.parent
-        assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", config_directory.name)
+        # 每个配置域都是**另一个**私有命名空间：与 postgres 口令或兄弟域同目录时，
+        # 目录挂载会把那些文件也送进只该看到本域的容器。
+        assert len(set(config_directories.values())) == 3
+        for directory in config_directories.values():
+            assert directory.parent == input_root
+            assert directory != override.parent
+            assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", directory.name)
         assert identity_mount["target"] == "/run/config/feishu-identities.json"
         assert identity_mount["read_only"] is True
-        assert config_mount["target"] == "/run/xiaowei-config"
-        assert "read_only" not in config_mount  # web-app 是唯一可写的那一个
+        assert [mount["target"] for mount in config_mounts] == [
+            "/run/xiaowei-config/ai",
+            "/run/xiaowei-config/feishu",
+            "/run/xiaowei-config/resources",
+        ]
+        # web-app 是唯一可写的那一个。
+        assert all("read_only" not in mount for mount in config_mounts)
+        by_target = {mount["target"]: mount for mount in config_mounts}
+
+        def read_only(domain: str) -> dict[str, Any]:
+            return {**by_target[f"/run/xiaowei-config/{domain}"], "read_only": True}
+
         listener_volumes = document["services"]["feishu-listener"]["volumes"]
-        assert listener_volumes[1] == identity_mount
-        assert listener_volumes[0]["read_only"] is True
-        for name in ("worker", "channel-worker"):
-            assert document["services"][name]["volumes"] == [listener_volumes[0]]
+        assert listener_volumes == [read_only("feishu"), identity_mount]
+        assert document["services"]["channel-worker"]["volumes"] == [read_only("feishu")]
+        assert document["services"]["worker"]["volumes"] == [
+            read_only("ai"),
+            read_only("resources"),
+        ]
         assert "api" not in document["services"]
         override_text = override.read_text(encoding="utf-8")
         assert all(value not in override_text for value in session.sensitive_values)
@@ -1085,8 +1191,8 @@ def test_smoke_input_bundle_preserves_the_first_error_when_cleanup_also_raises(
 
     assert caught.value is primary_error
     assert caught.value.__notes__ == ["SMOKE_INPUT_CLEANUP_FAILED"]
-    # 两个私有命名空间（输入 + 配置目录）各清一次，诊断仍只有一条。
-    assert cleanup_calls == 2
+    # 四个私有命名空间（输入 + 三个配置域）各清一次，诊断仍只有一条。
+    assert cleanup_calls == 4
     assert list(input_root.iterdir()) == []
 
 
@@ -1126,8 +1232,8 @@ def test_smoke_input_bundle_cleanup_preserves_a_note_rejecting_base_error(
 
     assert caught.value is primary_error
     assert primary_error.attempted_notes == ["SMOKE_INPUT_CLEANUP_FAILED"]
-    # 两个私有命名空间各清一次；拒绝挂 note 的异常上也只尝试挂一次。
-    assert cleanup_calls == 2
+    # 四个私有命名空间各清一次；拒绝挂 note 的异常上也只尝试挂一次。
+    assert cleanup_calls == 4
     assert list(input_root.iterdir()) == []
 
 

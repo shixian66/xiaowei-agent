@@ -686,10 +686,16 @@ Secrets are mounted only through fixed file references resolved by a trusted com
 root. API and Web publish only loopback ports in the base Compose file; PostgreSQL, task
 worker, listener and channel worker publish no host ports.
 
-**Provider 凭据与进程权限契约（ADR-015 RI5 修订）**：Provider 凭据不走 Docker secret。
-Gemini 与飞书的明文唯一真源是宿主 Git-ignored 的 `.config/integrations.json`，容器内以
-`/run/xiaowei-config/integrations.json` 出现：`web-app` 读写挂载该目录，实际需要凭据的进程
-只读挂载，`api` 不挂载。模型 override 只剩装配开关，在 `services.worker.environment` 下声明
+**Provider 凭据与进程权限契约（ADR-015 RI5 修订，W4a 三域化）**：Provider 凭据不走 Docker secret。
+配置分为 `ConfigDomain` 闭集 `ai` / `feishu` / `resources` 三个固定域，每域一个宿主 Git-ignored
+目录、一份固定文件与一个独立 `generation`：Gemini 在 `/run/xiaowei-config/ai/config.json`，飞书在
+`/run/xiaowei-config/feishu/config.json`，`resources` 在 W4a 只预留目录与挂载、没有文档契约。
+Compose 只挂域目录、从不挂父目录：`web-app` 三域读写；`worker` 只读 `ai` 与 `resources`；
+`feishu-listener` / `channel-worker` 只读 `feishu`；`api` / `migrate` / `postgres` 不挂任何域。
+每个进程只读取自己消费的域、只为 `(service, domain)` 签加载回执，不替兄弟进程作证。
+旧单文件 `.config/integrations.json` 只是 `interfaces/integration_config_migrate.py` 的一次性迁移输入：
+运行时不双读、不回落、不自动迁移；旧文件仍在时预检固定报 `migration_required`，迁移器遇到新旧内容
+不一致同样返回 `migration_required` 且不覆盖任何一边。模型 override 只剩装配开关，在 `services.worker.environment` 下声明
 `XIAOWEI_GEMINI_ENABLED=true`；共享的 `x-app-environment` anchor 与所有非 worker 服务都不带
 该 flag。
 
@@ -700,8 +706,23 @@ application setting is default-false
 RI3 fixes Developer API `v1beta` and canonical origin
 `https://generativelanguage.googleapis.com`.
 W2 将任务工作台与配置面分开：`/app` 及其静态脚本不含 Provider 配置表单或配置请求；
-本地 Admin 只经 `/admin/api/config*` 读取、保存、清除和测试配置，并继续受强制改密、认证来源、
-Origin、CSRF 与 JSON body 上限约束。飞书 Admin 只能读取独立的
+本地 Admin 只经 `/admin/api/config/{ai,feishu}` 按域读取与保存、经 `…/clear` 显式确认清除、经
+`/admin/api/config/test/*` 测试配置，并继续受强制改密、认证来源、Origin、CSRF 与 JSON body 上限约束。
+**配置写入契约（W4a）**：`application/integration_config_service.py` 的 `IntegrationConfigService` 是
+唯一配置写服务，只依赖 application 定义的窄 `IntegrationConfigRepository` port；文件 adapter
+`interfaces/integration_config_repository.py` 由 web-app composition root 装配，`_conformance.py`
+静态锚定其结构兼容，application 不反向 import interfaces，consumer 进程不装入写服务。同一实例用
+`asyncio.Lock` 串行化 read-modify-write，同域并发保存的 `generation` 连续且不丢更新。每次保存、清除
+与连接测试都是两阶段 Admin 审计：先写 `STARTED`（写不进即 503 且不动文件），再执行动作，最后写
+`SUCCEEDED`/`FAILED`；operation id 只由服务端 `trusted_trace_id()` 派生并带 `w4:` 前缀，客户端不能
+提供。Secret 缺省表示保留，`null`/空串拒绝，清除只走独立确认动作。OAuth 连接测试的 state 经
+`web_oauth_test_contexts`（`rev_0018`）绑定到其 `STARTED` operation id 与被测飞书 `config_generation`，与登录
+context 互不消费；开始测试前除凭据须在当前代次通过外，`(web, feishu)` 加载回执也必须是当前代次的
+`loaded`（交换 code 的是 Web 启动期装配的 adapter）；回调交换 code 前再核对当前文件代次、Web 已加载代次与
+绑定代次三者相等，任一漂移即写 `FAILED` 且不交换、不记结果，结果只记到绑定代次。state 无效或过期时保留
+`STARTED`，state 已消费而 Admin session 失效时不调用 Provider 并写 `FAILED`。
+`rev_0018` 同时把 `service_config_state.provider` 改名为 `config_domain`（`gemini`→`ai`），其 downgrade
+遇到 W4a 审计事实、OAuth test context 或 `resources` 回执时在任何 DDL 之前拒绝。飞书 Admin 只能读取独立的
 `/admin/api/integration-status` 脱敏投影，不能复用 raw config DTO；旧
 `/app/api/config*` 路径不保留兼容入口。OAuth 连接测试完成后回到 `/admin`，仍不签发或轮换
 Session，也不改变身份、激活与真实调用授权。
@@ -717,7 +738,8 @@ real-application, credential, network, deployment and canary authorization exist
 this topology must not be described as an activated channel or model.
 
 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 的 RI5 修订 R1
-规定 `.config/integrations.json` 与镜像内 UID/GID `10001:10001`；实施与运行证据见 handoff。
+规定了当时的单文件 `.config/integrations.json` 与镜像内 UID/GID `10001:10001`；W4a 按已批准的
+三域矩阵替换单文件形态，UID/GID 不变；实施与运行证据见 handoff。
 
 基础 Compose 继续只发布 loopback 端口，局域网发布只能由独立 override 打开。
 **2026-09-20 修订**：`ADR-014` Web 产品修订 R2 取消了"首次强制改密必须在 loopback 阶段完成"

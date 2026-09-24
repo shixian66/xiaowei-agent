@@ -123,6 +123,7 @@ def _app(web, settings: Settings):
         local_admin_auth=web.local_admin_auth,
         oauth_available=web.oauth_available,
         provider_state=web.provider_state,
+        integration_config=web.integration_config_service,
         settings=settings,
         readiness=web.readiness,
         task_access=web.task_access_service,

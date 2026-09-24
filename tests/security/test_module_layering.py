@@ -117,8 +117,20 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
-    "interfaces/integration_config_file.py": {
+    # 三域文件边界：consumer 进程也 import 它，所以**不得**依赖 application——
+    # 否则只读域文件的 listener/worker 会顺带装入配置写服务。
+    "interfaces/integration_config_file.py": {"xiaowei_agent.contracts"},
+    # 文件 adapter 实现 application 定义的窄 port：只允许 interfaces → application
+    # 这一个方向，application 绝不反向 import 它；只有 web-app 装配它。
+    "interfaces/integration_config_repository.py": {
+        "xiaowei_agent.application",
         "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
+    # 一次性迁移器：只读写本地文件，不碰数据库、网络或任何服务装配。
+    "interfaces/integration_config_migrate.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
     },
     "interfaces/config_preflight.py": {
         "xiaowei_agent.contracts",

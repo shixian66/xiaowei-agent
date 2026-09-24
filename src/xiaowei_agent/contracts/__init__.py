@@ -191,6 +191,9 @@ from xiaowei_agent.contracts.ids import (
     TaskId,
 )
 from xiaowei_agent.contracts.integration_config import (
+    AiConfig,
+    ConfigDomain,
+    FeishuConfig,
     FeishuIntegration,
     GeminiIntegration,
     IntegrationConfig,
@@ -231,6 +234,7 @@ from xiaowei_agent.contracts.promql_surface import (
 from xiaowei_agent.contracts.provider_state import (
     LoadReceipt,
     LoadStatus,
+    ReceiptKey,
     TestResult,
     TestStatus,
 )
@@ -323,6 +327,7 @@ __all__ = [
     "AdmissionCertificate",
     "AdvisoryModelResult",
     "AgentError",
+    "AiConfig",
     "AlwaysTrue",
     "AnswerabilityVerdict",
     "ApprovalRequest",
@@ -351,6 +356,7 @@ __all__ = [
     "ClarificationReasonCode",
     "ClarificationRecord",
     "ClarificationSubject",
+    "ConfigDomain",
     "ConfirmedSlot",
     "ConfirmedTextValue",
     "ConfirmedTimeRangeValue",
@@ -375,6 +381,7 @@ __all__ = [
     "ExternalInput",
     "ExternalInputKind",
     "ExternalSource",
+    "FeishuConfig",
     "FeishuIntegration",
     "FeishuProjectionInput",
     "FiniteFloat",
@@ -430,6 +437,7 @@ __all__ = [
     "ReadClass",
     "ReadinessProbe",
     "ReadinessReport",
+    "ReceiptKey",
     "RejectActivationCommand",
     "Rejection",
     "RenderPayload",

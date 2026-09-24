@@ -33,6 +33,7 @@ from xiaowei_agent.contracts.enums import (
     AdminAuditOutcome,
     AdminAuditReasonCode,
     AdminAuditTargetKind,
+    ConfigDomain,
     IdentitySource,
     ProductRole,
     UserStatus,
@@ -553,6 +554,34 @@ WEB_OAUTH_LOGIN_CONTEXTS: Final = sa.Table(
 )
 """登录域 state 的闭集返回意图；state 收割时由外键级联删除。"""
 
+WEB_OAUTH_TEST_CONTEXTS: Final = sa.Table(
+    "web_oauth_test_contexts",
+    METADATA,
+    sa.Column("state_digest", sa.CHAR(64), primary_key=True),
+    sa.Column("operation_id", sa.Text, nullable=False),
+    sa.Column("config_generation", sa.Integer, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["state_digest"],
+        ["web_oauth_states.state_digest"],
+        name="fk_web_oauth_test_contexts_state_digest",
+        ondelete="CASCADE",
+    ),
+    sa.UniqueConstraint("operation_id", name="uq_web_oauth_test_contexts_operation_id"),
+    sa.CheckConstraint(
+        "left(operation_id, 3) = 'w4:' AND char_length(operation_id) <= 64",
+        name="ck_web_oauth_test_contexts_operation_id_shape",
+    ),
+    sa.CheckConstraint(
+        "config_generation > 0",
+        name="ck_web_oauth_test_contexts_config_generation_positive",
+    ),
+)
+"""W4a OAuth 连接测试 state、其审计 operation id 与被测飞书配置代次；state 收割时由外键级联删除。
+
+与 ``web_oauth_login_contexts`` 是两张表：登录分支只认登录 context，测试分支只认测试
+context，两者互不回退。只保存 state 摘要与服务端派生的 ``w4:`` operation id。
+"""
+
 WEB_SESSIONS: Final = sa.Table(
     "web_sessions",
     METADATA,
@@ -603,11 +632,29 @@ LOCAL_ADMINS: Final = sa.Table(
 )
 """本地管理员；CHECK 把表锁成最多一行，不存在"第二个管理员"这种状态。"""
 
+def _closed_set(column: str, values: Iterable[str]) -> str:
+    """把一个闭集枚举渲染成 CHECK 的 ``IN`` 列表。
+
+    从枚举生成而不是手抄：手抄的那份不会随枚举增长，于是新增一个成员会在数据库
+    层被拒绝，而契约层照常放行——两层给出不同答案时，症状是一条写入在真实库上
+    失败、在内存实现上成功。
+
+    ``sorted`` 是为了 DDL 稳定：集合迭代序会变，而 ``schema.py`` 与迁移必须逐字
+    相等（``tests/contract/test_schema_matches_migration.py``）。
+    """
+    listed = ", ".join(f"'{value}'" for value in sorted(values))
+    return f"{column} IN ({listed})"
+
+
+def _nullable_closed_set(column: str, values: Iterable[str]) -> str:
+    return f"{column} IS NULL OR {_closed_set(column, values)}"
+
+
 SERVICE_CONFIG_STATE: Final = sa.Table(
     "service_config_state",
     METADATA,
     sa.Column("service_name", sa.Text, primary_key=True),
-    sa.Column("provider", sa.Text, primary_key=True),
+    sa.Column("config_domain", sa.Text, primary_key=True),
     sa.Column("loaded_generation", sa.Integer, nullable=False),
     sa.Column("load_status", sa.Text, nullable=False),
     sa.Column("loaded_at", sa.DateTime(timezone=True), nullable=False),
@@ -619,8 +666,15 @@ SERVICE_CONFIG_STATE: Final = sa.Table(
         "load_status IN ('loaded', 'invalid')",
         name="ck_service_config_state_status_closed",
     ),
+    sa.CheckConstraint(
+        _closed_set("config_domain", (member.value for member in ConfigDomain)),
+        name="ck_service_config_state_domain_closed",
+    ),
 )
-"""各进程的加载回执。
+"""各进程的加载回执，按 ``(service_name, config_domain)`` 键控（W4a ``rev_0018``）。
+
+``config_domain`` 的闭集一次接纳 ``ai/feishu/resources`` 三域：W4b 不必只为扩一个
+闭集再造 migration。
 
 ``invalid`` 表示"读到了这一代但没读成"。它与"缺回执"一样落到 PENDING_RESTART，
 不产生第六个页面状态；该列只供页面显示原因提示。文件缺失或整体损坏时读不出
@@ -660,24 +714,6 @@ PROVIDER_TEST_STATE: Final = sa.Table(
     ),
 )
 """控制面探针结果；通过与错误码互斥由 CHECK 保证，不靠调用方自觉。"""
-
-def _closed_set(column: str, values: Iterable[str]) -> str:
-    """把一个闭集枚举渲染成 CHECK 的 ``IN`` 列表。
-
-    从枚举生成而不是手抄：手抄的那份不会随枚举增长，于是新增一个成员会在数据库
-    层被拒绝，而契约层照常放行——两层给出不同答案时，症状是一条写入在真实库上
-    失败、在内存实现上成功。
-
-    ``sorted`` 是为了 DDL 稳定：集合迭代序会变，而 ``schema.py`` 与迁移必须逐字
-    相等（``tests/contract/test_schema_matches_migration.py``）。
-    """
-    listed = ", ".join(f"'{value}'" for value in sorted(values))
-    return f"{column} IN ({listed})"
-
-
-def _nullable_closed_set(column: str, values: Iterable[str]) -> str:
-    return f"{column} IS NULL OR {_closed_set(column, values)}"
-
 
 USER_ACCOUNTS: Final = sa.Table(
     "user_accounts",
@@ -1023,6 +1059,7 @@ ALL_TABLES: Final = (
     PROJECTION_SUBSCRIPTIONS,
     WEB_OAUTH_STATES,
     WEB_OAUTH_LOGIN_CONTEXTS,
+    WEB_OAUTH_TEST_CONTEXTS,
     WEB_SESSIONS,
     LOCAL_ADMINS,
     SERVICE_CONFIG_STATE,

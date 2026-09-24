@@ -58,6 +58,7 @@ from xiaowei_agent.persistence.schema import (
     USER_ROLE_ASSIGNMENTS,
     WEB_OAUTH_LOGIN_CONTEXTS,
     WEB_OAUTH_STATES,
+    WEB_OAUTH_TEST_CONTEXTS,
 )
 
 _DIGEST_LENGTH = 64
@@ -129,6 +130,7 @@ def test_new_tables_are_registered_in_all_tables() -> None:
         EXTERNAL_IDENTITIES,
         ADMIN_AUDIT_EVENTS,
         WEB_OAUTH_LOGIN_CONTEXTS,
+        WEB_OAUTH_TEST_CONTEXTS,
     } <= set(ALL_TABLES)
 
 
@@ -188,6 +190,41 @@ def test_login_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> N
         "ck_web_oauth_login_contexts_kind_closed",
         "ck_web_oauth_login_contexts_intent_shape",
     } <= _check_names(WEB_OAUTH_LOGIN_CONTEXTS)
+
+
+def test_test_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> None:
+    """W4a：OAuth 测试 state 只保存 state digest、审计 operation id 与被测配置代次。
+
+    它与登录 context 是两张表、两个外键：登录分支不能消费测试 state，测试分支也不能
+    消费登录 state。``operation_id`` 全局唯一——一次 STARTED 最多绑定一个 state。
+    """
+    assert _primary_key(WEB_OAUTH_TEST_CONTEXTS) == ("state_digest",)
+    assert {column.name for column in WEB_OAUTH_TEST_CONTEXTS.c} == {
+        "state_digest",
+        "operation_id",
+        "config_generation",
+    }
+    assert WEB_OAUTH_TEST_CONTEXTS.c.operation_id.nullable is False
+    assert WEB_OAUTH_TEST_CONTEXTS.c.config_generation.nullable is False
+    assert (
+        _check_text(
+            WEB_OAUTH_TEST_CONTEXTS, "ck_web_oauth_test_contexts_config_generation_positive"
+        )
+        == "config_generation > 0"
+    )
+    foreign_keys = tuple(WEB_OAUTH_TEST_CONTEXTS.foreign_key_constraints)
+    assert len(foreign_keys) == 1
+    assert tuple(element.target_fullname for element in foreign_keys[0].elements) == (
+        f"{WEB_OAUTH_STATES.name}.state_digest",
+    )
+    assert foreign_keys[0].ondelete == "CASCADE"
+    assert frozenset({"operation_id"}) in _global_unique_column_sets(
+        WEB_OAUTH_TEST_CONTEXTS
+    )
+    shape = _check_text(
+        WEB_OAUTH_TEST_CONTEXTS, "ck_web_oauth_test_contexts_operation_id_shape"
+    )
+    assert "'w4:'" in shape and "64" in shape
 
 
 def test_activation_request_has_one_pending_subject_per_scope() -> None:
