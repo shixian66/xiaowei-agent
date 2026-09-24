@@ -775,6 +775,8 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "identity_directory",
         "activation_service",
         "admin_identity_service",
+        # W4a：唯一配置写服务；只写本地配置文件与管理审计，不持有执行面。
+        "integration_config_service",
         "task_access_service",
         "submission_service",
         "clock",

@@ -432,7 +432,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .config-notice { margin: 0; padding: 10px 14px; border-radius: 12px; background: var(--brand-soft, #eef2ff); font-size: 13px; }
 .config-card { display: flex; flex-direction: column; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; }
 .config-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.config-card-head h3 { margin: 0; font-size: 16px; }
+.config-card-head h3 { flex: 1; margin: 0; font-size: 16px; }
+.config-pending { margin: 0; padding: 8px 12px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted, #6b7280); font-size: 13px; }
 .config-flag { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
 .config-fixed { display: flex; flex-wrap: wrap; gap: 18px; margin: 0; font-size: 13px; }
 .config-fixed dt { color: var(--muted, #6b7280); font-size: 12px; }

@@ -23,7 +23,6 @@ from xiaowei_agent.contracts import (
     ExecutionDisclosure,
     NonEmptyText,
     ProductRole,
-    ProviderName,
     RenderPayload,
     SecretRef,
     StrictInt,
@@ -191,8 +190,8 @@ class _ConfigUpdate(_WebModel):
     """保存请求里"未携带 = 保留原值"这条语义的共同约束。
 
     显式 ``null`` 与空串一样被拒绝：两者都是"用一个取值暗示清除"，而清除只能走
-    ``POST /admin/api/config/clear``。规则写在基类上，新增字段自动继承——写在每个
-    字段上迟早会漏掉一个。
+    ``POST /admin/api/config/{domain}/clear`` 的显式确认动作。规则写在基类上，新增字段
+    自动继承——写在每个字段上迟早会漏掉一个。
     """
 
     @model_validator(mode="after")
@@ -203,34 +202,24 @@ class _ConfigUpdate(_WebModel):
 
 
 class WebGeminiConfigUpdate(_ConfigUpdate):
-    """Gemini 的可编辑字段。模型、端点、API 版本是代码常量，不在这里。"""
+    """``PUT /admin/api/config/ai`` 的请求体。模型、端点、API 版本是代码常量，不在这里。"""
 
     enabled: bool | None = None
     api_key: SecretRef | None = Field(default=None, exclude=True, repr=False)
 
 
 class WebFeishuConfigUpdate(_ConfigUpdate):
-    """飞书的可编辑字段。"""
+    """``PUT /admin/api/config/feishu`` 的请求体。"""
 
     enabled: bool | None = None
     app_id: ConfigText | None = None
     app_secret: SecretRef | None = Field(default=None, exclude=True, repr=False)
 
 
-class WebConfigUpdateRequest(_ConfigUpdate):
-    """一次保存请求；两个 Provider 都可以整段不携带。"""
-
-    gemini: WebGeminiConfigUpdate | None = None
-    feishu: WebFeishuConfigUpdate | None = None
-
-
 class WebConfigClearRequest(_WebModel):
-    """显式清除某个 Provider 的全部配置。"""
+    """显式清除一个域的全部配置；域由路径决定，请求体只承载二次确认。"""
 
-    # 闭集仍然是 ``ProviderName``；只在这一个字段上放开 ``strict``。模型整体
-    # ``strict=True`` 时枚举只接受枚举实例，而请求体里来的必然是 JSON 字符串——
-    # 不放开就没有任何合法请求。改用 ``Literal`` 会把同一个闭集抄成第二份。
-    provider: ProviderName = Field(strict=False)
+    confirm: AlwaysTrue
 
 
 class WebGeminiConfigView(_WebModel):
@@ -248,37 +237,51 @@ class WebFeishuConfigView(_WebModel):
     app_id: StrictStr | None
 
 
-class WebConfigChecks(_WebModel):
-    """三个测试项的页面状态。
-
-    写成三个字段而不是一个 ``dict``：测试项是闭集，模型本身就是那份闭集，
-    多一项少一项都会在这里变红。
-    """
+class WebAiConfigChecks(_WebModel):
+    """AI 域唯一的测试项。写成字段而不是 ``dict``：测试项是闭集。"""
 
     gemini_connection: ProviderDisplayState
+
+
+class WebFeishuConfigChecks(_WebModel):
+    """飞书域的两个测试项：凭据与 OAuth 回调是两条独立链路。"""
+
     feishu_credentials: ProviderDisplayState
     feishu_oauth: ProviderDisplayState
 
 
-class WebConfigView(_WebModel):
-    """``GET /admin/api/config`` 的完整响应。
+class WebAiConfigView(_WebModel):
+    """``GET /admin/api/config/ai``。``generation`` 为 ``0`` 表示域文件尚不存在。
 
-    ``generation`` 为 ``0`` 表示文件尚不存在——干净部署的正常起点，不是错误。
+    ``pending_restart_services`` 只列本次部署需要该域、却还没报告当前代次 ``loaded``
+    的服务名；它不含任何配置值。
     """
 
+    domain: Literal["ai"] = "ai"
     generation: StrictInt
     gemini: WebGeminiConfigView
+    checks: WebAiConfigChecks
+    pending_restart_services: tuple[StrictStr, ...]
+
+
+class WebFeishuDomainConfigView(_WebModel):
+    """``GET /admin/api/config/feishu``；与 AI 域是两份独立的投影与代次。"""
+
+    domain: Literal["feishu"] = "feishu"
+    generation: StrictInt
     feishu: WebFeishuConfigView
-    checks: WebConfigChecks
+    checks: WebFeishuConfigChecks
+    pending_restart_services: tuple[StrictStr, ...]
 
 
 class WebConfigSaved(_WebModel):
-    """保存与清除的成功响应。
+    """保存与清除的成功响应：只点名**被写的那一个域**与它的新代次。
 
     ``restart_required`` 恒为真：Web 只写文件，不重启任何进程，也不挂
     ``docker.sock``。配置生效需要宿主机执行一次 Compose 重启。
     """
 
+    domain: Literal["ai", "feishu"]
     generation: StrictInt
     restart_required: bool
 

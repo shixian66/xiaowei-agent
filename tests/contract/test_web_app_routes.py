@@ -14,6 +14,7 @@ import httpx
 import pytest
 import uvicorn
 from tests.fakes.admin_identity import UnusedAdminIdentity
+from tests.fakes.integration_config import AbsentIntegrationConfig
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
 from xiaowei_agent.application.identity_activation import IdentityActivationService
@@ -210,6 +211,7 @@ def _web_app(
             clock=clock,
             policy_revision="policy-2026-09-01",
             provider_state=EmptyProviderState(),
+            integration_config=AbsentIntegrationConfig(),
             admin_identity=UnusedAdminIdentity(),
         ),
         oauth,
@@ -479,10 +481,13 @@ async def test_operator_cannot_read_raw_admin_configuration(
     app, oauth = _web_app(clock, memory_state, role=ProductRole.OPERATOR)
     async with _client(app) as client:
         assert (await _login_for(client, oauth, intent="workbench")).status_code == 302
-        response = await client.get("/admin/api/config")
+        responses = [
+            await client.get(f"/admin/api/config/{domain}") for domain in ("ai", "feishu")
+        ]
 
-    assert response.status_code == 403
-    assert response.json() == {"error": {"code": "forbidden"}}
+    for response in responses:
+        assert response.status_code == 403
+        assert response.json() == {"error": {"code": "forbidden"}}
 
 
 async def test_user_can_only_receive_a_safe_task_detail_session(
@@ -504,9 +509,10 @@ async def test_user_can_only_receive_a_safe_task_detail_session(
         assert (await client.get("/app/tasks/task-1")).status_code == 200
         assert (await client.get("/app/api/tasks")).status_code == 403
         assert (await client.post("/app/api/tasks", json={})).status_code == 403
-        raw_config = await client.get("/admin/api/config")
-        assert raw_config.status_code == 403
-        assert raw_config.json() == {"error": {"code": "forbidden"}}
+        for domain in ("ai", "feishu"):
+            raw_config = await client.get(f"/admin/api/config/{domain}")
+            assert raw_config.status_code == 403
+            assert raw_config.json() == {"error": {"code": "forbidden"}}
 
 
 async def test_feishu_admin_reads_only_the_redacted_integration_projection(
@@ -551,7 +557,8 @@ async def test_feishu_admin_reads_only_the_redacted_integration_projection(
             "error_code",
         ):
             assert forbidden not in serialized.lower()
-        assert (await client.get("/admin/api/config")).status_code == 403
+        for domain in ("ai", "feishu"):
+            assert (await client.get(f"/admin/api/config/{domain}")).status_code == 403
 
 
 async def test_duplicate_callback_parameters_are_rejected_before_exchange(
@@ -725,9 +732,12 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         ("POST", "/login/api/login"),
         ("POST", "/login/api/change-password"),
         ("GET", "/admin/api/integration-status"),
-        ("GET", "/admin/api/config"),
-        ("PUT", "/admin/api/config"),
-        ("POST", "/admin/api/config/clear"),
+        ("GET", "/admin/api/config/ai"),
+        ("PUT", "/admin/api/config/ai"),
+        ("POST", "/admin/api/config/ai/clear"),
+        ("GET", "/admin/api/config/feishu"),
+        ("PUT", "/admin/api/config/feishu"),
+        ("POST", "/admin/api/config/feishu/clear"),
         # 字面量在前、路径参数在后：Starlette 按注册顺序匹配，反过来会让
         # feishu_oauth 落进凭据探针那条分支。
         ("POST", "/admin/api/config/test/feishu_oauth"),
@@ -1108,6 +1118,7 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         task_access_service = object()
         submission_service = object()
         admin_identity_service = UnusedAdminIdentity()
+        integration_config_service = AbsentIntegrationConfig()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0
@@ -1504,6 +1515,7 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
         task_access_service = object()
         submission_service = object()
         admin_identity_service = UnusedAdminIdentity()
+        integration_config_service = AbsentIntegrationConfig()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0

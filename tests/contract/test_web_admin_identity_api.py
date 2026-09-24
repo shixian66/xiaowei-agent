@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.integration_config import AbsentIntegrationConfig
 from tests.fakes.web_auth import EmptyProviderState
 
 from xiaowei_agent.application.admin_identity import (
@@ -241,6 +242,7 @@ def _app(
         clock=lambda: _NOW,
         policy_revision="policy-2026-09-01",
         provider_state=EmptyProviderState(),
+        integration_config=AbsentIntegrationConfig(),
         admin_identity=service,  # type: ignore[arg-type]
     )
 
@@ -369,10 +371,10 @@ async def test_local_and_feishu_admins_share_identity_routes_but_not_raw_config(
         local_users = await local.get("/admin/api/users")
     async with _client(app, cookie=_FEISHU_COOKIE) as feishu:
         feishu_users = await feishu.get("/admin/api/users")
-        raw_config = await feishu.get("/admin/api/config")
+        raw_config = [await feishu.get(f"/admin/api/config/{d}") for d in ("ai", "feishu")]
 
     assert local_users.status_code == feishu_users.status_code == 200
-    assert raw_config.status_code == 403
+    assert [response.status_code for response in raw_config] == [403, 403]
     local_actor = service.calls[0][1]["actor"]
     feishu_actor = service.calls[1][1]["actor"]
     assert local_actor.user_id == LOCAL_ADMIN_USER_ID

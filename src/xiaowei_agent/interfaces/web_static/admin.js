@@ -35,9 +35,21 @@ const PROBE_ERROR = Object.freeze({
   invalid_response: "响应不合法",
 });
 
+const DOMAIN_LABELS = Object.freeze({ ai: "AI 配置", feishu: "飞书配置" });
+
+const SERVICE_LABELS = Object.freeze({
+  worker: "任务 worker",
+  feishu_listener: "飞书 listener",
+  channel_worker: "渠道 worker",
+  web: "Web",
+});
+
 const configElements = Object.freeze({
   panel: document.querySelector("#config-panel"),
-  generation: document.querySelector("#config-generation"),
+  aiGeneration: document.querySelector("#ai-generation"),
+  feishuGeneration: document.querySelector("#feishu-generation"),
+  aiPending: document.querySelector("#ai-pending"),
+  feishuPending: document.querySelector("#feishu-pending"),
   restartNotice: document.querySelector("#config-restart-notice"),
   message: document.querySelector("#config-message"),
   geminiModel: document.querySelector("#gemini-model"),
@@ -87,7 +99,7 @@ const SOURCE_LABELS = Object.freeze({ local_admin: "本地管理员", feishu: "�
 const ACTIVATION_SOURCE_LABELS = Object.freeze({ web_login: "Web 登录", safe_task_link: "结果链接", feishu_group: "飞书群" });
 const AUDIT_OUTCOME_LABELS = Object.freeze({ started: "进行中", succeeded: "成功", denied: "拒绝", failed: "失败" });
 const TARGET_KIND_LABELS = Object.freeze({ user: "用户", activation: "激活申请", duty_binding: "值班绑定", config: "配置", task_content: "任务内容" });
-const AUDIT_REASON_LABELS = Object.freeze({ actor_not_admin: "操作人不是管理员", auth_source_not_allowed: "认证来源不允许", target_not_found: "目标不存在", scope_mismatch: "作用域不匹配", conflict: "数据已变化", audit_unwritable: "审计不可写" });
+const AUDIT_REASON_LABELS = Object.freeze({ actor_not_admin: "操作人不是管理员", auth_source_not_allowed: "认证来源不允许", target_not_found: "目标不存在", scope_mismatch: "作用域不匹配", conflict: "数据已变化", audit_unwritable: "审计不可写", config_invalid: "配置文件无效", file_io_failed: "配置文件写入失败", probe_failed: "测试未通过", session_invalid: "会话已失效" });
 
 const identityState = {
   users: [],
@@ -464,75 +476,117 @@ function renderChecks(checks) {
   }
 }
 
-function renderConfig(view) {
-  configElements.generation.textContent = `代次 ${view.generation}`;
+function pendingText(services) {
+  if (!Array.isArray(services) || services.length === 0) return "";
+  return `待重启生效：${services.map((name) => SERVICE_LABELS[name] || name).join("、")}`;
+}
+
+function renderPending(element, services) {
+  const value = pendingText(services);
+  element.textContent = value;
+  setVisible(element, value.length > 0);
+}
+
+function renderConfig(ai, feishu) {
+  configElements.aiGeneration.textContent = `代次 ${ai.generation}`;
+  configElements.feishuGeneration.textContent = `代次 ${feishu.generation}`;
   configElements.geminiModel.textContent = GEMINI_FIXED.model;
   configElements.geminiApiVersion.textContent = GEMINI_FIXED.apiVersion;
   configElements.geminiOrigin.textContent = GEMINI_FIXED.origin;
   configElements.feishuCallback.textContent = `${window.location.origin}/oauth/feishu/callback`;
-  configElements.geminiConfigured.textContent = view.gemini.configured ? "已配置" : "未配置";
-  configElements.geminiEnabled.checked = view.gemini.enabled === true;
-  configElements.feishuConfigured.textContent = view.feishu.configured ? "已配置" : "未配置";
-  configElements.feishuEnabled.checked = view.feishu.enabled === true;
-  configElements.feishuAppId.value = text(view.feishu.app_id, "");
+  configElements.geminiConfigured.textContent = ai.gemini.configured ? "已配置" : "未配置";
+  configElements.geminiEnabled.checked = ai.gemini.enabled === true;
+  configElements.feishuConfigured.textContent = feishu.feishu.configured ? "已配置" : "未配置";
+  configElements.feishuEnabled.checked = feishu.feishu.enabled === true;
+  configElements.feishuAppId.value = text(feishu.feishu.app_id, "");
+  renderPending(configElements.aiPending, ai.pending_restart_services);
+  renderPending(configElements.feishuPending, feishu.pending_restart_services);
 
   // Secret 只进不出；每次渲染清空输入，避免无意把废弃值再次保存。
   configElements.geminiApiKey.value = "";
   configElements.feishuAppSecret.value = "";
 
-  renderChecks(view.checks);
+  renderChecks({ ...ai.checks, ...feishu.checks });
   for (const name of CHECK_NAMES) {
-    const provider = name === "gemini_connection" ? view.gemini : view.feishu;
+    const provider = name === "gemini_connection" ? ai.gemini : feishu.feishu;
     document.querySelector(`#test-${name}`).disabled =
       provider.enabled !== true || provider.configured !== true;
   }
 }
 
 async function loadConfig() {
-  const view = await requestJson("/admin/api/config");
-  renderConfig(view);
+  const [ai, feishu] = await Promise.all([
+    requestJson("/admin/api/config/ai"),
+    requestJson("/admin/api/config/feishu"),
+  ]);
+  renderConfig(ai, feishu);
   setVisible(configElements.panel, true);
 }
 
-async function saveConfig(body) {
+function showSaved(saved) {
+  // 只点名被写的那一个域：一次保存从不意味着"两域都已保存"。
+  const label = DOMAIN_LABELS[saved.domain] || "配置";
+  configElements.restartNotice.textContent =
+    `${label}已保存为代次 ${saved.generation}。新配置需要在宿主机重启对应进程后才会生效。`;
+  setVisible(configElements.restartNotice, saved.restart_required === true);
+}
+
+async function saveConfig(domain, body) {
   setConfigMessage("");
+  setVisible(configElements.restartNotice, false);
   try {
-    const saved = await requestJson("/admin/api/config", {
+    const saved = await requestJson(`/admin/api/config/${domain}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
       body: JSON.stringify(body),
     });
-    setVisible(configElements.restartNotice, saved.restart_required === true);
-    await loadConfig();
+    showSaved(saved);
   } catch (error) {
     setConfigMessage(error.code === "unavailable"
-      ? "配置文件当前不可读写，已保存的配置未被修改。"
+      ? "配置暂时无法保存，结果未知；请刷新后核对代次再决定是否重试。"
       : "保存被拒绝，配置未改变。");
   }
-}
-
-async function clearProvider(provider) {
-  setConfigMessage("");
+  // 结果不确定时也先重读：绝不自动重放写请求。
   try {
-    await requestJson("/admin/api/config/clear", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify({ provider }),
-    });
-    setVisible(configElements.restartNotice, true);
     await loadConfig();
   } catch (_) {
-    setConfigMessage("清除被拒绝，配置未改变。");
+    setConfigMessage("配置暂时无法读取，请稍后刷新。");
   }
 }
 
-function providerUpdate(provider) {
-  if (provider === "gemini") {
+async function clearDomain(domain) {
+  const label = DOMAIN_LABELS[domain] || "配置";
+  if (!window.confirm(`确认清除${label}？该域的凭据会被删除，其他配置域不受影响。`)) {
+    return;
+  }
+  setConfigMessage("");
+  setVisible(configElements.restartNotice, false);
+  try {
+    const saved = await requestJson(`/admin/api/config/${domain}/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ confirm: true }),
+    });
+    showSaved(saved);
+  } catch (error) {
+    setConfigMessage(error.code === "unavailable"
+      ? "清除结果未知；请刷新后核对代次。"
+      : "清除被拒绝，配置未改变。");
+  }
+  try {
+    await loadConfig();
+  } catch (_) {
+    setConfigMessage("配置暂时无法读取，请稍后刷新。");
+  }
+}
+
+function domainUpdate(domain) {
+  if (domain === "ai") {
     const update = { enabled: configElements.geminiEnabled.checked };
     if (configElements.geminiApiKey.value.length > 0) {
       update.api_key = configElements.geminiApiKey.value;
     }
-    return { gemini: update };
+    return update;
   }
   const update = { enabled: configElements.feishuEnabled.checked };
   if (configElements.feishuAppId.value.length > 0) {
@@ -541,7 +595,7 @@ function providerUpdate(provider) {
   if (configElements.feishuAppSecret.value.length > 0) {
     update.app_secret = configElements.feishuAppSecret.value;
   }
-  return { feishu: update };
+  return update;
 }
 
 async function runProviderTest(name) {
@@ -568,13 +622,13 @@ async function runProviderTest(name) {
 }
 
 document.querySelector("#save-gemini").addEventListener("click", () =>
-  saveConfig(providerUpdate("gemini")));
+  saveConfig("ai", domainUpdate("ai")));
 document.querySelector("#save-feishu").addEventListener("click", () =>
-  saveConfig(providerUpdate("feishu")));
+  saveConfig("feishu", domainUpdate("feishu")));
 document.querySelector("#clear-gemini").addEventListener("click", () =>
-  clearProvider("gemini"));
+  clearDomain("ai"));
 document.querySelector("#clear-feishu").addEventListener("click", () =>
-  clearProvider("feishu"));
+  clearDomain("feishu"));
 for (const name of CHECK_NAMES) {
   document.querySelector(`#test-${name}`).addEventListener("click", () =>
     runProviderTest(name));
