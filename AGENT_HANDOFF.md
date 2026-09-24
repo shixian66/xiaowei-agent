@@ -101,6 +101,24 @@ PR #77 合入 `4e488a48d6b0fe483ad3714970aecc7acc44c954`。切片 B 最终受审
 Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1440 管理壳、低于 1024 静态提示
 及确认对话框；这只是本地 UI 检查，不是正式浏览器 UAT。
 
+<a id="w4a-offline-candidate-evidence"></a>
+**W4a 离线候选证据**（实现与测试 head `71a53503e23431e4cea3dee124e6e42a57dac83e`，基线 `2cef6aa`；其后只追加本 handoff 文档提交）：
+本机 Python 3.11.16、依赖按 uv.lock，去掉代理环境变量运行。`python -m pytest -q` 为 `4674 passed, 411 skipped`，
+`python -m pytest -m security -q` 为 `1558 passed, 83 skipped`，`ruff check .` 与 `mypy src`（212 个源文件）通过；
+一次性 PostgreSQL 16.10 容器（仅 loopback、口令认证、用后删除）上全量为 `5085 passed`、零 skip，其中
+`tests/integration` 为 `413 passed`。锁定 hatchling 1.28.0 离线构建的 wheel 含新增的配置服务、文件 adapter、
+迁移器、预检、`rev_0018` 与 Admin 静态资源，且不含 tests/scripts。Compose smoke 在真实 Docker 中通过（`compose-smoke: passed`），
+逐容器核对三域挂载矩阵且清理干净；因本环境 TLS 代理，smoke 在同一提交的临时副本中执行，副本 Dockerfile **仅 builder 阶段**
+额外信任代理 CA 以安装 uv/依赖，运行阶段镜像、Compose 文件与 smoke 脚本未改——这是环境偏差，不等于仓库 Dockerfile 在该环境可直接构建；
+镜像构建访问了镜像仓库与依赖源，容器运行期未访问外网。四项隔离变异（`PYTHONDONTWRITEBYTECODE=1`）各自转红并恢复：
+恢复父目录挂载红在三域矩阵/父目录/override 扫描；恢复运行时旧文件回落红在 `test_the_legacy_combined_file_is_never_read`
+与（修复别名漏洞后的）旧引用 AST 扫描；STARTED 写失败后继续写文件红在 `test_started_failure_never_touches_the_file`；
+替兄弟签回执红在 `test_no_process_signs_a_receipt_for_a_sibling` 与域边界安全测试。本机 Chromium 以真实 `create_app`、
+内存存储与临时三域目录（loopback、假 Key，身份三块为空替身）核对 1440/1280/1024 管理页、低于 1024 提示与清除确认对话框。
+已知未覆盖：CI 结果以 PR 为准；集成状态概览在保存后不自动刷新（基线同样如此）；按「unit 早于 security」的非标准顺序运行时
+`tests/unit/test_log.py` 会残留 logger 状态使 5 条飞书日志用例失败，基线 `2cef6aa` 同样复现，标准入口不受影响。
+这些只是离线证据：没有真实环境配置迁移、部署、canary、真实 Provider 调用或用户验收。
+
 ## 1. 当前基线
 
 | 项目 | 当前值 |
