@@ -404,9 +404,10 @@ async def test_an_update_that_does_not_fit_the_stored_kind_is_rejected(
     )
 
 
-async def test_switching_prometheus_auth_drops_the_fields_the_new_mode_forbids(
+async def test_switching_between_secret_bearing_auth_modes_keeps_the_secret(
     harness: _Harness,
 ) -> None:
+    """bearer → basic 是普通修改：存量 Secret 保留，只有 username 随认证方式出现/消失。"""
     await _create_two(harness)
     await harness.service.update_resource(
         actor=_local_admin(),
@@ -421,15 +422,111 @@ async def test_switching_prometheus_auth_drops_the_fields_the_new_mode_forbids(
         "grafana",
         _TOKEN,
     )
-    await harness.service.update_resource(
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        ResourceUpdate(auth_mode="none"),
+        ResourceUpdate(auth_mode="none", display_name="改名"),
+        ResourceUpdate(auth_mode="none", secret="prom-svc-" + "replacement"),
+    ],
+    ids=["switch-only", "switch-with-other-field", "switch-with-new-secret"],
+)
+async def test_an_ordinary_update_can_never_drop_a_stored_secret(
+    harness: _Harness, update: ResourceUpdate
+) -> None:
+    """复审 P1：普通修改切到 ``none`` 会绕过确认框永久丢掉只进不出的凭据。
+
+    存量 Secret 非空时必须拒绝，文件、generation 与 Secret 都不动；``none`` 同时带新
+    Secret 也拒绝，不能把输入静默丢掉。清除只能走独立确认动作。
+    """
+    await _create_two(harness)
+    before = _fingerprint(harness.resources)
+    with pytest.raises(ResourceRejectedError):
+        await harness.service.update_resource(
+            actor=_local_admin(), trace_id=_TRACE, resource_id=_ID_2, update=update
+        )
+    assert _fingerprint(harness.resources) == before
+    prometheus = harness.document().resources[1]
+    assert isinstance(prometheus, PrometheusResource) and prometheus.secret == _TOKEN
+    assert harness.document().generation == 2
+    assert harness.outcomes()[-1] == (
+        AdminAuditAction.CONFIG_SAVED,
+        AdminAuditOutcome.FAILED,
+        AdminAuditReasonCode.CONFIG_INVALID,
+    )
+
+
+async def test_explicitly_clearing_first_then_switching_to_none_succeeds(
+    harness: _Harness,
+) -> None:
+    await _create_two(harness)
+    await harness.service.clear_resource_secret(
+        actor=_local_admin(), trace_id="c" * 32, resource_id=_ID_2
+    )
+    saved = await harness.service.update_resource(
         actor=_local_admin(),
-        trace_id="f" * 32,
+        trace_id="d" * 32,
         resource_id=_ID_2,
         update=ResourceUpdate(auth_mode="none"),
     )
+    assert saved.generation == 4
     prometheus = harness.document().resources[1]
     assert isinstance(prometheus, PrometheusResource)
-    assert (prometheus.username, prometheus.secret) == (None, None)
+    assert (prometheus.auth_mode, prometheus.username, prometheus.secret) == ("none", None, None)
+
+
+async def test_an_ordinary_update_keeps_every_stored_secret(harness: _Harness) -> None:
+    await _create_two(harness)
+    for resource_id in (_ID_1, _ID_2):
+        await harness.service.update_resource(
+            actor=_local_admin(),
+            trace_id=f"{resource_id[:1]}" * 32,
+            resource_id=resource_id,
+            update=ResourceUpdate(display_name="普通修改", enabled=False),
+        )
+    starrocks, prometheus = harness.document().resources
+    assert isinstance(starrocks, StarRocksResource) and starrocks.password == _PASSWORD
+    assert isinstance(prometheus, PrometheusResource) and prometheus.secret == _TOKEN
+
+
+@pytest.mark.parametrize("outcome", ["not_found", "conflict", "rejected"])
+async def test_a_failed_terminal_audit_is_unavailable_not_a_business_error(
+    tmp_path: Path, clock: Any, memory_state: Any, outcome: str
+) -> None:
+    """复审 P1：业务失败的 FAILED 终态写不进去时，结果只能是 unavailable（503）。
+
+    审计只剩 STARTED 表示"结果未知"；此时回 404/409/400 就是把未闭合的审计当成一次
+    正常业务失败。文件与 generation 同样不能动。
+    """
+    ids = _Ids(_ID_1, _ID_1 if outcome == "conflict" else _ID_2)
+    harness = _Harness(tmp_path, clock, memory_state, ids)
+    await harness.service.create_resource(
+        actor=_local_admin(), trace_id="a" * 32, draft=_starrocks_draft()
+    )
+    before = _fingerprint(harness.resources)
+    events_before = len(harness.outcomes())
+    harness.audit.fail_terminal = True
+    with pytest.raises(IntegrationConfigUnavailableError):
+        if outcome == "not_found":
+            await harness.service.delete_resource(
+                actor=_local_admin(), trace_id=_TRACE, resource_id=_ID_3
+            )
+        elif outcome == "conflict":
+            await harness.service.create_resource(
+                actor=_local_admin(), trace_id=_TRACE, draft=_prometheus_draft()
+            )
+        else:
+            await harness.service.update_resource(
+                actor=_local_admin(),
+                trace_id=_TRACE,
+                resource_id=_ID_1,
+                update=ResourceUpdate(port=0),
+            )
+    assert _fingerprint(harness.resources) == before
+    assert harness.document().generation == 1
+    assert [o for _, o, _ in harness.outcomes()[events_before:]] == [AdminAuditOutcome.STARTED]
 
 
 async def test_clearing_a_secret_keeps_the_resource_and_every_other_secret(

@@ -383,3 +383,66 @@ async def test_a_write_without_the_csrf_token_is_refused(tmp_path, clock, memory
         )
     assert response.status_code == 403
     assert not built.resources_path.exists()
+
+
+async def test_an_ordinary_update_to_auth_none_is_refused_and_keeps_the_secret(
+    tmp_path, clock, memory_state
+) -> None:
+    """复审 P1（正式路由）：切到 none 不能绕过"清除凭据…"确认框。"""
+    built = _built(tmp_path, clock, memory_state)
+    async with _client(built.app) as client:
+        token = await _sign_in(client, built.admins)
+        await _create_both(client, token)
+        before = _fingerprint(built.resources_path)
+        switch_to_none = {"resource_id": _ID_2, "auth_mode": "none"}
+        refused = await _post(client, "/admin/api/resources/update", token, switch_to_none)
+        after_refusal = _fingerprint(built.resources_path)
+        cleared = await _post(
+            client,
+            "/admin/api/resources/clear-secret",
+            token,
+            {"resource_id": _ID_2, "confirm": True},
+        )
+        switched = await _post(client, "/admin/api/resources/update", token, switch_to_none)
+    assert refused.status_code == 400
+    assert after_refusal == before
+    assert (cleared.status_code, switched.status_code) == (200, 200)
+    assert switched.json()["generation"] == 4
+    stored = read_resources_config(str(built.resources_path))
+    assert stored.resources[1].secret_configured is False
+
+
+async def test_an_unwritable_failure_terminal_is_503_not_a_business_error(
+    tmp_path, clock, memory_state, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复审 P1（正式路由）：FAILED 终态写不进去时统一 503，而不是 404/409/400。"""
+    from xiaowei_agent.contracts import AdminAuditOutcome as Outcome
+    from xiaowei_agent.persistence.fake import InMemoryAdminAuditStore
+
+    built = _built(tmp_path, clock, memory_state)
+    real_terminal = InMemoryAdminAuditStore.append_terminal
+
+    async def refuse_failed_terminal(self: Any, *, terminal: Any) -> Any:
+        if terminal.outcome is Outcome.FAILED:
+            raise RuntimeError("audit down")
+        return await real_terminal(self, terminal=terminal)
+
+    async with _client(built.app) as client:
+        token = await _sign_in(client, built.admins)
+        await _create_both(client, token)
+        before = _fingerprint(built.resources_path)
+        monkeypatch.setattr(InMemoryAdminAuditStore, "append_terminal", refuse_failed_terminal)
+        responses = [
+            await _post(
+                client,
+                "/admin/api/resources/delete",
+                token,
+                {"resource_id": _ID_3, "confirm": True},
+            ),
+            await _post(
+                client, "/admin/api/resources/update", token, {"resource_id": _ID_1, "port": 0}
+            ),
+        ]
+    assert [response.status_code for response in responses] == [503, 503]
+    assert all(r.json() == {"error": {"code": "unavailable"}} for r in responses)
+    assert _fingerprint(built.resources_path) == before

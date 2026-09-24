@@ -878,7 +878,7 @@ async function submitResource(event) {
   const kind = resourceElements.kind.value;
   const editing = resourceElements.id.value.length > 0;
   const ok = editing
-    ? await writeResource("/admin/api/resources/update", resourceUpdateBody(kind), "修改被拒绝，资源未改变；请检查字段组合。")
+    ? await writeResource("/admin/api/resources/update", resourceUpdateBody(kind), "修改被拒绝，资源未改变；请检查字段组合。改为无认证前需先使用「清除凭据…」。")
     : await writeResource(`/admin/api/resources/${kind}`, resourceCreateBody(kind), "登记被拒绝，请检查字段组合；未保存任何内容。");
   if (ok) resetResourceForm();
   // Secret 只进不出：无论成败都清空输入。

@@ -337,12 +337,13 @@ def _merged_resource(
     values = _with_secret(current) | carried
     if isinstance(current, StarRocksResource):
         return StarRocksResource.model_validate(values)
-    # 认证方式决定哪些字段存在：切走 basic 时 username 随之消失，切到 none 时 secret 也消失。
-    # 这不是第二套规则，只是把"新模式禁止的旧值"删掉，余下组合仍由契约校验。
+    # 切走 basic 时 username（不是 Secret）随之消失；余下组合仍由契约校验。
     if values["auth_mode"] != "basic":
         values["username"] = None
-    if values["auth_mode"] == "none":
-        values["secret"] = None
+    # 普通修改**永不**丢弃 Secret：存量或新带的 Secret 遇上 ``none`` 一律拒绝。先经独立确认
+    # 动作 ``clear_resource_secret`` 清掉，再切到 ``none``——清除只能走那一条路。
+    if values["auth_mode"] == "none" and values["secret"] is not None:
+        raise ResourceRejectedError
     return PrometheusResource.model_validate(values)
 
 
@@ -521,11 +522,12 @@ class IntegrationConfigService:
             raise IntegrationConfigUnavailableError from None
 
     async def _fail(self, *, operation_id: str, reason: AdminAuditReasonCode) -> None:
-        """写 ``FAILED`` 终态；即使终态也写不进去，调用方仍然只会看到 unavailable。"""
-        try:
-            await self._terminal(operation_id=operation_id, reason=reason)
-        except IntegrationConfigUnavailableError:
-            pass
+        """写 ``FAILED`` 终态；写不进去时 :class:`IntegrationConfigUnavailableError` **穿透**。
+
+        不能吞掉：调用方随后要抛的往往是业务错误（not found / conflict / rejected），而审计
+        只剩 ``STARTED`` 时结果是"未知"，只能回 unavailable，不能被当成一次正常业务失败。
+        """
+        await self._terminal(operation_id=operation_id, reason=reason)
 
     # ------------------------------------------------------------------ 保存与清除
 
