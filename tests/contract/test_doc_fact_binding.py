@@ -1626,33 +1626,62 @@ def test_development_plan_carries_no_implementation_progress() -> None:
     assert all(pattern.search(handoff) for pattern in _HANDOFF_PROGRESS_PATTERNS)
 
 
-def test_handoff_closes_w2_and_names_only_w3_planning_as_next_step() -> None:
-    """W2 收口后只能先规划 W3，不能把合并外推成 W3 实现授权。"""
+def test_handoff_tracks_the_w3_lite_candidate_without_closing_full_w3() -> None:
+    """W3-lite 候选须可追溯，但不能被写成完整 W3 或运行验收。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     for fact in (
-        "6b2999c752e55525518f2a9d01291cdaad4fac34",
-        "3fa17bb53eac27892263a721e5ba74dc34232e40",
-        "35861738344",
-        "4800 passed",
+        "17462b7f6c38549818081b5a704f6ec381dea1e7",
+        "4e488a48d6b0fe483ad3714970aecc7acc44c954",
+        "0e7e836a773c2682b1b7b3c1d5411b97266529dc",
+        "35954284776",
+        "4890 passed",
     ):
-        assert fact in handoff, f"W2-B2 收口缺少稳定证据：{fact}"
+        assert fact in handoff, f"W3-lite 交付链缺少稳定证据：{fact}"
     for stale in (
-        "W2-B2 已形成离线实现候选",
-        "W2-B2 在途",
-        "尚待 CI、独立复审与合入",
-        "产品下一步是完成 W2-B2",
+        "W3 尚无获批详细计划",
+        "只能先编写并送审 W3 详细计划",
+        "W3 尚未开始",
     ):
-        assert stale not in handoff, f"handoff 仍含 W2-B2 在途口径：{stale}"
+        assert stale not in handoff, f"handoff 仍含 W3-lite 开工前旧口径：{stale}"
+
+    assert "W3-lite != 完整 W3" in handoff
+    assert "真实飞书" in handoff and "用户验收" in handoff
 
     statements = _next_step_statements(handoff)
     assert statements, "handoff 没有任何可解析的下一步声明"
     for statement in statements:
-        assert "W3" in statement, f"W2 收口后的下一步没有指向 W3 计划：{statement}"
-        assert "计划" in statement, f"W3 仍没有先走详细计划门：{statement}"
+        assert "PR #78" in statement, f"下一步没有指向 W3-lite 实现候选：{statement}"
         if "I3" in statement:
             assert "延期" in statement or "未取消" in statement, (
                 f"下一步仍把 I3 写成当前动作：{statement}"
             )
+
+    next_step = _handoff_baseline_field(handoff, "下一步")
+    assert "复审" in next_step and "合入" in next_step, (
+        f"W3-lite 候选仍缺独立复审或合入门：{next_step}"
+    )
+
+
+def test_w3_lite_admin_identity_boundary_is_stable_documentation() -> None:
+    """稳定文档必须描述能力与边界，而不是只在在途计划里留一份副本。"""
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    readme = _truth_doc_text("README.md")
+
+    for route in (
+        "/admin/api/users",
+        "/admin/api/activations",
+        "/admin/api/audit",
+    ):
+        assert route in architecture
+        assert route in readme
+
+    for fact in (
+        "UserDirectoryStore.apply()",
+        "配置写入与连接测试继续只允许本地 Admin",
+        "Admin 不绕过结果 ACL",
+        "普通用户仍只通过具体任务或结果链接进入",
+    ):
+        assert fact in architecture, f"W3-lite 稳定边界缺失：{fact}"
 
 
 # ---------------------------------------------------------------------------
