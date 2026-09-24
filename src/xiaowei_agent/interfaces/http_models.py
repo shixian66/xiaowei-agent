@@ -30,6 +30,8 @@ class ErrorItem(BaseModel):
         "method_not_allowed",
         "clarification.integrity_error",
         "idempotency_conflict",
+        # W4b：服务端生成的资源 ID 撞上已有 ID；不是幂等重放，单独一个闭集码。
+        "conflict",
         "payload_too_large",
         "unsupported_media_type",
         "internal_error",

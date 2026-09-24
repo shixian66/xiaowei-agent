@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     ReceiptKey,
     TestResult,
 )
+from xiaowei_agent.contracts.resource_config import ResourcesConfig
 
 UNCONFIGURED_GENERATION: Final[int] = 0
 """文件不存在时的**逻辑**代次。
@@ -46,7 +47,7 @@ class ProviderDisplayState(StrEnum):
     TEST_FAILED = "test_failed"
 
 
-def current_generation(config: AiConfig | FeishuConfig | None) -> int:
+def current_generation(config: AiConfig | FeishuConfig | ResourcesConfig | None) -> int:
     """把"文件不存在"折成逻辑代次 ``0``。
 
     只有 ``None`` 走这条路。符号链接、权限、损坏一律在读取层抛错，不会到这里——

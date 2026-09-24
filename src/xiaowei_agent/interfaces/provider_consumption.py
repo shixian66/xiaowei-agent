@@ -56,7 +56,8 @@ def required_services(settings: Settings) -> Mapping[ConfigDomain, tuple[str, ..
     """本次部署实际启用、且需要某个域的服务名。
 
     未启用的服务不写回执——否则页面会永远显示一个没人会去加载的「待应用」。
-    resources 域在 W4a 没有消费者：W4b 才让 worker 读取并签它。
+    resources 域（W4b）恒由 task worker 读取并签回执：worker 没有独立开关，它总在部署里。
+    worker 只证明"格式已被读到"，不把资源交给 Runtime、Registry 或任何 adapter。
     """
     ai: list[str] = []
     feishu: list[str] = []
@@ -68,7 +69,11 @@ def required_services(settings: Settings) -> Mapping[ConfigDomain, tuple[str, ..
         feishu.append(SERVICE_CHANNEL_WORKER)
     if settings.feishu_oauth_enabled:
         feishu.append(SERVICE_WEB)
-    return {ConfigDomain.AI: tuple(ai), ConfigDomain.FEISHU: tuple(feishu)}
+    return {
+        ConfigDomain.AI: tuple(ai),
+        ConfigDomain.FEISHU: tuple(feishu),
+        ConfigDomain.RESOURCES: (SERVICE_WORKER,),
+    }
 
 
 def required_services_for_check(settings: Settings, check_name: str) -> frozenset[str]:

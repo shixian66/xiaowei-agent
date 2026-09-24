@@ -67,6 +67,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.contracts.readiness
     xiaowei_agent.contracts.render
     xiaowei_agent.contracts.request
+    xiaowei_agent.contracts.resource_config
     xiaowei_agent.contracts.sql_surface
     xiaowei_agent.contracts.target
     xiaowei_agent.contracts.task

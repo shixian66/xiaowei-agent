@@ -315,6 +315,8 @@ def test_admin_identity_route_set_is_exact() -> None:
         for method in getattr(route, "methods", set())
         if route.path.startswith("/admin/api/")
         and not route.path.startswith("/admin/api/config")
+        # W4b 资源登记属于配置面，由 test_web_app_routes 的全量闭集钉住。
+        and not route.path.startswith("/admin/api/resources")
         and route.path != "/admin/api/integration-status"
     }
     assert routes == {

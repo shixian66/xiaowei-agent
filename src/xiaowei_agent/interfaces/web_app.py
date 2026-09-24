@@ -53,6 +53,13 @@ from xiaowei_agent.application.integration_config_service import (
     IntegrationConfigService,
     IntegrationConfigUnavailableError,
     OAuthTestGenerationDriftError,
+    PrometheusDraft,
+    ResourceConflictError,
+    ResourceNotFoundError,
+    ResourceRejectedError,
+    ResourceSaved,
+    ResourceUpdate,
+    StarRocksDraft,
 )
 from xiaowei_agent.application.integration_state import (
     SERVICE_WEB,
@@ -94,6 +101,11 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.contracts.base import AwareDatetime
 from xiaowei_agent.contracts.identity import BoundedActor, BoundedId
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusResource,
+    ResourcesConfig,
+    StarRocksResource,
+)
 from xiaowei_agent.interfaces.auth import Clock, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
@@ -102,6 +114,7 @@ from xiaowei_agent.interfaces.local_admin_auth import (
     LocalAdminAuthService,
 )
 from xiaowei_agent.interfaces.provider_consumption import (
+    required_services,
     required_services_for_check,
 )
 from xiaowei_agent.interfaces.provider_probe import (
@@ -152,8 +165,16 @@ from xiaowei_agent.interfaces.web_models import (
     WebIntegrationStatusView,
     WebLoginRequest,
     WebOAuthTestStarted,
+    WebPrometheusResourceCreate,
+    WebPrometheusResourceView,
     WebRejectActivationRequest,
+    WebResourceConfirm,
+    WebResourceSaved,
+    WebResourcesView,
+    WebResourceUpdate,
     WebSetUserStatusRequest,
+    WebStarRocksResourceCreate,
+    WebStarRocksResourceView,
     WebTaskAccepted,
     WebTaskDetail,
     WebTaskPage,
@@ -588,6 +609,14 @@ async def _admin_identity_not_found(_: Request, __: Exception) -> Response:
 
 async def _admin_identity_conflict(_: Request, __: Exception) -> Response:
     return _error(409, "idempotency_conflict")
+
+
+async def _resource_not_found(_: Request, __: Exception) -> Response:
+    return _error(404, "not_found")
+
+
+async def _resource_conflict(_: Request, __: Exception) -> Response:
+    return _error(409, "conflict")
 
 
 async def _admin_identity_unavailable(_: Request, __: Exception) -> Response:
@@ -1165,10 +1194,18 @@ def _integration_domain_status(
     checks: tuple[CheckName, ...],
     settings: Settings,
     snapshot: ProviderStateSnapshot,
+    required: frozenset[str] | None = None,
 ) -> WebIntegrationDomainStatus:
-    """从本域文件/回执/测试事实派生一个不含原值的管理面域状态。"""
-    required_services = frozenset().union(
-        *(required_services_for_check(settings, check.value) for check in checks)
+    """从本域文件/回执/测试事实派生一个不含原值的管理面域状态。
+
+    ``required`` 缺省时由测试项推出等待的服务；resources 没有测试项，直接给出 worker。
+    """
+    required_services = (
+        required
+        if required is not None
+        else frozenset().union(
+            *(required_services_for_check(settings, check.value) for check in checks)
+        )
     )
     restart_required = False
     load_status: WebIntegrationLoadStatus = "unconfigured"
@@ -1210,9 +1247,10 @@ def _integration_status_view(
     settings: Settings,
     ai: AiConfig | None,
     feishu: FeishuConfig | None,
+    resources: ResourcesConfig | None,
     snapshot: ProviderStateSnapshot,
 ) -> WebIntegrationStatusView:
-    """三域脱敏状态；resources 在 W4a 只预留，明确标为 not_applicable。"""
+    """三域脱敏状态；resources 只有"已登记/待 worker 加载"，没有测试项，也不代表已接入。"""
     return WebIntegrationStatusView(
         domains=(
             _integration_domain_status(
@@ -1231,13 +1269,62 @@ def _integration_status_view(
                 settings=settings,
                 snapshot=snapshot,
             ),
-            WebIntegrationDomainStatus(
-                domain="resources",
-                configured=False,
-                restart_required=False,
-                load_status="not_applicable",
+            _integration_domain_status(
+                domain=ConfigDomain.RESOURCES,
+                configured=resources is not None,
+                generation=current_generation(resources),
+                checks=(),
+                settings=settings,
+                snapshot=snapshot,
+                required=frozenset(required_services(settings)[ConfigDomain.RESOURCES]),
             ),
         )
+    )
+
+
+def _resource_view(
+    resource: StarRocksResource | PrometheusResource,
+) -> WebStarRocksResourceView | WebPrometheusResourceView:
+    """安全投影：只有定位与展示字段加一个 ``configured`` 布尔。"""
+    if isinstance(resource, StarRocksResource):
+        return WebStarRocksResourceView(
+            resource_id=resource.resource_id,
+            environment=resource.environment,
+            display_name=resource.display_name,
+            enabled=resource.enabled,
+            host=resource.host,
+            port=resource.port,
+            configured=resource.secret_configured,
+        )
+    return WebPrometheusResourceView(
+        resource_id=resource.resource_id,
+        environment=resource.environment,
+        display_name=resource.display_name,
+        enabled=resource.enabled,
+        base_url=resource.base_url,
+        configured=resource.secret_configured,
+    )
+
+
+def _resources_view(
+    *, settings: Settings, config: ResourcesConfig | None, snapshot: ProviderStateSnapshot
+) -> WebResourcesView:
+    generation = current_generation(config)
+    return WebResourcesView(
+        generation=generation,
+        pending_restart_services=(
+            _pending_restart_services(
+                domain=ConfigDomain.RESOURCES,
+                generation=generation,
+                required=frozenset(required_services(settings)[ConfigDomain.RESOURCES]),
+                snapshot=snapshot,
+            )
+            if config is not None
+            else ()
+        ),
+        resources=tuple(
+            _resource_view(resource) for resource in (() if config is None else config.resources)
+        ),
     )
 
 
@@ -1432,6 +1519,11 @@ def create_app(
                 "/admin/api/config/test/gemini_connection",
                 "/admin/api/config/test/feishu_credentials",
                 "/admin/api/config/test/feishu_oauth",
+                "/admin/api/resources/starrocks",
+                "/admin/api/resources/prometheus",
+                "/admin/api/resources/update",
+                "/admin/api/resources/clear-secret",
+                "/admin/api/resources/delete",
                 "/admin/api/users/status",
                 "/admin/api/users/role",
                 "/admin/api/activations/approve",
@@ -1461,6 +1553,9 @@ def create_app(
         AdminIdentityUnavailableError, _admin_identity_unavailable
     )
     app.add_exception_handler(IntegrationConfigUnavailableError, _config_unavailable)
+    app.add_exception_handler(ResourceNotFoundError, _resource_not_found)
+    app.add_exception_handler(ResourceConflictError, _resource_conflict)
+    app.add_exception_handler(ResourceRejectedError, _input_error)
     app.add_exception_handler(IntegrationConfigForbiddenError, _forbidden)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
@@ -2043,9 +2138,10 @@ def create_app(
         await admin_session(request)
         ai = await integration_config.read_ai()
         feishu = await integration_config.read_feishu()
+        resources = await integration_config.read_resources()
         snapshot = await provider_state.snapshot()
         return _integration_status_view(
-            settings=settings, ai=ai, feishu=feishu, snapshot=snapshot
+            settings=settings, ai=ai, feishu=feishu, resources=resources, snapshot=snapshot
         ).model_dump(mode="json")
 
     # ------------------------------------------------------------------ 按域配置
@@ -2132,6 +2228,129 @@ def create_app(
         return WebConfigSaved(
             domain="feishu", generation=saved.generation, restart_required=True
         ).model_dump(mode="json")
+
+    # ------------------------------------------------------------------ 资源（W4b）
+    #
+    # 只登记参数：这些路由不解析 DNS、不连接目标、没有"测试连接"。读取只服务本地管理员
+    # 且不审计；写入经唯一配置写服务（服务同时校验来源与能力、先写 STARTED 再动文件）。
+    # 路径都是固定字面量、资源 ID 走 body——body 上限中间件是精确匹配。
+
+    @app.get("/admin/api/resources")
+    async def read_resources(request: Request) -> dict[str, object]:
+        await local_admin_session(request)
+        config = await integration_config.read_resources()
+        snapshot = await provider_state.snapshot()
+        return _resources_view(settings=settings, config=config, snapshot=snapshot).model_dump(
+            mode="json"
+        )
+
+    def _resource_saved(saved: ResourceSaved) -> dict[str, object]:
+        return WebResourceSaved(
+            resource_id=saved.resource_id, generation=saved.generation, restart_required=True
+        ).model_dump(mode="json")
+
+    @app.post("/admin/api/resources/starrocks")
+    async def create_starrocks_resource(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebStarRocksResourceCreate)
+        saved = await integration_config.create_resource(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            draft=StarRocksDraft(
+                environment=body.environment,
+                display_name=body.display_name,
+                host=body.host,
+                port=body.port,
+                database=body.database,
+                username=body.username,
+                password=body.password,
+                tls_mode=body.tls_mode,
+                enabled=body.enabled,
+            ),
+        )
+        return _resource_saved(saved)
+
+    @app.post("/admin/api/resources/prometheus")
+    async def create_prometheus_resource(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebPrometheusResourceCreate)
+        saved = await integration_config.create_resource(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            draft=PrometheusDraft(
+                environment=body.environment,
+                display_name=body.display_name,
+                base_url=body.base_url,
+                auth_mode=body.auth_mode,
+                username=body.username,
+                secret=body.secret,
+                tls_mode=body.tls_mode,
+                enabled=body.enabled,
+            ),
+        )
+        return _resource_saved(saved)
+
+    @app.post("/admin/api/resources/update")
+    async def update_resource(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebResourceUpdate)
+        saved = await integration_config.update_resource(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            resource_id=body.resource_id,
+            update=ResourceUpdate(
+                environment=body.environment,
+                display_name=body.display_name,
+                enabled=body.enabled,
+                tls_mode=body.tls_mode,
+                host=body.host,
+                port=body.port,
+                database=body.database,
+                username=body.username,
+                password=body.password,
+                base_url=body.base_url,
+                auth_mode=body.auth_mode,
+                secret=body.secret,
+            ),
+        )
+        return _resource_saved(saved)
+
+    @app.post("/admin/api/resources/clear-secret")
+    async def clear_resource_secret(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebResourceConfirm)
+        saved = await integration_config.clear_resource_secret(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            resource_id=body.resource_id,
+        )
+        return _resource_saved(saved)
+
+    @app.post("/admin/api/resources/delete")
+    async def delete_resource(request: Request) -> dict[str, object]:
+        session = await session_allowed_to_work(request)
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebResourceConfirm)
+        saved = await integration_config.delete_resource(
+            actor=identity_actor(session),
+            trace_id=trusted_trace_id(),
+            resource_id=body.resource_id,
+        )
+        return _resource_saved(saved)
 
     # ------------------------------------------------------------------ 探针
 

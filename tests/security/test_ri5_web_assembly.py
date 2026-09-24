@@ -743,6 +743,12 @@ async def test_every_new_json_write_route_enforces_the_body_limit(
             ("PUT", "/admin/api/config/feishu"),
             ("POST", "/admin/api/config/ai/clear"),
             ("POST", "/admin/api/config/feishu/clear"),
+            # W4b 资源写入口：固定路径 + body 寻址，逐条列全。
+            ("POST", "/admin/api/resources/starrocks"),
+            ("POST", "/admin/api/resources/prometheus"),
+            ("POST", "/admin/api/resources/update"),
+            ("POST", "/admin/api/resources/clear-secret"),
+            ("POST", "/admin/api/resources/delete"),
             ("POST", "/admin/api/config/test/gemini_connection"),
             ("POST", "/admin/api/config/test/feishu_credentials"),
             ("POST", "/admin/api/config/test/feishu_oauth"),
