@@ -804,6 +804,7 @@ def test_full_workflow_passes_the_resolved_session_to_the_barrier_call(
         lambda *_, **__: {"status": "succeeded"},
     )
     monkeypatch.setattr(compose_smoke, "_normalised_evidence", lambda *_: ())
+    monkeypatch.setattr(compose_smoke, "_require_worker_resources_receipt", lambda _: None)
 
     def reach_barrier(candidate: ComposeSession) -> ComposeSession:
         received.append(candidate)
@@ -985,7 +986,14 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         assert {
             domain: sorted(path.name for path in directory.iterdir())
             for domain, directory in config_directories.items()
-        } == {"ai": ["config.json"], "feishu": ["config.json"], "resources": []}
+        } == {"ai": ["config.json"], "feishu": ["config.json"], "resources": ["config.json"]}
+        # W4b：resources 域放一份合成的登记文档，两个假 Secret 同样进脱敏名单。
+        resources_document = json.loads(
+            (config_directories["resources"] / "config.json").read_text(encoding="utf-8")
+        )
+        starrocks, prometheus = resources_document["resources"]
+        assert starrocks["password"] in session.sensitive_values
+        assert prometheus["secret"] in session.sensitive_values
         observed_paths = (*observed_paths, *config_directories.values())
 
     run_smoke(
@@ -996,7 +1004,7 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         input_root=parent,
     )
 
-    assert len(observed_sensitive_values) == 3
+    assert len(observed_sensitive_values) == 5
     assert not any(path.exists() for path in observed_paths)
 
 
@@ -2638,3 +2646,66 @@ def test_asset_render_must_survive_api_restart_byte_for_byte() -> None:
             before,
             {"status": "succeeded", "render": {"answer": "changed"}},
         )
+
+
+def test_synthetic_resources_config_is_a_valid_document_of_both_kinds() -> None:
+    from xiaowei_agent.contracts.resource_config import (
+        PrometheusResource,
+        ResourcesConfig,
+        StarRocksResource,
+    )
+
+    document = json.loads(
+        compose_smoke._synthetic_resources_config(
+            password_value="sr-" + "smoke-fake", token_value="prom-" + "smoke-fake"
+        )
+    )
+    config = ResourcesConfig.model_validate(document)
+    assert config.generation == 1
+    assert [type(item) for item in config.resources] == [StarRocksResource, PrometheusResource]
+    # 登记目标用保留的 .invalid 顶级域：即使将来有人误接了解析，也不会命中真实主机。
+    starrocks, prometheus = config.resources
+    assert isinstance(starrocks, StarRocksResource) and starrocks.host.endswith(".invalid")
+    assert isinstance(prometheus, PrometheusResource)
+    assert ".invalid" in prometheus.base_url
+
+
+@pytest.mark.parametrize(
+    ("stdout", "passes"),
+    [
+        ("1|loaded\n", True),
+        ("", False),
+        ("1|invalid\n", False),
+        ("2|loaded\n", False),
+        ("1|loaded\n1|loaded\n", False),
+    ],
+)
+def test_the_worker_resources_receipt_must_be_exactly_the_synthetic_generation(
+    stdout: str, passes: bool
+) -> None:
+    class ReceiptRunner(RecordingRunner):
+        def __call__(
+            self, argv: Any, *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            super().__call__(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    runner = ReceiptRunner()
+    session = ComposeSession(
+        docker="/usr/bin/docker",
+        runner=runner,
+        project="isolated",
+        files=(Path("docker-compose.yml"),),
+        compose_command=("/usr/bin/docker", "compose"),
+    )
+    if passes:
+        compose_smoke._require_worker_resources_receipt(session)
+    else:
+        with pytest.raises(SmokeError, match=r"^SMOKE_RESOURCES_RECEIPT_MISSING$"):
+            compose_smoke._require_worker_resources_receipt(session)
+    (call,) = runner.calls
+    statement = call[-1]
+    assert "service_config_state" in statement
+    assert "'worker'" in statement and "'resources'" in statement
+    # 只读观测：固定语句，没有任何写入或参数拼接。
+    assert not any(word in statement.upper() for word in ("INSERT", "UPDATE", "DELETE"))
