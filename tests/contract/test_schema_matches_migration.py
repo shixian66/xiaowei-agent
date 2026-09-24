@@ -26,6 +26,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from xiaowei_agent.persistence import schema as live_schema
 from xiaowei_agent.persistence.schema import (
     ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
@@ -255,13 +256,30 @@ def test_rev_0014_has_the_expected_revision_chain() -> None:
 
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0016_web_login_contexts as revision,
+        rev_0017_w3_admin_query_indexes as revision,
     )
 
-    assert revision.down_revision == "0015_activation_requests"
+    assert revision.down_revision == "0016_web_login_contexts"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )
+
+
+def test_w3_admin_query_indexes_match_the_live_schema_and_offline_migration() -> None:
+    expected = {
+        "ix_user_role_assignments_scope_user",
+        "ix_activation_requests_scope_status_requested",
+        "ix_admin_audit_events_scope_created",
+    }
+    indexes = {
+        live_schema.USER_ROLE_ASSIGNMENTS_SCOPE_USER_INDEX.name,
+        live_schema.ACTIVATION_SCOPE_STATUS_REQUESTED_INDEX.name,
+        live_schema.ADMIN_AUDIT_SCOPE_CREATED_INDEX.name,
+    }
+    assert indexes == expected
+    sql = _offline_upgrade_sql()
+    for name in expected:
+        assert f"CREATE INDEX {name}" in sql
 
 
 def test_published_revision_sources_are_immutable() -> None:

@@ -731,6 +731,13 @@ USER_ROLE_ASSIGNMENTS: Final = sa.Table(
 角色行，而那正是事后要查"当时这个人有什么权限"时唯一的依据。
 """
 
+USER_ROLE_ASSIGNMENTS_SCOPE_USER_INDEX: Final = sa.Index(
+    "ix_user_role_assignments_scope_user",
+    USER_ROLE_ASSIGNMENTS.c.tenant_id,
+    USER_ROLE_ASSIGNMENTS.c.environment_id,
+    USER_ROLE_ASSIGNMENTS.c.user_id,
+)
+
 EXTERNAL_IDENTITIES: Final = sa.Table(
     "external_identities",
     METADATA,
@@ -867,6 +874,15 @@ ACTIVATION_PENDING_SUBJECT_INDEX: Final = sa.Index(
 )
 """同一作用域和外部主体最多一个有效待办。"""
 
+ACTIVATION_SCOPE_STATUS_REQUESTED_INDEX: Final = sa.Index(
+    "ix_activation_requests_scope_status_requested",
+    ACTIVATION_REQUESTS.c.tenant_id,
+    ACTIVATION_REQUESTS.c.environment_id,
+    ACTIVATION_REQUESTS.c.status,
+    ACTIVATION_REQUESTS.c.requested_at.desc(),
+    ACTIVATION_REQUESTS.c.request_id.desc(),
+)
+
 ADMIN_AUDIT_EVENTS: Final = sa.Table(
     "admin_audit_events",
     METADATA,
@@ -955,6 +971,14 @@ effect 与 action、``reason_code`` 与 ``outcome`` 都用 ``=`` 写成**双向*
 ADMIN_AUDIT_EVENTS_CREATED_AT_INDEX: Final = sa.Index(
     "ix_admin_audit_events_created_at",
     ADMIN_AUDIT_EVENTS.c.created_at,
+)
+
+ADMIN_AUDIT_SCOPE_CREATED_INDEX: Final = sa.Index(
+    "ix_admin_audit_events_scope_created",
+    ADMIN_AUDIT_EVENTS.c.tenant_id,
+    ADMIN_AUDIT_EVENTS.c.environment_id,
+    ADMIN_AUDIT_EVENTS.c.created_at.desc(),
+    ADMIN_AUDIT_EVENTS.c.event_id.desc(),
 )
 
 ADMIN_AUDIT_ONE_STARTED_PER_OPERATION: Final = sa.Index(
