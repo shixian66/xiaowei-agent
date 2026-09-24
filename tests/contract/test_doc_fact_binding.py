@@ -2015,6 +2015,7 @@ def test_handoff_records_both_w4_merges_and_points_only_to_w5_plan_review() -> N
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
     assert _W4B_MERGE_COMMIT in handoff and "PR #82" in handoff
     assert "W4a/W4b 已离线实现并合入" in handoff
+    assert "W5 详细计划为 Review Draft V0.2" in handoff
     for overclaim in _W4B_OVERCLAIMS:
         assert overclaim not in handoff, overclaim
     next_step = _handoff_baseline_field(handoff, "下一步")
@@ -2028,7 +2029,7 @@ def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:
     plan = _W5_PLAN.read_text(encoding="utf-8")
     header = "\n".join(plan.splitlines()[:24])
     assert header.startswith("# W5 产品发布与分级验收实施计划")
-    assert "状态：Review Draft V0.1" in header
+    assert "状态：Review Draft V0.2" in header
     assert _W4B_MERGE_COMMIT in header
     assert "计划送审不授权" in header
     for gate in ("源码", "部署", "真实调用", "canary", "UAT"):
@@ -2047,10 +2048,96 @@ def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:
         "/admin/api/activations/reject",
     ):
         assert route in plan
-    for independent_gate in ("W4c", "H 层", "E1", "RI2", "RI3"):
+    for independent_gate in ("W4c", "H 层", "E1", "RI2", "RI3", "RI4", "RI6"):
         assert independent_gate in plan
     for evidence_level in ("deployed SHA", "canary", "user-accepted"):
         assert evidence_level in plan
+
+
+def test_w5_plan_closes_release_snapshot_history_and_scope_gaps() -> None:
+    plan = _W5_PLAN.read_text(encoding="utf-8")
+
+    release_decisions = _section_between(
+        plan,
+        start="### 2.2 release 不允许合成执行，也不虚报当前能力",
+        end="### 2.3 旧身份文件只允许一次性挂载",
+    )
+    task_1 = _section_between(
+        plan,
+        start="### Task 1：实现 release runtime profile",
+        end="### Task 2：实现固定终态保留与维护 CLI",
+    )
+    task_3 = _section_between(
+        plan,
+        start="### Task 3：旧身份迁移 CLI 与运行时去旧真源",
+        end="### Task 4：增加发布预检，不把运行中任务跨 profile 接管",
+    )
+    task_4 = _section_between(
+        plan,
+        start="### Task 4：增加发布预检，不把运行中任务跨 profile 接管",
+        end="### Task 5：W5-A 集成、自审与合并门",
+    )
+    w5_c = _section_between(
+        plan,
+        start="## 6. W5-C 任务：获准环境执行",
+        end="## 7. 独立门与明确非目标",
+    )
+
+    # 当前普通对话与历史计划投影是两份不同事实；所有承载 TaskViewRuntime
+    # 的进程都必须消费 release 准入快照，不能只修 worker 内嵌的 view。
+    for fact in (
+        "conversation_snapshot",
+        "rendering_bindings",
+        "XIAOWEI_RUNTIME_PROFILE=release",
+        "_FAKE_MODULES",
+    ):
+        assert fact in release_decisions or fact in task_1
+    for process in (
+        "internal-api",
+        "web-app",
+        "feishu-listener",
+        "channel-worker",
+        "worker",
+    ):
+        assert process in release_decisions and process in task_1
+    for path in (
+        "src/xiaowei_agent/application/task_view_runtime.py",
+        "src/xiaowei_agent/application/runtime.py",
+        "tests/security/test_task_view_runtime_authority.py",
+    ):
+        assert path in task_1
+
+    # 首次 release 不能继承无可信运行来源的历史计划/证据；状态判断直接复用
+    # 契约真源，不能再手写一份终态/非终态清单。
+    assert "historical_execution_data_present" in task_4
+    assert "TERMINAL_STATUSES" in task_4
+    assert "SUCCEEDED" in task_4 and "plan/evidence" in task_4
+    assert "新数据库" in task_4 and "单独批准的数据处置" in task_4
+
+    # W5 V1 是固定作用域、provider-off 的产品壳。它不把 test_readonly
+    # 或 recording 偷渡进 release，也不冒充 RI6 的正式发布证据。
+    assert "starrocks_adapter_mode=disabled" in release_decisions
+    assert "dev-local/dev" in release_decisions
+    assert "provider-off 产品壳" in plan
+    assert "不构成 RI6" in plan and "RI6" in w5_c
+
+    # 维护命令不外泄旧身份或受控 PII；首次发布没有安全旧 release 时只能停服。
+    assert "全库所有作用域" in plan
+    for count in ("created_count", "skipped_count", "deferred_count"):
+        assert count in task_3
+    for omitted_file in (
+        ".env.example",
+        "README.md",
+        "docker-compose.feishu.yml",
+        "docker-compose.smoke.yml",
+        "scripts/compose_smoke.py",
+        "tests/contract/test_compose_contract.py",
+        "tests/contract/test_compose_smoke_script.py",
+        "tests/security/test_ri5_compose_boundary.py",
+    ):
+        assert omitted_file in task_3
+    assert "首次部署" in w5_c and "停止全部应用服务" in w5_c
+    assert "recording" in w5_c
 
 
 def test_readme_and_architecture_describe_resources_as_registration_only() -> None:

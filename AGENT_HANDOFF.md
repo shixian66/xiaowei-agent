@@ -159,7 +159,7 @@ resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。�
 | --- | --- |
 | 项目目录 | 当前开发分支 `codex/w5-deployment-plan`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-24（Asia/Shanghai） |
-| 阶段 | W4a/W4b 已离线实现并合入；W5 详细计划为 Review Draft V0.1，尚未批准 |
+| 阶段 | W4a/W4b 已离线实现并合入；W5 详细计划为 Review Draft V0.2，尚未批准 |
 | 下一步 | 对 W5 详细计划做 exact-SHA 复审、批准并合入；计划合入前不开始 W5 源码、部署、真实调用、canary 或 UAT |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
