@@ -30,7 +30,9 @@ from xiaowei_agent.application.integration_config_service import (
     IntegrationConfigUnavailableError,
     IntegrationConfigUnreadableError,
     IntegrationConfigWriteError,
+    OAuthTestGenerationDriftError,
 )
+from xiaowei_agent.application.integration_state import SERVICE_WEB
 from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditOutcome,
@@ -43,6 +45,7 @@ from xiaowei_agent.contracts import (
     FeishuIntegration,
     GeminiIntegration,
     IdentitySource,
+    LoadReceipt,
     ProductRole,
 )
 from xiaowei_agent.contracts.admin_audit import admin_audit_target_digest
@@ -577,20 +580,21 @@ async def test_oauth_start_binds_the_state_to_the_started_operation(
     harness: _Harness,
 ) -> None:
     _usable_feishu(harness)
-    issued: list[str] = []
+    issued: list[tuple[str, int]] = []
 
     async def _refuse(config: FeishuConfig | None) -> _Verdict | None:
         return None
 
-    async def _issue(operation_id: str) -> str:
-        issued.append(operation_id)
+    async def _issue(operation_id: str, config_generation: int) -> str:
+        issued.append((operation_id, config_generation))
         return "authorization-url"
 
     result = await harness.service.start_oauth_test(
         actor=_local_admin(), trace_id=_TRACE, refuse=_refuse, issue=_issue
     )
     assert result == "authorization-url"
-    assert issued == [f"w4:{_TRACE}"]
+    # state 同时绑定 operation 与签发时的飞书代次。
+    assert issued == [(f"w4:{_TRACE}", 3)]
     # 终态等回调：此刻只有 STARTED。
     assert harness.outcomes() == [
         (AdminAuditAction.CONNECTION_TESTED, AdminAuditOutcome.STARTED, None)
@@ -607,7 +611,7 @@ async def test_oauth_refusal_records_the_refusal_and_fails_the_operation(
             status="failed", duration_ms=0, error_code=ProviderTestErrorCode.REAL_TEST_DISABLED
         )
 
-    async def _issue(operation_id: str) -> str:
+    async def _issue(operation_id: str, config_generation: int) -> str:
         raise AssertionError("must not issue")
 
     result = await harness.service.start_oauth_test(
@@ -626,7 +630,7 @@ async def test_oauth_issue_failure_fails_the_operation(harness: _Harness) -> Non
     async def _refuse(config: FeishuConfig | None) -> None:
         return None
 
-    async def _issue(operation_id: str) -> str:
+    async def _issue(operation_id: str, config_generation: int) -> str:
         raise RuntimeError("capacity")
 
     with pytest.raises(RuntimeError):
@@ -639,14 +643,27 @@ async def test_oauth_issue_failure_fails_the_operation(harness: _Harness) -> Non
     )
 
 
+async def _web_loaded(harness: _Harness, generation: int) -> None:
+    await harness.provider_state.record_load(
+        receipts={
+            (SERVICE_WEB, ConfigDomain.FEISHU): LoadReceipt(
+                generation=generation, status="loaded"
+            )
+        }
+    )
+
+
 async def _start(harness: _Harness) -> str:
+    """在第 3 代开始一次测试；Web 回执同为第 3 代。返回 operation id（绑定代次恒为 3）。"""
     _usable_feishu(harness)
+    await _web_loaded(harness, 3)
     issued: list[str] = []
 
     async def _refuse(config: FeishuConfig | None) -> None:
         return None
 
-    async def _issue(operation_id: str) -> str:
+    async def _issue(operation_id: str, config_generation: int) -> str:
+        assert config_generation == 3
         issued.append(operation_id)
         return "url"
 
@@ -668,7 +685,7 @@ async def test_oauth_finish_with_an_invalid_session_never_calls_the_provider(
         return _Verdict(status="passed")
 
     result = await harness.service.finish_oauth_test(
-        operation_id=operation_id, actor=actor, exchange=_exchange
+        operation_id=operation_id, config_generation=3, actor=actor, exchange=_exchange
     )
     assert result is None
     assert calls == []
@@ -689,7 +706,10 @@ async def test_oauth_finish_exchanges_once_and_records_the_result(
         return _Verdict(status="passed")
 
     result = await harness.service.finish_oauth_test(
-        operation_id=operation_id, actor=_local_admin(), exchange=_exchange
+        operation_id=operation_id,
+        config_generation=3,
+        actor=_local_admin(),
+        exchange=_exchange,
     )
     assert result is not None and result.status == "passed"
     assert harness.outcomes()[-1] == (
@@ -713,13 +733,58 @@ async def test_oauth_finish_refuses_an_operation_that_is_not_an_open_oauth_start
     )
     finished = await _start(harness)
     await harness.service.finish_oauth_test(
-        operation_id=finished, actor=None, exchange=_exchange
+        operation_id=finished, config_generation=3, actor=None, exchange=_exchange
     )
     for operation_id in ("w4:" + "f" * 32, "w4:" + "c" * 32, finished, "trace-only"):
         with pytest.raises(IntegrationConfigUnavailableError):
             await harness.service.finish_oauth_test(
-                operation_id=operation_id, actor=_local_admin(), exchange=_exchange
+                operation_id=operation_id,
+                config_generation=3,
+                actor=_local_admin(),
+                exchange=_exchange,
             )
+
+
+@pytest.mark.parametrize("drift", ["file-newer", "file-cleared", "web-newer", "web-missing"])
+async def test_oauth_finish_fails_closed_when_the_bound_generation_drifted(
+    harness: _Harness, drift: str
+) -> None:
+    """P1：回调时文件或 Web 已加载的代次不再等于 state 绑定的第 3 代。
+
+    不交换 code、不记任何测试结果（尤其不把旧 adapter 的结论记到新代次），审计写
+    ``FAILED/config_invalid``。"""
+    operation_id = await _start(harness)
+    if drift == "file-newer":
+        write_feishu_config(
+            str(harness.paths.feishu),
+            FeishuConfig(
+                generation=4,
+                feishu=FeishuIntegration(enabled=True, app_id="cli_new", app_secret=_SECRET),
+            ),
+        )
+    elif drift == "file-cleared":
+        harness.paths.feishu.unlink()
+    elif drift == "web-newer":
+        await _web_loaded(harness, 4)
+    else:
+        harness.memory_state.load_receipts.clear()
+
+    async def _exchange() -> _Verdict:
+        raise AssertionError("must not exchange with a drifted adapter")
+
+    with pytest.raises(OAuthTestGenerationDriftError):
+        await harness.service.finish_oauth_test(
+            operation_id=operation_id,
+            config_generation=3,
+            actor=_local_admin(),
+            exchange=_exchange,
+        )
+    assert harness.outcomes()[-1] == (
+        AdminAuditAction.CONNECTION_TESTED,
+        AdminAuditOutcome.FAILED,
+        AdminAuditReasonCode.CONFIG_INVALID,
+    )
+    assert CheckName.FEISHU_OAUTH.value not in (await harness.provider_state.snapshot()).tests
 
 
 def test_the_repository_protocol_lists_only_explicit_ai_and_feishu_methods() -> None:

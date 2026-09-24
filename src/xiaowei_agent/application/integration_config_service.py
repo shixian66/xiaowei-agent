@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Final, Protocol, TypeVar
 
 from xiaowei_agent.application.admin_identity import AdminIdentityActor
+from xiaowei_agent.application.integration_state import web_holds_feishu_generation
 from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditOutcome,
@@ -79,6 +80,16 @@ class IntegrationConfigForbiddenError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("integration config forbidden")
+
+
+class OAuthTestGenerationDriftError(RuntimeError):
+    """OAuth 测试回调时，文件或 Web 已加载的飞书代次已不是 state 绑定的那一代。
+
+    不交换 code、不记任何测试结果；审计已写 ``FAILED``。不携带任何代次数值。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("oauth test generation drifted")
 
 
 class IntegrationConfigUnavailableError(RuntimeError):
@@ -549,12 +560,13 @@ class IntegrationConfigService:
         actor: AdminIdentityActor,
         trace_id: str,
         refuse: Callable[[FeishuConfig | None], Awaitable[ProbeVerdict | None]],
-        issue: Callable[[str], Awaitable[_T]],
+        issue: Callable[[str, int], Awaitable[_T]],
     ) -> _T | ProbeVerdict:
-        """写 ``STARTED`` 后把**同一个** operation id 交给 state 签发。
+        """写 ``STARTED`` 后把**同一个** operation id 与被测代次交给 state 签发。
 
-        ``issue`` 必须把 operation id 与 state 同事务落库；回调只能从 state 取回它。
-        前置拒绝（开关关闭、未配置、凭据未在当前代次通过）同样有终态 ``FAILED``。
+        ``issue(operation_id, config_generation)`` 必须把两者与 state 同事务落库；回调只能
+        从 state 取回它们。前置拒绝（开关关闭、未配置、凭据未在当前代次通过、Web 尚未加载
+        当前代次）同样有终态 ``FAILED``。
         """
         operation_id = _operation_id(trace_id)
         target = _probe_target(CheckName.FEISHU_OAUTH)
@@ -587,8 +599,14 @@ class IntegrationConfigService:
                 verdict=refusal,
             )
             return refusal
+        if config is None:
+            # ``refuse`` 必然拒绝未配置；到这里说明调用方的前置写漏了——失败关闭。
+            await self._fail(
+                operation_id=operation_id, reason=AdminAuditReasonCode.CONFIG_INVALID
+            )
+            raise IntegrationConfigUnavailableError
         try:
-            return await issue(operation_id)
+            return await issue(operation_id, config.generation)
         except Exception:
             await self._fail(
                 operation_id=operation_id, reason=AdminAuditReasonCode.PROBE_FAILED
@@ -599,14 +617,18 @@ class IntegrationConfigService:
         self,
         *,
         operation_id: str,
+        config_generation: int,
         actor: AdminIdentityActor | None,
         exchange: Callable[[], Awaitable[ProbeVerdict]],
     ) -> ProbeVerdict | None:
-        """回调已消费测试 state 并从中取回 ``operation_id`` 之后调用。
+        """回调已消费测试 state 并从中取回 ``operation_id`` 与绑定代次之后调用。
 
         先确认它是一条尚未结束的 OAuth 连接测试 ``STARTED``；再核对当前会话仍是本地
         管理员——不是就**不交换 code**，按取回的 operation id 写 ``FAILED`` 并返回
-        ``None``。只有两者都成立才交换一次 code、记结果、写终态。
+        ``None``。然后核对当前飞书文件代次与 Web 已加载代次都仍等于绑定代次：任一漂移
+        都说明这次测试的结论不属于任何一份现行配置，同样**不交换 code**，写
+        ``FAILED``（``config_invalid``）并抛 :class:`OAuthTestGenerationDriftError`。
+        三者同代才交换一次 code，结果只记到绑定代次。
         """
         if not await self._is_open_oauth_start(operation_id):
             raise IntegrationConfigUnavailableError
@@ -622,11 +644,27 @@ class IntegrationConfigService:
                 operation_id=operation_id, reason=AdminAuditReasonCode.CONFIG_INVALID
             )
             raise IntegrationConfigUnavailableError from None
+        try:
+            snapshot = await self._provider_state.snapshot()
+        except Exception:
+            await self._fail(
+                operation_id=operation_id, reason=AdminAuditReasonCode.PROBE_FAILED
+            )
+            raise IntegrationConfigUnavailableError from None
+        if (
+            config is None
+            or config.generation != config_generation
+            or not web_holds_feishu_generation(snapshot.receipts, config_generation)
+        ):
+            await self._fail(
+                operation_id=operation_id, reason=AdminAuditReasonCode.CONFIG_INVALID
+            )
+            raise OAuthTestGenerationDriftError
         verdict = await exchange()
         await self._finish_probe(
             operation_id=operation_id,
             check=CheckName.FEISHU_OAUTH,
-            generation=None if config is None else config.generation,
+            generation=config_generation,
             verdict=verdict,
         )
         return verdict
@@ -663,5 +701,6 @@ __all__ = [
     "IntegrationConfigUnavailableError",
     "IntegrationConfigUnreadableError",
     "IntegrationConfigWriteError",
+    "OAuthTestGenerationDriftError",
     "ProbeVerdict",
 ]

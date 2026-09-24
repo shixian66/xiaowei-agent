@@ -174,6 +174,14 @@ class OAuthStart:
 
 
 @dataclass(frozen=True)
+class ConnectionTestBinding:
+    """从测试 state 取回的可信事实：审计 operation id 与签发时绑定的飞书配置代次。"""
+
+    operation_id: str
+    config_generation: int
+
+
+@dataclass(frozen=True)
 class IssuedWebSession:
     session_cookie: str = field(repr=False)
     principal: AuthenticatedPrincipal
@@ -416,11 +424,14 @@ class WebAuthService:
             max_age_seconds=self._oauth_state_ttl_seconds,
         )
 
-    async def start_connection_test(self, *, operation_id: str) -> OAuthStart:
-        """签发一次**只能**被测试分支消费的 state，并与审计 operation 同事务绑定。
+    async def start_connection_test(
+        self, *, operation_id: str, config_generation: int
+    ) -> OAuthStart:
+        """签发一次**只能**被测试分支消费的 state，并与审计 operation、被测代次同事务绑定。
 
         ``operation_id`` 来自配置服务刚写下的 ``STARTED``（服务端 ``w4:`` 派生），浏览器
-        拿不到也改不了它；回调只能从 state 取回它来写终态。
+        拿不到也改不了它；回调只能从 state 取回它来写终态。``config_generation`` 是本进程
+        OAuth adapter 实际持有的飞书配置代次，回调据此核对漂移并只给这一代记账。
 
         与登录共用授权 URL 与 redirect_uri——测的就是那条真实回调链路；换一个
         redirect_uri 等于测了一条生产环境里不存在的路径。
@@ -433,6 +444,7 @@ class WebAuthService:
                     state_digest=_digest(domain=OAUTH_TEST_STATE_DOMAIN, secret=state),
                     ttl_seconds=self._oauth_state_ttl_seconds,
                     operation_id=operation_id,
+                    config_generation=config_generation,
                 )
             )
         except OAuthStateCapacityError:
@@ -496,8 +508,8 @@ class WebAuthService:
 
     async def consume_connection_test_state(
         self, *, state: str, state_cookie: str | None
-    ) -> str:
-        """确认这次回调属于连接测试并取回它的审计 operation id。
+    ) -> ConnectionTestBinding:
+        """确认这次回调属于连接测试并取回它的审计 operation id 与绑定代次。
 
         不属于测试域（未知、过期、重放，或是一张没有测试 context 的 state）就抛
         ``WebOAuthStateError``——此时拿不到可信 operation id，调用方只能保留 ``STARTED``。
@@ -507,19 +519,22 @@ class WebAuthService:
         发起 code 交换之前，再核对一遍本地管理员 session 仍然有效。
         """
         self._validate_state_pair(state=state, state_cookie=state_cookie)
-        operation_id: str | None = None
+        binding: ConnectionTestBinding | None = None
         try:
             consumed = await self._sessions.consume_oauth_test_state(
                 command=ConsumeOAuthTestStateCommand(
                     state_digest=_digest(domain=OAUTH_TEST_STATE_DOMAIN, secret=state)
                 )
             )
-            operation_id = consumed.operation_id
+            binding = ConnectionTestBinding(
+                operation_id=consumed.operation_id,
+                config_generation=consumed.config_generation,
+            )
         except (OAuthStateNotFoundError, OAuthTestContextNotFoundError):
-            operation_id = None
-        if operation_id is None:
+            binding = None
+        if binding is None:
             raise WebOAuthStateError
-        return operation_id
+        return binding
 
     async def complete_connection_test(self, *, code: str) -> None:
         """只交换一次 code 以证明回调链路可用；成功即返回。
@@ -745,6 +760,7 @@ __all__ = [
     "FEISHU_OAUTH_PROVIDER_TIMEOUT_SECONDS",
     "FEISHU_OAUTH_SERVICE_TIMEOUT_SECONDS",
     "AuthenticatedWebSession",
+    "ConnectionTestBinding",
     "FeishuOAuthCodeError",
     "FeishuOAuthIdentity",
     "FeishuOAuthPort",

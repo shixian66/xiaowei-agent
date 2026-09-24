@@ -193,7 +193,7 @@ def test_login_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> N
 
 
 def test_test_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> None:
-    """W4a：OAuth 测试 state 只保存 state digest 与审计 operation id。
+    """W4a：OAuth 测试 state 只保存 state digest、审计 operation id 与被测配置代次。
 
     它与登录 context 是两张表、两个外键：登录分支不能消费测试 state，测试分支也不能
     消费登录 state。``operation_id`` 全局唯一——一次 STARTED 最多绑定一个 state。
@@ -202,8 +202,16 @@ def test_test_context_is_a_one_to_one_cascading_extension_of_oauth_state() -> No
     assert {column.name for column in WEB_OAUTH_TEST_CONTEXTS.c} == {
         "state_digest",
         "operation_id",
+        "config_generation",
     }
     assert WEB_OAUTH_TEST_CONTEXTS.c.operation_id.nullable is False
+    assert WEB_OAUTH_TEST_CONTEXTS.c.config_generation.nullable is False
+    assert (
+        _check_text(
+            WEB_OAUTH_TEST_CONTEXTS, "ck_web_oauth_test_contexts_config_generation_positive"
+        )
+        == "config_generation > 0"
+    )
     foreign_keys = tuple(WEB_OAUTH_TEST_CONTEXTS.foreign_key_constraints)
     assert len(foreign_keys) == 1
     assert tuple(element.target_fullname for element in foreign_keys[0].elements) == (

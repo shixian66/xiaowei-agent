@@ -52,12 +52,14 @@ from xiaowei_agent.application.integration_config_service import (
     IntegrationConfigForbiddenError,
     IntegrationConfigService,
     IntegrationConfigUnavailableError,
+    OAuthTestGenerationDriftError,
 )
 from xiaowei_agent.application.integration_state import (
     SERVICE_WEB,
     ProviderDisplayState,
     compute_display_state,
     current_generation,
+    web_holds_feishu_generation,
 )
 from xiaowei_agent.application.task_view_runtime import (
     ApplicationFailure,
@@ -1499,7 +1501,7 @@ def create_app(
             写 ``FAILED``。
             """
             try:
-                operation_id = await auth.consume_connection_test_state(
+                binding = await auth.consume_connection_test_state(
                     state=state, state_cookie=state_cookie
                 )
             except WebOAuthStateError:
@@ -1524,9 +1526,17 @@ def create_app(
                     return _probe_failure(ProbeErrorCode.UNAVAILABLE, started=started)
                 return ProbeOutcome(status="passed", duration_ms=_probe_duration_ms(started))
 
-            verdict = await integration_config.finish_oauth_test(
-                operation_id=operation_id, actor=actor, exchange=exchange
-            )
+            try:
+                verdict = await integration_config.finish_oauth_test(
+                    operation_id=binding.operation_id,
+                    config_generation=binding.config_generation,
+                    actor=actor,
+                    exchange=exchange,
+                )
+            except OAuthTestGenerationDriftError:
+                # 绑定代次已不是当前文件或 Web 已加载的代次：没有交换 code，也没有记结果；
+                # 这张 state 对现行配置已无效，与过期 state 同一个闭集回答。
+                return _error(400, "invalid_request")
             if verdict is None:
                 # 会话已过期/撤销，或已不是本地管理员：测试结束为 FAILED，什么都不交换。
                 return _error(401, "unauthorized") if actor is None else _error(
@@ -2126,11 +2136,15 @@ def create_app(
     # ------------------------------------------------------------------ 探针
 
     async def oauth_test_refusal(config: FeishuConfig | None) -> ProbeOutcome | None:
-        """OAuth 测试的三道前置；``None`` 表示可以签发 state。
+        """OAuth 测试的四道前置；``None`` 表示可以签发 state。
 
-        最后一道——凭据测试必须在**飞书域当前代次**通过——不是礼貌，是必需：OAuth 回调
+        第三道——凭据测试必须在**飞书域当前代次**通过——不是礼貌，是必需：OAuth 回调
         链路建立在应用凭据之上，凭据本身没验过时跳出去的失败无法区分"回调地址配错了"
         与"密钥根本不对"。
+
+        第四道——Web 必须已加载当前代次：交换 code 的是本进程**启动期**装配的 OAuth
+        adapter。文件已保存、Web 尚未重启时放行，测的是旧凭据，结果却会记到新代次。
+        这由服务端回执判定，不靠前端隐藏按钮。
         """
         if not settings.feishu_real_test_enabled:
             return refused_outcome(ProbeErrorCode.REAL_TEST_DISABLED)
@@ -2143,6 +2157,8 @@ def create_app(
             or credentials.status != "passed"
             or credentials.generation != current_generation(config)
         ):
+            return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
+        if not web_holds_feishu_generation(snapshot.receipts, current_generation(config)):
             return refused_outcome(ProbeErrorCode.NOT_CONFIGURED)
         return None
 
@@ -2161,9 +2177,9 @@ def create_app(
             request, public_origin=public_origin, session_cookie=session.cookie
         )
 
-        async def issue(operation_id: str) -> OAuthStart:
+        async def issue(operation_id: str, config_generation: int) -> OAuthStart:
             return await cast(WebAuthService, auth).start_connection_test(
-                operation_id=operation_id
+                operation_id=operation_id, config_generation=config_generation
             )
 
         result = await integration_config.start_oauth_test(

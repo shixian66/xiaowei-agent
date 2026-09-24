@@ -1022,6 +1022,7 @@ class PostgresWebSessionStore:
                     sa.insert(WEB_OAUTH_TEST_CONTEXTS).values(
                         state_digest=issued.state_digest,
                         operation_id=command.operation_id,
+                        config_generation=command.config_generation,
                     )
                 )
         if conflict_reached:
@@ -1030,7 +1031,11 @@ class PostgresWebSessionStore:
             raise OAuthStateCapacityError
         if issued is None:
             raise RuntimeError("oauth test state issue result missing")
-        return OAuthTestState(**issued.model_dump(), operation_id=command.operation_id)
+        return OAuthTestState(
+            **issued.model_dump(),
+            operation_id=command.operation_id,
+            config_generation=command.config_generation,
+        )
 
     @_persistence_boundary(write=True)
     async def issue_oauth_login_state(
@@ -1147,16 +1152,23 @@ class PostgresWebSessionStore:
             )
             if state_row is None:
                 raise OAuthStateNotFoundError
-            operation_id = await connection.scalar(
-                sa.select(WEB_OAUTH_TEST_CONTEXTS.c.operation_id).where(
-                    WEB_OAUTH_TEST_CONTEXTS.c.state_digest == command.state_digest
+            context = (
+                await connection.execute(
+                    sa.select(
+                        WEB_OAUTH_TEST_CONTEXTS.c.operation_id,
+                        WEB_OAUTH_TEST_CONTEXTS.c.config_generation,
+                    ).where(WEB_OAUTH_TEST_CONTEXTS.c.state_digest == command.state_digest)
                 )
-            )
-            if operation_id is None:
+            ).first()
+            if context is None:
                 # 抛出即回滚：一张登录 state 或缺 context 的 state 不会被烧掉。
                 raise OAuthTestContextNotFoundError
             state = row_to_oauth_state(state_row)
-            return OAuthTestState(**state.model_dump(), operation_id=operation_id)
+            return OAuthTestState(
+                **state.model_dump(),
+                operation_id=context.operation_id,
+                config_generation=context.config_generation,
+            )
 
     @_persistence_boundary(write=True)
     async def consume_oauth_login_state(

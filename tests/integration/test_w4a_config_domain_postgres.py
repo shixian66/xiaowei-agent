@@ -277,14 +277,18 @@ async def test_test_context_cascades_and_binds_one_operation(
     sessions = PostgresWebSessionStore(engine=clean_database, clock=clock)
     issued = await sessions.issue_oauth_test_state(
         command=IssueOAuthTestStateCommand(
-            state_digest="a" * 64, ttl_seconds=60, operation_id="w4:pg-op"
+            state_digest="a" * 64,
+            ttl_seconds=60,
+            operation_id="w4:pg-op",
+            config_generation=9,
         )
     )
     assert issued.operation_id == "w4:pg-op"
     consumed = await sessions.consume_oauth_test_state(
         command=ConsumeOAuthTestStateCommand(state_digest="a" * 64)
     )
-    assert consumed.operation_id == "w4:pg-op"
+    # P1：被测代次随 state 在真实库里往返，不在回调时按当前文件重新归属。
+    assert (consumed.operation_id, consumed.config_generation) == ("w4:pg-op", 9)
     async with clean_database.begin() as connection:
         await connection.execute(sa.text("DELETE FROM web_oauth_states"))
         remaining = await connection.scalar(
@@ -309,10 +313,35 @@ async def test_database_rejects_a_non_w4_or_oversize_operation_id(
         async with clean_database.begin() as connection:
             await connection.execute(
                 sa.text(
-                    "INSERT INTO web_oauth_test_contexts (state_digest, operation_id)"
-                    " VALUES (:digest, :operation_id)"
+                    "INSERT INTO web_oauth_test_contexts"
+                    " (state_digest, operation_id, config_generation)"
+                    " VALUES (:digest, :operation_id, 1)"
                 ),
                 {"digest": "b" * 64, "operation_id": operation_id},
+            )
+
+
+@pytest.mark.parametrize("config_generation", [0, -1, None])
+async def test_database_rejects_a_test_context_without_a_positive_generation(
+    clean_database: AsyncEngine, config_generation: int | None
+) -> None:
+    async with clean_database.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO web_oauth_states (state_digest, issued_at, expires_at)"
+                " VALUES (:digest, :now, :later)"
+            ),
+            {"digest": "c" * 64, "now": _NOW, "later": _NOW + dt.timedelta(minutes=5)},
+        )
+    with pytest.raises(IntegrityError):
+        async with clean_database.begin() as connection:
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO web_oauth_test_contexts"
+                    " (state_digest, operation_id, config_generation)"
+                    " VALUES (:digest, 'w4:pg-generation', :generation)"
+                ),
+                {"digest": "c" * 64, "generation": config_generation},
             )
 
 
@@ -369,7 +398,10 @@ async def _audit_fact(engine: AsyncEngine, clock: Any) -> None:
 async def _test_context(engine: AsyncEngine, clock: Any) -> None:
     await PostgresWebSessionStore(engine=engine, clock=clock).issue_oauth_test_state(
         command=IssueOAuthTestStateCommand(
-            state_digest="d" * 64, ttl_seconds=60, operation_id="w4:pg-guard"
+            state_digest="d" * 64,
+            ttl_seconds=60,
+            operation_id="w4:pg-guard",
+            config_generation=1,
         )
     )
 

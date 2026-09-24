@@ -394,3 +394,16 @@ def test_persisted_time_facts_reject_impossible_states(
 ) -> None:
     with pytest.raises(ValidationError, match=message):
         model(**values)
+
+
+@pytest.mark.parametrize("config_generation", [0, -1, True, "5"])
+def test_a_test_state_cannot_be_issued_without_a_positive_bound_generation(
+    config_generation: object,
+) -> None:
+    """P1：不能签发一张没有绑定被测配置代次的 OAuth 测试 state。"""
+    with pytest.raises(ValidationError):
+        oauth_test_issue(
+            state_digest="5a" * 32,
+            ttl_seconds=60,
+            config_generation=config_generation,  # type: ignore[arg-type]
+        )

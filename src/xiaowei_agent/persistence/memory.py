@@ -1,6 +1,7 @@
 """单进程持久化适配器共享的状态容器。"""
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from xiaowei_agent.contracts import (
@@ -24,6 +25,14 @@ if TYPE_CHECKING:
     from xiaowei_agent.persistence.admin_audit import AuditStage
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthTestContext:
+    """内存侧的测试 context 行：与 ``web_oauth_test_contexts`` 两列一一对应。"""
+
+    operation_id: str
+    config_generation: int
 
 
 class InMemoryPersistenceState:
@@ -52,8 +61,8 @@ class InMemoryPersistenceState:
         ] = {}
         self.oauth_states: dict[str, OAuthState] = {}
         self.oauth_login_contexts: dict[str, WebReturnIntent] = {}
-        # W4a：测试 state → 审计 operation id；与登录 context 同样随 state 收割。
-        self.oauth_test_contexts: dict[str, str] = {}
+        # W4a：测试 state → 审计 operation id 与被测代次；与登录 context 同样随 state 收割。
+        self.oauth_test_contexts: dict[str, OAuthTestContext] = {}
         self.web_sessions: dict[str, WebSession] = {}
         self.local_admin: Any | None = None
         self.user_accounts: dict[str, UserAccount] = {}

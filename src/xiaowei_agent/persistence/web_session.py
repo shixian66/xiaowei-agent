@@ -96,9 +96,14 @@ def _w4_operation_id(value: str) -> str:
 
 
 class OAuthTestState(OAuthState):
-    """一次 OAuth 连接测试 state 与签发它的 W4a 审计 operation id。"""
+    """一次 OAuth 连接测试 state、签发它的 W4a 审计 operation id 与被测飞书配置代次。
+
+    ``config_generation`` 是签发时 Web 已加载、且等于当前文件的那一代：Web 的 OAuth
+    adapter 持有的是启动期凭据，回调只能按这一代核对与记账，不能按回调时的文件重新归属。
+    """
 
     operation_id: AuditOperationId
+    config_generation: StrictInt = Field(gt=0)
 
     _operation_id_is_w4 = field_validator("operation_id")(_w4_operation_id)
 
@@ -135,9 +140,10 @@ class IssueOAuthLoginStateCommand(IssueOAuthStateCommand):
 
 
 class IssueOAuthTestStateCommand(IssueOAuthStateCommand):
-    """测试专用签发命令；无法构造一个不绑定审计 operation 的测试 state。"""
+    """测试专用签发命令；无法构造一个不绑定审计 operation 与被测代次的测试 state。"""
 
     operation_id: AuditOperationId
+    config_generation: StrictInt = Field(gt=0)
 
     _operation_id_is_w4 = field_validator("operation_id")(_w4_operation_id)
 
@@ -202,7 +208,7 @@ class WebSessionStore(Protocol):
     async def consume_oauth_test_state(
         self, *, command: ConsumeOAuthTestStateCommand
     ) -> OAuthTestState:
-        """同一提交消费测试 state 并取回 operation id；未知、过期和重放统一拒绝。
+        """同一提交消费测试 state 并取回 operation id 与绑定代次；未知、过期和重放统一拒绝。
 
         state 有效但没有测试 context（包括一张登录 state）时抛
         :class:`OAuthTestContextNotFoundError` 并回滚，绝不消费。

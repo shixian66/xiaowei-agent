@@ -174,7 +174,7 @@ from xiaowei_agent.persistence.local_admin import (
     bootstrap_local_admin_command,
     bootstrap_operation_context,
 )
-from xiaowei_agent.persistence.memory import InMemoryPersistenceState
+from xiaowei_agent.persistence.memory import InMemoryPersistenceState, OAuthTestContext
 from xiaowei_agent.persistence.provider_state import (
     ProviderStateSnapshot,
     RecordTestCommand,
@@ -1747,14 +1747,22 @@ class InMemoryWebSessionStore:
         async with self._lock:
             now = self._clock()
             self._cleanup_oauth_states(now=now)
-            if command.operation_id in self._state.oauth_test_contexts.values():
+            if any(
+                context.operation_id == command.operation_id
+                for context in self._state.oauth_test_contexts.values()
+            ):
                 # 与 PostgreSQL 的 UNIQUE(operation_id) 同一语义：一次 STARTED
                 # 最多绑定一个 state，且冲突时什么都不落。
                 raise WebSessionConflictError
             state = self._issue_oauth_state(command=command, now=now)
-            self._state.oauth_test_contexts[state.state_digest] = command.operation_id
+            self._state.oauth_test_contexts[state.state_digest] = OAuthTestContext(
+                operation_id=command.operation_id,
+                config_generation=command.config_generation,
+            )
             return OAuthTestState(
-                **state.model_dump(), operation_id=command.operation_id
+                **state.model_dump(),
+                operation_id=command.operation_id,
+                config_generation=command.config_generation,
             )
 
     async def issue_oauth_login_state(
@@ -1784,12 +1792,16 @@ class InMemoryWebSessionStore:
                 or now >= state.expires_at
             ):
                 raise OAuthStateNotFoundError
-            operation_id = self._state.oauth_test_contexts.get(command.state_digest)
-            if operation_id is None:
+            context = self._state.oauth_test_contexts.get(command.state_digest)
+            if context is None:
                 raise OAuthTestContextNotFoundError
             consumed = state.model_copy(update={"consumed_at": now})
             self._state.oauth_states[state.state_digest] = consumed
-            return OAuthTestState(**consumed.model_dump(), operation_id=operation_id)
+            return OAuthTestState(
+                **consumed.model_dump(),
+                operation_id=context.operation_id,
+                config_generation=context.config_generation,
+            )
 
     async def consume_oauth_login_state(
         self, *, command: ConsumeOAuthLoginStateCommand

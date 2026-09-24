@@ -75,6 +75,23 @@ def _every_required_service_loaded(
     )
 
 
+def web_holds_feishu_generation(
+    receipts: Mapping[ReceiptKey, LoadReceipt], generation: int
+) -> bool:
+    """Web 进程的飞书 OAuth adapter 是否正持有 ``generation`` 这一代凭据。
+
+    OAuth 连接测试跨一次浏览器回调，交换 code 用的是 Web **启动期**装配的 adapter，
+    而不是回调时的文件。因此开始与回调两端都只认 ``(web, feishu)`` 的 ``loaded`` 回执：
+    文件已保存、Web 未重启时，测到的是旧凭据，不能被记到新代次。
+    """
+    return _every_required_service_loaded(
+        domain=ConfigDomain.FEISHU,
+        generation=generation,
+        required_service_names=frozenset({SERVICE_WEB}),
+        receipts=receipts,
+    )
+
+
 def compute_display_state(
     *,
     domain: ConfigDomain,
@@ -116,4 +133,5 @@ __all__ = [
     "ProviderDisplayState",
     "compute_display_state",
     "current_generation",
+    "web_holds_feishu_generation",
 ]

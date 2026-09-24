@@ -32,12 +32,15 @@ _OTHER_ORIGIN_DIGEST = "b2" * 32
 _WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
-def oauth_test_issue(*, state_digest: str, ttl_seconds: int) -> IssueOAuthTestStateCommand:
+def oauth_test_issue(
+    *, state_digest: str, ttl_seconds: int, config_generation: int = 7
+) -> IssueOAuthTestStateCommand:
     """测试 state 的签发命令；operation id 由 digest 派生，保证每个 state 唯一。"""
     return IssueOAuthTestStateCommand(
         state_digest=state_digest,
         ttl_seconds=ttl_seconds,
         operation_id=f"w4:{state_digest[-32:]}",
+        config_generation=config_generation,
     )
 
 
@@ -607,10 +610,14 @@ async def test_test_state_returns_its_operation_id_exactly_once(
     digest = "4a" * 32
     issued = await web_sessions.issue_oauth_test_state(
         command=IssueOAuthTestStateCommand(
-            state_digest=digest, ttl_seconds=60, operation_id="w4:trace-op-1"
+            state_digest=digest,
+            ttl_seconds=60,
+            operation_id="w4:trace-op-1",
+            config_generation=5,
         )
     )
     assert issued.operation_id == "w4:trace-op-1"
+    assert issued.config_generation == 5
     assert await oauth_test_context_digests() == {digest}
     assert await oauth_login_context_digests() == set()
 
@@ -618,6 +625,7 @@ async def test_test_state_returns_its_operation_id_exactly_once(
         command=ConsumeOAuthTestStateCommand(state_digest=digest)
     )
     assert consumed.operation_id == "w4:trace-op-1"
+    assert consumed.config_generation == 5
     assert consumed.consumed_at is not None
     with pytest.raises(OAuthStateNotFoundError):
         await web_sessions.consume_oauth_test_state(
@@ -723,21 +731,51 @@ async def test_one_operation_id_binds_at_most_one_live_test_state(
 ) -> None:
     await web_sessions.issue_oauth_test_state(
         command=IssueOAuthTestStateCommand(
-            state_digest="52" * 32, ttl_seconds=60, operation_id="w4:same-op"
+            state_digest="52" * 32,
+            ttl_seconds=60,
+            operation_id="w4:same-op",
+            config_generation=1,
         )
     )
     with pytest.raises(WebSessionConflictError):
         await web_sessions.issue_oauth_test_state(
             command=IssueOAuthTestStateCommand(
-                state_digest="53" * 32, ttl_seconds=60, operation_id="w4:same-op"
+                state_digest="53" * 32,
+                ttl_seconds=60,
+                operation_id="w4:same-op",
+                config_generation=2,
             )
         )
     # 冲突整体回滚：第二个 state 没有落下来。
     assert await oauth_state_digests() == {"52" * 32}
 
 
+async def test_each_test_state_returns_its_own_bound_generation(web_sessions: Any) -> None:
+    """P1：代次随 state 同事务落库、同事务取回；两张 state 互不串代，且仍只能消费一次。"""
+    old, new = "54" * 32, "55" * 32
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=old, ttl_seconds=60, config_generation=4)
+    )
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=new, ttl_seconds=60, config_generation=5)
+    )
+    consumed_new = await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=new)
+    )
+    consumed_old = await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=old)
+    )
+    assert (consumed_old.config_generation, consumed_new.config_generation) == (4, 5)
+    for digest in (old, new):
+        with pytest.raises(OAuthStateNotFoundError):
+            await web_sessions.consume_oauth_test_state(
+                command=ConsumeOAuthTestStateCommand(state_digest=digest)
+            )
+
+
 WEB_SESSION_STORE_CASES = (
     test_test_state_returns_its_operation_id_exactly_once,
+    test_each_test_state_returns_its_own_bound_generation,
     test_login_branch_cannot_consume_a_test_state,
     test_test_branch_cannot_consume_a_login_state,
     test_missing_test_context_rolls_back_state_consumption,

@@ -559,6 +559,7 @@ WEB_OAUTH_TEST_CONTEXTS: Final = sa.Table(
     METADATA,
     sa.Column("state_digest", sa.CHAR(64), primary_key=True),
     sa.Column("operation_id", sa.Text, nullable=False),
+    sa.Column("config_generation", sa.Integer, nullable=False),
     sa.ForeignKeyConstraint(
         ["state_digest"],
         ["web_oauth_states.state_digest"],
@@ -570,8 +571,12 @@ WEB_OAUTH_TEST_CONTEXTS: Final = sa.Table(
         "left(operation_id, 3) = 'w4:' AND char_length(operation_id) <= 64",
         name="ck_web_oauth_test_contexts_operation_id_shape",
     ),
+    sa.CheckConstraint(
+        "config_generation > 0",
+        name="ck_web_oauth_test_contexts_config_generation_positive",
+    ),
 )
-"""W4a OAuth 连接测试 state 与其审计 operation id；state 收割时由外键级联删除。
+"""W4a OAuth 连接测试 state、其审计 operation id 与被测飞书配置代次；state 收割时由外键级联删除。
 
 与 ``web_oauth_login_contexts`` 是两张表：登录分支只认登录 context，测试分支只认测试
 context，两者互不回退。只保存 state 摘要与服务端派生的 ``w4:`` operation id。

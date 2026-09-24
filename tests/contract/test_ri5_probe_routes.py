@@ -19,6 +19,7 @@ from tests.fakes.admin_identity import UnusedAdminIdentity
 from xiaowei_agent.application.integration_config_service import (
     IntegrationConfigService,
 )
+from xiaowei_agent.application.integration_state import SERVICE_WEB
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdminAuditAction,
@@ -26,7 +27,9 @@ from xiaowei_agent.contracts import (
     AdminAuditReasonCode,
     AuthenticatedPrincipal,
     ChannelPermission,
+    ConfigDomain,
     IdentitySource,
+    LoadReceipt,
     ProductRole,
     ReadinessReport,
     WebMode,
@@ -562,8 +565,13 @@ async def test_the_response_never_carries_the_secret(
 # --------------------------------------------------------------------------
 
 
-async def _passed_credentials(built: Any, *, generation: int = 4) -> None:
-    """把 feishu_credentials 置为当前代次通过——OAuth 测试的前置。"""
+async def _passed_credentials(
+    built: Any, *, generation: int = 4, web_loaded: int | None = None
+) -> None:
+    """OAuth 测试的两道前置：凭据在该代次通过，且 Web 进程已加载该代次。
+
+    ``web_loaded`` 缺省与 ``generation`` 同代；传别的值模拟"文件已保存、Web 尚未重启"。
+    """
     from xiaowei_agent.persistence.provider_state import CheckName, RecordTestCommand
 
     await built["provider_state"].record_test(
@@ -573,6 +581,18 @@ async def _passed_credentials(built: Any, *, generation: int = 4) -> None:
             status="passed",
             duration_ms=5,
         )
+    )
+    await _web_loaded(built, generation if web_loaded is None else web_loaded)
+
+
+async def _web_loaded(built: Any, generation: int, *, status: str = "loaded") -> None:
+    """Web 进程为飞书域签下的加载回执——OAuth adapter 实际持有的就是这一代凭据。"""
+    await built["provider_state"].record_load(
+        receipts={
+            (SERVICE_WEB, ConfigDomain.FEISHU): LoadReceipt(
+                generation=generation, status=status
+            )
+        }
     )
 
 
@@ -616,6 +636,122 @@ async def test_oauth_test_at_a_stale_generation_is_refused(
         )
     assert response.json()["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
     assert memory_state.oauth_states == {}
+
+
+@pytest.mark.parametrize(
+    ("web_loaded", "status"),
+    [(4, "loaded"), (None, "loaded"), (5, "invalid")],
+    ids=["web-still-on-old-generation", "web-never-loaded", "web-loaded-invalid"],
+)
+async def test_oauth_test_is_refused_until_the_web_process_loads_the_current_generation(
+    tmp_path, clock, memory_state, web_loaded: int | None, status: str
+) -> None:
+    """反例（P1）：文件已是第 5 代、凭据也在第 5 代通过，但 Web 仍持有第 4 代的 OAuth
+    adapter。此时放行测试，跳出去的是旧凭据，结果却会记到第 5 代——重启后页面直接显示
+    "OAuth 可用"，而新 App ID/Secret 从未走通过回调。重启前必须拒绝。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    from xiaowei_agent.persistence.provider_state import CheckName, RecordTestCommand
+
+    await built["provider_state"].record_test(
+        command=RecordTestCommand(
+            check_name=CheckName.FEISHU_CREDENTIALS,
+            generation=5,
+            status="passed",
+            duration_ms=5,
+        )
+    )
+    if web_loaded is not None:
+        await _web_loaded(built, web_loaded, status=status)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        response = await client.post(
+            "/admin/api/config/test/feishu_oauth", headers=_json_headers(token)
+        )
+
+    body = response.json()
+    assert "authorization_url" not in body
+    assert body["error_code"] == ProbeErrorCode.NOT_CONFIGURED.value
+    assert memory_state.oauth_states == {}
+    assert oauth.exchanges == []
+    snapshot = await built["provider_state"].snapshot()
+    assert snapshot.tests["feishu_oauth"].status != "passed"
+
+
+async def test_oauth_test_state_is_bound_to_the_generation_it_started_on(
+    tmp_path, clock, memory_state
+) -> None:
+    built = _build(tmp_path, clock, memory_state, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        await _start_oauth(client, token)
+
+    (context,) = memory_state.oauth_test_contexts.values()
+    assert context.config_generation == 5
+    assert context.operation_id.startswith("w4:")
+
+
+@pytest.mark.parametrize("drift", ["file-saved", "web-reloaded", "file-and-web"])
+async def test_a_generation_drift_between_start_and_callback_fails_closed(
+    tmp_path, clock, memory_state, drift: str
+) -> None:
+    """反例（P1）：第 5 代开始测试后、回调前配置升到第 6 代。
+
+    不得用旧 adapter 交换 code，也不得给任何代次写 ``passed``——绑定代次已经不是当前
+    文件或 Web 加载的代次，这次测试的结论不属于任何一份现行配置。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        if drift in {"file-saved", "file-and-web"}:
+            _write_config(built, generation=6)
+        if drift in {"web-reloaded", "file-and-web"}:
+            await _web_loaded(built, 6)
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": {"code": "invalid_request"}}
+    assert oauth.exchanges == []
+    snapshot = await built["provider_state"].snapshot()
+    assert "feishu_oauth" not in snapshot.tests
+    assert [(o, r) for _, o, r in _audit(memory_state)] == [
+        (AdminAuditOutcome.STARTED, None),
+        (AdminAuditOutcome.FAILED, AdminAuditReasonCode.CONFIG_INVALID),
+    ]
+
+
+async def test_a_same_generation_oauth_test_is_recorded_against_the_bound_generation(
+    tmp_path, clock, memory_state
+) -> None:
+    """对照：文件、Web 回执、state 三者同为第 5 代时正常完成，结果只记第 5 代。"""
+    oauth = _OAuth()
+    built = _build(tmp_path, clock, memory_state, oauth=oauth, feishu_real_test_enabled=True)
+    _write_config(built, generation=5)
+    await _passed_credentials(built, generation=5)
+    async with _client(built["app"]) as client:
+        token = await _sign_in(client, built["admins"])
+        state = await _start_oauth(client, token)
+        response = await client.get(
+            "/oauth/feishu/callback",
+            params={"code": "code-1", "state": state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert oauth.exchanges == ["code-1"]
+    snapshot = await built["provider_state"].snapshot()
+    assert snapshot.tests["feishu_oauth"].status == "passed"
+    assert snapshot.tests["feishu_oauth"].generation == 5
 
 
 async def test_oauth_test_issues_a_state_that_the_login_path_cannot_consume(
@@ -1028,7 +1164,9 @@ async def test_oauth_test_state_carries_the_started_operation_to_the_callback(
     (operation_id, _, _) = after_start[0]
     assert re.fullmatch(r"w4:[0-9a-f]{32}", operation_id)
     # 签发时写进 context 的就是这条 STARTED 的 operation id。
-    assert set(memory_state.oauth_test_contexts.values()) <= {operation_id}
+    assert {c.operation_id for c in memory_state.oauth_test_contexts.values()} <= {
+        operation_id
+    }
     assert _audit(memory_state) == [
         (operation_id, AdminAuditOutcome.STARTED, None),
         (operation_id, AdminAuditOutcome.SUCCEEDED, None),

@@ -9,7 +9,8 @@ Revises: 0017_w3_admin_query_indexes
 * ``admin_audit_events`` admits the three startable config actions and the minimal
   closed failure reasons.
 * ``web_oauth_test_contexts`` binds an OAuth connection-test state digest to its
-  server-derived ``w4:`` audit operation id.
+  server-derived ``w4:`` audit operation id and to the Feishu config generation the
+  Web process had loaded when the test started.
 
 Downgrade refuses (before any DDL, regardless of the destructive flag) whenever W4a
 audit facts, OAuth test contexts or ``resources`` receipts exist: the old schema
@@ -133,6 +134,7 @@ def upgrade() -> None:
         "web_oauth_test_contexts",
         sa.Column("state_digest", sa.CHAR(length=64), nullable=False),
         sa.Column("operation_id", sa.Text(), nullable=False),
+        sa.Column("config_generation", sa.Integer(), nullable=False),
         sa.PrimaryKeyConstraint("state_digest"),
         sa.ForeignKeyConstraint(
             ["state_digest"],
@@ -146,6 +148,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "left(operation_id, 3) = 'w4:' AND char_length(operation_id) <= 64",
             name="ck_web_oauth_test_contexts_operation_id_shape",
+        ),
+        sa.CheckConstraint(
+            "config_generation > 0",
+            name="ck_web_oauth_test_contexts_config_generation_positive",
         ),
     )
 
