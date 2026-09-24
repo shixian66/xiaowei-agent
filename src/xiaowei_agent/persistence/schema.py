@@ -33,11 +33,11 @@ from xiaowei_agent.contracts.enums import (
     AdminAuditOutcome,
     AdminAuditReasonCode,
     AdminAuditTargetKind,
+    ConfigDomain,
     IdentitySource,
     ProductRole,
     UserStatus,
 )
-from xiaowei_agent.contracts.integration_config import ConfigDomain
 
 _DIRECTORY_ACTION_VALUES: Final[frozenset[str]] = frozenset(
     action.value for action in DIRECTORY_ACTIONS

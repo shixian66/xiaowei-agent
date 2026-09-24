@@ -16,12 +16,12 @@ Secret 字段必须**同时**写 ``exclude=True`` 与 ``repr=False``，取值只
 """
 
 import unicodedata
-from enum import StrEnum
 from typing import Annotated, Final
 
 from pydantic import AfterValidator, Field
 
 from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+from xiaowei_agent.contracts.enums import ConfigDomain
 
 _MAX_SECRET_LENGTH: Final[int] = 4096
 
@@ -62,19 +62,6 @@ class FeishuIntegration(Contract):
         if self.app_secret is None:
             raise ValueError("feishu app secret is not configured")
         return self.app_secret
-
-
-class ConfigDomain(StrEnum):
-    """配置域闭集：一个宿主目录、一份固定文件、一个独立 ``generation``。
-
-    加载回执的键、``service_config_state.config_domain`` 的 CHECK 与 Web 投影都用它，
-    不再借 :class:`~xiaowei_agent.contracts.enums.ProviderName` 冒充配置域——后者只服务
-    现有 Gemini/飞书探针分类。``RESOURCES`` 在 W4a 只占名字与挂载，没有文档契约。
-    """
-
-    AI = "ai"
-    FEISHU = "feishu"
-    RESOURCES = "resources"
 
 
 class AiConfig(Contract):

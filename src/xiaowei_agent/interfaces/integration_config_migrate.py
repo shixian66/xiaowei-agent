@@ -54,7 +54,7 @@ class MigrationResult(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-class _Stop(Exception):
+class _MigrationStopError(Exception):
     """内部短路：携带唯一结果码，不携带任何文本。"""
 
     def __init__(self, result: MigrationResult) -> None:
@@ -71,13 +71,13 @@ _ABSENT: Final = _Absent()
 
 def _open_root(config_root: str) -> int:
     if not isinstance(config_root, str) or not os.path.isabs(config_root):
-        raise _Stop(MigrationResult.UNAVAILABLE)
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
     try:
         return os.open(config_root, flags)
     except OSError:
-        raise _Stop(MigrationResult.UNAVAILABLE) from None
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE) from None
 
 
 def _require_domain_directories(root_fd: int) -> None:
@@ -85,9 +85,9 @@ def _require_domain_directories(root_fd: int) -> None:
         try:
             info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
         except OSError:
-            raise _Stop(MigrationResult.UNAVAILABLE) from None
+            raise _MigrationStopError(MigrationResult.UNAVAILABLE) from None
         if not stat.S_ISDIR(info.st_mode):
-            raise _Stop(MigrationResult.UNAVAILABLE)
+            raise _MigrationStopError(MigrationResult.UNAVAILABLE)
 
 
 def _legacy_identity(root_fd: int) -> tuple[int, int] | None:
@@ -97,9 +97,9 @@ def _legacy_identity(root_fd: int) -> tuple[int, int] | None:
     except FileNotFoundError:
         return None
     except OSError:
-        raise _Stop(MigrationResult.UNAVAILABLE) from None
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE) from None
     if not stat.S_ISREG(info.st_mode):
-        raise _Stop(MigrationResult.UNAVAILABLE)
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE)
     return info.st_dev, info.st_ino
 
 
@@ -110,7 +110,7 @@ def _existing(reader: Callable[[str], _T], path: str) -> _T | _Absent:
     except IntegrationConfigMissingError:
         return _ABSENT
     except IntegrationConfigError:
-        raise _Stop(MigrationResult.MIGRATION_REQUIRED) from None
+        raise _MigrationStopError(MigrationResult.MIGRATION_REQUIRED) from None
 
 
 def _write_and_verify(
@@ -124,9 +124,9 @@ def _write_and_verify(
         writer(path, expected)
         written = reader(path)
     except IntegrationConfigError:
-        raise _Stop(MigrationResult.UNAVAILABLE) from None
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE) from None
     if written != expected:
-        raise _Stop(MigrationResult.UNAVAILABLE)
+        raise _MigrationStopError(MigrationResult.UNAVAILABLE)
 
 
 def _migrate(root_fd: int, config_root: str) -> MigrationResult:
@@ -139,7 +139,7 @@ def _migrate(root_fd: int, config_root: str) -> MigrationResult:
         try:
             ai = _existing(read_ai_config, ai_path)
             feishu = _existing(read_feishu_config, feishu_path)
-        except _Stop:
+        except _MigrationStopError:
             # 没有旧文件时新文件损坏不是迁移冲突，而是一处需要人工查看的故障。
             return MigrationResult.UNAVAILABLE
         if isinstance(ai, _Absent) or isinstance(feishu, _Absent):
@@ -202,11 +202,11 @@ def migrate_legacy_integration_config(*, config_root: str) -> MigrationResult:
     """执行一次迁移并返回闭集结果；不抛异常、不打印、不回显任何路径或内容。"""
     try:
         root_fd = _open_root(config_root)
-    except _Stop as stop:
+    except _MigrationStopError as stop:
         return stop.result
     try:
         return _migrate(root_fd, config_root)
-    except _Stop as stop:
+    except _MigrationStopError as stop:
         return stop.result
     except Exception:
         return MigrationResult.UNAVAILABLE

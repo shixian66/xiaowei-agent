@@ -88,7 +88,12 @@ def test_no_required_service_means_no_pending_restart() -> None:
 
 def test_receipts_from_unrelated_services_are_ignored() -> None:
     assert (
-        _state(receipts={("api", ConfigDomain.AI): _loaded(), ("worker", ConfigDomain.AI): _loaded()})
+        _state(
+            receipts={
+                ("api", ConfigDomain.AI): _loaded(),
+                ("worker", ConfigDomain.AI): _loaded(),
+            }
+        )
         is S.PENDING_TEST
     )
 

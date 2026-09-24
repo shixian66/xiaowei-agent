@@ -19,6 +19,7 @@ from xiaowei_agent.application.integration_state import (
     SERVICE_WORKER,
 )
 from xiaowei_agent.config import Settings
+from xiaowei_agent.contracts import ConfigDomain
 from xiaowei_agent.interfaces import feishu_listener as listener_module
 from xiaowei_agent.interfaces import feishu_worker as channel_worker_module
 from xiaowei_agent.interfaces import local_stack as local_stack_module
@@ -28,23 +29,22 @@ _GEMINI_KEY = "gemini-unit-" + "test-key"
 _FEISHU_SECRET = "feishu-unit-" + "test-secret"
 
 
-def _config_file(tmp_path: Path, generation: int = 6) -> Path:
-    path = tmp_path / "integrations.json"
-    path.write_text(
-        json.dumps(
-            {
-                "generation": generation,
-                "gemini": {"enabled": True, "api_key": _GEMINI_KEY},
-                "feishu": {
-                    "enabled": True,
-                    "app_id": "cli_unit",
-                    "app_secret": _FEISHU_SECRET,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
+def _config_files(tmp_path: Path, generation: int = 6) -> dict[str, str]:
+    """两域各一份固定形状文件；返回 ``load_provider_credentials`` 的路径实参。"""
+    documents = {
+        "ai": {"generation": generation, "gemini": {"enabled": True, "api_key": _GEMINI_KEY}},
+        "feishu": {
+            "generation": generation,
+            "feishu": {"enabled": True, "app_id": "cli_unit", "app_secret": _FEISHU_SECRET},
+        },
+    }
+    paths: dict[str, str] = {}
+    for domain, document in documents.items():
+        path = tmp_path / domain / "config.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(document), encoding="utf-8")
+        paths[f"{domain}_path"] = str(path)
+    return paths
 
 
 class _Stack:
@@ -62,20 +62,26 @@ class _Stack:
 @pytest.mark.parametrize(
     ("module", "entry", "builder", "service_name", "provider"),
     [
-        (worker_module, "run_worker", "build_postgres_local_stack", SERVICE_WORKER, "gemini"),
+        (
+            worker_module,
+            "run_worker",
+            "build_postgres_local_stack",
+            SERVICE_WORKER,
+            ConfigDomain.AI,
+        ),
         (
             listener_module,
             "_run",
             "build_postgres_feishu_listener_stack",
             SERVICE_FEISHU_LISTENER,
-            "feishu",
+            ConfigDomain.FEISHU,
         ),
         (
             channel_worker_module,
             "_run",
             "build_postgres_channel_worker_stack",
             SERVICE_CHANNEL_WORKER,
-            "feishu",
+            ConfigDomain.FEISHU,
         ),
     ],
     ids=["worker", "listener", "channel-worker"],
@@ -86,7 +92,7 @@ def test_each_process_records_its_own_receipt_before_serving(
     entry: str,
     builder: str,
     service_name: str,
-    provider: str,
+    provider: ConfigDomain,
 ) -> None:
     from xiaowei_agent.contracts import LoadReceipt
 
@@ -140,15 +146,15 @@ def _every_switch_on(tmp_path: Path) -> Settings:
 @pytest.mark.parametrize(
     ("service_name", "provider"),
     [
-        (SERVICE_WORKER, "gemini"),
-        (SERVICE_FEISHU_LISTENER, "feishu"),
-        (SERVICE_CHANNEL_WORKER, "feishu"),
-        (SERVICE_WEB, "feishu"),
+        (SERVICE_WORKER, ConfigDomain.AI),
+        (SERVICE_FEISHU_LISTENER, ConfigDomain.FEISHU),
+        (SERVICE_CHANNEL_WORKER, ConfigDomain.FEISHU),
+        (SERVICE_WEB, ConfigDomain.FEISHU),
     ],
     ids=["worker", "listener", "channel-worker", "web"],
 )
 def test_no_process_signs_a_receipt_for_a_sibling(
-    tmp_path: Path, service_name: str, provider: str
+    tmp_path: Path, service_name: str, provider: ConfigDomain
 ) -> None:
     """反例：四个开关全开时，任何一个进程都不得写出兄弟进程的回执。
 
@@ -157,17 +163,18 @@ def test_no_process_signs_a_receipt_for_a_sibling(
     甚至没启动成功。
     """
     from xiaowei_agent.interfaces.integration_config_file import (
-        DEFAULT_INTEGRATION_CONFIG_PATH,
+        DEFAULT_AI_CONFIG_PATH,
+        DEFAULT_FEISHU_CONFIG_PATH,
     )
     from xiaowei_agent.interfaces.provider_consumption import load_provider_credentials
 
-    path = _config_file(tmp_path)
-    assert DEFAULT_INTEGRATION_CONFIG_PATH != str(path)
+    paths = _config_files(tmp_path)
+    assert {DEFAULT_AI_CONFIG_PATH, DEFAULT_FEISHU_CONFIG_PATH}.isdisjoint(paths.values())
 
     _, receipts = load_provider_credentials(
         settings=_every_switch_on(tmp_path),
         service_name=service_name,
-        path=str(path),
+        **paths,
     )
 
     assert set(receipts) == {(service_name, provider)}
@@ -185,7 +192,7 @@ def test_a_stack_that_attests_for_nobody_writes_no_receipt(tmp_path: Path) -> No
     _, receipts = load_provider_credentials(
         settings=_every_switch_on(tmp_path),
         service_name=None,
-        path=str(_config_file(tmp_path)),
+        **_config_files(tmp_path),
     )
 
     assert receipts == {}
@@ -200,7 +207,7 @@ def test_an_unknown_service_name_does_not_borrow_a_sibling_receipt(
     _, receipts = load_provider_credentials(
         settings=_every_switch_on(tmp_path),
         service_name="internal_api",
-        path=str(_config_file(tmp_path)),
+        **_config_files(tmp_path),
     )
 
     assert receipts == {}

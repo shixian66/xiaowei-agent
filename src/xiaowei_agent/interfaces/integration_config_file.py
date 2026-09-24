@@ -22,10 +22,6 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from xiaowei_agent.application.integration_config_service import (
-    IntegrationConfigUnreadableError,
-    IntegrationConfigWriteError,
-)
 from xiaowei_agent.contracts import (
     AiConfig,
     FeishuConfig,
@@ -249,52 +245,6 @@ def write_preflight_probe(path: str) -> None:
         raise PreflightProbeUnreadableError
 
 
-class FileIntegrationConfigRepository:
-    """application ``IntegrationConfigRepository`` 的文件 adapter。
-
-    只把本模块的窄入口翻译成 application 的闭集错误：不存在是 ``None``，存在但坏是
-    :class:`IntegrationConfigUnreadableError`，写失败是 :class:`IntegrationConfigWriteError`。
-    路径在构造时由 composition root 固定，方法不接收路径、schema 或 domain。
-    """
-
-    def __init__(
-        self,
-        *,
-        ai_path: str = DEFAULT_AI_CONFIG_PATH,
-        feishu_path: str = DEFAULT_FEISHU_CONFIG_PATH,
-    ) -> None:
-        self._ai_path = ai_path
-        self._feishu_path = feishu_path
-
-    def read_ai(self) -> AiConfig | None:
-        try:
-            return read_ai_config(self._ai_path)
-        except IntegrationConfigMissingError:
-            return None
-        except IntegrationConfigError:
-            raise IntegrationConfigUnreadableError from None
-
-    def write_ai(self, *, config: AiConfig) -> None:
-        try:
-            write_ai_config(self._ai_path, config)
-        except IntegrationConfigError:
-            raise IntegrationConfigWriteError from None
-
-    def read_feishu(self) -> FeishuConfig | None:
-        try:
-            return read_feishu_config(self._feishu_path)
-        except IntegrationConfigMissingError:
-            return None
-        except IntegrationConfigError:
-            raise IntegrationConfigUnreadableError from None
-
-    def write_feishu(self, *, config: FeishuConfig) -> None:
-        try:
-            write_feishu_config(self._feishu_path, config)
-        except IntegrationConfigError:
-            raise IntegrationConfigWriteError from None
-
-
 __all__ = [
     "CONFIG_FILE_NAME",
     "CONFIG_ROOT",
@@ -302,7 +252,6 @@ __all__ = [
     "DEFAULT_FEISHU_CONFIG_PATH",
     "DEFAULT_RESOURCES_CONFIG_PATH",
     "LEGACY_CONFIG_FILE_NAME",
-    "FileIntegrationConfigRepository",
     "IntegrationConfigError",
     "IntegrationConfigMissingError",
     "PreflightProbeUnreadableError",

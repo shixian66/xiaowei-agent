@@ -11,7 +11,7 @@ from typing import ClassVar, Literal, TypeAlias
 from pydantic import Field
 
 from xiaowei_agent.contracts.base import AwareDatetime, Contract, StrictInt
-from xiaowei_agent.contracts.integration_config import ConfigDomain
+from xiaowei_agent.contracts.enums import ConfigDomain
 
 LoadStatus = Literal["loaded", "invalid"]
 TestStatus = Literal["passed", "failed"]

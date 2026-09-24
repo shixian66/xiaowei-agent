@@ -100,6 +100,11 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED",
         "AdminAuditReasonCode.SCOPE_MISMATCH",
         "AdminAuditReasonCode.TARGET_NOT_FOUND",
+        # --- W4a 迁移 MigrationResult 枚举成员：CLI 唯一输出的闭集结果码 ---
+        # 旧文件内容、路径与 OSError 原文都不进异常；由
+        # test_integration_config_migration 的 CLI 输出断言反向承重。
+        "MigrationResult.MIGRATION_REQUIRED",
+        "MigrationResult.UNAVAILABLE",
         # --- TargetRejection 枚举成员：取值域是代码里的闭集 ---
         # 被拒的环境标识来自调用方，不进消息；由
         # test_rejection_message_never_echoes_the_environment_id 反向承重。

@@ -408,8 +408,8 @@ def test_no_secret_or_path_reaches_the_result_or_output(tmp_path: Path) -> None:
 
 def test_cli_prints_only_a_closed_result_code() -> None:
     """CLI 不接收任何参数：多一个参数就是多一条"迁移了另一个目录"的路。"""
-    completed = subprocess.run(  # noqa: S603 -- 固定解释器与模块
-        [sys.executable, "-m", "xiaowei_agent.interfaces.integration_config_migrate", "/tmp"],
+    completed = subprocess.run(
+        [sys.executable, "-m", "xiaowei_agent.interfaces.integration_config_migrate", "extra"],
         capture_output=True,
         text=True,
         check=False,

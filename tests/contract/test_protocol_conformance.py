@@ -495,7 +495,7 @@ def test_file_config_adapter_keeps_the_port_keyword_signatures() -> None:
     from xiaowei_agent.application.integration_config_service import (
         IntegrationConfigRepository,
     )
-    from xiaowei_agent.interfaces.integration_config_file import (
+    from xiaowei_agent.interfaces.integration_config_repository import (
         FileIntegrationConfigRepository,
     )
 

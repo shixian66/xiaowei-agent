@@ -67,7 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         FeishuSdkMessageAdapter,
     )
     from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
-    from xiaowei_agent.interfaces.integration_config_file import (
+    from xiaowei_agent.interfaces.integration_config_repository import (
         FileIntegrationConfigRepository,
     )
     from xiaowei_agent.interfaces.provider_probe import ProbeOutcome

@@ -47,11 +47,13 @@ from xiaowei_agent.contracts import (
 )
 from xiaowei_agent.contracts.admin_audit import admin_audit_target_digest
 from xiaowei_agent.interfaces.integration_config_file import (
-    FileIntegrationConfigRepository,
     read_ai_config,
     read_feishu_config,
     write_ai_config,
     write_feishu_config,
+)
+from xiaowei_agent.interfaces.integration_config_repository import (
+    FileIntegrationConfigRepository,
 )
 from xiaowei_agent.persistence.fake import (
     InMemoryAdminAuditStore,

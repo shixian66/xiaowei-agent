@@ -208,10 +208,23 @@ class AdminAuditReasonCode(StrEnum):
 
 
 class ProviderName(StrEnum):
-    """`integrations.json` 里可配置的 Provider 闭集。"""
+    """Gemini/飞书探针与模型接线使用的 Provider 闭集；配置域见 :class:`ConfigDomain`。"""
 
     GEMINI = "gemini"
     FEISHU = "feishu"
+
+
+class ConfigDomain(StrEnum):
+    """配置域闭集：一个宿主目录、一份固定文件、一个独立 ``generation``。
+
+    加载回执的键、``service_config_state.config_domain`` 的 CHECK 与 Web 投影都用它，
+    不再借 :class:`ProviderName` 冒充配置域——后者只服务
+    现有 Gemini/飞书探针分类。``RESOURCES`` 在 W4a 只占名字与挂载，没有文档契约。
+    """
+
+    AI = "ai"
+    FEISHU = "feishu"
+    RESOURCES = "resources"
 
 
 class WebMode(StrEnum):

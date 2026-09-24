@@ -1008,16 +1008,16 @@ async def build_postgres_web_stack(
     两个端口都在才额外装配 OAuth 认证。谁传端口谁负责判断。
     """
     from xiaowei_agent.application.admin_identity import AdminIdentityService
-    from xiaowei_agent.application.integration_config_service import (
-        IntegrationConfigService,
-    )
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.identity_activation import IdentityActivationService
+    from xiaowei_agent.application.integration_config_service import (
+        IntegrationConfigService,
+    )
     from xiaowei_agent.interfaces.directory_identity import (
         DirectoryFeishuIdentityDirectory,
     )
-    from xiaowei_agent.interfaces.integration_config_file import (
+    from xiaowei_agent.interfaces.integration_config_repository import (
         FileIntegrationConfigRepository,
     )
     from xiaowei_agent.interfaces.local_admin_auth import (
