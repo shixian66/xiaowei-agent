@@ -102,11 +102,15 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 及确认对话框；这只是本地 UI 检查，不是正式浏览器 UAT。
 
 <a id="w4a-offline-candidate-evidence"></a>
-**W4a 离线候选证据**（实现与测试 head `71a53503e23431e4cea3dee124e6e42a57dac83e`，基线 `2cef6aa`；其后只追加本 handoff 文档提交）：
-本机 Python 3.11.16、依赖按 uv.lock，去掉代理环境变量运行。`python -m pytest -q` 为 `4674 passed, 411 skipped`，
+**W4a 离线候选证据**（首轮受审 head `ef5566e34210871f2111d4b28531bd3a3f30003e`，基线 `2cef6aa`）：
+独立复审在首轮 head 上复现 1 个 P1——Web 未重启时 OAuth 连接测试用启动期旧凭据交换 code，回调却按当前文件把结果记到新代次。
+修复提交 `705a0a90e7ed16c790cd4865dc41aef09d9a8347`：测试 state/context 绑定 `config_generation`；开始前要求 `(web, feishu)`
+回执为当前代次 `loaded`；回调前文件、Web 回执、state 三者同代，否则写 `FAILED/config_invalid` 且不交换、不记结果；结果只记绑定代次。
+修复后本机（Python 3.11.16、依赖按 uv.lock、去掉代理环境变量）：`python -m pytest -q` 为 `4691 passed, 415 skipped`，
 `python -m pytest -m security -q` 为 `1558 passed, 83 skipped`，`ruff check .` 与 `mypy src`（212 个源文件）通过；
-一次性 PostgreSQL 16.10 容器（仅 loopback、口令认证、用后删除）上全量为 `5085 passed`、零 skip，其中
-`tests/integration` 为 `413 passed`。锁定 hatchling 1.28.0 离线构建的 wheel 含新增的配置服务、文件 adapter、
+一次性 PostgreSQL 16.10 容器（仅 loopback、口令认证、用后删除）上全量为 `5106 passed`、零 skip。修复的三项隔离变异
+（撤掉开始前 Web 回执门、撤掉回调漂移门并按当前文件记账、内存 store 丢失绑定代次）各自转红并恢复。以下 wheel、smoke、
+首轮四项变异与视觉证据取自首轮 head `71a5350`/`ef5566e`，修复未触及挂载、迁移器、回执签名或静态资源，未对修复提交重跑。锁定 hatchling 1.28.0 离线构建的 wheel 含新增的配置服务、文件 adapter、
 迁移器、预检、`rev_0018` 与 Admin 静态资源，且不含 tests/scripts。Compose smoke 在真实 Docker 中通过（`compose-smoke: passed`），
 逐容器核对三域挂载矩阵且清理干净；因本环境 TLS 代理，smoke 在同一提交的临时副本中执行，副本 Dockerfile **仅 builder 阶段**
 额外信任代理 CA 以安装 uv/依赖，运行阶段镜像、Compose 文件与 smoke 脚本未改——这是环境偏差，不等于仓库 Dockerfile 在该环境可直接构建；

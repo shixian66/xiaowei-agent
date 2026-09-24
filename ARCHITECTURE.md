@@ -716,8 +716,11 @@ W2 将任务工作台与配置面分开：`/app` 及其静态脚本不含 Provid
 与连接测试都是两阶段 Admin 审计：先写 `STARTED`（写不进即 503 且不动文件），再执行动作，最后写
 `SUCCEEDED`/`FAILED`；operation id 只由服务端 `trusted_trace_id()` 派生并带 `w4:` 前缀，客户端不能
 提供。Secret 缺省表示保留，`null`/空串拒绝，清除只走独立确认动作。OAuth 连接测试的 state 经
-`web_oauth_test_contexts`（`rev_0018`）绑定到其 `STARTED` operation id，与登录 context 互不消费；
-state 无效或过期时保留 `STARTED`，state 已消费而 Admin session 失效时不调用 Provider 并写 `FAILED`。
+`web_oauth_test_contexts`（`rev_0018`）绑定到其 `STARTED` operation id 与被测飞书 `config_generation`，与登录
+context 互不消费；开始测试前除凭据须在当前代次通过外，`(web, feishu)` 加载回执也必须是当前代次的
+`loaded`（交换 code 的是 Web 启动期装配的 adapter）；回调交换 code 前再核对当前文件代次、Web 已加载代次与
+绑定代次三者相等，任一漂移即写 `FAILED` 且不交换、不记结果，结果只记到绑定代次。state 无效或过期时保留
+`STARTED`，state 已消费而 Admin session 失效时不调用 Provider 并写 `FAILED`。
 `rev_0018` 同时把 `service_config_state.provider` 改名为 `config_domain`（`gemini`→`ai`），其 downgrade
 遇到 W4a 审计事实、OAuth test context 或 `resources` 回执时在任何 DDL 之前拒绝。飞书 Admin 只能读取独立的
 `/admin/api/integration-status` 脱敏投影，不能复用 raw config DTO；旧
