@@ -1112,6 +1112,7 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "provider_state",
         "identity_directory",
         "activation_service",
+        "admin_identity_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -1226,6 +1227,7 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.trace",
     }
     web_only = {
+        "xiaowei_agent.application.admin_identity",
         "xiaowei_agent.application.channel_access",
         "xiaowei_agent.application.channel_submission",
         "xiaowei_agent.application.identity_activation",
