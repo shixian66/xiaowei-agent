@@ -86,6 +86,8 @@ const STATUS_LABELS = Object.freeze({ active: "正常", disabled: "已禁用" })
 const SOURCE_LABELS = Object.freeze({ local_admin: "本地管理员", feishu: "飞书" });
 const ACTIVATION_SOURCE_LABELS = Object.freeze({ web_login: "Web 登录", safe_task_link: "结果链接", feishu_group: "飞书群" });
 const AUDIT_OUTCOME_LABELS = Object.freeze({ started: "进行中", succeeded: "成功", denied: "拒绝", failed: "失败" });
+const TARGET_KIND_LABELS = Object.freeze({ user: "用户", activation: "激活申请", duty_binding: "值班绑定", config: "配置", task_content: "任务内容" });
+const AUDIT_REASON_LABELS = Object.freeze({ actor_not_admin: "操作人不是管理员", auth_source_not_allowed: "认证来源不允许", target_not_found: "目标不存在", scope_mismatch: "作用域不匹配", conflict: "数据已变化", audit_unwritable: "审计不可写" });
 
 const identityState = {
   users: [],
@@ -117,6 +119,11 @@ function setVisible(element, visible) {
 
 function replaceChildren(element) {
   element.replaceChildren();
+}
+
+function auditReasonText(reasonCode) {
+  if (reasonCode === null || reasonCode === undefined) return "—";
+  return AUDIT_REASON_LABELS[reasonCode] || "未知";
 }
 
 function tableCell(row, value, className = "") {
@@ -261,7 +268,9 @@ function renderAudit() {
     tableCell(row, text(event.actor));
     tableCell(row, SOURCE_LABELS[event.auth_source] || "未知");
     tableCell(row, text(event.action));
-    tableCell(row, event.reason_code || AUDIT_OUTCOME_LABELS[event.outcome] || "未知");
+    tableCell(row, TARGET_KIND_LABELS[event.target_kind] || "未知");
+    tableCell(row, AUDIT_OUTCOME_LABELS[event.outcome] || "未知");
+    tableCell(row, auditReasonText(event.reason_code));
     tableCell(row, effectText(event.effect));
     identityElements.auditBody.append(row);
   }
@@ -366,19 +375,32 @@ async function submitIdentityAction(event) {
   }
   identityElements.submit.disabled = true;
   try {
-    await requestJson(pendingIdentityAction.path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify(body),
-    });
+    try {
+      await requestJson(pendingIdentityAction.path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (error.status === 409) {
+        try {
+          await refreshIdentityConsole();
+        } catch (_) {
+          setIdentityMessage("数据刷新失败，请刷新页面。");
+        }
+      }
+      identityElements.confirmMessage.textContent = identityError(error);
+      setVisible(identityElements.confirmMessage, true);
+      return;
+    }
     identityElements.dialog.close();
     pendingIdentityAction = null;
     setIdentityMessage("");
-    await refreshIdentityConsole();
-  } catch (error) {
-    if (error.status === 409) await refreshIdentityConsole();
-    identityElements.confirmMessage.textContent = identityError(error);
-    setVisible(identityElements.confirmMessage, true);
+    try {
+      await refreshIdentityConsole();
+    } catch (_) {
+      setIdentityMessage("操作已完成，但列表刷新失败，请刷新页面。");
+    }
   } finally {
     identityElements.submit.disabled = false;
   }

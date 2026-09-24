@@ -73,6 +73,7 @@ def test_raw_configuration_ui_belongs_only_to_the_admin_shell() -> None:
 
 def test_admin_shell_contains_the_three_lite_identity_regions_and_one_confirmation() -> None:
     admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
+    script = (_STATIC / "admin.js").read_text(encoding="utf-8")
 
     for required in (
         'id="identity-users"',
@@ -87,6 +88,14 @@ def test_admin_shell_contains_the_three_lite_identity_regions_and_one_confirmati
     assert "用户与权限" in admin
     assert "待激活申请" in admin
     assert "管理审计" in admin
+    for column in ("目标类型", "结果", "原因", "影响"):
+        assert f"<th>{column}</th>" in admin
+    assert 'TARGET_KIND_LABELS[event.target_kind] || "未知"' in script
+    assert 'AUDIT_OUTCOME_LABELS[event.outcome] || "未知"' in script
+    assert "auditReasonText(event.reason_code)" in script
+    assert "event.reason_code || AUDIT_OUTCOME_LABELS" not in script
+    assert "操作已完成，但列表刷新失败，请刷新页面。" in script
+    assert 'setIdentityMessage("操作已完成，但列表刷新失败，请刷新页面。")' in script
 
 
 def test_admin_script_uses_only_the_governed_identity_route_closure() -> None:

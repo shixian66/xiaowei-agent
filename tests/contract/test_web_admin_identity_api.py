@@ -495,6 +495,8 @@ async def test_each_governed_write_requires_origin_csrf_json_and_confirmation(
     service = _AdminIdentity()
     app = _app(service)
     without_confirmation = {**body, "confirm": False}
+    with_integer_confirmation = {**body, "confirm": 1}
+    with_float_confirmation = {**body, "confirm": 1.0}
     with_extra = {**body, "tenant_id": "other-tenant"}
     async with _client(app, cookie=_LOCAL_COOKIE) as client:
         responses = [
@@ -552,6 +554,16 @@ async def test_each_governed_write_requires_origin_csrf_json_and_confirmation(
             ),
             await client.post(
                 path,
+                content=json.dumps(with_integer_confirmation),
+                headers=_headers(_LOCAL_COOKIE),
+            ),
+            await client.post(
+                path,
+                content=json.dumps(with_float_confirmation),
+                headers=_headers(_LOCAL_COOKIE),
+            ),
+            await client.post(
+                path,
                 content=json.dumps(with_extra),
                 headers=_headers(_LOCAL_COOKIE),
             ),
@@ -565,6 +577,8 @@ async def test_each_governed_write_requires_origin_csrf_json_and_confirmation(
         403,
         403,
         415,
+        400,
+        400,
         400,
         400,
         413,

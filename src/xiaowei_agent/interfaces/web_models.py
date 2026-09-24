@@ -15,6 +15,7 @@ from xiaowei_agent.application.channel_submission import SubmittedTask
 from xiaowei_agent.application.integration_state import ProviderDisplayState
 from xiaowei_agent.contracts import (
     AdminCapability,
+    AlwaysTrue,
     AuthenticatedPrincipal,
     AwareDatetime,
     ChannelPermission,
@@ -137,7 +138,7 @@ class WebSetUserStatusRequest(_AdminIdentityRequest):
     expected_status: UserStatus
     expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
     status: UserStatus
-    confirm: Literal[True]
+    confirm: AlwaysTrue
 
     @model_validator(mode="after")
     def _status_must_change(self) -> Self:
@@ -152,7 +153,7 @@ class WebChangeUserRoleRequest(_AdminIdentityRequest):
     user_id: BoundedId
     expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
     role: Literal[ProductRole.USER, ProductRole.OPERATOR]
-    confirm: Literal[True]
+    confirm: AlwaysTrue
 
     @model_validator(mode="after")
     def _role_must_change(self) -> Self:
@@ -168,14 +169,14 @@ class WebApproveActivationRequest(_AdminIdentityRequest):
     actor: BoundedActor
     display_name: BoundedName
     approved_role: Literal[ProductRole.USER, ProductRole.OPERATOR] = ProductRole.USER
-    confirm: Literal[True]
+    confirm: AlwaysTrue
 
 
 class WebRejectActivationRequest(_AdminIdentityRequest):
     """激活拒绝只需申请 ID 与显式确认。"""
 
     request_id: BoundedId
-    confirm: Literal[True]
+    confirm: AlwaysTrue
 
 
 ConfigText: TypeAlias = Annotated[StrictStr, Field(min_length=1, max_length=256)]
