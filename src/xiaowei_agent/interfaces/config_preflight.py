@@ -35,7 +35,9 @@ from xiaowei_agent.interfaces.integration_config_file import (
 
 DOMAIN_DIRECTORIES: Final[tuple[str, ...]] = ("ai", "feishu", "resources")
 
-_OK: Final[str] = "preflight: ok"
+PREFLIGHT_OK: Final[str] = "preflight: ok"
+"""唯一的成功行；W5 发布预检按它组合三域目录预检，不另抄一份判断。"""
+_OK: Final[str] = PREFLIGHT_OK
 
 
 def probe_file_name(domain: str) -> str:
@@ -144,6 +146,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "DOMAIN_DIRECTORIES",
+    "PREFLIGHT_OK",
     "PreflightFailure",
     "main",
     "probe_file_name",

@@ -321,6 +321,19 @@ request id、主体、actor、作用域与异常正文一律不输出，可以�
 
   输出 `{"approved_deleted": …, "expired_deleted": …, "pending_expired": …, "rejected_deleted": …}`；
   重复运行只会得到零删除。正式环境由 owner 每日调度并配置失败告警。
+- 首次 release 预检（只读）：切换 `XIAOWEI_RUNTIME_PROFILE=release` 之前运行。依次检查三域配置
+  目录（同 `config_preflight`）、数据库可达与 schema head，再完整分页扫描固定 `dev-local/dev`：
+
+  ```bash
+  compose run --rm \
+    -v "$PWD/.config:/run/xiaowei-config" \
+    migrate python -m xiaowei_agent.interfaces.release_preflight
+  ```
+
+  只有 `result=ok` 可以切换。`tasks_not_drained` 表示仍有非终态任务，先排空；
+  `historical_execution_data_present` 表示该作用域里有任何已持久化 plan/evidence 的任务（包括
+  已成功的）——既有数据无法证明它们不是 recording 时代的合成结果，owner 只能选择**新数据库**或
+  另起方案做**单独批准的数据处置**。预检不删历史，不接受 `--force`、忽略标志或临时 SQL。
 
 #### 首启顺序（RI5 本地管理面）
 

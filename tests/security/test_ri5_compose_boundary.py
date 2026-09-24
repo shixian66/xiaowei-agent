@@ -276,10 +276,17 @@ def test_read_only_rootfs_and_dropped_caps_are_unchanged() -> None:
 
 def test_preflight_module_lives_inside_the_packaged_source() -> None:
     """``scripts/`` 不进镜像；预检放在那里会在容器里 ``ModuleNotFoundError``。"""
-    assert (
-        _ROOT / "src" / "xiaowei_agent" / "interfaces" / "config_preflight.py"
-    ).is_file()
-    assert not (_ROOT / "scripts" / "config_preflight.py").exists()
+    # W5 的三条一次性维护命令同理：release 镜像里只能用 ``python -m`` 调到它们。
+    for module in (
+        "config_preflight",
+        "release_preflight",
+        "activation_retention",
+        "legacy_identity_migration",
+    ):
+        assert (
+            _ROOT / "src" / "xiaowei_agent" / "interfaces" / f"{module}.py"
+        ).is_file(), module
+        assert not (_ROOT / "scripts" / f"{module}.py").exists(), module
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY scripts" not in dockerfile
 

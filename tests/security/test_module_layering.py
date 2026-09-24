@@ -172,6 +172,14 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.interfaces",
         "xiaowei_agent.persistence",
     },
+    "interfaces/release_preflight.py": {
+        # 组合三域目录预检与只读 PostgreSQL 扫描；不 import application、tools 或
+        # Provider 消费。
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
     "interfaces/activation_retention.py": {
         "xiaowei_agent.config",
         "xiaowei_agent.contracts",
