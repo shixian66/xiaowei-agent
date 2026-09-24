@@ -66,9 +66,10 @@ _ACTIVATION_SQL_WRITE_SITES = frozenset(
     {
         "persistence/postgres.py::PostgresActivationStore.create_or_reuse",
         "persistence/postgres.py::PostgresUserDirectoryStore._decide_activation",
+        "persistence/postgres.py::PostgresActivationRetentionStore.purge_expired_terminal",
     }
 )
-"""激活表的两类 SQL 写点：创建/收割，以及目录事务内的终态决策。"""
+"""激活表的三类 SQL 写点：创建/收割、目录事务内的终态决策、W5 固定期终态保留。"""
 
 _ACTIVATION_MEMORY_WRITE_SITES = frozenset(
     {
@@ -77,9 +78,10 @@ _ACTIVATION_MEMORY_WRITE_SITES = frozenset(
         "persistence/fake.py::InMemoryUserDirectoryStore._approve_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._reject_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._restore",
+        "persistence/fake.py::InMemoryActivationRetentionStore.purge_expired_terminal",
     }
 )
-"""内存激活事实的创建/收割、终态决策与事务回滚恢复点。"""
+"""内存激活事实的创建/收割、终态决策、事务回滚恢复点与固定期终态保留。"""
 
 _AUDIT_WRITE_SITES = frozenset({"persistence/postgres.py::_insert_audit_event"})
 """**单元素**。
@@ -450,7 +452,7 @@ def test_authorization_tables_are_written_only_at_frozen_sites() -> None:
     assert not offenders, offenders
 
 
-def test_activation_table_is_written_only_at_its_two_frozen_sql_owners() -> None:
+def test_activation_table_is_written_only_at_its_frozen_sql_owners() -> None:
     discovered = {
         site.qualified for site in _all_sites() if site.table in ACTIVATION_TABLES
     }

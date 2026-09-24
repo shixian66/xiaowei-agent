@@ -212,12 +212,22 @@ class PendingActivationPage(Contract):
             raise ValueError("pending activation cursor must match the last item")
         return self
 
+class ActivationRetentionReport(Contract):
+    """一次终态保留运行的闭集计数；不含任何 request id、主体、决定人或作用域。"""
+
+    pending_expired: StrictInt = Field(ge=0)
+    approved_deleted: StrictInt = Field(ge=0)
+    rejected_deleted: StrictInt = Field(ge=0)
+    expired_deleted: StrictInt = Field(ge=0)
+
+
 __all__ = [
     "ACTIVATION_SOURCE_INTENT_KINDS",
     "ACTIVATION_SOURCE_REFERENCE_REQUIREMENTS",
     "ACTIVATION_STATUS_DECISION_RULES",
     "ActivationLookup",
     "ActivationRequest",
+    "ActivationRetentionReport",
     "ActivationSource",
     "ActivationStatus",
     "CreateActivationCommand",
