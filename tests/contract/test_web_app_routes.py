@@ -1174,6 +1174,9 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         "oauth": events["oauth_instance"],
         "membership": events["membership_instance"],
     }
+    app_values = events["app"]
+    assert isinstance(app_values, dict)
+    assert app_values["admin_identity"] is stack.admin_identity_service
     config = events["server_config"]
     assert isinstance(config, uvicorn.Config)
     assert config.host == "127.0.0.1"
