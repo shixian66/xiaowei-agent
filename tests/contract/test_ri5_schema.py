@@ -2,6 +2,7 @@
 
 import sqlalchemy as sa
 
+from xiaowei_agent.contracts import ConfigDomain
 from xiaowei_agent.persistence import schema
 
 
@@ -12,11 +13,28 @@ def test_local_admins_allows_at_most_one_row() -> None:
     assert [c.name for c in table.primary_key.columns] == ["id"]
 
 
-def test_service_config_state_is_keyed_by_service_and_provider() -> None:
+def test_service_config_state_is_keyed_by_service_and_config_domain() -> None:
+    """W4a：列名与取值都是配置域，不保留"列叫 provider、值却是 domain"的过渡形状。"""
     assert [c.name for c in schema.SERVICE_CONFIG_STATE.primary_key.columns] == [
         "service_name",
-        "provider",
+        "config_domain",
     ]
+    assert "provider" not in schema.SERVICE_CONFIG_STATE.c
+
+
+def test_service_config_state_domain_is_the_closed_config_domain_set() -> None:
+    checks = {
+        c.name: str(c.sqltext)
+        for c in schema.SERVICE_CONFIG_STATE.constraints
+        if isinstance(c, sa.CheckConstraint)
+    }
+    text = checks["ck_service_config_state_domain_closed"]
+    assert {member.value for member in ConfigDomain if f"'{member.value}'" in text} == {
+        "ai",
+        "feishu",
+        "resources",
+    }
+    assert "'gemini'" not in text
 
 
 def test_provider_test_state_is_keyed_by_check_name() -> None:

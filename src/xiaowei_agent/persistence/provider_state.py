@@ -1,6 +1,6 @@
 """加载回执与测试结果的存储契约与 PostgreSQL 实现。
 
-两张表分开写而不是合成一张：加载回执按 ``(service_name, provider)`` 由**各进程**
+两张表分开写而不是合成一张：加载回执按 ``(service_name, config_domain)`` 由**各进程**
 在启动时写，测试结果按 ``check_name`` 由**管理员点击**时写。写入者、主键和时机都
 不同，合表会逼出一个既非回执也非结果的中间行。
 """
@@ -16,9 +16,11 @@ from pydantic import Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei_agent.contracts import (
+    ConfigDomain,
     Contract,
     LoadReceipt,
     LoadStatus,
+    ReceiptKey,
     StrictInt,
     StrictStr,
     TestResult,
@@ -88,13 +90,13 @@ class RecordTestCommand(Contract):
 class ProviderStateSnapshot:
     """页面计算状态所需的全部持久化事实。
 
-    **刻意不用 ``Contract``**：两个映射的键分别是 ``(service_name, provider)``
+    **刻意不用 ``Contract``**：两个映射的键分别是 ``(service_name, config_domain)``
     元组与 ``check_name``，而 ``FrozenMap`` 只支持字符串键到标量。这里沿用它同一条
     纪律——先 ``dict()`` 复制切断与调用方原对象的联系，再 ``MappingProxyType``
     包装挡住原地改写；两步缺一不可。
     """
 
-    receipts: Mapping[tuple[str, str], LoadReceipt]
+    receipts: Mapping[ReceiptKey, LoadReceipt]
     tests: Mapping[str, TestResult]
 
     def __post_init__(self) -> None:
@@ -105,16 +107,35 @@ class ProviderStateSnapshot:
 class ProviderStateStore(Protocol):
     """加载回执与测试结果的读写边界。"""
 
-    async def record_load(
-        self, *, receipts: Mapping[tuple[str, str], LoadReceipt]
-    ) -> None:
-        """整批覆盖本进程这一轮的加载回执；空映射是合法的空操作。"""
+    async def record_load(self, *, receipts: Mapping[ReceiptKey, LoadReceipt]) -> None:
+        """整批覆盖本进程这一轮的加载回执；空映射是合法的空操作。
+
+        配置域不在 :class:`ConfigDomain` 闭集里时整批拒绝（与数据库 CHECK 同一语义）。
+        """
 
     async def record_test(self, *, command: RecordTestCommand) -> None:
         """按 ``check_name`` 覆盖式写入最新一次测试结果。"""
 
     async def snapshot(self) -> ProviderStateSnapshot:
         """读出全部回执与全部测试结果。"""
+
+
+def closed_receipts(receipts: Mapping[ReceiptKey, LoadReceipt]) -> dict[ReceiptKey, LoadReceipt]:
+    """把回执键规范成 ``(str, ConfigDomain)``；任一键不在闭集里就整批拒绝。
+
+    两个实现共用这一处：只在 PostgreSQL 一侧靠 CHECK 拒绝时，内存实现会接受一条
+    真库写不进去的回执，共享套件就会在两边给出不同答案。
+    """
+    closed: dict[ReceiptKey, LoadReceipt] = {}
+    for (service_name, config_domain), receipt in receipts.items():
+        if not isinstance(service_name, str) or not service_name:
+            raise ProviderStateStoreError("load receipt service is invalid")
+        try:
+            domain = ConfigDomain(config_domain)
+        except ValueError:
+            raise ProviderStateStoreError("load receipt domain is invalid") from None
+        closed[(service_name, domain)] = receipt
+    return closed
 
 
 class PostgresProviderStateStore:
@@ -124,23 +145,22 @@ class PostgresProviderStateStore:
         self._engine = engine
         self._clock = clock
 
-    async def record_load(
-        self, *, receipts: Mapping[tuple[str, str], LoadReceipt]
-    ) -> None:
+    async def record_load(self, *, receipts: Mapping[ReceiptKey, LoadReceipt]) -> None:
         if not receipts:
             # 没有回执是**正常状态**（文件缺失或整体损坏时读不出可信 generation），
             # 不是"没什么可写"就顺手把旧行删掉——旧回执仍是"上次加载了第几代"的事实。
             return
+        closed = closed_receipts(receipts)
         now = self._clock()
         rows = [
             {
                 "service_name": service_name,
-                "provider": provider,
+                "config_domain": config_domain.value,
                 "loaded_generation": receipt.generation,
                 "load_status": receipt.status,
                 "loaded_at": now,
             }
-            for (service_name, provider), receipt in sorted(receipts.items())
+            for (service_name, config_domain), receipt in sorted(closed.items())
         ]
         statement = sa.dialects.postgresql.insert(SERVICE_CONFIG_STATE)
         async with self._engine.begin() as connection:
@@ -148,7 +168,7 @@ class PostgresProviderStateStore:
                 statement.on_conflict_do_update(
                     index_elements=[
                         SERVICE_CONFIG_STATE.c.service_name,
-                        SERVICE_CONFIG_STATE.c.provider,
+                        SERVICE_CONFIG_STATE.c.config_domain,
                     ],
                     set_={
                         "loaded_generation": statement.excluded.loaded_generation,
@@ -199,7 +219,7 @@ class PostgresProviderStateStore:
             )
         return ProviderStateSnapshot(
             receipts={
-                (row["service_name"], row["provider"]): LoadReceipt(
+                (row["service_name"], ConfigDomain(row["config_domain"])): LoadReceipt(
                     generation=row["loaded_generation"],
                     status=row["load_status"],
                 )
@@ -226,4 +246,5 @@ __all__ = [
     "ProviderStateStoreError",
     "ProviderTestErrorCode",
     "RecordTestCommand",
+    "closed_receipts",
 ]

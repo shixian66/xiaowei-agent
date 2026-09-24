@@ -11,7 +11,11 @@ from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.suites.web_session_store import WEB_SESSION_STORE_CASES, bind
+from tests.suites.web_session_store import (
+    WEB_SESSION_STORE_CASES,
+    bind,
+    oauth_test_issue,
+)
 
 from xiaowei_agent.contracts import IdentitySource
 from xiaowei_agent.contracts.web_navigation import (
@@ -36,7 +40,6 @@ from xiaowei_agent.persistence.schema import (
 from xiaowei_agent.persistence.web_session import (
     DEFAULT_OAUTH_STATE_CAPACITY,
     IssueOAuthLoginStateCommand,
-    IssueOAuthStateCommand,
     OAuthState,
     OAuthStateCapacityError,
     RotateWebSessionCommand,
@@ -79,6 +82,22 @@ def oauth_login_context_digests(memory_state):
 def delete_oauth_login_context(memory_state):
     async def delete(state_digest: str) -> None:
         memory_state.oauth_login_contexts.pop(state_digest, None)
+
+    return delete
+
+
+@pytest.fixture
+def oauth_test_context_digests(memory_state):
+    async def load() -> set[str]:
+        return set(memory_state.oauth_test_contexts)
+
+    return load
+
+
+@pytest.fixture
+def delete_oauth_test_context(memory_state):
+    async def delete(state_digest: str) -> None:
+        memory_state.oauth_test_contexts.pop(state_digest, None)
 
     return delete
 
@@ -129,16 +148,16 @@ async def test_default_capacity_rejects_the_1025th_pending_state(
 ) -> None:
     store = InMemoryWebSessionStore(clock=clock, state=memory_state)
     for index in range(1024):
-        await store.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await store.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest=f"{index:064x}",
                 ttl_seconds=60,
             )
         )
 
     with pytest.raises(OAuthStateCapacityError):
-        await store.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await store.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest=f"{1024:064x}",
                 ttl_seconds=60,
             )

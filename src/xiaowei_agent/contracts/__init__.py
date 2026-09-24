@@ -234,6 +234,7 @@ from xiaowei_agent.contracts.promql_surface import (
 from xiaowei_agent.contracts.provider_state import (
     LoadReceipt,
     LoadStatus,
+    ReceiptKey,
     TestResult,
     TestStatus,
 )
@@ -436,6 +437,7 @@ __all__ = [
     "ReadClass",
     "ReadinessProbe",
     "ReadinessReport",
+    "ReceiptKey",
     "RejectActivationCommand",
     "Rejection",
     "RenderPayload",

@@ -154,6 +154,10 @@ class AdminAuditAction(StrEnum):
     LEGACY_IDENTITY_MIGRATED = "legacy_identity_migrated"
     ACTIVATION_APPROVED = "activation_approved"
     ACTIVATION_REJECTED = "activation_rejected"
+    # W4a：文件配置与探针不能与数据库审计同事务，因此只有这三个动作走两阶段。
+    CONFIG_SAVED = "config_saved"
+    CONFIG_CLEARED = "config_cleared"
+    CONNECTION_TESTED = "connection_tested"
 
 
 class AdminAuditTargetKind(StrEnum):
@@ -196,6 +200,11 @@ class AdminAuditReasonCode(StrEnum):
     SCOPE_MISMATCH = "scope_mismatch"
     CONFLICT = "conflict"
     AUDIT_UNWRITABLE = "audit_unwritable"
+    # W4a 两阶段配置审计的失败原因：只到闭集码，异常正文一律不进审计表。
+    CONFIG_INVALID = "config_invalid"
+    FILE_IO_FAILED = "file_io_failed"
+    PROBE_FAILED = "probe_failed"
+    SESSION_INVALID = "session_invalid"
 
 
 class ProviderName(StrEnum):

@@ -104,9 +104,9 @@ async def test_service_config_state_rejects_a_zero_generation(
         async with clean_database.begin() as connection:
             await connection.execute(
                 sa.text(
-                    "INSERT INTO service_config_state (service_name, provider,"
+                    "INSERT INTO service_config_state (service_name, config_domain,"
                     " loaded_generation, load_status, loaded_at)"
-                    " VALUES ('worker', 'gemini', 0, 'loaded', :now)"
+                    " VALUES ('worker', 'ai', 0, 'loaded', :now)"
                 ),
                 {"now": _NOW},
             )
@@ -119,9 +119,9 @@ async def test_service_config_state_rejects_an_unknown_load_status(
         async with clean_database.begin() as connection:
             await connection.execute(
                 sa.text(
-                    "INSERT INTO service_config_state (service_name, provider,"
+                    "INSERT INTO service_config_state (service_name, config_domain,"
                     " loaded_generation, load_status, loaded_at)"
-                    " VALUES ('worker', 'gemini', 1, 'load_failed', :now)"
+                    " VALUES ('worker', 'ai', 1, 'load_failed', :now)"
                 ),
                 {"now": _NOW},
             )

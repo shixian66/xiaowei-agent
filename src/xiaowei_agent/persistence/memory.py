@@ -12,7 +12,7 @@ from xiaowei_agent.contracts import (
 )
 
 if TYPE_CHECKING:
-    from xiaowei_agent.contracts import LoadReceipt, TestResult
+    from xiaowei_agent.contracts import LoadReceipt, ReceiptKey, TestResult
     from xiaowei_agent.contracts.activation import ActivationRequest
     from xiaowei_agent.contracts.admin_audit import AdminAuditEvent
     from xiaowei_agent.contracts.identity import (
@@ -52,6 +52,8 @@ class InMemoryPersistenceState:
         ] = {}
         self.oauth_states: dict[str, OAuthState] = {}
         self.oauth_login_contexts: dict[str, WebReturnIntent] = {}
+        # W4a：测试 state → 审计 operation id；与登录 context 同样随 state 收割。
+        self.oauth_test_contexts: dict[str, str] = {}
         self.web_sessions: dict[str, WebSession] = {}
         self.local_admin: Any | None = None
         self.user_accounts: dict[str, UserAccount] = {}
@@ -65,7 +67,7 @@ class InMemoryPersistenceState:
         # 两条偏唯一索引在内存里的对应物：一次操作每个阶段最多一条事件。
         self.admin_audit_stage_keys: dict[tuple[str, AuditStage], str] = {}
         self.activation_requests: dict[str, ActivationRequest] = {}
-        self.load_receipts: dict[tuple[str, str], LoadReceipt] = {}
+        self.load_receipts: dict[ReceiptKey, LoadReceipt] = {}
         self.provider_tests: dict[str, TestResult] = {}
         self.next_fencing_token = 1
         self.next_projection_fencing_token = 1

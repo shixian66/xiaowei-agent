@@ -123,16 +123,15 @@ class AdminAuditStore(Protocol):
     async def append_started(self, *, start: AdminAuditStart) -> AdminAuditEvent:
         """写两阶段操作的第一条事件。
 
-        W1b 没有任何可用的 action：``DIRECTORY_ACTIONS`` 恰好等于本阶段全部十个
-        动作，而 :class:`AdminAuditStart` 在契约层就拒绝目录动作。这是设计结果，
-        不是缺陷——放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
+        只有 W4a 的三个配置动作可用：:class:`AdminAuditStart` 在契约层拒绝目录动作。
+        放宽它等于允许目录动作走两阶段，终态字段由调用方再传一遍。
         """
 
     async def append_terminal(self, *, terminal: AdminAuditTerminal) -> AdminAuditEvent:
         """写终态；稳定字段从已存的 ``STARTED`` 读回，找不到就抛。"""
 
     async def append_denied(self, *, denial: AdminAuditDenial) -> AdminAuditEvent:
-        """写一次拒绝。本阶段唯一可用的写方法。"""
+        """写一次拒绝；``outcome`` 恒为 ``DENIED``。"""
 
     async def load(self, *, event_id: str) -> AdminAuditEvent | None:
         """按 id 读回一条事件；不存在返回 ``None``。"""

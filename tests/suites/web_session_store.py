@@ -13,12 +13,13 @@ from xiaowei_agent.contracts.web_navigation import (
 )
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthLoginStateCommand,
-    ConsumeOAuthStateCommand,
+    ConsumeOAuthTestStateCommand,
     IssueOAuthLoginStateCommand,
-    IssueOAuthStateCommand,
+    IssueOAuthTestStateCommand,
     OAuthLoginContextNotFoundError,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
+    OAuthTestContextNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
     WebSessionConflictError,
@@ -31,6 +32,15 @@ _OTHER_ORIGIN_DIGEST = "b2" * 32
 _WORKBENCH_INTENT = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
 
 
+def oauth_test_issue(*, state_digest: str, ttl_seconds: int) -> IssueOAuthTestStateCommand:
+    """测试 state 的签发命令；operation id 由 digest 派生，保证每个 state 唯一。"""
+    return IssueOAuthTestStateCommand(
+        state_digest=state_digest,
+        ttl_seconds=ttl_seconds,
+        operation_id=f"w4:{state_digest[-32:]}",
+    )
+
+
 def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]]) -> None:
     for case in cases:
         namespace[case.__name__] = case
@@ -39,35 +49,35 @@ def bind(namespace: MutableMapping[str, Any], cases: Sequence[Callable[..., Any]
 async def test_oauth_state_is_single_use_and_expiry_is_fail_closed(
     web_sessions: Any, clock: Any
 ) -> None:
-    command = IssueOAuthStateCommand(state_digest="a" * 64, ttl_seconds=60)
-    issued = await web_sessions.issue_oauth_state(command=command)
+    command = oauth_test_issue(state_digest="a" * 64, ttl_seconds=60)
+    issued = await web_sessions.issue_oauth_test_state(command=command)
 
     assert issued.state_digest == command.state_digest
     assert issued.issued_at == clock()
     assert (issued.expires_at - issued.issued_at).total_seconds() == 60
     assert issued.consumed_at is None
 
-    consumed = await web_sessions.consume_oauth_state(
-        command=ConsumeOAuthStateCommand(state_digest=command.state_digest)
+    consumed = await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=command.state_digest)
     )
     assert consumed.consumed_at == clock()
 
     with pytest.raises(OAuthStateNotFoundError):
-        await web_sessions.consume_oauth_state(
-            command=ConsumeOAuthStateCommand(state_digest=command.state_digest)
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=command.state_digest)
         )
 
     expired_digest = "b" * 64
-    await web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(
             state_digest=expired_digest,
             ttl_seconds=60,
         )
     )
     clock.advance(seconds=60)
     with pytest.raises(OAuthStateNotFoundError):
-        await web_sessions.consume_oauth_state(
-            command=ConsumeOAuthStateCommand(state_digest=expired_digest)
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=expired_digest)
         )
 
 
@@ -75,14 +85,14 @@ async def test_concurrent_oauth_state_consumption_has_exactly_one_winner(
     web_sessions: Any,
 ) -> None:
     digest = "c" * 64
-    await web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
     )
 
     results = await asyncio.gather(
         *(
-            web_sessions.consume_oauth_state(
-                command=ConsumeOAuthStateCommand(state_digest=digest)
+            web_sessions.consume_oauth_test_state(
+                command=ConsumeOAuthTestStateCommand(state_digest=digest)
             )
             for _ in range(2)
         ),
@@ -122,8 +132,8 @@ async def test_connection_test_state_never_creates_a_login_context(
     oauth_login_context_digests: Callable[[], Awaitable[set[str]]],
 ) -> None:
     digest = "1a" * 32
-    await web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
     )
 
     assert await oauth_login_context_digests() == set()
@@ -152,12 +162,15 @@ async def test_missing_login_context_rolls_back_state_consumption(
         )
 
     # The aggregate failed, so the state update must have rolled back rather than
-    # turning an invariant failure into a consumed ticket.
-    assert (
-        await web_sessions.consume_oauth_state(
-            command=ConsumeOAuthStateCommand(state_digest=digest)
+    # turning an invariant failure into a consumed ticket: the digest is still live.
+    with pytest.raises(WebSessionConflictError):
+        await web_sessions.issue_oauth_login_state(
+            command=IssueOAuthLoginStateCommand(
+                state_digest=digest,
+                ttl_seconds=60,
+                return_intent=_WORKBENCH_INTENT,
+            )
         )
-    ).consumed_at is not None
 
 
 async def test_state_cleanup_cascades_login_contexts(
@@ -180,8 +193,8 @@ async def test_state_cleanup_cascades_login_contexts(
     )
     clock.advance(seconds=1)
 
-    await web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(state_digest="1e" * 32, ttl_seconds=60)
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest="1e" * 32, ttl_seconds=60)
     )
 
     assert await oauth_login_context_digests() == set()
@@ -197,8 +210,8 @@ async def test_login_and_connection_test_states_share_one_capacity(
             return_intent=_WORKBENCH_INTENT,
         )
     )
-    await bounded_web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(state_digest="20" * 32, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest="20" * 32, ttl_seconds=60)
     )
 
     with pytest.raises(OAuthStateCapacityError):
@@ -241,8 +254,8 @@ async def test_unknown_oauth_state_is_indistinguishable_from_replay(
     web_sessions: Any,
 ) -> None:
     with pytest.raises(OAuthStateNotFoundError, match="oauth state not found"):
-        await web_sessions.consume_oauth_state(
-            command=ConsumeOAuthStateCommand(state_digest="d" * 64)
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest="d" * 64)
         )
 
 
@@ -250,15 +263,15 @@ async def test_oauth_state_capacity_rejects_the_first_issue_above_the_limit(
     bounded_web_sessions: Any,
 ) -> None:
     for digest in ("1" * 64, "2" * 64):
-        await bounded_web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+        await bounded_web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
         )
 
     with pytest.raises(
         OAuthStateCapacityError, match=r"^oauth state capacity exhausted$"
     ):
-        await bounded_web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await bounded_web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest="3" * 64,
                 ttl_seconds=60,
             )
@@ -268,24 +281,24 @@ async def test_oauth_state_capacity_rejects_the_first_issue_above_the_limit(
 async def test_live_oauth_state_digest_conflicts_below_capacity(
     bounded_web_sessions: Any,
 ) -> None:
-    command = IssueOAuthStateCommand(state_digest="e" * 64, ttl_seconds=60)
-    await bounded_web_sessions.issue_oauth_state(command=command)
+    command = oauth_test_issue(state_digest="e" * 64, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_test_state(command=command)
 
     with pytest.raises(WebSessionConflictError):
-        await bounded_web_sessions.issue_oauth_state(command=command)
+        await bounded_web_sessions.issue_oauth_test_state(command=command)
 
 
 async def test_live_oauth_state_digest_conflict_precedes_capacity(
     bounded_web_sessions: Any,
 ) -> None:
-    command = IssueOAuthStateCommand(state_digest="e" * 64, ttl_seconds=60)
-    await bounded_web_sessions.issue_oauth_state(command=command)
-    await bounded_web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(state_digest="f" * 64, ttl_seconds=60)
+    command = oauth_test_issue(state_digest="e" * 64, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_test_state(command=command)
+    await bounded_web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest="f" * 64, ttl_seconds=60)
     )
 
     with pytest.raises(WebSessionConflictError):
-        await bounded_web_sessions.issue_oauth_state(command=command)
+        await bounded_web_sessions.issue_oauth_test_state(command=command)
 
 
 async def test_live_digest_conflict_commits_consumed_and_expired_cleanup(
@@ -301,20 +314,20 @@ async def test_live_digest_conflict_commits_consumed_and_expired_cleanup(
         (consumed_digest, 60),
         (expired_digest, 1),
     ):
-        await web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest=digest,
                 ttl_seconds=ttl_seconds,
             )
         )
-    await web_sessions.consume_oauth_state(
-        command=ConsumeOAuthStateCommand(state_digest=consumed_digest)
+    await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=consumed_digest)
     )
     clock.advance(seconds=1)
 
     with pytest.raises(WebSessionConflictError):
-        await web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest=live_digest,
                 ttl_seconds=60,
             )
@@ -328,30 +341,30 @@ async def test_consumed_and_expired_oauth_states_release_capacity(
 ) -> None:
     consumed_digest = "4" * 64
     expired_digest = "5" * 64
-    await bounded_web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(
+    await bounded_web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(
             state_digest=consumed_digest,
             ttl_seconds=60,
         )
     )
-    await bounded_web_sessions.issue_oauth_state(
-        command=IssueOAuthStateCommand(
+    await bounded_web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(
             state_digest=expired_digest,
             ttl_seconds=1,
         )
     )
-    await bounded_web_sessions.consume_oauth_state(
-        command=ConsumeOAuthStateCommand(state_digest=consumed_digest)
+    await bounded_web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=consumed_digest)
     )
     clock.advance(seconds=1)
 
     for digest in ("6" * 64, "7" * 64):
-        await bounded_web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
+        await bounded_web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
         )
     with pytest.raises(OAuthStateCapacityError):
-        await bounded_web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        await bounded_web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest="8" * 64,
                 ttl_seconds=60,
             )
@@ -362,16 +375,16 @@ async def test_cleaned_oauth_state_digest_no_longer_collides(
     bounded_web_sessions: Any, clock: Any
 ) -> None:
     digest = "9" * 64
-    command = IssueOAuthStateCommand(state_digest=digest, ttl_seconds=60)
-    await bounded_web_sessions.issue_oauth_state(command=command)
-    await bounded_web_sessions.consume_oauth_state(
-        command=ConsumeOAuthStateCommand(state_digest=digest)
+    command = oauth_test_issue(state_digest=digest, ttl_seconds=60)
+    await bounded_web_sessions.issue_oauth_test_state(command=command)
+    await bounded_web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=digest)
     )
 
-    reissued = await bounded_web_sessions.issue_oauth_state(command=command)
+    reissued = await bounded_web_sessions.issue_oauth_test_state(command=command)
     assert reissued.state_digest == digest
     clock.advance(seconds=60)
-    reissued_after_expiry = await bounded_web_sessions.issue_oauth_state(
+    reissued_after_expiry = await bounded_web_sessions.issue_oauth_test_state(
         command=command
     )
     assert reissued_after_expiry.state_digest == digest
@@ -384,8 +397,8 @@ async def test_concurrent_oauth_state_issuance_cannot_cross_capacity(
 
     async def issue(index: int) -> object:
         await barrier.wait()
-        return await bounded_web_sessions.issue_oauth_state(
-            command=IssueOAuthStateCommand(
+        return await bounded_web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(
                 state_digest=f"{index + 10:064x}",
                 ttl_seconds=60,
             )
@@ -585,7 +598,152 @@ async def test_the_auth_source_is_persisted_as_issued(web_sessions: Any) -> None
     ).auth_source is IdentitySource.LOCAL_ADMIN
 
 
+async def test_test_state_returns_its_operation_id_exactly_once(
+    web_sessions: Any,
+    oauth_test_context_digests: Callable[[], Awaitable[set[str]]],
+    oauth_login_context_digests: Callable[[], Awaitable[set[str]]],
+) -> None:
+    """W4a：签发与 state 同事务写入 operation id，消费与 state 同事务取回它。"""
+    digest = "4a" * 32
+    issued = await web_sessions.issue_oauth_test_state(
+        command=IssueOAuthTestStateCommand(
+            state_digest=digest, ttl_seconds=60, operation_id="w4:trace-op-1"
+        )
+    )
+    assert issued.operation_id == "w4:trace-op-1"
+    assert await oauth_test_context_digests() == {digest}
+    assert await oauth_login_context_digests() == set()
+
+    consumed = await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=digest)
+    )
+    assert consumed.operation_id == "w4:trace-op-1"
+    assert consumed.consumed_at is not None
+    with pytest.raises(OAuthStateNotFoundError):
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=digest)
+        )
+
+
+async def test_login_branch_cannot_consume_a_test_state(web_sessions: Any) -> None:
+    """登录分支只认登录 context：拿测试 state 去登录必须失败且不消费它。"""
+    digest = "4b" * 32
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
+    )
+    with pytest.raises(OAuthLoginContextNotFoundError):
+        await web_sessions.consume_oauth_login_state(
+            command=ConsumeOAuthLoginStateCommand(state_digest=digest)
+        )
+    # 失败的一次登录尝试没有烧掉测试票据。
+    consumed = await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=digest)
+    )
+    assert consumed.operation_id == f"w4:{digest[-32:]}"
+
+
+async def test_test_branch_cannot_consume_a_login_state(web_sessions: Any) -> None:
+    """测试分支只认测试 context：两个 context 表互不回退。"""
+    digest = "4c" * 32
+    await web_sessions.issue_oauth_login_state(
+        command=IssueOAuthLoginStateCommand(
+            state_digest=digest, ttl_seconds=60, return_intent=_WORKBENCH_INTENT
+        )
+    )
+    with pytest.raises(OAuthTestContextNotFoundError):
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=digest)
+        )
+    consumed = await web_sessions.consume_oauth_login_state(
+        command=ConsumeOAuthLoginStateCommand(state_digest=digest)
+    )
+    assert consumed.return_intent == _WORKBENCH_INTENT
+
+
+async def test_missing_test_context_rolls_back_state_consumption(
+    web_sessions: Any,
+    delete_oauth_test_context: Callable[[str], Awaitable[None]],
+) -> None:
+    digest = "4d" * 32
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
+    )
+    await delete_oauth_test_context(digest)
+    with pytest.raises(
+        OAuthTestContextNotFoundError, match=r"^oauth test context missing$"
+    ):
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=digest)
+        )
+    with pytest.raises(WebSessionConflictError):
+        await web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
+        )
+
+
+async def test_expired_test_state_yields_no_operation_id(
+    web_sessions: Any, clock: Any
+) -> None:
+    """过期 state 拿不到可信 operation id：调用方只能保留 STARTED。"""
+    digest = "4e" * 32
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=digest, ttl_seconds=60)
+    )
+    clock.advance(seconds=60)
+    with pytest.raises(OAuthStateNotFoundError):
+        await web_sessions.consume_oauth_test_state(
+            command=ConsumeOAuthTestStateCommand(state_digest=digest)
+        )
+
+
+async def test_state_cleanup_cascades_test_contexts(
+    web_sessions: Any,
+    clock: Any,
+    oauth_test_context_digests: Callable[[], Awaitable[set[str]]],
+) -> None:
+    consumed_digest = "4f" * 32
+    expired_digest = "50" * 32
+    for digest, ttl_seconds in ((consumed_digest, 60), (expired_digest, 1)):
+        await web_sessions.issue_oauth_test_state(
+            command=oauth_test_issue(state_digest=digest, ttl_seconds=ttl_seconds)
+        )
+    await web_sessions.consume_oauth_test_state(
+        command=ConsumeOAuthTestStateCommand(state_digest=consumed_digest)
+    )
+    clock.advance(seconds=1)
+    fresh = "51" * 32
+    await web_sessions.issue_oauth_test_state(
+        command=oauth_test_issue(state_digest=fresh, ttl_seconds=60)
+    )
+    assert await oauth_test_context_digests() == {fresh}
+
+
+async def test_one_operation_id_binds_at_most_one_live_test_state(
+    web_sessions: Any, oauth_state_digests: Callable[[], Awaitable[set[str]]]
+) -> None:
+    await web_sessions.issue_oauth_test_state(
+        command=IssueOAuthTestStateCommand(
+            state_digest="52" * 32, ttl_seconds=60, operation_id="w4:same-op"
+        )
+    )
+    with pytest.raises(WebSessionConflictError):
+        await web_sessions.issue_oauth_test_state(
+            command=IssueOAuthTestStateCommand(
+                state_digest="53" * 32, ttl_seconds=60, operation_id="w4:same-op"
+            )
+        )
+    # 冲突整体回滚：第二个 state 没有落下来。
+    assert await oauth_state_digests() == {"52" * 32}
+
+
 WEB_SESSION_STORE_CASES = (
+    test_test_state_returns_its_operation_id_exactly_once,
+    test_login_branch_cannot_consume_a_test_state,
+    test_test_branch_cannot_consume_a_login_state,
+    test_missing_test_context_rolls_back_state_consumption,
+    test_expired_test_state_yields_no_operation_id,
+    test_state_cleanup_cascades_test_contexts,
+    test_one_operation_id_binds_at_most_one_live_test_state,
     test_oauth_state_is_single_use_and_expiry_is_fail_closed,
     test_concurrent_oauth_state_consumption_has_exactly_one_winner,
     test_login_state_and_intent_are_issued_and_consumed_as_one_fact,
