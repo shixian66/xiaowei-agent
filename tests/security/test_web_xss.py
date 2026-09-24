@@ -64,6 +64,9 @@ def test_admin_identity_assets_never_open_an_html_or_dynamic_code_sink() -> None
         "new Function",
     ):
         assert forbidden not in script
+    assert "subject_ref" not in admin + script
+    assert "open_id" not in admin + script
+    assert "target_ref_digest" not in admin + script
 
 
 async def test_untrusted_render_text_remains_json_data_not_html_response() -> None:

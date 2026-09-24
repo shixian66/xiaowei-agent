@@ -20,6 +20,55 @@
       <p class="admin-lead">这里只展示是否已配置、是否需要重启、加载结果和最近测试结果，不展示凭据或连接细节。</p>
       <div class="integration-grid" id="integration-grid" aria-live="polite"></div>
       <p class="form-message is-hidden" id="admin-message" role="alert"></p>
+
+      <section class="identity-console is-hidden" id="identity-console" aria-labelledby="identity-title">
+        <div class="stage-heading">
+          <div><p class="eyebrow">IDENTITY GOVERNANCE</p><h2 id="identity-title">用户与权限</h2></div>
+          <span class="safe-view-pill">受管写入 · 全量审计</span>
+        </div>
+        <p class="admin-lead">所有变更由当前会话派生操作人与作用域，页面不接受租户、环境或审计结论。</p>
+        <p class="form-message is-hidden" id="identity-message" role="alert"></p>
+
+        <article class="identity-card" id="identity-users">
+          <div class="identity-card-head"><div><p class="eyebrow">DIRECTORY</p><h3>用户目录</h3></div><span class="identity-count" id="identity-users-count">0 人</span></div>
+          <div class="table-scroll"><table class="identity-table"><thead><tr><th>用户</th><th>状态</th><th>角色</th><th>飞书</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="identity-users-body"></tbody></table></div>
+          <p class="empty-state is-hidden" id="identity-users-empty">当前作用域还没有可管理用户。</p>
+          <button class="button button-quiet is-hidden" id="identity-users-more" type="button">加载更多用户</button>
+        </article>
+
+        <article class="identity-card" id="identity-activations">
+          <div class="identity-card-head"><div><p class="eyebrow">ACTIVATION</p><h3>待激活申请</h3></div><span class="identity-count" id="identity-activations-count">0 条</span></div>
+          <div class="table-scroll"><table class="identity-table"><thead><tr><th>申请</th><th>来源</th><th>申请时间</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="identity-activations-body"></tbody></table></div>
+          <p class="empty-state is-hidden" id="identity-activations-empty">没有待处理的激活申请。</p>
+          <button class="button button-quiet is-hidden" id="identity-activations-more" type="button">加载更多申请</button>
+        </article>
+
+        <article class="identity-card" id="identity-audit">
+          <div class="identity-card-head"><div><p class="eyebrow">AUDIT</p><h3>管理审计</h3></div><span class="identity-count" id="identity-audit-count">0 条</span></div>
+          <div class="table-scroll"><table class="identity-table"><thead><tr><th>时间</th><th>操作人</th><th>来源</th><th>动作</th><th>结果</th><th>影响</th></tr></thead><tbody id="identity-audit-body"></tbody></table></div>
+          <p class="empty-state is-hidden" id="identity-audit-empty">当前作用域还没有管理审计事件。</p>
+          <button class="button button-quiet is-hidden" id="identity-audit-more" type="button">加载更多审计</button>
+        </article>
+      </section>
+
+      <dialog id="identity-confirm" class="identity-dialog" aria-labelledby="identity-confirm-title">
+        <form id="identity-confirm-form">
+          <p class="eyebrow">CONFIRM CHANGE</p>
+          <h2 id="identity-confirm-title">确认管理变更</h2>
+          <p id="identity-confirm-summary">请核对本次操作。</p>
+          <div class="activation-fields is-hidden" id="identity-activation-fields">
+            <label class="config-field"><span>用户标识</span><input id="identity-activation-actor" type="text" maxlength="256" autocomplete="off"></label>
+            <label class="config-field"><span>显示名称</span><input id="identity-activation-name" type="text" maxlength="128" autocomplete="off"></label>
+            <label class="config-field"><span>初始角色</span><select id="identity-activation-role"><option value="user">普通用户</option><option value="operator">运维人员</option></select></label>
+          </div>
+          <p class="form-message is-hidden" id="identity-confirm-message" role="alert"></p>
+          <div class="identity-dialog-actions">
+            <button class="button button-quiet" id="identity-confirm-cancel" type="button">取消</button>
+            <button class="button button-primary" id="identity-confirm-submit" type="submit">确认执行</button>
+          </div>
+        </form>
+      </dialog>
+
       <section class="config-panel is-hidden" id="config-panel" aria-labelledby="config-title">
         <div class="stage-heading">
           <div>

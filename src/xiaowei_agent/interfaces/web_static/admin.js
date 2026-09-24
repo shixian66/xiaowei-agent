@@ -53,6 +53,51 @@ const configElements = Object.freeze({
   feishuAppSecret: document.querySelector("#feishu-app-secret"),
 });
 
+const identityElements = Object.freeze({
+  console: document.querySelector("#identity-console"),
+  message: document.querySelector("#identity-message"),
+  usersBody: document.querySelector("#identity-users-body"),
+  usersEmpty: document.querySelector("#identity-users-empty"),
+  usersMore: document.querySelector("#identity-users-more"),
+  usersCount: document.querySelector("#identity-users-count"),
+  activationsBody: document.querySelector("#identity-activations-body"),
+  activationsEmpty: document.querySelector("#identity-activations-empty"),
+  activationsMore: document.querySelector("#identity-activations-more"),
+  activationsCount: document.querySelector("#identity-activations-count"),
+  auditBody: document.querySelector("#identity-audit-body"),
+  auditEmpty: document.querySelector("#identity-audit-empty"),
+  auditMore: document.querySelector("#identity-audit-more"),
+  auditCount: document.querySelector("#identity-audit-count"),
+  dialog: document.querySelector("#identity-confirm"),
+  form: document.querySelector("#identity-confirm-form"),
+  title: document.querySelector("#identity-confirm-title"),
+  summary: document.querySelector("#identity-confirm-summary"),
+  activationFields: document.querySelector("#identity-activation-fields"),
+  activationActor: document.querySelector("#identity-activation-actor"),
+  activationName: document.querySelector("#identity-activation-name"),
+  activationRole: document.querySelector("#identity-activation-role"),
+  confirmMessage: document.querySelector("#identity-confirm-message"),
+  cancel: document.querySelector("#identity-confirm-cancel"),
+  submit: document.querySelector("#identity-confirm-submit"),
+});
+
+const ROLE_LABELS = Object.freeze({ admin: "管理员", operator: "运维人员", user: "普通用户" });
+const STATUS_LABELS = Object.freeze({ active: "正常", disabled: "已禁用" });
+const SOURCE_LABELS = Object.freeze({ local_admin: "本地管理员", feishu: "飞书" });
+const ACTIVATION_SOURCE_LABELS = Object.freeze({ web_login: "Web 登录", safe_task_link: "结果链接", feishu_group: "飞书群" });
+const AUDIT_OUTCOME_LABELS = Object.freeze({ started: "进行中", succeeded: "成功", denied: "拒绝", failed: "失败" });
+
+const identityState = {
+  users: [],
+  usersCursor: null,
+  activations: [],
+  activationCursor: null,
+  audit: [],
+  auditCursor: null,
+};
+
+let pendingIdentityAction = null;
+
 let csrfToken = null;
 
 function addText(parent, tag, value, className) {
@@ -68,6 +113,275 @@ function text(value, fallback = "—") {
 
 function setVisible(element, visible) {
   element.classList.toggle("is-hidden", !visible);
+}
+
+function replaceChildren(element) {
+  element.replaceChildren();
+}
+
+function tableCell(row, value, className = "") {
+  const cell = document.createElement("td");
+  cell.textContent = value;
+  if (className) cell.className = className;
+  row.append(cell);
+  return cell;
+}
+
+function actionButton(label, action, tone = "button-quiet") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `button ${tone} button-compact`;
+  button.textContent = label;
+  button.addEventListener("click", () => openIdentityConfirmation(action));
+  return button;
+}
+
+function formatTime(value) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? "—" : parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
+function identityError(error) {
+  if (error.status === 403) return "当前账号没有这项管理权限。";
+  if (error.status === 409) return "数据已经变化，页面已刷新，请重新确认。";
+  if (error.status === 503) return "身份目录暂时不可用，请稍后重试。";
+  return "请求失败，没有写入任何变更。";
+}
+
+function setIdentityMessage(value) {
+  identityElements.message.textContent = value || "";
+  setVisible(identityElements.message, Boolean(value));
+}
+
+function effectText(effect) {
+  const values = [];
+  if (effect && typeof effect.role === "string") values.push(`角色：${ROLE_LABELS[effect.role] || effect.role}`);
+  if (effect && typeof effect.status === "string") values.push(`状态：${STATUS_LABELS[effect.status] || effect.status}`);
+  return values.length > 0 ? values.join("；") : "—";
+}
+
+function renderUsers() {
+  replaceChildren(identityElements.usersBody);
+  for (const user of identityState.users) {
+    const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    addText(identity, "strong", text(user.display_name));
+    addText(identity, "small", text(user.actor), "table-secondary");
+    row.append(identity);
+    tableCell(row, STATUS_LABELS[user.status] || "未知");
+    tableCell(row, ROLE_LABELS[user.role] || "未知");
+    tableCell(row, user.feishu_bound === true ? "已绑定" : "未绑定");
+    tableCell(row, formatTime(user.updated_at));
+    const actions = document.createElement("td");
+    actions.className = "table-actions";
+    if (user.role === "admin") {
+      actions.textContent = "受保护";
+    } else {
+      const nextStatus = user.status === "active" ? "disabled" : "active";
+      actions.append(actionButton(
+        nextStatus === "disabled" ? "禁用" : "启用",
+        {
+          kind: "status",
+          title: nextStatus === "disabled" ? "确认禁用用户" : "确认启用用户",
+          summary: `${text(user.display_name)}（${text(user.actor)}）`,
+          path: "/admin/api/users/status",
+          body: {
+            user_id: user.user_id,
+            expected_status: user.status,
+            expected_role: user.role,
+            status: nextStatus,
+            confirm: true,
+          },
+        },
+      ));
+      const nextRole = user.role === "user" ? "operator" : "user";
+      const roleButton = actionButton(
+        nextRole === "operator" ? "设为运维" : "设为普通用户",
+        {
+          kind: "role",
+          title: "确认变更用户角色",
+          summary: `${text(user.display_name)}：${ROLE_LABELS[user.role]} → ${ROLE_LABELS[nextRole]}`,
+          path: "/admin/api/users/role",
+          body: {
+            user_id: user.user_id,
+            expected_role: user.role,
+            role: nextRole,
+            confirm: true,
+          },
+        },
+      );
+      roleButton.disabled = user.status !== "active";
+      actions.append(roleButton);
+    }
+    row.append(actions);
+    identityElements.usersBody.append(row);
+  }
+  identityElements.usersCount.textContent = `${identityState.users.length} 人`;
+  setVisible(identityElements.usersEmpty, identityState.users.length === 0);
+  setVisible(identityElements.usersMore, identityState.usersCursor !== null);
+}
+
+function renderActivations() {
+  replaceChildren(identityElements.activationsBody);
+  for (const request of identityState.activations) {
+    const row = document.createElement("tr");
+    tableCell(row, text(request.subject_hint));
+    tableCell(row, ACTIVATION_SOURCE_LABELS[request.source] || "未知");
+    tableCell(row, formatTime(request.requested_at));
+    tableCell(row, formatTime(request.expires_at));
+    const actions = document.createElement("td");
+    actions.className = "table-actions";
+    actions.append(actionButton("批准", {
+      kind: "approve",
+      title: "确认批准激活",
+      summary: `${text(request.subject_hint)}。请填写新账号的受控目录字段。`,
+      path: "/admin/api/activations/approve",
+      body: { request_id: request.request_id, confirm: true },
+    }, "button-primary"));
+    actions.append(actionButton("拒绝", {
+      kind: "reject",
+      title: "确认拒绝激活",
+      summary: `${text(request.subject_hint)}。拒绝后该申请不能再次处理。`,
+      path: "/admin/api/activations/reject",
+      body: { request_id: request.request_id, confirm: true },
+    }));
+    row.append(actions);
+    identityElements.activationsBody.append(row);
+  }
+  identityElements.activationsCount.textContent = `${identityState.activations.length} 条`;
+  setVisible(identityElements.activationsEmpty, identityState.activations.length === 0);
+  setVisible(identityElements.activationsMore, identityState.activationCursor !== null);
+}
+
+function renderAudit() {
+  replaceChildren(identityElements.auditBody);
+  for (const event of identityState.audit) {
+    const row = document.createElement("tr");
+    tableCell(row, formatTime(event.created_at));
+    tableCell(row, text(event.actor));
+    tableCell(row, SOURCE_LABELS[event.auth_source] || "未知");
+    tableCell(row, text(event.action));
+    tableCell(row, event.reason_code || AUDIT_OUTCOME_LABELS[event.outcome] || "未知");
+    tableCell(row, effectText(event.effect));
+    identityElements.auditBody.append(row);
+  }
+  identityElements.auditCount.textContent = `${identityState.audit.length} 条`;
+  setVisible(identityElements.auditEmpty, identityState.audit.length === 0);
+  setVisible(identityElements.auditMore, identityState.auditCursor !== null);
+}
+
+function openIdentityConfirmation(action) {
+  pendingIdentityAction = action;
+  identityElements.title.textContent = action.title;
+  identityElements.summary.textContent = action.summary;
+  identityElements.confirmMessage.textContent = "";
+  setVisible(identityElements.confirmMessage, false);
+  setVisible(identityElements.activationFields, action.kind === "approve");
+  identityElements.activationActor.value = "";
+  identityElements.activationName.value = "";
+  identityElements.activationRole.value = "user";
+  identityElements.dialog.showModal();
+}
+
+function usersPath() {
+  const query = new URLSearchParams({ limit: "50" });
+  if (identityState.usersCursor !== null) query.set("after_actor", identityState.usersCursor);
+  return `/admin/api/users?${query.toString()}`;
+}
+
+function activationsPath() {
+  const query = new URLSearchParams({ limit: "50" });
+  if (identityState.activationCursor !== null) {
+    query.set("before_requested_at", identityState.activationCursor.time);
+    query.set("before_request_id", identityState.activationCursor.id);
+  }
+  return `/admin/api/activations?${query.toString()}`;
+}
+
+function auditPath() {
+  const query = new URLSearchParams({ limit: "50" });
+  if (identityState.auditCursor !== null) {
+    query.set("before_created_at", identityState.auditCursor.time);
+    query.set("before_event_id", identityState.auditCursor.id);
+  }
+  return `/admin/api/audit?${query.toString()}`;
+}
+
+async function loadUsers(reset = false) {
+  if (reset) {
+    identityState.users = [];
+    identityState.usersCursor = null;
+  }
+  const page = await requestJson(usersPath());
+  identityState.users.push(...page.items);
+  identityState.usersCursor = page.next_after_actor || null;
+  renderUsers();
+}
+
+async function loadActivations(reset = false) {
+  if (reset) {
+    identityState.activations = [];
+    identityState.activationCursor = null;
+  }
+  const page = await requestJson(activationsPath());
+  identityState.activations.push(...page.items);
+  identityState.activationCursor = page.next_requested_at && page.next_request_id
+    ? { time: page.next_requested_at, id: page.next_request_id }
+    : null;
+  renderActivations();
+}
+
+async function loadAudit(reset = false) {
+  if (reset) {
+    identityState.audit = [];
+    identityState.auditCursor = null;
+  }
+  const page = await requestJson(auditPath());
+  identityState.audit.push(...page.items);
+  identityState.auditCursor = page.next_created_at && page.next_event_id
+    ? { time: page.next_created_at, id: page.next_event_id }
+    : null;
+  renderAudit();
+}
+
+async function refreshIdentityConsole() {
+  await Promise.all([loadUsers(true), loadActivations(true), loadAudit(true)]);
+}
+
+async function submitIdentityAction(event) {
+  event.preventDefault();
+  if (pendingIdentityAction === null) return;
+  const body = { ...pendingIdentityAction.body };
+  if (pendingIdentityAction.kind === "approve") {
+    const actor = identityElements.activationActor.value.trim();
+    const displayName = identityElements.activationName.value.trim();
+    if (!actor || !displayName) {
+      identityElements.confirmMessage.textContent = "请填写用户标识和显示名称。";
+      setVisible(identityElements.confirmMessage, true);
+      return;
+    }
+    body.actor = actor;
+    body.display_name = displayName;
+    body.approved_role = identityElements.activationRole.value;
+  }
+  identityElements.submit.disabled = true;
+  try {
+    await requestJson(pendingIdentityAction.path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify(body),
+    });
+    identityElements.dialog.close();
+    pendingIdentityAction = null;
+    setIdentityMessage("");
+    await refreshIdentityConsole();
+  } catch (error) {
+    if (error.status === 409) await refreshIdentityConsole();
+    identityElements.confirmMessage.textContent = identityError(error);
+    setVisible(identityElements.confirmMessage, true);
+  } finally {
+    identityElements.submit.disabled = false;
+  }
 }
 
 async function requestJson(path, options = {}) {
@@ -239,6 +553,14 @@ for (const name of CHECK_NAMES) {
   document.querySelector(`#test-${name}`).addEventListener("click", () =>
     runProviderTest(name));
 }
+identityElements.usersMore.addEventListener("click", () => loadUsers());
+identityElements.activationsMore.addEventListener("click", () => loadActivations());
+identityElements.auditMore.addEventListener("click", () => loadAudit());
+identityElements.cancel.addEventListener("click", () => {
+  pendingIdentityAction = null;
+  identityElements.dialog.close();
+});
+identityElements.form.addEventListener("submit", submitIdentityAction);
 
 async function boot() {
   try {
@@ -252,7 +574,16 @@ async function boot() {
     document.querySelector("#admin-source").textContent = me.role === "admin" ? "管理员" : "已认证";
     status.domains.forEach(renderDomain);
     const mayConfigure = me.admin_capabilities.includes("manage_integrations");
+    const mayManageUsers = me.admin_capabilities.includes("manage_users");
+    const mayViewAudit = me.admin_capabilities.includes("view_admin_audit");
     setVisible(feishuCallout, !mayConfigure);
+    setVisible(identityElements.console, mayManageUsers || mayViewAudit);
+    if (mayManageUsers || mayViewAudit) {
+      const reads = [];
+      if (mayManageUsers) reads.push(loadUsers(true), loadActivations(true));
+      if (mayViewAudit) reads.push(loadAudit(true));
+      await Promise.all(reads);
+    }
     if (mayConfigure) {
       await loadConfig();
     }

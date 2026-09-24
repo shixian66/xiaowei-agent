@@ -71,6 +71,50 @@ def test_raw_configuration_ui_belongs_only_to_the_admin_shell() -> None:
         assert required in admin_script
 
 
+def test_admin_shell_contains_the_three_lite_identity_regions_and_one_confirmation() -> None:
+    admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
+
+    for required in (
+        'id="identity-users"',
+        'id="identity-activations"',
+        'id="identity-audit"',
+        'id="identity-confirm"',
+        'id="identity-confirm-submit"',
+        'id="identity-confirm-cancel"',
+    ):
+        assert required in admin
+    assert admin.count('<dialog id="identity-confirm"') == 1
+    assert "用户与权限" in admin
+    assert "待激活申请" in admin
+    assert "管理审计" in admin
+
+
+def test_admin_script_uses_only_the_governed_identity_route_closure() -> None:
+    script = (_STATIC / "admin.js").read_text(encoding="utf-8")
+
+    required = {
+        "/admin/api/users",
+        "/admin/api/users/status",
+        "/admin/api/users/role",
+        "/admin/api/activations",
+        "/admin/api/activations/approve",
+        "/admin/api/activations/reject",
+        "/admin/api/audit",
+    }
+    assert all(path in script for path in required)
+    assert "createElement" in script
+    assert ".textContent" in script
+    assert "subject_ref" not in script
+    assert "open_id" not in script
+    assert "target_ref_digest" not in script
+
+
+def test_admin_console_keeps_raw_configuration_out_of_the_workbench_script() -> None:
+    workbench = (_STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "/admin/api/" not in workbench
+
+
 def test_desktop_shell_contains_a_static_minimum_width_notice() -> None:
     index = (_STATIC / "index.html").read_text(encoding="utf-8")
     css = (_STATIC / "app.css").read_text(encoding="utf-8")
