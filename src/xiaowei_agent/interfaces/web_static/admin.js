@@ -382,14 +382,18 @@ async function submitIdentityAction(event) {
         body: JSON.stringify(body),
       });
     } catch (error) {
+      let conflictRefreshFailed = false;
       if (error.status === 409) {
         try {
           await refreshIdentityConsole();
         } catch (_) {
+          conflictRefreshFailed = true;
           setIdentityMessage("数据刷新失败，请刷新页面。");
         }
       }
-      identityElements.confirmMessage.textContent = identityError(error);
+      identityElements.confirmMessage.textContent = conflictRefreshFailed
+        ? "数据已经变化，列表刷新失败，请刷新页面后重新确认。"
+        : identityError(error);
       setVisible(identityElements.confirmMessage, true);
       return;
     }

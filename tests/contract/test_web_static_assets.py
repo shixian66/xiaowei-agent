@@ -96,6 +96,7 @@ def test_admin_shell_contains_the_three_lite_identity_regions_and_one_confirmati
     assert "event.reason_code || AUDIT_OUTCOME_LABELS" not in script
     assert "操作已完成，但列表刷新失败，请刷新页面。" in script
     assert 'setIdentityMessage("操作已完成，但列表刷新失败，请刷新页面。")' in script
+    assert "数据已经变化，列表刷新失败，请刷新页面后重新确认。" in script
 
 
 def test_admin_script_uses_only_the_governed_identity_route_closure() -> None:
