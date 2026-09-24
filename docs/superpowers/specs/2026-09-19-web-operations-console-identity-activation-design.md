@@ -386,6 +386,9 @@ approved_role                   APPROVED 时为 USER 或 OPERATOR
   满载时不得先查 subject，已有与不存在的 subject 都返回统一“暂时无法提交激活申请”；
 - 容量只约束**有效待办积压**，不冒充 HTTP 防滥用，也不冒充终态数据保留策略。`APPROVED / REJECTED /
   EXPIRED` 行（含受控 PII）的保留期与清理机制必须在 W5 部署前明确并验证；未完成时不得部署启用。
+  W5 计划（Approved V0.2）已固定为 **30 天**、全库所有作用域：批准/拒绝按 `decided_at`、过期按
+  `expires_at`，`terminal_at <= now - 30 天` 删除；在全局 activation advisory lock 下先转过期再删除，
+  仍有效的 `PENDING` 永不删除，只输出四个计数。正式环境每日调度与失败告警是晋升 canary 的前置。
   正式发布的边缘限流要求见第 13 节。
 
 Admin 审批时默认角色为 `USER`；提升为 `OPERATOR` 必须显式选择并可审计。任何 Web/群激活路径都不能
@@ -722,6 +725,12 @@ Admin 审计和未来结果五类事实不互相复制。未来 `ResultAccessSer
   “待配置/待授权”，不能把整个 Web 拉垮；
 - 当前基础 Compose 把 listener/channel-worker 开关写成字面 `false`。W5 必须由可审计 release override
   显式覆盖并用 Compose 契约测试证明；不能宣称“改 `.env` 就能打开”；
+- W5 V1（计划 Approved V0.2）固定为 **provider-off 产品壳**：作用域固定 `dev-local/dev`，五个应用进程
+  以 `XIAOWEI_RUNTIME_PROFILE=release` 运行，StarRocks 为 `disabled`，Gemini、OAuth、listener、
+  channel-worker 与真实测试开关在 release 模板中固定关闭；普通对话只投影空准入快照，工作台如实显示
+  当前无可执行能力。首次 release 不继承 recording 时代的 plan/evidence，命中历史执行数据时只能换新
+  数据库或另行批准数据处置。这些证据不构成 RI6 或只读 V1 发布；真实 Provider/目标进入 release
+  须另立计划与 GO；
 - 配置齐全、对应真实调用 GO 已取得并完成重启后，已实现功能可用，不再要求用户寻找历史里程碑开关；
 - 真实目标、凭据、网络、部署和 canary 的具体执行仍需对应环境的明确授权与证据；本规格不代替该授权。
 

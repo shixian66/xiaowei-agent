@@ -43,6 +43,7 @@ from xiaowei_agent.persistence.database import (
     PostgresReadinessProbe,
     create_database_engine,
 )
+from xiaowei_agent.persistence.errors import PersistenceUnavailableError
 from xiaowei_agent.persistence.evidence import EvidenceLedger
 from xiaowei_agent.persistence.plans import PlanNotFoundError, PlanStore
 from xiaowei_agent.persistence.store import TaskStore
@@ -56,6 +57,7 @@ TASKS_NOT_DRAINED: Final[str] = "tasks_not_drained"
 HISTORICAL_EXECUTION_DATA_PRESENT: Final[str] = "historical_execution_data_present"
 DATABASE_UNAVAILABLE: Final[str] = "database_unavailable"
 SCHEMA_NOT_AT_HEAD: Final[str] = "schema_not_at_head"
+PREFLIGHT_FAILED: Final[str] = "preflight_failed"
 
 Clock = Callable[[], dt.datetime]
 EngineFactory = Callable[[Settings], AsyncEngine]
@@ -198,9 +200,12 @@ def main(
     except DatabaseConfigurationError:
         stderr.write(f"{_COMMAND}: configuration_error\n")
         return 2
-    except Exception:
-        # 读路径的驱动异常可能带 SQL/参数；这里只认"数据库不可用"一个闭集结论。
+    except PersistenceUnavailableError:
         report = {"result": DATABASE_UNAVAILABLE}
+    except Exception:
+        # 异常正文可能带 SQL/参数或任务事实；只给闭集结论，不把未知故障冒充成
+        # "数据库不可用"。
+        report = {"result": PREFLIGHT_FAILED}
     stdout.write(json.dumps(report, sort_keys=True) + "\n")
     return 0 if report["result"] == OK else 1
 
@@ -213,6 +218,7 @@ __all__ = [
     "DATABASE_UNAVAILABLE",
     "HISTORICAL_EXECUTION_DATA_PRESENT",
     "OK",
+    "PREFLIGHT_FAILED",
     "SCHEMA_NOT_AT_HEAD",
     "TASKS_NOT_DRAINED",
     "PreflightStores",

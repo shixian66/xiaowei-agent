@@ -24,6 +24,10 @@ from xiaowei_agent.contracts import (
     TaskStatus,
 )
 from xiaowei_agent.interfaces import release_preflight
+from xiaowei_agent.persistence.errors import (
+    PersistenceUnavailableCategory,
+    PersistenceUnavailableError,
+)
 from xiaowei_agent.persistence.store import TransitionCommand
 from xiaowei_agent.rendering.generic import CONVERSATION_TERMINAL_REASON
 
@@ -297,6 +301,38 @@ def test_database_and_schema_are_checked_before_the_scan(
 
     assert code == 1
     assert report == {"result": expected}
+    assert engine.disposed == 1
+
+
+class _BrokenTasks:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def list_tasks_for_scope(self, **_: object) -> object:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            PersistenceUnavailableError(category=PersistenceUnavailableCategory.CONNECT),
+            "database_unavailable",
+        ),
+        (RuntimeError("task " + "leaky-task-id" + " actor=admin-1"), "preflight_failed"),
+    ],
+)
+def test_scan_failures_are_closed_codes_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception, expected: str
+) -> None:
+    harness = RuntimeHarness(GOLDEN)
+    monkeypatch.setattr(harness, "store", _BrokenTasks(error))
+
+    code, report, err, engine = _run(monkeypatch, tmp_path, harness)
+
+    assert code == 1
+    assert report == {"result": expected}
+    assert "leaky-task-id" not in json.dumps(report) + err
     assert engine.disposed == 1
 
 

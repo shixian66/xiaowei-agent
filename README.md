@@ -219,19 +219,18 @@ Web 相关的四个开关（`XIAOWEI_WEB_APP_ENABLED`、`XIAOWEI_FEISHU_OAUTH_EN
 OAuth 浏览器入口仍必须使用已经备案的 HTTPS SSO 域名，并由 Compose 外部的 TLS/反向代理转发到
 Web 容器。本仓库没有提供证书、TLS/Ingress 或反向代理，也没有证明真实 callback 可以从飞书到达。
 
-三个进程都关闭时，`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID`、
-`XIAOWEI_FEISHU_IDENTITY_FILE` 与 `XIAOWEI_WEB_PUBLIC_ORIGIN` 必须全部留空。listener 开启时
-前三项必须同时提供；Web app 开启时必须提供 `XIAOWEI_WEB_PUBLIC_ORIGIN`，飞书 OAuth 另外开启时
-还需要身份文件。**App ID 与 App Secret 不再是环境变量**：自 W4a 起它们的唯一真源是飞书域
+三个进程都关闭时，`XIAOWEI_FEISHU_TENANT_KEY`、`XIAOWEI_FEISHU_BOT_OPEN_ID` 与
+`XIAOWEI_WEB_PUBLIC_ORIGIN` 必须全部留空。listener 开启时前两项必须同时提供；Web app 开启时
+必须提供 `XIAOWEI_WEB_PUBLIC_ORIGIN`。身份一律查 PostgreSQL 用户目录，不再有身份文件配置。**App ID 与 App Secret 不再是环境变量**：自 W4a 起它们的唯一真源是飞书域
 `.config/feishu/config.json`，由 Web 管理面写入、所需进程启动时读取。不经 Compose 直接运行时，
 Web 默认监听 `127.0.0.1:8080`；OAuth state 默认 300 秒、session 默认 3600 秒。当前 Web OAuth
 code exchange 使用代码固定的 5 秒 provider 总预算，`WebAuthService` 使用严格更长的 6 秒外层
 watchdog，且不重试；两者都没有读取
 `XIAOWEI_FEISHU_API_TIMEOUT_SECONDS`；后者目前只装配给渠道消息发送路径。
 详情 origin 会把 IDN hostname 规范化为 ASCII punycode 后再用于卡片链接，校验值与实际使用值一致。
-`XIAOWEI_FEISHU_IDENTITY_FILE` 必须是绝对路径；当前 Settings 的启动校验与飞书 Compose
-override 仍保留这个文件输入。它不是在线授权真源，也不会在启动时自动导入数据库。旧文件的
-版本化 JSON 仅供显式一次性迁移，按飞书 `open_id` 精确关联，不按姓名或群角色猜权限：
+旧静态身份文件自 W5 起不属于任何长期进程的配置：它不是在线授权真源，也不会在启动时自动导入
+数据库，只作为下文「一次性维护命令」里旧身份迁移的只读输入。旧文件的版本化 JSON 按飞书 `open_id`
+精确关联，不按姓名或群角色猜权限：
 
 ```json
 {
@@ -526,13 +525,13 @@ python -m scripts.compose_smoke
 
 缺少 Docker、migration 失败、readiness 未就绪、Worker 恢复失败、默认关闭的渠道入口未静默
 fail-closed、Web 容器边界不符或日志泄漏都会返回非零；脚本不允许 skip。脚本会在 `.secrets/`
-下创建**四个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令、身份文件与不含
+下创建**四个**一次性的 `0700` UUID 私有目录：一个放 fake 的 postgres 口令与不含
 secret 值的 JSON Compose override，另外三个分别是 AI、飞书、resources 域目录（前两个各放一份
 合成的 `config.json`，resources 放一份目标在 `.invalid` 域下的合成登记文档，其两个假凭据同样进脱敏
 名单；worker 基线任务完成后，脚本用一条固定只读 SQL 核对 `(worker, resources)` 回执恰为第 1 代
 `loaded`）。分开是必要的——每个域目录是**整目录**挂进容器的，与口令
-或兄弟域同目录时那些文件会一起出现在只该看到本域的容器里。override 把三个域目录与身份文件的
-引用都指向这些私有目录，不读取或
+或兄弟域同目录时那些文件会一起出现在只该看到本域的容器里。override 把三个域目录的
+引用都指向这些私有目录，并核对 Web 容器既不挂载旧身份文件、也不带它的变量；不读取或
 覆盖上文供人工启动使用的固定文件，也不依赖宿主环境变量。清理时先原子隔离目录，再核对目录与
 各自已知文件的 inode，且不递归删除未知内容。它只激活 Web，listener 与 channel-worker 仍关闭；Web 的飞书 API 域名被指向
 loopback。脚本先访问 `/healthz`、`/readyz`，再用不读取代理、不能跟随重定向的本地

@@ -255,6 +255,18 @@ Resolver/Planner/Gateway。带 `clarification_parent_task_id` 的子任务不能
 `clarification_parent_task_id` 只表示澄清父链，不是任意终态“继续这个任务”。普通对话记忆、资料查询
 历史、用户日志分析上下文和飞书 reply/thread 语义必须另立存储与 ADR，不能扩展澄清链或复用同名字段。
 
+**当前准入快照与历史渲染 binding 分离（W5）。** `TaskViewRuntime` 不再用一对 snapshot/bindings
+同时承担两种角色：`conversation_snapshot` 是**当前准入快照**，只回答普通对话"此刻能做什么"；
+`rendering_bindings` 是代码内完整注册表，只按已持久化计划的精确 capability/version 查投影器。
+`XiaoweiRuntime` 另持当前执行 bindings（键集合精确等于准入快照），其内嵌 view 显式收到这两份不同
+权威的数据。进程运行形态是闭集 `XIAOWEI_RUNTIME_PROFILE`：`offline_recording`（默认，开发/测试/
+smoke，保留三能力 recording）与 `release`（产品运行）。Settings 只接受 `release + dev-local/dev +
+StarRocks disabled`；release 下 internal-api、web-app、feishu-listener、channel-worker 与 worker 五个
+进程共用固定 ID 的空准入快照 `snapshot.w5.provider-off.empty.v1`，普通对话如实回答当前无可执行
+能力；worker 另用空执行 binding 和不注册任何 adapter 的 Gateway，能力请求在 Resolver 阶段确定性
+拒绝，工具调用为 0；装配完成后 `sys.modules` 不含任何 fake/recording 模块（fake import 只在 offline
+分支与内存栈内部）。真实 adapter 进入 release 必须另立 RI2/RI4/H/RI6 方案，不是往空快照里加 binding。
+
 Model context is bounded by field count, row count, Unicode character count and
 serialized UTF-8 bytes. Fixed system/policy/capability prefixes are versioned local
 constants; RI3 does not enable provider caching or sessions. Variable evidence is
@@ -765,13 +777,24 @@ this topology must not be described as an activated channel or model.
 调用方没有任何参数能指定它们。`AdminAuditStore` 只有 `append_started` / `append_terminal` /
 `append_denied` / `load` 四个窄方法，`persistence/` 里不存在针对 `admin_audit_events` 的
 `UPDATE` / `DELETE`。飞书 `open_id` 只以 domain-separated 摘要落库。旧静态身份文档由一次性、
-整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。
+整批原子的迁移命令搬进目录，迁移后该文件保留只读、不双写。W5 起它只经无参命令
+`python -m xiaowei_agent.interfaces.legacy_identity_migration` 从固定只读挂载点
+`/run/xiaowei-legacy/feishu-identities.json` 读取；长期 Settings 没有对应字段或 `XIAOWEI_*` 变量，
+任何 Compose 服务都不挂载它。命令只输出 `created_count / skipped_count / deferred_count` 与闭集错误码，
+无旧文档时输出 `not_applicable`。
 
 **身份激活契约（W1b）**：`rev_0015` 建立
 `activation_requests`，申请创建/过期由 `ActivationStore` 承载，批准或拒绝仍只经
 `UserDirectoryStore.apply()`，使申请终态、目录授权与审计保持同事务。入口层通过
 `IdentityActivationService` 复用该写路径，并以 `DirectoryFeishuIdentityDirectory` 每次从
 **数据库目录**重建主体；静态身份文件只保留为一次性迁移输入，不是运行时 fallback。
+
+**终态激活保留（W5）。** `APPROVED / REJECTED / EXPIRED` 行含受控 PII，固定保留 30 天
+（`ACTIVATION_TERMINAL_RETENTION_DAYS`，不是配置项）：批准/拒绝以 `decided_at`、过期以 `expires_at`
+为终态时间，`terminal_at <= now - 30 天` 即删除。窄 `ActivationRetentionStore` 只有无参的
+`purge_expired_terminal()`，覆盖**全库所有作用域**，在与容量门相同的全局 activation advisory lock 下
+先把过期 `PENDING` 转成 `EXPIRED` 再删除；仍有效的 `PENDING`、Admin 审计、目录、Session、任务与证据
+都不在清理面。它只由一次性命令 `activation_retention` 调用，输出四个计数，没有 Web 路由。
 
 Web OAuth 对真正未登记的身份创建或复用申请，返回闭集 `403` / `activation_pending`，不签发
 Session；已经绑定但停用或失去当前作用域角色的身份仍按普通认证失败处理，不能借激活重新进入。
@@ -807,7 +830,11 @@ Admin 审计的分页投影；状态/角色变更及激活决定继续只经 `Us
 结果。
 
 `/healthz` 只回答对应 HTTP 进程是否存活，不触碰 TaskStore；`/readyz` 才检查数据库连接、
-migration head 与装配状态。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过
+migration head 与装配状态。首次切换到 `release` 前运行只读的
+`release_preflight`：组合三域目录预检、数据库可达与 schema head，并完整分页扫描固定 `dev-local/dev`，
+任一非终态任务返回 `tasks_not_drained`，任一持久化 plan/evidence（含 `SUCCEEDED`）返回
+`historical_execution_data_present`——既有 schema 不能证明它不是 recording 时代的合成结果；预检不删
+历史、不接受覆盖参数。Worker 不引入第二个队列或状态真源，而是从 TaskStore 发现候选，再通过
 带 lease/fencing 的唯一领取事务取得执行权。channel worker 只从 ChannelStore 领取投影订阅并回读
 同一 TaskView；渠道投递状态不改写任务真相。migration 是一次性前置服务，失败时应用进程不得启动。
 M5/M7 基础栈只装配确定性无模型 interpreter、fake/recording ToolGateway 与 fake 渠道 port；
