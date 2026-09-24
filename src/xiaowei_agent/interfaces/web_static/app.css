@@ -356,6 +356,45 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .feishu-admin-callout h2 { margin: 0 0 6px; font-size: 17px; }
 .feishu-admin-callout p { color: var(--ink-500); }
 
+.identity-console { display: grid; margin-top: 28px; gap: 16px; }
+.identity-console > .admin-lead { margin-bottom: 0; }
+.admin-content .safe-view-pill { color: var(--brand-deep); border-color: #cce1d9; background: #eff8f5; }
+.identity-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+.identity-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.identity-card-head h3 { margin: 2px 0 0; font-size: 18px; }
+.identity-count { color: var(--ink-500); font-size: 13px; font-weight: 700; }
+.table-scroll { margin: 16px 0 14px; overflow-x: auto; }
+.identity-table { width: 100%; min-width: 780px; border-collapse: collapse; font-size: 13px; }
+.identity-table th, .identity-table td { padding: 12px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.identity-table th { color: var(--ink-500); background: var(--surface-soft); font-size: 12px; font-weight: 750; white-space: nowrap; }
+.identity-table tbody tr:last-child td { border-bottom: 0; }
+.identity-table strong, .identity-table small { display: block; }
+.table-secondary { margin-top: 2px; color: var(--ink-500); }
+.table-actions { display: flex; min-width: 150px; flex-wrap: wrap; align-items: center; gap: 6px; }
+.button-compact { min-height: 34px; padding: 6px 10px; font-size: 12px; }
+.identity-card > .button-quiet, .identity-dialog .button-quiet, .table-actions .button-quiet {
+  color: var(--ink-700);
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.empty-state { margin: 14px 0; padding: 20px; text-align: center; color: var(--ink-500); border: 1px dashed var(--line-strong); border-radius: 12px; background: var(--surface-soft); }
+.identity-dialog { width: min(520px, calc(100% - 40px)); padding: 0; border: 1px solid var(--line); border-radius: 18px; color: var(--ink-900); background: var(--surface); box-shadow: var(--shadow); }
+.identity-dialog::backdrop { background: rgba(11, 23, 40, 0.48); backdrop-filter: blur(2px); }
+.identity-dialog form { display: grid; padding: 26px; gap: 14px; }
+.identity-dialog h2, .identity-dialog p { margin: 0; }
+.identity-dialog #identity-confirm-summary { color: var(--ink-500); }
+.activation-fields { display: grid; gap: 12px; }
+.config-field select { min-height: 42px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font: inherit; }
+.identity-dialog-actions { display: flex; margin-top: 4px; justify-content: flex-end; gap: 10px; }
+.identity-dialog .form-message { border: 0; border-radius: 10px; }
+
 @media (max-width: 1023px) {
   .workbench-page { padding: 0 20px; }
   .workbench-page .app-shell, .admin-shell { display: none; }
@@ -400,7 +439,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .config-fixed dd { margin: 2px 0 0; font-family: ui-monospace, SFMono-Regular, monospace; word-break: break-all; }
 .config-switch { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .config-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
-.config-field input { padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.config-field input { min-height: 42px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
 .config-checks { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .state-badge { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
 .state-badge[data-state="available"] { border-color: var(--green, #16a34a); color: var(--green, #16a34a); }

@@ -51,6 +51,24 @@ def test_static_html_has_no_inline_handlers_or_template_interpolation() -> None:
     assert " onclick=" not in html.lower()
 
 
+def test_admin_identity_assets_never_open_an_html_or_dynamic_code_sink() -> None:
+    admin = (_STATIC / "admin.html").read_text(encoding="utf-8")
+    script = (_STATIC / "admin.js").read_text(encoding="utf-8")
+
+    assert '<script type="module" src="/app/static/admin.js"></script>' in admin
+    for forbidden in (
+        "innerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+    ):
+        assert forbidden not in script
+    assert "subject_ref" not in admin + script
+    assert "open_id" not in admin + script
+    assert "target_ref_digest" not in admin + script
+
+
 async def test_untrusted_render_text_remains_json_data_not_html_response() -> None:
     injected = '<img src=x onerror="alert(1)"><script>alert(2)</script>'
     view = TaskView(

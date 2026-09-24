@@ -426,6 +426,7 @@ def _app(clock: Any, memory_state: Any, *, mode: WebMode = WebMode.HTTPS) -> Any
         clock=clock,
         policy_revision="policy-2026-09-01",
         provider_state=InMemoryProviderStateStore(clock=clock, state=memory_state),
+        admin_identity=_Unused(),
     )
     return app, admins, origin, INITIAL_LOCAL_ADMIN_PASSWORD, hash_password
 

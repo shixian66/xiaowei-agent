@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from tests.fakes.activation import RecordingActivationRequests
+from tests.fakes.admin_identity import UnusedAdminIdentity
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 from tests.security.test_task_view_runtime_authority import (
     _TASK_VIEW_PROCESS_ALLOWED_MODULES,
@@ -88,6 +89,7 @@ def _auth_app(
         clock=clock,
         policy_revision="policy-2026-09-01",
         provider_state=EmptyProviderState(),
+        admin_identity=UnusedAdminIdentity(),
     )
 
 

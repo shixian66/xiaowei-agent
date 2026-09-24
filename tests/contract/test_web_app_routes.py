@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from tests.fakes.admin_identity import UnusedAdminIdentity
 from tests.fakes.web_auth import EmptyProviderState, NoLocalAdmin
 
 from xiaowei_agent.application.identity_activation import IdentityActivationService
@@ -209,6 +210,7 @@ def _web_app(
             clock=clock,
             policy_revision="policy-2026-09-01",
             provider_state=EmptyProviderState(),
+            admin_identity=UnusedAdminIdentity(),
         ),
         oauth,
     )
@@ -730,6 +732,13 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         # feishu_oauth 落进凭据探针那条分支。
         ("POST", "/admin/api/config/test/feishu_oauth"),
         ("POST", "/admin/api/config/test/{check_name}"),
+        ("GET", "/admin/api/users"),
+        ("POST", "/admin/api/users/status"),
+        ("POST", "/admin/api/users/role"),
+        ("GET", "/admin/api/activations"),
+        ("POST", "/admin/api/activations/approve"),
+        ("POST", "/admin/api/activations/reject"),
+        ("GET", "/admin/api/audit"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/admin.js"),
@@ -1098,6 +1107,7 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
+        admin_identity_service = UnusedAdminIdentity()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0
@@ -1164,6 +1174,9 @@ async def test_serve_web_assembles_real_ports_with_fixed_oauth_budget(
         "oauth": events["oauth_instance"],
         "membership": events["membership_instance"],
     }
+    app_values = events["app"]
+    assert isinstance(app_values, dict)
+    assert app_values["admin_identity"] is stack.admin_identity_service
     config = events["server_config"]
     assert isinstance(config, uvicorn.Config)
     assert config.host == "127.0.0.1"
@@ -1490,6 +1503,7 @@ async def test_serve_web_closes_stack_at_every_post_assembly_failure(
         readiness = _Probe()
         task_access_service = object()
         submission_service = object()
+        admin_identity_service = UnusedAdminIdentity()
         clock = object()
         policy_revision = "policy-1"
         close_calls = 0

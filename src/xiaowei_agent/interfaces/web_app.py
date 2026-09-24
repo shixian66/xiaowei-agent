@@ -1,6 +1,7 @@
 """默认关闭、无执行权的飞书认证 Web 工作台。"""
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import re
@@ -8,6 +9,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from importlib.resources import files
 from typing import Annotated, Final, TypeVar, cast
 from urllib.parse import urlsplit
@@ -16,12 +18,20 @@ import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from xiaowei_agent.application.admin_identity import (
+    AdminIdentityActor,
+    AdminIdentityConflictError,
+    AdminIdentityForbiddenError,
+    AdminIdentityNotFoundError,
+    AdminIdentityService,
+    AdminIdentityUnavailableError,
+)
 from xiaowei_agent.application.channel_access import (
     FeishuMembershipPort,
     TaskAccessNotFoundError,
@@ -56,6 +66,8 @@ from xiaowei_agent.config import (
 from xiaowei_agent.contracts import (
     LOCAL_ADMIN_USER_ID,
     TASK_ID_PATTERN,
+    AdminAuditAction,
+    AdminAuditOutcome,
     AdminCapability,
     AuthenticatedPrincipal,
     ChannelKind,
@@ -72,7 +84,9 @@ from xiaowei_agent.contracts import (
     WebReturnIntent,
     WebReturnIntentKind,
 )
-from xiaowei_agent.interfaces.auth import Clock
+from xiaowei_agent.contracts.base import AwareDatetime
+from xiaowei_agent.contracts.identity import BoundedActor, BoundedId
+from xiaowei_agent.interfaces.auth import Clock, trusted_trace_id
 from xiaowei_agent.interfaces.body_limit import JsonBodyLimitMiddleware
 from xiaowei_agent.interfaces.http_models import error_body
 from xiaowei_agent.interfaces.integration_config_file import (
@@ -116,7 +130,9 @@ from xiaowei_agent.interfaces.web_auth import (
     validate_unauthenticated_origin,
 )
 from xiaowei_agent.interfaces.web_models import (
+    WebApproveActivationRequest,
     WebChangePasswordRequest,
+    WebChangeUserRoleRequest,
     WebConfigChecks,
     WebConfigClearRequest,
     WebConfigSaved,
@@ -133,6 +149,8 @@ from xiaowei_agent.interfaces.web_models import (
     WebIntegrationStatusView,
     WebLoginRequest,
     WebOAuthTestStarted,
+    WebRejectActivationRequest,
+    WebSetUserStatusRequest,
     WebTaskAccepted,
     WebTaskDetail,
     WebTaskPage,
@@ -156,6 +174,7 @@ from xiaowei_agent.persistence.provider_state import (
 from xiaowei_agent.trace import bind_trace_id, get_trace_id
 
 _BodyT = TypeVar("_BodyT", bound=BaseModel)
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 _SESSION_COOKIE_BASE: Final[str] = "xiaowei-session"
 _OAUTH_STATE_COOKIE_BASE: Final[str] = "xiaowei-oauth-state"
@@ -201,6 +220,9 @@ _HSTS: Final[bytes] = b"max-age=31536000"
 _TASK_ID_RE: Final[re.Pattern[str]] = re.compile(TASK_ID_PATTERN)
 _POSITIVE_INT_RE: Final[re.Pattern[str]] = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_CREATED_SEQ: Final[int] = 9_223_372_036_854_775_807
+_BOUNDED_ID_ADAPTER = TypeAdapter(BoundedId)
+_BOUNDED_ACTOR_ADAPTER = TypeAdapter(BoundedActor)
+_AWARE_DATETIME_ADAPTER = TypeAdapter(AwareDatetime)
 _STATIC_MEDIA_TYPES: Final[dict[str, str]] = {
     "admin.js": "text/javascript",
     "app.css": "text/css",
@@ -558,6 +580,18 @@ async def _config_unavailable(_: Request, __: Exception) -> Response:
     return _error(503, "unavailable")
 
 
+async def _admin_identity_not_found(_: Request, __: Exception) -> Response:
+    return _error(404, "not_found")
+
+
+async def _admin_identity_conflict(_: Request, __: Exception) -> Response:
+    return _error(409, "idempotency_conflict")
+
+
+async def _admin_identity_unavailable(_: Request, __: Exception) -> Response:
+    return _error(503, "unavailable")
+
+
 async def _application_error(_: Request, exc: Exception) -> Response:
     failure = classify_application_exception(exc)
     if failure is ApplicationFailure.CLARIFICATION_INTEGRITY:
@@ -759,6 +793,145 @@ def _list_query(request: Request) -> tuple[int | None, int]:
     if limit > 100:
         raise _WebInputError
     return before_created_seq, limit
+
+
+def _single_query_values(
+    request: Request, *, allowed: frozenset[str]
+) -> dict[str, str]:
+    """严格 query 边界：未知字段与重复字段都不交给框架静默择一。"""
+    if set(request.query_params) - allowed:
+        raise _WebInputError
+    values: dict[str, str] = {}
+    for name in allowed:
+        items = request.query_params.getlist(name)
+        if len(items) > 1:
+            raise _WebInputError
+        if items:
+            values[name] = items[0]
+    return values
+
+
+def _admin_limit(values: dict[str, str]) -> int:
+    raw = values.get("limit")
+    if raw is None:
+        return 50
+    if _POSITIVE_INT_RE.fullmatch(raw) is None:
+        raise _WebInputError
+    limit = int(raw)
+    if limit > 100:
+        raise _WebInputError
+    return limit
+
+
+def _bounded_id(value: str) -> str:
+    try:
+        return _BOUNDED_ID_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise _WebInputError from None
+
+
+def _bounded_actor(value: str) -> str:
+    try:
+        return _BOUNDED_ACTOR_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise _WebInputError from None
+
+
+def _aware_datetime(value: str) -> dt.datetime:
+    try:
+        return _AWARE_DATETIME_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise _WebInputError from None
+
+
+def _admin_users_query(request: Request) -> tuple[str | None, int]:
+    values = _single_query_values(
+        request, allowed=frozenset({"after_actor", "limit"})
+    )
+    after_actor = values.get("after_actor")
+    return (
+        None if after_actor is None else _bounded_actor(after_actor),
+        _admin_limit(values),
+    )
+
+
+def _admin_activations_query(
+    request: Request,
+) -> tuple[dt.datetime | None, str | None, int]:
+    values = _single_query_values(
+        request,
+        allowed=frozenset(
+            {"before_requested_at", "before_request_id", "limit"}
+        ),
+    )
+    raw_time = values.get("before_requested_at")
+    raw_id = values.get("before_request_id")
+    if (raw_time is None) != (raw_id is None):
+        raise _WebInputError
+    return (
+        None if raw_time is None else _aware_datetime(raw_time),
+        None if raw_id is None else _bounded_id(raw_id),
+        _admin_limit(values),
+    )
+
+
+def _optional_enum(value: str | None, enum_type: type[_EnumT]) -> _EnumT | None:
+    if value is None:
+        return None
+    try:
+        return enum_type(value)
+    except ValueError:
+        raise _WebInputError from None
+
+
+def _admin_audit_query(
+    request: Request,
+) -> tuple[
+    dt.datetime | None,
+    str | None,
+    AdminAuditAction | None,
+    AdminAuditOutcome | None,
+    str | None,
+    str | None,
+    int,
+]:
+    values = _single_query_values(
+        request,
+        allowed=frozenset(
+            {
+                "before_created_at",
+                "before_event_id",
+                "action",
+                "outcome",
+                "target_user_id",
+                "target_request_id",
+                "limit",
+            }
+        ),
+    )
+    raw_time = values.get("before_created_at")
+    raw_id = values.get("before_event_id")
+    if (raw_time is None) != (raw_id is None):
+        raise _WebInputError
+    target_user_id = values.get("target_user_id")
+    target_request_id = values.get("target_request_id")
+    if target_user_id is not None and target_request_id is not None:
+        raise _WebInputError
+    return (
+        None if raw_time is None else _aware_datetime(raw_time),
+        None if raw_id is None else _bounded_id(raw_id),
+        cast(
+            AdminAuditAction | None,
+            _optional_enum(values.get("action"), AdminAuditAction),
+        ),
+        cast(
+            AdminAuditOutcome | None,
+            _optional_enum(values.get("outcome"), AdminAuditOutcome),
+        ),
+        None if target_user_id is None else _bounded_id(target_user_id),
+        None if target_request_id is None else _bounded_id(target_request_id),
+        _admin_limit(values),
+    )
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1211,6 +1384,7 @@ def create_app(
     clock: Clock,
     policy_revision: str,
     provider_state: ProviderStateStore,
+    admin_identity: AdminIdentityService,
     integration_config_path: str = DEFAULT_INTEGRATION_CONFIG_PATH,
     gemini_probe: ProbeTransport = gemini_probe_transport,
     feishu_probe: ProbeTransport = feishu_probe_transport,
@@ -1266,6 +1440,10 @@ def create_app(
                 "/admin/api/config/test/gemini_connection",
                 "/admin/api/config/test/feishu_credentials",
                 "/admin/api/config/test/feishu_oauth",
+                "/admin/api/users/status",
+                "/admin/api/users/role",
+                "/admin/api/activations/approve",
+                "/admin/api/activations/reject",
             }
         ),
     )
@@ -1285,6 +1463,12 @@ def create_app(
         _PasswordChangeRequiredError, _password_change_required
     )
     app.add_exception_handler(_WebForbiddenError, _forbidden)
+    app.add_exception_handler(AdminIdentityForbiddenError, _forbidden)
+    app.add_exception_handler(AdminIdentityNotFoundError, _admin_identity_not_found)
+    app.add_exception_handler(AdminIdentityConflictError, _admin_identity_conflict)
+    app.add_exception_handler(
+        AdminIdentityUnavailableError, _admin_identity_unavailable
+    )
     app.add_exception_handler(_ConfigUnavailableError, _config_unavailable)
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
@@ -1462,6 +1646,29 @@ def create_app(
         ):
             raise _WebForbiddenError
         return session
+
+    async def identity_admin_session(
+        request: Request, *, capability: AdminCapability
+    ) -> _WebPrincipalSession:
+        """W3-lite 双来源 Admin 闸门；配置面的 local-only helper 保持独立。"""
+        session = await session_allowed_to_work(request)
+        if (
+            session.role is not ProductRole.ADMIN
+            or capability not in session.admin_capabilities
+        ):
+            raise _WebForbiddenError
+        return session
+
+    def identity_actor(session: _WebPrincipalSession) -> AdminIdentityActor:
+        return AdminIdentityActor(
+            user_id=session.user_id,
+            tenant_id=session.principal.tenant_id,
+            environment_id=session.principal.environment_id,
+            actor=session.principal.actor,
+            auth_source=session.principal.source,
+            role=session.role,
+            capabilities=session.admin_capabilities,
+        )
 
     async def safe_task_session(request: Request) -> _WebPrincipalSession:
         session = await session_allowed_to_work(request)
@@ -1701,6 +1908,133 @@ def create_app(
         if session.principal.source is not IdentitySource.LOCAL_ADMIN:
             raise _WebForbiddenError
         return session
+
+    @app.get("/admin/api/users")
+    async def list_admin_users(request: Request) -> dict[str, object]:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        after_actor, limit = _admin_users_query(request)
+        page = await admin_identity.list_users(
+            actor=identity_actor(session),
+            after_actor=after_actor,
+            limit=limit,
+        )
+        return page.model_dump(mode="json")
+
+    @app.post("/admin/api/users/status", status_code=204)
+    async def set_admin_user_status(request: Request) -> Response:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebSetUserStatusRequest)
+        await admin_identity.set_user_status(
+            actor=identity_actor(session),
+            user_id=body.user_id,
+            expected_status=body.expected_status,
+            expected_role=body.expected_role,
+            status=body.status,
+            trace_id=trusted_trace_id(),
+        )
+        return Response(status_code=204)
+
+    @app.post("/admin/api/users/role", status_code=204)
+    async def change_admin_user_role(request: Request) -> Response:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebChangeUserRoleRequest)
+        await admin_identity.change_user_role(
+            actor=identity_actor(session),
+            user_id=body.user_id,
+            expected_role=body.expected_role,
+            role=body.role,
+            trace_id=trusted_trace_id(),
+        )
+        return Response(status_code=204)
+
+    @app.get("/admin/api/activations")
+    async def list_admin_activations(request: Request) -> dict[str, object]:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        before_requested_at, before_request_id, limit = _admin_activations_query(
+            request
+        )
+        page = await admin_identity.list_pending_activations(
+            actor=identity_actor(session),
+            before_requested_at=before_requested_at,
+            before_request_id=before_request_id,
+            limit=limit,
+        )
+        return page.model_dump(mode="json")
+
+    @app.post("/admin/api/activations/approve", status_code=204)
+    async def approve_admin_activation(request: Request) -> Response:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebApproveActivationRequest)
+        await admin_identity.approve_activation(
+            actor=identity_actor(session),
+            request_id=body.request_id,
+            account_actor=body.actor,
+            display_name=body.display_name,
+            approved_role=body.approved_role,
+            trace_id=trusted_trace_id(),
+        )
+        return Response(status_code=204)
+
+    @app.post("/admin/api/activations/reject", status_code=204)
+    async def reject_admin_activation(request: Request) -> Response:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.MANAGE_USERS
+        )
+        _validate_state_change(
+            request, public_origin=public_origin, session_cookie=session.cookie
+        )
+        body = await _typed_body(request, WebRejectActivationRequest)
+        await admin_identity.reject_activation(
+            actor=identity_actor(session),
+            request_id=body.request_id,
+            trace_id=trusted_trace_id(),
+        )
+        return Response(status_code=204)
+
+    @app.get("/admin/api/audit")
+    async def list_admin_audit(request: Request) -> dict[str, object]:
+        session = await identity_admin_session(
+            request, capability=AdminCapability.VIEW_ADMIN_AUDIT
+        )
+        (
+            before_created_at,
+            before_event_id,
+            action,
+            outcome,
+            target_user_id,
+            target_request_id,
+            limit,
+        ) = _admin_audit_query(request)
+        page = await admin_identity.list_audit(
+            actor=identity_actor(session),
+            before_created_at=before_created_at,
+            before_event_id=before_event_id,
+            action=action,
+            outcome=outcome,
+            target_user_id=target_user_id,
+            target_request_id=target_request_id,
+            limit=limit,
+        )
+        return page.model_dump(mode="json")
 
     @app.get("/admin/api/integration-status")
     async def read_integration_status(request: Request) -> dict[str, object]:
@@ -2004,6 +2338,7 @@ async def serve_web(settings: Settings) -> int:
             clock=stack.clock,
             policy_revision=stack.policy_revision,
             provider_state=stack.provider_state,
+            admin_identity=stack.admin_identity_service,
         )
         server = uvicorn.Server(
             uvicorn.Config(
