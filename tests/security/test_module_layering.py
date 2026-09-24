@@ -120,6 +120,11 @@ _ALLOWED_INTERNAL_BY_FILE = {
     "interfaces/integration_config_file.py": {
         "xiaowei_agent.contracts",
     },
+    # 一次性迁移器：只读写本地文件，不碰数据库、网络或任何服务装配。
+    "interfaces/integration_config_migrate.py": {
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+    },
     "interfaces/config_preflight.py": {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
