@@ -24,7 +24,10 @@ from tests.suites.identity_directory import (
     prepare_activation_admin,
 )
 
-from xiaowei_agent.contracts.admin_audit import AdminOperationContext
+from xiaowei_agent.contracts.admin_audit import (
+    AdminOperationContext,
+    admin_audit_target_digest,
+)
 from xiaowei_agent.contracts.enums import (
     AdminAuditAction,
     AdminAuditOutcome,
@@ -38,6 +41,7 @@ from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_USER_ID,
     ApproveActivationCommand,
     BindExternalIdentityCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     UnbindExternalIdentityCommand,
 )
@@ -500,6 +504,15 @@ async def test_two_admins_cannot_both_approve_one_activation(
         ),
         context=admin_context("op-create-admin-two"),
     )
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="admin-two",
+            tenant_id=TENANT,
+            environment_id="env-a",
+            subject_ref="ou_admin_two",
+        ),
+        context=admin_context("op-bind-admin-two"),
+    )
     pending = await activation_store.create_or_reuse(command=activation_command())
     command = ApproveActivationCommand(
         request_id=pending.request_id,
@@ -518,7 +531,7 @@ async def test_two_admins_cannot_both_approve_one_activation(
             operation_id="op-concurrent-approve-two",
             actor_user_id="admin-two",
             actor="admin-two@example.com",
-            auth_source=IdentitySource.LOCAL_ADMIN,
+            auth_source=IdentitySource.FEISHU,
         ),
     )
 
@@ -545,11 +558,64 @@ async def test_two_admins_cannot_both_approve_one_activation(
             )
         )
         bound = await connection.scalar(
-            sa.select(sa.func.count()).select_from(EXTERNAL_IDENTITIES)
+            sa.select(sa.func.count())
+            .select_from(EXTERNAL_IDENTITIES)
+            .where(EXTERNAL_IDENTITIES.c.user_id != "admin-two")
         )
     assert approved == 1
     assert activation_audits == 1
     assert bound == 1
+
+
+async def test_concurrent_managed_role_changes_have_one_winner(
+    directory, clean_database, clock
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=create_user("managed"), context=admin_context("op-create-managed")
+    )
+    stores = (
+        PostgresUserDirectoryStore(engine=clean_database, clock=clock),
+        PostgresUserDirectoryStore(engine=clean_database, clock=clock),
+    )
+    command = ChangeManagedUserRoleCommand(
+        user_id="managed",
+        tenant_id=TENANT,
+        environment_id="env-a",
+        expected_role=ProductRole.USER,
+        role=ProductRole.OPERATOR,
+    )
+
+    results = await asyncio.gather(
+        stores[0].apply(command=command, context=admin_context("op-managed-one")),
+        stores[1].apply(command=command, context=admin_context("op-managed-two")),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(item, tuple) for item in results) == 1
+    assert sum(isinstance(item, UserDirectoryConflictError) for item in results) == 1
+    target_digest = admin_audit_target_digest(
+        target_kind=AdminAuditTargetKind.USER, target_ref="managed"
+    )
+    async with clean_database.connect() as connection:
+        role = await connection.scalar(
+            sa.select(USER_ROLE_ASSIGNMENTS.c.role).where(
+                USER_ROLE_ASSIGNMENTS.c.user_id == "managed",
+                USER_ROLE_ASSIGNMENTS.c.tenant_id == TENANT,
+                USER_ROLE_ASSIGNMENTS.c.environment_id == "env-a",
+            )
+        )
+        audit_count = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(ADMIN_AUDIT_EVENTS)
+            .where(
+                ADMIN_AUDIT_EVENTS.c.action
+                == AdminAuditAction.ROLE_ASSIGNED.value,
+                ADMIN_AUDIT_EVENTS.c.target_ref_digest == target_digest,
+            )
+        )
+    assert role == ProductRole.OPERATOR.value
+    assert audit_count == 1
 
 
 @pytest.mark.parametrize(

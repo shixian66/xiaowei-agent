@@ -50,11 +50,13 @@ from xiaowei_agent.contracts.identity import (
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     LegacyIdentityMigrationEntry,
     MigrateLegacyIdentitiesCommand,
     RejectActivationCommand,
     RevokeRoleCommand,
+    SetManagedUserStatusCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
 )
@@ -256,6 +258,222 @@ async def test_status_change_records_the_new_status(directory: Any) -> None:
     assert event.action is AdminAuditAction.USER_STATUS_CHANGED
     assert event.effect.status is UserStatus.DISABLED
     assert event.effect.role is None
+
+
+async def test_local_admin_can_manage_a_non_admin_with_expected_value_cas(
+    directory: Any,
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=create_user("managed"), context=admin_context("op-create-managed")
+    )
+
+    (role_event,) = await directory.apply(
+        command=ChangeManagedUserRoleCommand(
+            user_id="managed",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            expected_role=ProductRole.USER,
+            role=ProductRole.OPERATOR,
+        ),
+        context=admin_context("op-managed-role"),
+    )
+    (status_event,) = await directory.apply(
+        command=SetManagedUserStatusCommand(
+            user_id="managed",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            expected_status=UserStatus.ACTIVE,
+            expected_role=ProductRole.OPERATOR,
+            status=UserStatus.DISABLED,
+        ),
+        context=admin_context("op-managed-status"),
+    )
+
+    assert role_event.action is AdminAuditAction.ROLE_ASSIGNED
+    assert role_event.effect.role is ProductRole.OPERATOR
+    assert status_event.action is AdminAuditAction.USER_STATUS_CHANGED
+    assert status_event.effect.status is UserStatus.DISABLED
+
+
+async def test_feishu_admin_can_manage_only_while_its_binding_is_current(
+    directory: Any, directory_probe: Any
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=create_user(
+            "feishu-admin", actor="feishu-admin@example.com", role=ProductRole.ADMIN
+        ),
+        context=admin_context("op-create-feishu-admin"),
+    )
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="feishu-admin",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            subject_ref="ou_feishu_admin",
+        ),
+        context=admin_context("op-bind-feishu-admin"),
+    )
+    await directory.apply(
+        command=create_user("managed"), context=admin_context("op-create-managed")
+    )
+    feishu = AdminOperationContext(
+        operation_id="op-feishu-manage",
+        actor_user_id="feishu-admin",
+        actor="feishu-admin@example.com",
+        auth_source=IdentitySource.FEISHU,
+    )
+
+    await directory.apply(
+        command=ChangeManagedUserRoleCommand(
+            user_id="managed",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            expected_role=ProductRole.USER,
+            role=ProductRole.OPERATOR,
+        ),
+        context=feishu,
+    )
+    await directory.apply(
+        command=UnbindExternalIdentityCommand(
+            user_id="feishu-admin",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        ),
+        context=admin_context("op-unbind-feishu-admin"),
+    )
+    before = await directory_probe.facts()
+
+    with pytest.raises(UserDirectoryDecisionDeniedError):
+        await directory.apply(
+            command=ChangeManagedUserRoleCommand(
+                user_id="managed",
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                expected_role=ProductRole.OPERATOR,
+                role=ProductRole.USER,
+            ),
+            context=feishu.model_copy(update={"operation_id": "op-feishu-revoked"}),
+        )
+    assert await directory_probe.facts() == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["ordinary", "disabled", "actor-mismatch", "forged-local", "stale-role"],
+)
+async def test_managed_write_revalidates_actor_and_expected_values(
+    directory: Any, directory_probe: Any, case: str
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=create_user("managed"), context=admin_context("op-create-managed")
+    )
+    actor = admin_context(f"op-denied-{case}")
+    if case == "ordinary":
+        actor = context(f"op-denied-{case}")
+    elif case == "disabled":
+        await directory.apply(
+            command=SetUserStatusCommand(
+                user_id=LOCAL_ADMIN_USER_ID,
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                status=UserStatus.DISABLED,
+            ),
+            context=admin_context("op-disable-admin"),
+        )
+    elif case == "actor-mismatch":
+        actor = actor.model_copy(update={"actor": "forged@example.test"})
+    elif case == "forged-local":
+        await directory.apply(
+            command=create_user(
+                "forged-admin",
+                actor="forged-admin@example.com",
+                role=ProductRole.ADMIN,
+            ),
+            context=admin_context("op-create-forged-admin"),
+        )
+        actor = AdminOperationContext(
+            operation_id=f"op-denied-{case}",
+            actor_user_id="forged-admin",
+            actor="forged-admin@example.com",
+            auth_source=IdentitySource.LOCAL_ADMIN,
+        )
+    command = ChangeManagedUserRoleCommand(
+        user_id="managed",
+        tenant_id=TENANT,
+        environment_id=ENVIRONMENT,
+        expected_role=(
+            ProductRole.OPERATOR if case == "stale-role" else ProductRole.USER
+        ),
+        role=(ProductRole.USER if case == "stale-role" else ProductRole.OPERATOR),
+    )
+    before = await directory_probe.facts()
+
+    expected_error = (
+        UserDirectoryConflictError
+        if case == "stale-role"
+        else UserDirectoryDecisionDeniedError
+    )
+    with pytest.raises(expected_error):
+        await directory.apply(command=command, context=actor)
+    assert await directory_probe.facts() == before
+
+
+@pytest.mark.parametrize("case", ["target-admin", "other-scope", "inactive-role"])
+async def test_managed_write_refuses_protected_or_out_of_scope_targets(
+    directory: Any, directory_probe: Any, case: str
+) -> None:
+    await prepare_activation_admin(directory)
+    role = ProductRole.ADMIN if case == "target-admin" else ProductRole.USER
+    await directory.apply(
+        command=create_user("managed", role=role),
+        context=admin_context("op-create-managed"),
+    )
+    if case == "other-scope":
+        await directory.apply(
+            command=AssignRoleCommand(
+                user_id="managed",
+                tenant_id=TENANT,
+                environment_id=OTHER_ENVIRONMENT,
+                role=ProductRole.USER,
+            ),
+            context=admin_context("op-add-other-scope"),
+        )
+    if case == "inactive-role":
+        await directory.apply(
+            command=SetUserStatusCommand(
+                user_id="managed",
+                tenant_id=TENANT,
+                environment_id=ENVIRONMENT,
+                status=UserStatus.DISABLED,
+            ),
+            context=admin_context("op-disable-managed"),
+        )
+    before = await directory_probe.facts()
+    command: SetManagedUserStatusCommand | ChangeManagedUserRoleCommand
+    if case == "inactive-role":
+        command = ChangeManagedUserRoleCommand(
+            user_id="managed",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            expected_role=ProductRole.USER,
+            role=ProductRole.OPERATOR,
+        )
+    else:
+        command = SetManagedUserStatusCommand(
+            user_id="managed",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            expected_status=UserStatus.ACTIVE,
+            expected_role=ProductRole.USER,
+            status=UserStatus.DISABLED,
+        )
+
+    with pytest.raises(UserDirectoryConflictError):
+        await directory.apply(command=command, context=admin_context(f"op-{case}"))
+    assert await directory_probe.facts() == before
 
 
 async def test_revoking_a_role_claims_no_effect(directory: Any) -> None:
@@ -1303,11 +1521,70 @@ async def test_activation_approval_rolls_back_the_request_with_the_directory(
     assert still_pending.status is ActivationStatus.PENDING
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_feishu_admin_can_make_both_activation_decisions(
+    directory: Any, activation_store: Any, decision: str
+) -> None:
+    await prepare_activation_admin(directory)
+    await directory.apply(
+        command=create_user(
+            "feishu-admin", actor="feishu-admin@example.com", role=ProductRole.ADMIN
+        ),
+        context=admin_context("op-create-feishu-admin"),
+    )
+    await directory.apply(
+        command=BindExternalIdentityCommand(
+            user_id="feishu-admin",
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            subject_ref="ou_feishu_admin",
+        ),
+        context=admin_context("op-bind-feishu-admin"),
+    )
+    pending = await activation_store.create_or_reuse(
+        command=activation_command(f"ou_{decision}")
+    )
+    actor = AdminOperationContext(
+        operation_id=f"op-feishu-{decision}",
+        actor_user_id="feishu-admin",
+        actor="feishu-admin@example.com",
+        auth_source=IdentitySource.FEISHU,
+    )
+    command = (
+        ApproveActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+            actor="approved@example.com",
+            display_name="Approved User",
+        )
+        if decision == "approve"
+        else RejectActivationCommand(
+            request_id=pending.request_id,
+            tenant_id=TENANT,
+            environment_id=ENVIRONMENT,
+        )
+    )
+
+    (event,) = await directory.apply(command=command, context=actor)
+
+    assert event.auth_source is IdentitySource.FEISHU
+    assert event.action is (
+        AdminAuditAction.ACTIVATION_APPROVED
+        if decision == "approve"
+        else AdminAuditAction.ACTIVATION_REJECTED
+    )
+
+
 IDENTITY_DIRECTORY_CASES = (
     test_creating_a_user_persists_the_account_and_a_derived_audit_event,
     test_the_audit_event_points_at_the_user_the_command_changed,
     test_role_assignment_records_which_role_was_granted,
     test_status_change_records_the_new_status,
+    test_local_admin_can_manage_a_non_admin_with_expected_value_cas,
+    test_feishu_admin_can_manage_only_while_its_binding_is_current,
+    test_managed_write_revalidates_actor_and_expected_values,
+    test_managed_write_refuses_protected_or_out_of_scope_targets,
     test_revoking_a_role_claims_no_effect,
     test_audit_write_failure_rolls_back_the_authorization_change,
     test_any_failure_after_a_directory_write_leaves_nothing_behind,
@@ -1343,6 +1620,7 @@ IDENTITY_DIRECTORY_CASES = (
     test_activation_decision_rejects_every_non_current_admin_shape,
     test_terminal_activation_replay_is_a_conflict_without_side_effects,
     test_activation_approval_rolls_back_the_request_with_the_directory,
+    test_feishu_admin_can_make_both_activation_decisions,
 )
 
 ALL_GROUPS = {"identity_directory": IDENTITY_DIRECTORY_CASES}

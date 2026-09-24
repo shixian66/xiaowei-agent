@@ -71,6 +71,7 @@ from xiaowei_agent.contracts.enums import (
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_USER_ID,
     AdminUserListQuery,
     AdminUserPage,
     AdminUserRecord,
@@ -78,6 +79,7 @@ from xiaowei_agent.contracts.identity import (
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     DirectoryCommand,
     DirectoryPrincipalFacts,
@@ -85,6 +87,7 @@ from xiaowei_agent.contracts.identity import (
     MigrateLegacyIdentitiesCommand,
     RejectActivationCommand,
     RevokeRoleCommand,
+    SetManagedUserStatusCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
     UserAccount,
@@ -1036,8 +1039,12 @@ class InMemoryUserDirectoryStore:
             return self._create_user(command, context, now)
         if isinstance(command, SetUserStatusCommand):
             return self._set_status(command, context, now)
+        if isinstance(command, SetManagedUserStatusCommand):
+            return self._set_managed_status(command, context, now)
         if isinstance(command, AssignRoleCommand):
             return self._assign_role(command, context, now)
+        if isinstance(command, ChangeManagedUserRoleCommand):
+            return self._change_managed_role(command, context, now)
         if isinstance(command, RevokeRoleCommand):
             return self._revoke_role(command, context, now)
         if isinstance(command, BindExternalIdentityCommand):
@@ -1050,7 +1057,9 @@ class InMemoryUserDirectoryStore:
             return self._migrate(command, context, now)
         if isinstance(command, ApproveActivationCommand):
             return self._approve_activation(command, context, now)
-        return self._reject_activation(command, context, now)
+        if isinstance(command, RejectActivationCommand):
+            return self._reject_activation(command, context, now)
+        raise AssertionError(f"unhandled directory command: {type(command).__name__}")
 
     def _write_audit(
         self, candidate: AdminAuditCandidate, *, now: _dt.datetime
@@ -1217,6 +1226,122 @@ class InMemoryUserDirectoryStore:
         candidate = derive_audit(command, context, target_ref=command.user_id)
         return (self._write_audit(candidate, now=now),)
 
+    def _require_admin(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        context: AdminOperationContext,
+    ) -> None:
+        account = self._state.user_accounts.get(context.actor_user_id)
+        assignment = self._state.user_role_assignments.get(
+            (context.actor_user_id, tenant_id, environment_id)
+        )
+        if (
+            account is None
+            or account.status is not UserStatus.ACTIVE
+            or account.actor != context.actor
+            or assignment is None
+            or assignment.role is not ProductRole.ADMIN
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.ACTOR_NOT_ADMIN
+            )
+        if context.auth_source is IdentitySource.LOCAL_ADMIN:
+            source_is_current = context.actor_user_id == LOCAL_ADMIN_USER_ID
+        elif context.auth_source is IdentitySource.FEISHU:
+            source_is_current = (
+                self._binding_key_of(
+                    context.actor_user_id, tenant_id, environment_id
+                )
+                is not None
+            )
+        else:  # pragma: no cover - IdentitySource 是闭集，保留 fail-closed 分支
+            source_is_current = False
+        if not source_is_current:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
+            )
+
+    def _managed_target(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> tuple[UserAccount, UserRoleAssignment, tuple[UserRoleAssignment, ...]]:
+        account = self._state.user_accounts.get(user_id)
+        assignment = self._state.user_role_assignments.get(
+            (user_id, tenant_id, environment_id)
+        )
+        if account is None or assignment is None:
+            raise UserDirectoryNotFoundError("no account in this scope")
+        assignments = tuple(
+            candidate
+            for (candidate_id, _, _), candidate in (
+                self._state.user_role_assignments.items()
+            )
+            if candidate_id == user_id
+        )
+        if any(candidate.role is ProductRole.ADMIN for candidate in assignments):
+            raise UserDirectoryConflictError("an admin account cannot be managed")
+        return account, assignment, assignments
+
+    def _set_managed_status(
+        self,
+        command: SetManagedUserStatusCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        account, assignment, assignments = self._managed_target(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if len(assignments) != 1:
+            raise UserDirectoryConflictError("a cross-scope account cannot change status")
+        if (
+            account.status is not command.expected_status
+            or assignment.role is not command.expected_role
+        ):
+            raise UserDirectoryConflictError("the managed user changed")
+        self._state.user_accounts[command.user_id] = account.model_copy(
+            update={"status": command.status, "updated_at": now}
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _change_managed_role(
+        self,
+        command: ChangeManagedUserRoleCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        account, assignment, _ = self._managed_target(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if account.status is not UserStatus.ACTIVE:
+            raise UserDirectoryConflictError("a disabled account cannot change role")
+        if assignment.role is not command.expected_role:
+            raise UserDirectoryConflictError("the managed role changed")
+        self._state.user_role_assignments[
+            (command.user_id, command.tenant_id, command.environment_id)
+        ] = assignment.model_copy(update={"role": command.role, "updated_at": now})
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
     def _revoke_role(
         self,
         command: RevokeRoleCommand,
@@ -1363,24 +1488,11 @@ class InMemoryUserDirectoryStore:
         environment_id: str,
         context: AdminOperationContext,
     ) -> None:
-        if context.auth_source is not IdentitySource.LOCAL_ADMIN:
-            raise UserDirectoryDecisionDeniedError(
-                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
-            )
-        account = self._state.user_accounts.get(context.actor_user_id)
-        assignment = self._state.user_role_assignments.get(
-            (context.actor_user_id, tenant_id, environment_id)
+        self._require_admin(
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            context=context,
         )
-        if (
-            account is None
-            or account.status is not UserStatus.ACTIVE
-            or account.actor != context.actor
-            or assignment is None
-            or assignment.role is not ProductRole.ADMIN
-        ):
-            raise UserDirectoryDecisionDeniedError(
-                AdminAuditReasonCode.ACTOR_NOT_ADMIN
-            )
 
     def _activation_for_decision(
         self,
