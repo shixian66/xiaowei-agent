@@ -142,6 +142,12 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 加入一次 DNS 解析（零网络计数与 AST 双红）、资源面板加入测试按钮（静态资产门红）、StarRocks 投影带出密码（API 投影门红）、
 resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。本机 Chromium 以真实 `create_app`、内存存储与临时目录（loopback、
 假凭据，身份三块为空替身）核对 1440/1280/1024 资源区、修改模式与清除确认，行内不出现凭据、用户名或数据库名，也没有测试入口。
+独立复审在首轮 head `f4c45be` 上复现 2 个阻塞：普通修改切到 `auth_mode=none` 会绕过确认框丢弃 Prometheus Secret；
+`_fail()` 吞掉写不进的 FAILED 终态，使 not-found/conflict/rejected 仍回 404/409/400。修复提交
+`1183e0506c0239e309b0245780e11074e6afc92f`：存量或新带 Secret 遇 `none` 一律拒绝（先显式清除再切换可成功），终态审计故障
+穿透为 unavailable（503）；两项隔离变异（恢复静默丢弃、恢复吞异常）各自令服务层与正式路由新用例转红并恢复。修复后本机
+`python -m pytest -q` 为 `4975 passed, 416 skipped`，security `1594 passed, 83 skipped`，Ruff/mypy 通过，一次性 PostgreSQL
+全量 `5391 passed`、零 skip；smoke、wheel 与视觉证据沿用首轮（修复未触及挂载、worker 读取或页面结构，仅改一句拒绝提示）。
 这些只是离线证据：没有真实 StarRocks/Prometheus 目标、DNS、连接、部署、canary 或用户验收。
 
 ## 1. 当前基线
