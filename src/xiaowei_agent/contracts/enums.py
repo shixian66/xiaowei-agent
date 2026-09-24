@@ -163,8 +163,8 @@ class AdminAuditAction(StrEnum):
 class AdminAuditTargetKind(StrEnum):
     """审计目标类别闭集（规格 §14.2）。
 
-    W1b 开始由激活决策产生 ``ACTIVATION``；``DUTY_BINDING`` / ``CONFIG`` /
-    ``TASK_CONTENT`` 仍只是规格逐字列出的值域，没有对应写命令。
+    W1b 开始由激活决策产生 ``ACTIVATION``；W4a 起配置保存、清除与连接测试产生
+    ``CONFIG``；``DUTY_BINDING`` / ``TASK_CONTENT`` 仍只是规格逐字列出的值域，没有对应写命令。
     """
 
     USER = "user"
