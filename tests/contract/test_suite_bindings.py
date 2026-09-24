@@ -25,6 +25,7 @@ from pathlib import Path
 from types import ModuleType
 
 from tests.suites import activation_store as activation_suite
+from tests.suites import admin_identity_queries as admin_identity_query_suite
 from tests.suites import channel_store as channel_suite
 from tests.suites import clarification_records as clarification_suite
 from tests.suites import evidence_ledger as evidence_suite
@@ -37,6 +38,7 @@ from tests.suites import web_session_store as web_session_suite
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 
 _SUITES: dict[str, ModuleType] = {
+    "admin_identity_queries": admin_identity_query_suite,
     "activation_store": activation_suite,
     "channel_store": channel_suite,
     "clarification_records": clarification_suite,
@@ -55,6 +57,16 @@ _SUITES: dict[str, ModuleType] = {
 # ``test_binding_exposes_exactly_its_group`` 不再是平凡真，两条都在 T5 复查过确实
 # 会因缺绑定而转红。
 _BINDINGS: dict[str, tuple[str, str, str]] = {
+    "tests.contract.test_admin_identity_queries": (
+        "admin_identity_queries",
+        "admin_identity_queries",
+        "memory",
+    ),
+    "tests.integration.test_admin_identity_queries_postgres": (
+        "admin_identity_queries",
+        "admin_identity_queries",
+        "postgres",
+    ),
     "tests.contract.test_activation_store": (
         "activation_store",
         "activation_store",

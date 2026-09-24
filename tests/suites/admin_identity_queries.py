@@ -248,3 +248,5 @@ ADMIN_IDENTITY_QUERY_CASES = (
     test_pending_activations_exclude_expired_and_use_a_stable_tie_break,
     test_audit_events_are_scoped_filtered_and_keyset_paginated,
 )
+
+ALL_GROUPS = {"admin_identity_queries": ADMIN_IDENTITY_QUERY_CASES}
