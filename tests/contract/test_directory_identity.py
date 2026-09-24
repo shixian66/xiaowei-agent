@@ -6,6 +6,7 @@ import inspect
 import pytest
 
 from xiaowei_agent.contracts import (
+    AuthenticatedPrincipal,
     IdentitySource,
     ProductRole,
     UserStatus,
@@ -103,8 +104,35 @@ async def test_directory_adapter_uses_the_shared_role_permission_mapping(
     assert principal.permissions == channel_permissions(role=role)
 
     web_identity = await adapter.resolve_for_web(subject_ref="ou_alice")
+    assert web_identity.user_id == "user-alice"
     assert web_identity.principal == principal
     assert web_identity.role is role
+
+
+@pytest.mark.asyncio
+async def test_static_web_identity_requires_an_explicit_internal_user_id() -> None:
+    principal = AuthenticatedPrincipal(
+        tenant_id="dev-local",
+        environment_id="dev",
+        actor="alice",
+        source=IdentitySource.FEISHU,
+        subject_ref="ou_alice",
+        permissions=channel_permissions(role=ProductRole.USER),
+    )
+    missing = StaticFeishuIdentityDirectory(
+        principals={"ou_alice": principal},
+        web_roles={"ou_alice": ProductRole.USER},
+    )
+    with pytest.raises(FeishuIdentityUnavailableError):
+        await missing.resolve_for_web(subject_ref="ou_alice")
+
+    available = StaticFeishuIdentityDirectory(
+        principals={"ou_alice": principal},
+        web_roles={"ou_alice": ProductRole.USER},
+        web_user_ids={"ou_alice": "user-alice"},
+    )
+    resolution = await available.resolve_for_web(subject_ref="ou_alice")
+    assert resolution.user_id == "user-alice"
 
 
 @pytest.mark.asyncio

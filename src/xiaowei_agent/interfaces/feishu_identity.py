@@ -17,6 +17,7 @@ from xiaowei_agent.contracts import (
     ProductRole,
     StrictStr,
 )
+from xiaowei_agent.contracts.identity import BoundedId
 
 _MAX_IDENTITY_FILE_BYTES: Final[int] = 1_048_576
 _MAX_IDENTITY_ENTRIES: Final[int] = 10_000
@@ -45,6 +46,7 @@ class FeishuIdentityDirectory(Protocol):
 class WebIdentityResolution:
     """Web 授权所需的当前主体与当前产品角色。"""
 
+    user_id: BoundedId
     principal: AuthenticatedPrincipal
     role: ProductRole
 
@@ -130,9 +132,11 @@ class StaticFeishuIdentityDirectory:
         *,
         principals: Mapping[str, AuthenticatedPrincipal],
         web_roles: Mapping[str, ProductRole] | None = None,
+        web_user_ids: Mapping[str, str] | None = None,
     ) -> None:
         self._principals = dict(principals)
         self._web_roles = {} if web_roles is None else dict(web_roles)
+        self._web_user_ids = {} if web_user_ids is None else dict(web_user_ids)
 
     async def resolve(self, *, subject_ref: str) -> AuthenticatedPrincipal:
         """按 ``open_id`` 精确查找，未知主体统一返回安全错误。"""
@@ -146,11 +150,12 @@ class StaticFeishuIdentityDirectory:
         principal = await self.resolve(subject_ref=subject_ref)
         try:
             role = self._web_roles[subject_ref]
+            user_id = self._web_user_ids[subject_ref]
         except (KeyError, TypeError):
             raise FeishuIdentityUnavailableError(
                 "feishu identity unavailable"
             ) from None
-        return WebIdentityResolution(principal=principal, role=role)
+        return WebIdentityResolution(user_id=user_id, principal=principal, role=role)
 
 
 def _read_identity_file(path: str) -> bytes:

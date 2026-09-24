@@ -117,6 +117,7 @@ def _build(
             identities=StaticFeishuIdentityDirectory(
                 principals={"subject-alice": _feishu_admin()},
                 web_roles={"subject-alice": ProductRole.ADMIN},
+                web_user_ids={"subject-alice": "user-alice"},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),

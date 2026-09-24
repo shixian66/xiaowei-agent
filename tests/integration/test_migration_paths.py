@@ -863,6 +863,18 @@ async def _column_names(engine: AsyncEngine, table: str) -> set[str]:
         return {row[0] for row in rows}
 
 
+async def _index_names(engine: AsyncEngine, table: str) -> set[str]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() "
+                "AND tablename = :table"
+            ),
+            {"table": table},
+        )
+        return {row[0] for row in rows}
+
+
 _W1A_TABLES = {
     "user_accounts",
     "user_role_assignments",
@@ -895,6 +907,37 @@ async def _restore_head(engine: AsyncEngine, run_upgrade: Any) -> None:
         "return_intent_task_id",
         "return_intent_request_id",
     } <= await _column_names(engine, "activation_requests")
+
+
+async def test_rev_0017_indexes_round_trip_and_restore_head(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+) -> None:
+    run_upgrade, run_downgrade = alembic_runners
+    expected = {
+        "user_role_assignments": "ix_user_role_assignments_scope_user",
+        "activation_requests": "ix_activation_requests_scope_status_requested",
+        "admin_audit_events": "ix_admin_audit_events_scope_created",
+    }
+    try:
+        for table, index in expected.items():
+            assert index in await _index_names(clean_database, table)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0016_web_login_contexts")
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            ) == "0016_web_login_contexts"
+        for table, index in expected.items():
+            assert index not in await _index_names(clean_database, table)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        for table, index in expected.items():
+            assert index in await _index_names(clean_database, table)
+    finally:
+        await _restore_head(clean_database, run_upgrade)
 
 
 async def _seed_directory_and_audit(engine: AsyncEngine) -> None:

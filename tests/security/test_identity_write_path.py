@@ -50,6 +50,7 @@ CREDENTIAL_LINK_COLUMN = "user_id"
 _AUTHZ_WRITE_SITES = frozenset(
     {
         "persistence/postgres.py::PostgresUserDirectoryStore._apply_in_transaction",
+        "persistence/postgres.py::PostgresUserDirectoryStore._apply_managed_user_change",
         "persistence/postgres.py::PostgresUserDirectoryStore._insert_account",
         "persistence/postgres.py::PostgresUserDirectoryStore._upsert_role",
         "persistence/postgres.py::PostgresUserDirectoryStore._bind_subject",
@@ -58,6 +59,7 @@ _AUTHZ_WRITE_SITES = frozenset(
 """``user_accounts`` / ``user_role_assignments`` / ``external_identities`` 的全部写点。
 
 ``apply()`` 本身不发 SQL——它开事务并委托，所以名单里是助手而不是 ``apply``。
+受管写点单列，是为了让状态/角色 CAS 的 SQL 不能被悄悄搬到第二条路径。
 """
 
 _ACTIVATION_SQL_WRITE_SITES = frozenset(
@@ -128,6 +130,7 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/fake.py::InMemoryAdminAuditStore.append_started",
         "persistence/fake.py::InMemoryAdminAuditStore.append_terminal",
         "persistence/fake.py::InMemoryUserDirectoryStore._assign_role",
+        "persistence/fake.py::InMemoryUserDirectoryStore._change_managed_role",
         "persistence/fake.py::InMemoryUserDirectoryStore._approve_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._bind_identity",
         "persistence/fake.py::InMemoryUserDirectoryStore._bootstrap",
@@ -136,6 +139,7 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/fake.py::InMemoryUserDirectoryStore._reject_activation",
         "persistence/fake.py::InMemoryUserDirectoryStore._revoke_role",
         "persistence/fake.py::InMemoryUserDirectoryStore._set_status",
+        "persistence/fake.py::InMemoryUserDirectoryStore._set_managed_status",
         "persistence/fake.py::InMemoryUserDirectoryStore._unbind_identity",
         "persistence/fake.py::InMemoryUserDirectoryStore._write_audit",
         "persistence/postgres.py::PostgresAdminAuditStore._append_candidate",
@@ -143,6 +147,7 @@ _HELPER_CALL_SITES = frozenset(
         "persistence/postgres.py::PostgresAdminAuditStore.append_started",
         "persistence/postgres.py::PostgresAdminAuditStore.append_terminal",
         "persistence/postgres.py::PostgresUserDirectoryStore._apply_in_transaction",
+        "persistence/postgres.py::PostgresUserDirectoryStore._apply_managed_user_change",
         "persistence/postgres.py::PostgresUserDirectoryStore._audit",
         "persistence/postgres.py::PostgresUserDirectoryStore._bootstrap_in_transaction",
         "persistence/postgres.py::PostgresUserDirectoryStore._decide_activation",

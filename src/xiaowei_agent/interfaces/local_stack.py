@@ -28,6 +28,10 @@ from xiaowei_agent.contracts import (
     ReadinessProbe,
     ReadinessReport,
 )
+from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_ENVIRONMENT_ID,
+    LOCAL_ADMIN_TENANT_ID,
+)
 from xiaowei_agent.governance.profiles import ACTIVE_POLICY_SNAPSHOT
 from xiaowei_agent.interfaces.provider_consumption import (
     ProviderCredentials,
@@ -80,6 +84,7 @@ if TYPE_CHECKING:
     from xiaowei_agent.application.activation_notification import (
         ActivationNotificationService,
     )
+    from xiaowei_agent.application.admin_identity import AdminIdentityService
     from xiaowei_agent.application.channel_access import (
         FeishuMembershipPort,
         TaskAccessService,
@@ -227,8 +232,9 @@ class ChannelWorkerStack:
 class WebStack:
     """无执行权的 Web 认证与任务投影进程装配。
 
-    飞书那一组全部可选：本地管理员登录是 Web 的必备入口，飞书 OAuth 是插件。
-    ``oauth_available`` 恒等于 ``auth is not None``，不是第二个真源。
+    目录、激活和审计服务是本地管理员也要使用的必备依赖；只有飞书 OAuth adapter
+    与它的身份解析器可选。``oauth_available`` 恒等于 ``auth is not None``，不是
+    第二个真源。
     """
 
     local_admin_auth: LocalAdminAuthService
@@ -242,7 +248,8 @@ class WebStack:
     web_session_store: WebSessionStore
     provider_state: ProviderStateStore
     identity_directory: FeishuIdentityDirectory | None
-    activation_service: IdentityActivationService | None
+    activation_service: IdentityActivationService
+    admin_identity_service: AdminIdentityService
     task_access_service: TaskAccessService
     submission_service: ChannelSubmissionService
     clock: Clock
@@ -992,9 +999,10 @@ async def build_postgres_web_stack(
 
     **本函数不读 `integrations.json`，也不看 ``settings.feishu_oauth_enabled``。**
     读配置、判双层开关、构造真实 adapter 全部属于 composition root
-    （``web_app.serve_web``）。这里只反映传进来的事实：两个端口都在就装配飞书那一组，
-    否则不装配。谁传端口谁负责判断。
+    （``web_app.serve_web``）。目录、激活、审计与 Admin 服务始终装配；两个端口都在
+    才额外装配 OAuth 认证。谁传端口谁负责判断。
     """
+    from xiaowei_agent.application.admin_identity import AdminIdentityService
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.identity_activation import IdentityActivationService
@@ -1015,6 +1023,11 @@ async def build_postgres_web_stack(
 
     if not settings.web_app_enabled:
         raise ValueError("Web app is disabled")
+    if (
+        settings.tenant_id != LOCAL_ADMIN_TENANT_ID
+        or settings.environment_id != LOCAL_ADMIN_ENVIRONMENT_ID
+    ):
+        raise WebStackConfigurationError("web stack configuration invalid")
     engine = None
     database_invalid = False
     try:
@@ -1081,24 +1094,29 @@ async def build_postgres_web_stack(
             session_ttl_seconds=settings.web_session_ttl_seconds,
         )
 
+        directory_store = PostgresUserDirectoryStore(engine=engine, clock=clock)
+        activation_store = PostgresActivationStore(engine=engine, clock=clock)
+        audit_store = PostgresAdminAuditStore(engine=engine, clock=clock)
+        activation_service = IdentityActivationService(
+            activations=activation_store,
+            directory=directory_store,
+            audit=audit_store,
+            tenant_id=settings.tenant_id,
+            environment_id=settings.environment_id,
+        )
+        admin_identity_service = AdminIdentityService(
+            directory=directory_store,
+            activations=activation_store,
+            audit=audit_store,
+            activation_decisions=activation_service,
+        )
+
         auth: WebAuthService | None = None
         identity_directory: FeishuIdentityDirectory | None = None
-        activation_service: IdentityActivationService | None = None
         if oauth is not None and membership is not None:
             try:
-                directory_store = PostgresUserDirectoryStore(
-                    engine=engine,
-                    clock=clock,
-                )
                 identity_directory = DirectoryFeishuIdentityDirectory(
                     directory=directory_store,
-                    tenant_id=settings.tenant_id,
-                    environment_id=settings.environment_id,
-                )
-                activation_service = IdentityActivationService(
-                    activations=PostgresActivationStore(engine=engine, clock=clock),
-                    directory=directory_store,
-                    audit=PostgresAdminAuditStore(engine=engine, clock=clock),
                     tenant_id=settings.tenant_id,
                     environment_id=settings.environment_id,
                 )
@@ -1119,7 +1137,6 @@ async def build_postgres_web_stack(
                 # 非法抛的就是它，不能让它把整个 Web 打挂。
                 auth = None
                 identity_directory = None
-                activation_service = None
         return WebStack(
             local_admin_auth=local_admin_auth,
             oauth_available=auth is not None,
@@ -1133,6 +1150,7 @@ async def build_postgres_web_stack(
             provider_state=provider_state,
             identity_directory=identity_directory,
             activation_service=activation_service,
+            admin_identity_service=admin_identity_service,
             task_access_service=task_access_service,
             submission_service=submission_service,
             clock=clock,

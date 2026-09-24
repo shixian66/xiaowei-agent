@@ -47,6 +47,7 @@ class DirectoryFeishuIdentityDirectory:
         if facts is None:
             raise FeishuIdentityNotFoundError("feishu identity not found")
         return WebIdentityResolution(
+            user_id=facts.account.user_id,
             principal=AuthenticatedPrincipal(
                 tenant_id=self._tenant_id,
                 environment_id=self._environment_id,

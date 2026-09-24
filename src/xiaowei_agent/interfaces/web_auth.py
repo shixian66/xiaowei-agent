@@ -184,6 +184,7 @@ class IssuedWebSession:
 
 @dataclass(frozen=True)
 class AuthenticatedWebSession:
+    user_id: str
     principal: AuthenticatedPrincipal
     role: ProductRole
     admin_capabilities: frozenset[AdminCapability]
@@ -706,6 +707,7 @@ class WebAuthService:
         if authentication_failed:
             raise WebAuthenticationError
         return AuthenticatedWebSession(
+            user_id=resolution.user_id,
             principal=resolution.principal,
             role=resolution.role,
             admin_capabilities=admin_capabilities(

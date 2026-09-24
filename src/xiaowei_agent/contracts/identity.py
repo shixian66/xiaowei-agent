@@ -15,9 +15,10 @@
 ``persistence -> interfaces``）。
 """
 
-from typing import Annotated, Final, Literal, TypeAlias
+from itertools import pairwise
+from typing import Annotated, Final, Literal, Self, TypeAlias
 
-from pydantic import Field
+from pydantic import Field, StrictBool, model_validator
 
 from xiaowei_agent.contracts.base import (
     CONTROLLED_PII_MAX_LENGTH,
@@ -25,6 +26,7 @@ from xiaowei_agent.contracts.base import (
     Contract,
     ControlledPii,
     SecretHash,
+    StrictInt,
     StrictStr,
 )
 from xiaowei_agent.contracts.enums import IdentitySource, ProductRole, UserStatus
@@ -126,6 +128,50 @@ class DirectoryPrincipalFacts(Contract):
     assignment: UserRoleAssignment
 
 
+class AdminUserListQuery(Contract):
+    """Admin 用户列表的显式 scope 与 actor keyset 游标。"""
+
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    after_actor: BoundedActor | None = None
+    limit: StrictInt = Field(default=50, gt=0, le=100)
+
+
+class AdminUserRecord(Contract):
+    """一次批量查询返回的账号、当前作用域角色与飞书绑定事实。"""
+
+    account: UserAccount
+    assignment: UserRoleAssignment
+    feishu_bound: StrictBool
+
+    @model_validator(mode="after")
+    def _account_and_assignment_match(self) -> Self:
+        if self.account.user_id != self.assignment.user_id:
+            raise ValueError("account and assignment user ids must match")
+        return self
+
+
+class AdminUserPage(Contract):
+    """按全局唯一 actor 严格升序的 Admin 用户页。"""
+
+    items: tuple[AdminUserRecord, ...] = Field(max_length=100)
+    next_after_actor: BoundedActor | None = None
+
+    @model_validator(mode="after")
+    def _ordering_and_cursor_are_consistent(self) -> Self:
+        actors = tuple(item.account.actor for item in self.items)
+        if any(left >= right for left, right in pairwise(actors)):
+            raise ValueError("admin users must be strictly ordered by actor")
+        if not self.items and self.next_after_actor is not None:
+            raise ValueError("an empty admin user page cannot have a cursor")
+        if (
+            self.next_after_actor is not None
+            and self.next_after_actor != self.items[-1].account.actor
+        ):
+            raise ValueError("admin user cursor must match the last actor")
+        return self
+
+
 class LegacyIdentityMigrationEntry(Contract):
     """一条待迁移的旧身份，字段**已经是派生完的结果**。
 
@@ -173,12 +219,47 @@ class SetUserStatusCommand(Contract):
     status: UserStatus
 
 
+class SetManagedUserStatusCommand(Contract):
+    """带当前值 CAS 的 W3 受管账号状态命令。"""
+
+    kind: Literal["set_managed_user_status"] = "set_managed_user_status"
+    user_id: BoundedId
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    expected_status: UserStatus
+    expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+    status: UserStatus
+
+    @model_validator(mode="after")
+    def _changes_status(self) -> Self:
+        if self.status is self.expected_status:
+            raise ValueError("managed status command must change the status")
+        return self
+
+
 class AssignRoleCommand(Contract):
     kind: Literal["assign_role"] = "assign_role"
     user_id: BoundedId
     tenant_id: BoundedId
     environment_id: BoundedId
     role: ProductRole
+
+
+class ChangeManagedUserRoleCommand(Contract):
+    """只允许 USER 与 OPERATOR 之间做 CAS 角色变更。"""
+
+    kind: Literal["change_managed_user_role"] = "change_managed_user_role"
+    user_id: BoundedId
+    tenant_id: BoundedId
+    environment_id: BoundedId
+    expected_role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+    role: Literal[ProductRole.USER, ProductRole.OPERATOR]
+
+    @model_validator(mode="after")
+    def _changes_role(self) -> Self:
+        if self.role is self.expected_role:
+            raise ValueError("managed role command must change the role")
+        return self
 
 
 class RevokeRoleCommand(Contract):
@@ -266,7 +347,9 @@ class MigrateLegacyIdentitiesCommand(Contract):
 DirectoryCommand: TypeAlias = Annotated[
     CreateUserCommand
     | SetUserStatusCommand
+    | SetManagedUserStatusCommand
     | AssignRoleCommand
+    | ChangeManagedUserRoleCommand
     | RevokeRoleCommand
     | BindExternalIdentityCommand
     | UnbindExternalIdentityCommand
@@ -276,7 +359,7 @@ DirectoryCommand: TypeAlias = Annotated[
     | MigrateLegacyIdentitiesCommand,
     Field(discriminator="kind"),
 ]
-"""十个写命令的判别联合。
+"""十二个写命令的判别联合。
 
 它是 ``UserDirectoryStore.apply()`` 的**唯一**入参形状：本地管理员 bootstrap 与旧
 身份迁移都必须是它的成员，不得另开写方法、另开事务或另写一份 SQL。

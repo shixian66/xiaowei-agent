@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Final, ParamSpec, TypeVar
 
 import sqlalchemy as sa
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei_agent.contracts import (
@@ -74,26 +75,36 @@ from xiaowei_agent.contracts.activation import (
     ActivationRequest,
     ActivationStatus,
     CreateActivationCommand,
+    PendingActivationListQuery,
+    PendingActivationPage,
 )
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
     AdminAuditEvent,
+    AdminAuditListQuery,
+    AdminAuditPage,
     AdminAuditStart,
     AdminAuditTerminal,
     AdminOperationContext,
 )
 from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_USER_ID,
+    AdminUserListQuery,
+    AdminUserPage,
+    AdminUserRecord,
     ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     DirectoryCommand,
     DirectoryPrincipalFacts,
     MigrateLegacyIdentitiesCommand,
     RejectActivationCommand,
     RevokeRoleCommand,
+    SetManagedUserStatusCommand,
     SetUserStatusCommand,
     UserAccount,
     UserRoleAssignment,
@@ -186,7 +197,9 @@ from xiaowei_agent.persistence.identity import (
     derive_audit,
     external_subject_digest,
 )
-from xiaowei_agent.persistence.local_admin import LOCAL_ADMIN_SINGLETON_ID
+from xiaowei_agent.persistence.local_admin import (
+    LOCAL_ADMIN_SINGLETON_ID,
+)
 from xiaowei_agent.persistence.model_artifacts import (
     AcceptedInteractionArtifact,
     AdvisoryArtifactCandidate,
@@ -2904,6 +2917,39 @@ class PostgresActivationStore:
             )
         return None if row is None else row_to_activation_request(row)
 
+    @_persistence_boundary(write=False)
+    async def list_pending(
+        self, *, query: PendingActivationListQuery
+    ) -> PendingActivationPage:
+        statement = sa.select(ACTIVATION_REQUESTS).where(
+            ACTIVATION_REQUESTS.c.tenant_id == query.tenant_id,
+            ACTIVATION_REQUESTS.c.environment_id == query.environment_id,
+            ACTIVATION_REQUESTS.c.status == ActivationStatus.PENDING.value,
+            ACTIVATION_REQUESTS.c.expires_at > self._clock(),
+        )
+        if query.before_requested_at is not None:
+            statement = statement.where(
+                sa.tuple_(
+                    ACTIVATION_REQUESTS.c.requested_at,
+                    ACTIVATION_REQUESTS.c.request_id,
+                )
+                < (query.before_requested_at, query.before_request_id)
+            )
+        statement = statement.order_by(
+            ACTIVATION_REQUESTS.c.requested_at.desc(),
+            ACTIVATION_REQUESTS.c.request_id.desc(),
+        ).limit(query.limit + 1)
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(row_to_activation_request(row) for row in rows[: query.limit])
+        has_more = len(rows) > query.limit
+        tail = items[-1] if has_more else None
+        return PendingActivationPage(
+            items=items,
+            next_requested_at=None if tail is None else tail.requested_at,
+            next_request_id=None if tail is None else tail.request_id,
+        )
+
 
 async def _insert_audit_event(
     connection: AsyncConnection, candidate: AdminAuditCandidate, *, now: _dt.datetime
@@ -3055,6 +3101,48 @@ class PostgresAdminAuditStore:
             )
         return None if row is None else row_to_admin_audit_event(row)
 
+    @_persistence_boundary(write=False)
+    async def list_events(self, *, query: AdminAuditListQuery) -> AdminAuditPage:
+        statement = sa.select(ADMIN_AUDIT_EVENTS).where(
+            ADMIN_AUDIT_EVENTS.c.tenant_id == query.tenant_id,
+            ADMIN_AUDIT_EVENTS.c.environment_id == query.environment_id,
+        )
+        if query.before_created_at is not None:
+            statement = statement.where(
+                sa.tuple_(
+                    ADMIN_AUDIT_EVENTS.c.created_at,
+                    ADMIN_AUDIT_EVENTS.c.event_id,
+                )
+                < (query.before_created_at, query.before_event_id)
+            )
+        if query.action is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.action == query.action.value
+            )
+        if query.outcome is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.outcome == query.outcome.value
+            )
+        if query.target_kind is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.target_kind == query.target_kind.value,
+                ADMIN_AUDIT_EVENTS.c.target_ref_digest == query.target_ref_digest,
+            )
+        statement = statement.order_by(
+            ADMIN_AUDIT_EVENTS.c.created_at.desc(),
+            ADMIN_AUDIT_EVENTS.c.event_id.desc(),
+        ).limit(query.limit + 1)
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(row_to_admin_audit_event(row) for row in rows[: query.limit])
+        has_more = len(rows) > query.limit
+        tail = items[-1] if has_more else None
+        return AdminAuditPage(
+            items=items,
+            next_created_at=None if tail is None else tail.created_at,
+            next_event_id=None if tail is None else tail.event_id,
+        )
+
 
 class PostgresUserDirectoryStore:
     """``UserDirectoryStore`` 的 PostgreSQL 实现。
@@ -3118,6 +3206,75 @@ class PostgresUserDirectoryStore:
                     "the bound subject is unavailable"
                 )
             return facts
+
+    @_persistence_boundary(write=False)
+    async def list_admin_users(self, *, query: AdminUserListQuery) -> AdminUserPage:
+        bound = sa.exists(
+            sa.select(1).where(
+                EXTERNAL_IDENTITIES.c.user_id == USER_ACCOUNTS.c.user_id,
+                EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
+                EXTERNAL_IDENTITIES.c.tenant_id == query.tenant_id,
+                EXTERNAL_IDENTITIES.c.environment_id == query.environment_id,
+            )
+        ).label("feishu_bound")
+        statement = (
+            sa.select(
+                USER_ACCOUNTS.c.user_id,
+                USER_ACCOUNTS.c.actor,
+                USER_ACCOUNTS.c.display_name,
+                USER_ACCOUNTS.c.status,
+                USER_ACCOUNTS.c.created_at.label("account_created_at"),
+                USER_ACCOUNTS.c.updated_at.label("account_updated_at"),
+                USER_ROLE_ASSIGNMENTS.c.role,
+                USER_ROLE_ASSIGNMENTS.c.created_by,
+                USER_ROLE_ASSIGNMENTS.c.created_at.label("role_created_at"),
+                USER_ROLE_ASSIGNMENTS.c.updated_at.label("role_updated_at"),
+                bound,
+            )
+            .join(
+                USER_ROLE_ASSIGNMENTS,
+                USER_ROLE_ASSIGNMENTS.c.user_id == USER_ACCOUNTS.c.user_id,
+            )
+            .where(
+                USER_ROLE_ASSIGNMENTS.c.tenant_id == query.tenant_id,
+                USER_ROLE_ASSIGNMENTS.c.environment_id == query.environment_id,
+            )
+        )
+        if query.after_actor is not None:
+            statement = statement.where(USER_ACCOUNTS.c.actor > query.after_actor)
+        statement = statement.order_by(USER_ACCOUNTS.c.actor.asc()).limit(
+            query.limit + 1
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(
+            AdminUserRecord(
+                account=UserAccount(
+                    user_id=row["user_id"],
+                    actor=row["actor"],
+                    display_name=row["display_name"],
+                    status=UserStatus(row["status"]),
+                    created_at=row["account_created_at"],
+                    updated_at=row["account_updated_at"],
+                ),
+                assignment=UserRoleAssignment(
+                    user_id=row["user_id"],
+                    tenant_id=query.tenant_id,
+                    environment_id=query.environment_id,
+                    role=ProductRole(row["role"]),
+                    created_by=row["created_by"],
+                    created_at=row["role_created_at"],
+                    updated_at=row["role_updated_at"],
+                ),
+                feishu_bound=bool(row["feishu_bound"]),
+            )
+            for row in rows[: query.limit]
+        )
+        has_more = len(rows) > query.limit
+        return AdminUserPage(
+            items=items,
+            next_after_actor=(items[-1].account.actor if has_more else None),
+        )
 
     @_persistence_boundary(write=True)
     async def apply(
@@ -3200,6 +3357,37 @@ class PostgresUserDirectoryStore:
             )
         ) is not None
 
+    async def _account_for_update(
+        self, connection: AsyncConnection, user_id: str
+    ) -> RowMapping | None:
+        return (
+            (
+                await connection.execute(
+                    sa.select(USER_ACCOUNTS)
+                    .where(USER_ACCOUNTS.c.user_id == user_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+
+    async def _assignments_for_update(
+        self, connection: AsyncConnection, user_id: str
+    ) -> tuple[RowMapping, ...]:
+        rows = (
+            await connection.execute(
+                sa.select(USER_ROLE_ASSIGNMENTS)
+                .where(USER_ROLE_ASSIGNMENTS.c.user_id == user_id)
+                .order_by(
+                    USER_ROLE_ASSIGNMENTS.c.tenant_id,
+                    USER_ROLE_ASSIGNMENTS.c.environment_id,
+                )
+                .with_for_update()
+            )
+        ).mappings()
+        return tuple(rows)
+
     async def _role_exists(
         self,
         connection: AsyncConnection,
@@ -3277,6 +3465,12 @@ class PostgresUserDirectoryStore:
                     )
                 )
             return tuple(events)
+        if isinstance(
+            command, (SetManagedUserStatusCommand, ChangeManagedUserRoleCommand)
+        ):
+            return await self._apply_managed_user_change(
+                connection, command=command, context=context, now=now
+            )
         if isinstance(command, CreateUserCommand):
             await self._insert_account(
                 connection,
@@ -3295,7 +3489,7 @@ class PostgresUserDirectoryStore:
                 now=now,
             )
         elif isinstance(command, SetUserStatusCommand):
-            if not await self._account_exists(connection, command.user_id):
+            if await self._account_for_update(connection, command.user_id) is None:
                 raise UserDirectoryNotFoundError("no such account")
             # 作用域里没有角色的账号在这个作用域根本不可见，改它的状态等于隔着
             # 作用域动一个看不到的人。
@@ -3312,7 +3506,7 @@ class PostgresUserDirectoryStore:
                 .values(status=command.status.value, updated_at=now)
             )
         elif isinstance(command, AssignRoleCommand):
-            if not await self._account_exists(connection, command.user_id):
+            if await self._account_for_update(connection, command.user_id) is None:
                 raise UserDirectoryNotFoundError("no such account")
             await self._upsert_role(
                 connection,
@@ -3324,7 +3518,7 @@ class PostgresUserDirectoryStore:
                 now=now,
             )
         elif isinstance(command, RevokeRoleCommand):
-            if not await self._account_exists(connection, command.user_id):
+            if await self._account_for_update(connection, command.user_id) is None:
                 raise UserDirectoryNotFoundError("no such account")
             deleted = await connection.scalar(
                 sa.delete(USER_ROLE_ASSIGNMENTS)
@@ -3338,7 +3532,7 @@ class PostgresUserDirectoryStore:
             if deleted is None:
                 raise UserDirectoryNotFoundError("no role in this scope")
         elif isinstance(command, BindExternalIdentityCommand):
-            if not await self._account_exists(connection, command.user_id):
+            if await self._account_for_update(connection, command.user_id) is None:
                 raise UserDirectoryNotFoundError("no such account")
             await self._bind_subject(
                 connection,
@@ -3349,7 +3543,7 @@ class PostgresUserDirectoryStore:
                 now=now,
             )
         else:
-            if not await self._account_exists(connection, command.user_id):
+            if await self._account_for_update(connection, command.user_id) is None:
                 raise UserDirectoryNotFoundError("no such account")
             # 前置判定**就是**这条写语句，不是它前面的一次 SELECT。
             #
@@ -3377,7 +3571,84 @@ class PostgresUserDirectoryStore:
             ),
         )
 
-    async def _require_activation_admin_for_update(
+    async def _apply_managed_user_change(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: SetManagedUserStatusCommand | ChangeManagedUserRoleCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        await self._require_admin_for_update(
+            connection,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        account = await self._account_for_update(connection, command.user_id)
+        assignments = await self._assignments_for_update(connection, command.user_id)
+        current = next(
+            (
+                row
+                for row in assignments
+                if row["tenant_id"] == command.tenant_id
+                and row["environment_id"] == command.environment_id
+            ),
+            None,
+        )
+        if account is None or current is None:
+            raise UserDirectoryNotFoundError("no account in this scope")
+        if any(row["role"] == ProductRole.ADMIN.value for row in assignments):
+            raise UserDirectoryConflictError("an admin account cannot be managed")
+
+        if isinstance(command, SetManagedUserStatusCommand):
+            if len(assignments) != 1:
+                raise UserDirectoryConflictError(
+                    "a cross-scope account cannot change status"
+                )
+            if (
+                account["status"] != command.expected_status.value
+                or current["role"] != command.expected_role.value
+            ):
+                raise UserDirectoryConflictError("the managed user changed")
+            changed = await connection.scalar(
+                sa.update(USER_ACCOUNTS)
+                .where(
+                    USER_ACCOUNTS.c.user_id == command.user_id,
+                    USER_ACCOUNTS.c.status == command.expected_status.value,
+                )
+                .values(status=command.status.value, updated_at=now)
+                .returning(USER_ACCOUNTS.c.user_id)
+            )
+        else:
+            if account["status"] != UserStatus.ACTIVE.value:
+                raise UserDirectoryConflictError(
+                    "a disabled account cannot change role"
+                )
+            if current["role"] != command.expected_role.value:
+                raise UserDirectoryConflictError("the managed role changed")
+            changed = await connection.scalar(
+                sa.update(USER_ROLE_ASSIGNMENTS)
+                .where(
+                    USER_ROLE_ASSIGNMENTS.c.user_id == command.user_id,
+                    USER_ROLE_ASSIGNMENTS.c.tenant_id == command.tenant_id,
+                    USER_ROLE_ASSIGNMENTS.c.environment_id == command.environment_id,
+                    USER_ROLE_ASSIGNMENTS.c.role == command.expected_role.value,
+                )
+                .values(role=command.role.value, updated_at=now)
+                .returning(USER_ROLE_ASSIGNMENTS.c.user_id)
+            )
+        if changed is None:
+            raise UserDirectoryConflictError("the managed user changed")
+        return (
+            await self._audit(
+                connection,
+                derive_audit(command, context, target_ref=command.user_id),
+                now=now,
+            ),
+        )
+
+    async def _require_admin_for_update(
         self,
         connection: AsyncConnection,
         *,
@@ -3385,21 +3656,7 @@ class PostgresUserDirectoryStore:
         environment_id: str,
         context: AdminOperationContext,
     ) -> None:
-        if context.auth_source is not IdentitySource.LOCAL_ADMIN:
-            raise UserDirectoryDecisionDeniedError(
-                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
-            )
-        account = (
-            (
-                await connection.execute(
-                    sa.select(USER_ACCOUNTS)
-                    .where(USER_ACCOUNTS.c.user_id == context.actor_user_id)
-                    .with_for_update()
-                )
-            )
-            .mappings()
-            .first()
-        )
+        account = await self._account_for_update(connection, context.actor_user_id)
         assignment = (
             (
                 await connection.execute(
@@ -3424,6 +3681,28 @@ class PostgresUserDirectoryStore:
         ):
             raise UserDirectoryDecisionDeniedError(
                 AdminAuditReasonCode.ACTOR_NOT_ADMIN
+            )
+        if context.auth_source is IdentitySource.LOCAL_ADMIN:
+            source_is_current = context.actor_user_id == LOCAL_ADMIN_USER_ID
+        elif context.auth_source is IdentitySource.FEISHU:
+            source_is_current = (
+                await connection.scalar(
+                    sa.select(EXTERNAL_IDENTITIES.c.user_id)
+                    .where(
+                        EXTERNAL_IDENTITIES.c.provider
+                        == IdentitySource.FEISHU.value,
+                        EXTERNAL_IDENTITIES.c.tenant_id == tenant_id,
+                        EXTERNAL_IDENTITIES.c.environment_id == environment_id,
+                        EXTERNAL_IDENTITIES.c.user_id == context.actor_user_id,
+                    )
+                    .with_for_update()
+                )
+            ) is not None
+        else:  # pragma: no cover - IdentitySource 是闭集
+            source_is_current = False
+        if not source_is_current:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
             )
 
     async def _activation_for_update(
@@ -3467,7 +3746,7 @@ class PostgresUserDirectoryStore:
         context: AdminOperationContext,
         now: _dt.datetime,
     ) -> tuple[AdminAuditEvent, ...]:
-        await self._require_activation_admin_for_update(
+        await self._require_admin_for_update(
             connection,
             tenant_id=command.tenant_id,
             environment_id=command.environment_id,

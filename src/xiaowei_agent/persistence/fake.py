@@ -51,11 +51,15 @@ from xiaowei_agent.contracts.activation import (
     ActivationRequest,
     ActivationStatus,
     CreateActivationCommand,
+    PendingActivationListQuery,
+    PendingActivationPage,
 )
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
     AdminAuditEvent,
+    AdminAuditListQuery,
+    AdminAuditPage,
     AdminAuditStart,
     AdminAuditTerminal,
     AdminOperationContext,
@@ -67,10 +71,15 @@ from xiaowei_agent.contracts.enums import (
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_USER_ID,
+    AdminUserListQuery,
+    AdminUserPage,
+    AdminUserRecord,
     ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
     BootstrapLocalAdminCommand,
+    ChangeManagedUserRoleCommand,
     CreateUserCommand,
     DirectoryCommand,
     DirectoryPrincipalFacts,
@@ -78,6 +87,7 @@ from xiaowei_agent.contracts.identity import (
     MigrateLegacyIdentitiesCommand,
     RejectActivationCommand,
     RevokeRoleCommand,
+    SetManagedUserStatusCommand,
     SetUserStatusCommand,
     UnbindExternalIdentityCommand,
     UserAccount,
@@ -654,6 +664,42 @@ class InMemoryActivationStore:
                 return None
             return request
 
+    async def list_pending(
+        self, *, query: PendingActivationListQuery
+    ) -> PendingActivationPage:
+        """只返回显式作用域内仍有效的 pending 申请。"""
+        async with self._lock:
+            now = self._clock()
+            cursor = (
+                None
+                if query.before_requested_at is None
+                else (query.before_requested_at, query.before_request_id)
+            )
+            candidates = sorted(
+                (
+                    request
+                    for request in self._state.activation_requests.values()
+                    if request.tenant_id == query.tenant_id
+                    and request.environment_id == query.environment_id
+                    and request.status is ActivationStatus.PENDING
+                    and request.expires_at > now
+                    and (
+                        cursor is None
+                        or (request.requested_at, request.request_id) < cursor
+                    )
+                ),
+                key=lambda request: (request.requested_at, request.request_id),
+                reverse=True,
+            )
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            tail = items[-1] if has_more else None
+            return PendingActivationPage(
+                items=items,
+                next_requested_at=None if tail is None else tail.requested_at,
+                next_request_id=None if tail is None else tail.request_id,
+            )
+
 
 class InMemoryAdminAuditStore:
     """``AdminAuditStore`` 的单进程实现；与目录 store **共用同一把锁和同一份事实**。
@@ -771,6 +817,45 @@ class InMemoryAdminAuditStore:
         async with self._lock:
             return self._state.admin_audit_events.get(event_id)
 
+    async def list_events(self, *, query: AdminAuditListQuery) -> AdminAuditPage:
+        """按显式作用域、闭集过滤与复合 keyset 读取审计事实。"""
+        async with self._lock:
+            cursor = (
+                None
+                if query.before_created_at is None
+                else (query.before_created_at, query.before_event_id)
+            )
+            candidates = sorted(
+                (
+                    event
+                    for event in self._state.admin_audit_events.values()
+                    if event.tenant_id == query.tenant_id
+                    and event.environment_id == query.environment_id
+                    and (query.action is None or event.action is query.action)
+                    and (query.outcome is None or event.outcome is query.outcome)
+                    and (
+                        query.target_kind is None
+                        or (
+                            event.target_kind is query.target_kind
+                            and event.target_ref_digest == query.target_ref_digest
+                        )
+                    )
+                    and (
+                        cursor is None or (event.created_at, event.event_id) < cursor
+                    )
+                ),
+                key=lambda event: (event.created_at, event.event_id),
+                reverse=True,
+            )
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            tail = items[-1] if has_more else None
+            return AdminAuditPage(
+                items=items,
+                next_created_at=None if tail is None else tail.created_at,
+                next_event_id=None if tail is None else tail.event_id,
+            )
+
 
 _DirectorySnapshot = tuple[
     dict[str, UserAccount],
@@ -834,6 +919,40 @@ class InMemoryUserDirectoryStore:
                     "the bound subject is unavailable"
                 )
             return facts
+
+    async def list_admin_users(self, *, query: AdminUserListQuery) -> AdminUserPage:
+        """一次批量读取当前作用域角色、账号状态与飞书绑定事实。"""
+        async with self._lock:
+            candidates: list[AdminUserRecord] = []
+            for (user_id, tenant_id, environment_id), assignment in (
+                self._state.user_role_assignments.items()
+            ):
+                if tenant_id != query.tenant_id or environment_id != query.environment_id:
+                    continue
+                account = self._state.user_accounts[user_id]
+                if query.after_actor is not None and account.actor <= query.after_actor:
+                    continue
+                bound = any(
+                    binding.user_id == user_id
+                    and binding.tenant_id == query.tenant_id
+                    and binding.environment_id == query.environment_id
+                    and binding.provider is IdentitySource.FEISHU
+                    for binding in self._state.external_identities.values()
+                )
+                candidates.append(
+                    AdminUserRecord(
+                        account=account,
+                        assignment=assignment,
+                        feishu_bound=bound,
+                    )
+                )
+            candidates.sort(key=lambda item: item.account.actor)
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            return AdminUserPage(
+                items=items,
+                next_after_actor=(items[-1].account.actor if has_more else None),
+            )
 
     async def apply(
         self, *, command: DirectoryCommand, context: AdminOperationContext
@@ -920,8 +1039,12 @@ class InMemoryUserDirectoryStore:
             return self._create_user(command, context, now)
         if isinstance(command, SetUserStatusCommand):
             return self._set_status(command, context, now)
+        if isinstance(command, SetManagedUserStatusCommand):
+            return self._set_managed_status(command, context, now)
         if isinstance(command, AssignRoleCommand):
             return self._assign_role(command, context, now)
+        if isinstance(command, ChangeManagedUserRoleCommand):
+            return self._change_managed_role(command, context, now)
         if isinstance(command, RevokeRoleCommand):
             return self._revoke_role(command, context, now)
         if isinstance(command, BindExternalIdentityCommand):
@@ -934,7 +1057,9 @@ class InMemoryUserDirectoryStore:
             return self._migrate(command, context, now)
         if isinstance(command, ApproveActivationCommand):
             return self._approve_activation(command, context, now)
-        return self._reject_activation(command, context, now)
+        if isinstance(command, RejectActivationCommand):
+            return self._reject_activation(command, context, now)
+        raise AssertionError("unhandled directory command")
 
     def _write_audit(
         self, candidate: AdminAuditCandidate, *, now: _dt.datetime
@@ -1101,6 +1226,122 @@ class InMemoryUserDirectoryStore:
         candidate = derive_audit(command, context, target_ref=command.user_id)
         return (self._write_audit(candidate, now=now),)
 
+    def _require_admin(
+        self,
+        *,
+        tenant_id: str,
+        environment_id: str,
+        context: AdminOperationContext,
+    ) -> None:
+        account = self._state.user_accounts.get(context.actor_user_id)
+        assignment = self._state.user_role_assignments.get(
+            (context.actor_user_id, tenant_id, environment_id)
+        )
+        if (
+            account is None
+            or account.status is not UserStatus.ACTIVE
+            or account.actor != context.actor
+            or assignment is None
+            or assignment.role is not ProductRole.ADMIN
+        ):
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.ACTOR_NOT_ADMIN
+            )
+        if context.auth_source is IdentitySource.LOCAL_ADMIN:
+            source_is_current = context.actor_user_id == LOCAL_ADMIN_USER_ID
+        elif context.auth_source is IdentitySource.FEISHU:
+            source_is_current = (
+                self._binding_key_of(
+                    context.actor_user_id, tenant_id, environment_id
+                )
+                is not None
+            )
+        else:  # pragma: no cover - IdentitySource 是闭集，保留 fail-closed 分支
+            source_is_current = False
+        if not source_is_current:
+            raise UserDirectoryDecisionDeniedError(
+                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
+            )
+
+    def _managed_target(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        environment_id: str,
+    ) -> tuple[UserAccount, UserRoleAssignment, tuple[UserRoleAssignment, ...]]:
+        account = self._state.user_accounts.get(user_id)
+        assignment = self._state.user_role_assignments.get(
+            (user_id, tenant_id, environment_id)
+        )
+        if account is None or assignment is None:
+            raise UserDirectoryNotFoundError("no account in this scope")
+        assignments = tuple(
+            candidate
+            for (candidate_id, _, _), candidate in (
+                self._state.user_role_assignments.items()
+            )
+            if candidate_id == user_id
+        )
+        if any(candidate.role is ProductRole.ADMIN for candidate in assignments):
+            raise UserDirectoryConflictError("an admin account cannot be managed")
+        return account, assignment, assignments
+
+    def _set_managed_status(
+        self,
+        command: SetManagedUserStatusCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        account, assignment, assignments = self._managed_target(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if len(assignments) != 1:
+            raise UserDirectoryConflictError("a cross-scope account cannot change status")
+        if (
+            account.status is not command.expected_status
+            or assignment.role is not command.expected_role
+        ):
+            raise UserDirectoryConflictError("the managed user changed")
+        self._state.user_accounts[command.user_id] = account.model_copy(
+            update={"status": command.status, "updated_at": now}
+        )
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
+    def _change_managed_role(
+        self,
+        command: ChangeManagedUserRoleCommand,
+        context: AdminOperationContext,
+        now: _dt.datetime,
+    ) -> tuple[AdminAuditEvent, ...]:
+        self._require_admin(
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+            context=context,
+        )
+        account, assignment, _ = self._managed_target(
+            user_id=command.user_id,
+            tenant_id=command.tenant_id,
+            environment_id=command.environment_id,
+        )
+        if account.status is not UserStatus.ACTIVE:
+            raise UserDirectoryConflictError("a disabled account cannot change role")
+        if assignment.role is not command.expected_role:
+            raise UserDirectoryConflictError("the managed role changed")
+        self._state.user_role_assignments[
+            (command.user_id, command.tenant_id, command.environment_id)
+        ] = assignment.model_copy(update={"role": command.role, "updated_at": now})
+        candidate = derive_audit(command, context, target_ref=command.user_id)
+        return (self._write_audit(candidate, now=now),)
+
     def _revoke_role(
         self,
         command: RevokeRoleCommand,
@@ -1247,24 +1488,11 @@ class InMemoryUserDirectoryStore:
         environment_id: str,
         context: AdminOperationContext,
     ) -> None:
-        if context.auth_source is not IdentitySource.LOCAL_ADMIN:
-            raise UserDirectoryDecisionDeniedError(
-                AdminAuditReasonCode.AUTH_SOURCE_NOT_ALLOWED
-            )
-        account = self._state.user_accounts.get(context.actor_user_id)
-        assignment = self._state.user_role_assignments.get(
-            (context.actor_user_id, tenant_id, environment_id)
+        self._require_admin(
+            tenant_id=tenant_id,
+            environment_id=environment_id,
+            context=context,
         )
-        if (
-            account is None
-            or account.status is not UserStatus.ACTIVE
-            or account.actor != context.actor
-            or assignment is None
-            or assignment.role is not ProductRole.ADMIN
-        ):
-            raise UserDirectoryDecisionDeniedError(
-                AdminAuditReasonCode.ACTOR_NOT_ADMIN
-            )
 
     def _activation_for_decision(
         self,

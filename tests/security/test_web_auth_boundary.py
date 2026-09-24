@@ -210,6 +210,7 @@ def _service(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal},
             web_roles={principal.subject_ref: ProductRole.ADMIN},
+            web_user_ids={principal.subject_ref: "user-admin"},
         ),
         activations=(activations or RecordingActivationRequests()).as_service(),
         oauth=oauth,
@@ -345,6 +346,7 @@ async def test_oauth_exchange_has_one_bounded_attempt_and_cancels_timeout(
         identities=StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal},
             web_roles={principal.subject_ref: ProductRole.ADMIN},
+            web_user_ids={principal.subject_ref: "user-admin"},
         ),
         activations=RecordingActivationRequests().as_service(),
         oauth=oauth,
@@ -494,6 +496,7 @@ def test_public_origin_is_an_origin_not_a_url_path(
             identities=StaticFeishuIdentityDirectory(
                 principals={principal.subject_ref: principal},
                 web_roles={principal.subject_ref: ProductRole.ADMIN},
+                web_user_ids={principal.subject_ref: "user-admin"},
             ),
             activations=RecordingActivationRequests().as_service(),
             oauth=_OAuth(),
@@ -1109,6 +1112,7 @@ def test_web_stack_field_surface_has_no_execution_authority() -> None:
         "provider_state",
         "identity_directory",
         "activation_service",
+        "admin_identity_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -1223,6 +1227,7 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.trace",
     }
     web_only = {
+        "xiaowei_agent.application.admin_identity",
         "xiaowei_agent.application.channel_access",
         "xiaowei_agent.application.channel_submission",
         "xiaowei_agent.application.identity_activation",

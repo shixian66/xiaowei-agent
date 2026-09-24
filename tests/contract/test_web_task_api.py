@@ -115,6 +115,7 @@ class _Auth:
         if session_cookie != _COOKIE:
             raise WebAuthenticationError
         return AuthenticatedWebSession(
+            user_id="user-alice",
             principal=self.principal,
             role=ProductRole.OPERATOR,
             admin_capabilities=frozenset[AdminCapability](),

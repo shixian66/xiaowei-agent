@@ -14,6 +14,7 @@ from tests.fakes.feishu import RecordingFeishuInboundTransport
 from xiaowei_agent.application.activation_notification import (
     ActivationNotificationService,
 )
+from xiaowei_agent.application.admin_identity import AdminIdentityService
 from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.channel_access import TaskAccessService
 from xiaowei_agent.application.channel_projection import ChannelProjectionService
@@ -773,6 +774,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "provider_state",
         "identity_directory",
         "activation_service",
+        "admin_identity_service",
         "task_access_service",
         "submission_service",
         "clock",
@@ -795,6 +797,21 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     assert stack.membership is membership
     assert isinstance(stack.identity_directory, DirectoryFeishuIdentityDirectory)
     assert isinstance(stack.activation_service, IdentityActivationService)
+    assert isinstance(stack.admin_identity_service, AdminIdentityService)
+    assert stack.admin_identity_service._directory is stack.identity_directory._directory
+    assert (
+        stack.admin_identity_service._directory
+        is stack.activation_service._directory
+    )
+    assert (
+        stack.admin_identity_service._activations
+        is stack.activation_service._activations
+    )
+    assert stack.admin_identity_service._audit is stack.activation_service._audit
+    assert (
+        stack.admin_identity_service._activation_decisions
+        is stack.activation_service
+    )
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
     assert stack.submission_service._web_parent_access is stack.task_access_service
@@ -806,6 +823,70 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     )
     await stack.aclose()
     assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_web_stack_assembles_admin_identity_without_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _FakeWebEngine()
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        lambda _: engine,
+    )
+
+    stack = await build_postgres_web_stack(
+        settings=_web_settings(tmp_path / "unused-identities.json"),
+        oauth=None,
+        membership=None,
+    )
+    try:
+        assert stack.auth is None
+        assert stack.identity_directory is None
+        assert stack.oauth_available is False
+        assert isinstance(stack.activation_service, IdentityActivationService)
+        assert isinstance(stack.admin_identity_service, AdminIdentityService)
+        assert (
+            stack.admin_identity_service._activation_decisions
+            is stack.activation_service
+        )
+        assert (
+            stack.admin_identity_service._directory
+            is stack.activation_service._directory
+        )
+        assert (
+            stack.admin_identity_service._activations
+            is stack.activation_service._activations
+        )
+        assert stack.admin_identity_service._audit is stack.activation_service._audit
+    finally:
+        await stack.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_stack_rejects_local_admin_scope_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_engine(_: object) -> object:
+        raise AssertionError("scope mismatch must stop before database assembly")
+
+    monkeypatch.setattr(
+        "xiaowei_agent.interfaces.local_stack.create_database_engine",
+        fail_engine,
+    )
+    settings = Settings(
+        **(
+            _web_settings(tmp_path / "unused-identities.json").model_dump()
+            | {"environment_id": "staging"}
+        )
+    )
+
+    with pytest.raises(WebStackConfigurationError):
+        await build_postgres_web_stack(
+            settings=settings,
+            oauth=None,
+            membership=None,
+        )
 
 
 @pytest.mark.asyncio

@@ -109,6 +109,7 @@ class _TracingIdentityDirectory:
         self._delegate = StaticFeishuIdentityDirectory(
             principals={principal.subject_ref: principal},
             web_roles={principal.subject_ref: role},
+            web_user_ids={principal.subject_ref: "user-alice"},
         )
         self._trace_ids = trace_ids
 

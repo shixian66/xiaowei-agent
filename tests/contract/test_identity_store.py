@@ -56,6 +56,7 @@ def test_directory_store_exposes_exactly_one_write_method() -> None:
     assert _protocol_surface(UserDirectoryStore) == {
         "load_account",
         "resolve_by_subject",
+        "list_admin_users",
         "apply",
     }
 
@@ -74,7 +75,13 @@ def test_apply_gives_the_caller_no_way_to_steer_the_audit() -> None:
 def test_admin_audit_store_is_append_only_by_shape() -> None:
     """四个窄写方法之外没有任何东西；名字里也不许出现改写或清理的意思。"""
     surface = _protocol_surface(AdminAuditStore)
-    assert surface == {"append_started", "append_terminal", "append_denied", "load"}
+    assert surface == {
+        "append_started",
+        "append_terminal",
+        "append_denied",
+        "list_events",
+        "load",
+    }
     forbidden = ("update", "delete", "purge", "prune", "truncate", "retention", "clean")
     assert not [name for name in surface if any(bad in name for bad in forbidden)]
 
@@ -86,7 +93,7 @@ def test_every_command_has_a_declared_action_and_effect() -> None:
     多一个：说明某个命令被删掉了而声明没跟着删，下一个读者会以为它还在。
     """
     commands = _command_types()
-    assert len(commands) == 10
+    assert len(commands) == 12
     assert frozenset(ACTION_FOR_COMMAND) == commands
     assert frozenset(EFFECT_FOR_COMMAND) == commands
 
