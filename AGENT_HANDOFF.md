@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@2cef6aa52e17eece8eb70ebce0057cfdddd8167a`（2026-09-24，PR #80 已 squash 合入 W4 总实施计划）。
+- **当前基线**：`main@dcef09a903224fb86e8b053a15ab4865a7b731d1`（2026-09-24，PR #81 已 squash 合入 W4a）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -20,13 +20,20 @@
   **W3 后续增强**包括职责绑定、可靠/私聊通知与敏感内容查看审计，延期但未取消；它们不再作为 W4a/W4b 的进入条件。
   该收口仍不表示真实飞书、部署、canary 或用户验收完成，也不自动授权
   W4a/W4b 源码。
-- **W4a 离线候选（待独立审查）**：W4 [总实施计划](docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md)
+- **W4a 离线实施已合入**：W4 [总实施计划](docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md)
   已由 PR #80 合入；负责人在 Codex 会话批准该计划并下达 W4a 离线开工口令（无公开 GitHub 审批 permalink）。
-  分支 `claude/w4a-config-domains` 已离线实现 Task 0–7：AI/飞书/resources 三个固定配置域、显式可重跑的
-  旧 `.config/integrations.json` 一次性迁移器、`rev_0018`、按域加载回执、唯一配置写服务与两阶段 Admin 审计、
-  OAuth test context、按域 Admin API/UI、Compose 精确域挂载、预检与 smoke。证据见下文「W4a 离线候选证据」。
-  这只是离线候选：**配置没有在任何真实环境迁移**，没有部署、canary、真实 Provider 调用或用户验收；
-  W4b 在 W4a exact-SHA 复审、CI 与合入前不开始，W4c、W5 与真实调用均未授权。
+  Task 0–7（AI/飞书/resources 三个固定配置域、显式可重跑的旧 `.config/integrations.json` 一次性迁移器、
+  `rev_0018`、按域加载回执、唯一配置写服务与两阶段 Admin 审计、OAuth test context、按域 Admin API/UI、
+  Compose 精确域挂载、预检与 smoke）经独立复审：首轮 head `ef5566e` 被打回 1 个 P1，修复后 head
+  `66d8b7e4cd45323f6e6009ab9a1b3a516f28c580` 复核通过，负责人授权后由 PR #81 squash 合入
+  `dcef09a903224fb86e8b053a15ab4865a7b731d1`。证据见下文「W4a 离线证据」。**配置没有在任何真实环境迁移**，
+  没有部署、canary、真实 Provider 调用或用户验收。
+- **W4b 离线参数登记完成（离线候选，待独立审查）**：负责人在 W4a 合入后于本会话指示继续开发（无 GitHub
+  permalink），据此从 `dcef09a` 开始计划内的 Task 8–11。分支 `claude/hopeful-rubin-1g51tl` 离线实现：
+  StarRocks / Prometheus 资源契约与 `.config/resources/config.json` 文件边界、Local Admin 资源维护 API
+  （服务端 ID、两阶段审计、Secret 保留/显式清除）、管理页"已保存，尚未接入"、worker 的
+  `(worker, resources)` 回执与零网络证明、smoke 与真库回执证明。证据见下文「W4b 离线候选证据」。
+  没有真实目标、连接、DNS、部署、canary 或用户验收；W4c、W5 与真实调用均未授权。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -102,7 +109,7 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 及确认对话框；这只是本地 UI 检查，不是正式浏览器 UAT。
 
 <a id="w4a-offline-candidate-evidence"></a>
-**W4a 离线候选证据**（首轮受审 head `ef5566e34210871f2111d4b28531bd3a3f30003e`，基线 `2cef6aa`）：
+**W4a 离线证据（已由 PR #81 合入；以下为合入前候选证据原文）**（首轮受审 head `ef5566e34210871f2111d4b28531bd3a3f30003e`，基线 `2cef6aa`）：
 独立复审在首轮 head 上复现 1 个 P1——Web 未重启时 OAuth 连接测试用启动期旧凭据交换 code，回调却按当前文件把结果记到新代次。
 修复提交 `705a0a90e7ed16c790cd4865dc41aef09d9a8347`：测试 state/context 绑定 `config_generation`；开始前要求 `(web, feishu)`
 回执为当前代次 `loaded`；回调前文件、Web 回执、state 三者同代，否则写 `FAILED/config_invalid` 且不交换、不记结果；结果只记绑定代次。
@@ -123,14 +130,28 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 `tests/unit/test_log.py` 会残留 logger 状态使 5 条飞书日志用例失败，基线 `2cef6aa` 同样复现，标准入口不受影响。
 这些只是离线证据：没有真实环境配置迁移、部署、canary、真实 Provider 调用或用户验收。
 
+<a id="w4b-offline-candidate-evidence"></a>
+**W4b 离线候选证据**（基线 `dcef09a`，分支 `claude/hopeful-rubin-1g51tl`；四门与真库在实现 head `aa5b0af` 上运行，其后只有
+一处按钮配色 CSS 与本文档提交）：本机 Python 3.11.16、依赖按 uv.lock、去掉代理环境变量。`python -m pytest -q` 为
+`4965 passed, 416 skipped`，`python -m pytest -m security -q` 为 `1594 passed, 83 skipped`，`ruff check .` 与 `mypy src`
+（213 个源文件）通过；一次性 PostgreSQL 16.10 容器上全量 `5381 passed`、零 skip（含 `(worker, resources)` 回执真库往返与
+`rev_0018` downgrade 在有 resources 回执时于 DDL 前拒绝且回执行不变）。锁定 hatchling 离线构建的 wheel 含资源契约、写服务、
+文件 adapter 与管理页静态资源，且与源码逐字节一致。Compose smoke 在 `65de574` 通过：合成 resources 文档（目标在 `.invalid`）
+挂给 worker，基线任务后以固定只读 SQL 核对 `(worker, resources)` 恰为第 1 代 `loaded`；与 W4a 相同的环境偏差——smoke 在同一提交的
+临时副本中执行、仅 builder 阶段额外信任本环境代理 CA，运行阶段镜像、Compose 文件与脚本未改。隔离变异各自转红并恢复：资源校验
+加入一次 DNS 解析（零网络计数与 AST 双红）、资源面板加入测试按钮（静态资产门红）、StarRocks 投影带出密码（API 投影门红）、
+resources 挂给飞书 listener（三域矩阵/override/compose 契约红）。本机 Chromium 以真实 `create_app`、内存存储与临时目录（loopback、
+假凭据，身份三块为空替身）核对 1440/1280/1024 资源区、修改模式与清除确认，行内不出现凭据、用户名或数据库名，也没有测试入口。
+这些只是离线证据：没有真实 StarRocks/Prometheus 目标、DNS、连接、部署、canary 或用户验收。
+
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/w4a-config-domains`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `claude/hopeful-rubin-1g51tl`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-24（Asia/Shanghai） |
-| 阶段 | W4a 离线候选：Task 0–7 已在 `claude/w4a-config-domains` 离线实现，待独立 exact-SHA 审查；W4b 源码尚未开始 |
-| 下一步 | 由独立审查者对 W4a PR 做 exact-SHA 复审并核对 CI；W4a 合入前不开始 W4b，W4c/真实调用、真实环境配置迁移与 W5 部署均不在本轮授权内 |
+| 阶段 | W4a 已由 PR #81 合入；W4b 离线参数登记完成，Task 8–11 在 `claude/hopeful-rubin-1g51tl` 待独立 exact-SHA 审查 |
+| 下一步 | 由独立审查者对 W4b PR 做 exact-SHA 复审并核对 CI；W4a 已合入，W4b 合入前不开始 W4c 或 W5，真实连接、真实环境配置迁移与部署均不在本轮授权内 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -147,7 +168,8 @@ Compose smoke 通过。本机无网络假数据浏览器检查覆盖 1024/1280/1
 | [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md) / [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md) | Plan schema V2、read_class、审批绑定、智能分流、澄清与执行披露 |
 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) | 里程碑顺序、进入/退出门与已批准窄例外 |
 
-W4a 候选代码中 Provider 明文配置为 `.config/ai/config.json` 与 `.config/feishu/config.json`（`.config/resources/` 只预留），
+已合入代码中 Provider 明文配置为 `.config/ai/config.json` 与 `.config/feishu/config.json`；W4b 候选另把运维资源登记在
+`.config/resources/config.json`（只登记、不接入），
 `web-app` 三域读写、consumer 只读自己的域、`api` 不挂任何域；模型调用端口只在 task worker 装配。旧
 `.config/integrations.json` 只作显式一次性迁移输入，运行时不读；README 首启步骤已按三域与迁移命令更新，
 但没有任何真实部署执行过该迁移。历史设计摘要在快照内不再是并行真源。
@@ -165,8 +187,9 @@ W4a 候选代码中 Provider 明文配置为 `.config/ai/config.json` 与 `.conf
 - W3-lite [详细计划](docs/superpowers/plans/2026-09-23-w3-lite-admin-identity.md) 已由 PR #76 合入并取得负责人开工口令；授权范围仅为用户、激活、审计三个离线闭环。切片 A/B 已由 PR #77/#78 合入，PR #79 完成收口；负责人现将该精简范围定为 W3 V1。该授权已经用完，不授权 W3 后续增强、W4 源码、真实调用或部署。
 - W4 [总实施计划](docs/superpowers/plans/2026-09-24-w4-configuration-and-resource-registration.md) 已由 PR #80
   合入 `2cef6aa52e17eece8eb70ebce0057cfdddd8167a`；负责人在 Codex 会话批准该计划并授权 W4a（Task 0–7）离线实现，
-  该批准没有公开 GitHub 审批 permalink，合入事实本身不是批准来源。授权不含 W4b（Task 8–11，须待 W4a exact-SHA
-  复审、CI 与合入后）、W4c、W5、真实 Provider、真实 Secret、联网、部署、canary 或 UAT。
+  该批准没有公开 GitHub 审批 permalink，合入事实本身不是批准来源。W4a 经独立复审后由负责人授权合入（PR #81）；
+  W4a 合入后负责人在本会话指示继续开发，据此开始 W4b（Task 8–11）离线实现。两段授权都不含 W4c、W5、
+  真实 Provider、真实 Secret、真实资源目标、联网、部署、canary 或 UAT。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
 - M6b 仅离线实现并合入，真实验证被负责人延期，未验收归档。重新进入需唯一 canonical target、物理身份、带外 version/grants/DDL/identity digest、
@@ -210,8 +233,8 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. W3 V1 已按精简范围离线收口；W4 总实施计划已获批。W4a 离线候选下一步是独立 exact-SHA 审查与 CI 核对；
-   W4a 未独立验收并合入前不进入 W4b，也不把 W4c、R1、真实调用、真实环境配置迁移或 W5 部署一并带入。
+2. W3 V1 已按精简范围离线收口；W4 总实施计划已获批，W4a 已由 PR #81 合入。W4b 离线候选下一步是独立
+   exact-SHA 审查与 CI 核对；不把 W4c、R1、真实调用、真实环境配置迁移或 W5 部署一并带入。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 

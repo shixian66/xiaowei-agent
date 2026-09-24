@@ -1157,7 +1157,8 @@ def test_readme_runbook_uses_the_w4a_domains_and_an_explicit_migration() -> None
     runbook = _readme_runbook(readme)
     for domain_file in _W4A_DOMAIN_FILES:
         assert domain_file in runbook, f"首启步骤缺少三域文件 {domain_file}"
-    assert "`.config/resources/`" in runbook
+    # W4b 起 resources 域有了固定文件；W4a 时这里只是一个预留目录。
+    assert "`.config/resources/config.json`" in runbook
     # 旧文件只能经显式 CLI 迁移，且必须先停消费者；运行时不双读、不自动迁移。
     assert "python -m xiaowei_agent.interfaces.integration_config_migrate" in runbook
     assert "migration_required" in runbook
@@ -1987,3 +1988,45 @@ def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
     header = _w4_plan_header(_W4_PLAN.read_text(encoding="utf-8"))
     with pytest.raises(AssertionError):
         _check_w4_plan_header(_replace_once(header, old, new))
+
+
+# --- W4b 文档门 ------------------------------------------------------------
+#
+# W4a 已由 PR #81 合入；W4b 只能写到"离线参数登记完成"——没有真实目标、连接、部署或验收。
+
+_W4A_MERGE_COMMIT: Final[str] = "dcef09a903224fb86e8b053a15ab4865a7b731d1"
+_W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
+    "W4b 已部署",
+    "W4b 已上线",
+    "W4b 已验收",
+    "资源已接入",
+    "资源连接已验证",
+    "已连接 StarRocks",
+    "已连接 Prometheus",
+)
+
+
+def test_handoff_records_the_w4a_merge_and_an_offline_only_w4b() -> None:
+    handoff = _truth_doc_text("AGENT_HANDOFF.md")
+    assert _current_baseline(handoff) == _W4A_MERGE_COMMIT
+    assert "PR #81" in handoff
+    assert "W4b 离线参数登记完成" in handoff
+    for overclaim in _W4B_OVERCLAIMS:
+        assert overclaim not in handoff, overclaim
+    next_step = _handoff_baseline_field(handoff, "下一步")
+    assert "W4b" in next_step and "exact-SHA" in next_step and "不" in next_step
+    for gate in ("W4c", "W5"):
+        assert gate in next_step
+
+
+def test_readme_and_architecture_describe_resources_as_registration_only() -> None:
+    readme = _truth_doc_text("README.md")
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    assert "`.config/resources/config.json`" in readme
+    assert "已保存，尚未接入" in readme
+    for text in (readme, architecture):
+        assert "StarRocks" in text and "Prometheus" in text
+        assert "不解析 DNS" in text
+        for overclaim in _W4B_OVERCLAIMS:
+            assert overclaim not in text, overclaim
+    assert "(worker, resources)" in architecture
