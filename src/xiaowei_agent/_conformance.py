@@ -35,6 +35,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         TaskProjectionPort,
     )
     from xiaowei_agent.application.default_capabilities import SLOW_QUERY_BINDING
+    from xiaowei_agent.application.integration_config_service import (
+        IntegrationConfigRepository,
+        ProbeVerdict,
+    )
     from xiaowei_agent.application.model_ports import (
         InteractionClassifierPort,
         SlowQueryAdvisoryPort,
@@ -63,6 +67,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         FeishuSdkMessageAdapter,
     )
     from xiaowei_agent.interfaces.gemini_model import GeminiModelAdapter
+    from xiaowei_agent.interfaces.integration_config_file import (
+        FileIntegrationConfigRepository,
+    )
+    from xiaowei_agent.interfaces.provider_probe import ProbeOutcome
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
@@ -299,3 +307,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
             advisory_projector,
             evidence_builder,
         )
+
+    def _integration_config_anchors(
+        adapter: "FileIntegrationConfigRepository", probe: "ProbeOutcome"
+    ) -> None:
+        """W4a：application 定义窄 port，interfaces 的文件 adapter 必须**就是**它。
+
+        port 在 application、实现在 interfaces，依赖方向只能是后者指向前者；这条赋值让
+        mypy 在二者漂移时直接失败，而不是等某次调用在运行期才发现少了一个方法。
+        """
+        repository: IntegrationConfigRepository = adapter
+        outcome: ProbeVerdict = probe
+        _ = (repository, outcome)

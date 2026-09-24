@@ -1,6 +1,6 @@
 """加载回执与页面状态的纯逻辑。
 
-回执的键是 ``(service_name, provider)``——与 ``service_config_state`` 的联合主键、
+回执的键是 ``(service_name, config_domain)``——与 ``service_config_state`` 的联合主键、
 以及页面状态计算的 ``receipts`` 形状**完全一致**。三处各用一套形状是这条链路上最容易
 出现的漂移，因此只在这里定义一次。
 """
@@ -10,18 +10,20 @@ from enum import StrEnum
 from typing import Final
 
 from xiaowei_agent.contracts import (
-    IntegrationConfig,
+    AiConfig,
+    ConfigDomain,
+    FeishuConfig,
     LoadReceipt,
-    ProviderName,
+    ReceiptKey,
     TestResult,
 )
 
 UNCONFIGURED_GENERATION: Final[int] = 0
 """文件不存在时的**逻辑**代次。
 
-只活在内存里，不写进文件——``IntegrationConfig.generation`` 仍恒 ``> 0``。
-干净部署只 ``mkdir .config``，此时 `integrations.json` 不存在；第一次保存需要一个
-起点，否则整条闭环卡死在第一步。第一次成功保存写 ``0 + 1 = 1``。
+只活在内存里，不写进文件——每个域文档的 ``generation`` 仍恒 ``> 0``。
+干净部署只建三个域目录，此时域文件不存在；第一次保存需要一个起点，否则整条闭环
+卡死在第一步。第一次成功保存写 ``0 + 1 = 1``。各域的代次互不相干。
 """
 
 SERVICE_WORKER: Final[str] = "worker"
@@ -44,7 +46,7 @@ class ProviderDisplayState(StrEnum):
     TEST_FAILED = "test_failed"
 
 
-def current_generation(config: IntegrationConfig | None) -> int:
+def current_generation(config: AiConfig | FeishuConfig | None) -> int:
     """把"文件不存在"折成逻辑代次 ``0``。
 
     只有 ``None`` 走这条路。符号链接、权限、损坏一律在读取层抛错，不会到这里——
@@ -55,10 +57,10 @@ def current_generation(config: IntegrationConfig | None) -> int:
 
 def _every_required_service_loaded(
     *,
-    provider: ProviderName,
+    domain: ConfigDomain,
     generation: int,
     required_service_names: frozenset[str],
-    receipts: Mapping[tuple[str, str], LoadReceipt],
+    receipts: Mapping[ReceiptKey, LoadReceipt],
 ) -> bool:
     """``required_service_names`` 中每一个服务都报了当前代次的 ``loaded``。
 
@@ -66,7 +68,7 @@ def _every_required_service_loaded(
     空集为真——没有服务需要它时不得永久停在"待应用"。
     """
     return all(
-        (receipt := receipts.get((service_name, provider.value))) is not None
+        (receipt := receipts.get((service_name, domain))) is not None
         and receipt.status == "loaded"
         and receipt.generation == generation
         for service_name in required_service_names
@@ -75,12 +77,12 @@ def _every_required_service_loaded(
 
 def compute_display_state(
     *,
-    provider: ProviderName,
+    domain: ConfigDomain,
     enabled: bool,
     required_fields_present: bool,
     current_generation: int,
     required_service_names: frozenset[str],
-    receipts: Mapping[tuple[str, str], LoadReceipt],
+    receipts: Mapping[ReceiptKey, LoadReceipt],
     test: TestResult | None,
 ) -> ProviderDisplayState:
     """按设计的五步顺序短路返回，不做任何合并或猜测。
@@ -92,7 +94,7 @@ def compute_display_state(
     if not enabled or not required_fields_present:
         return ProviderDisplayState.UNCONFIGURED
     if not _every_required_service_loaded(
-        provider=provider,
+        domain=domain,
         generation=current_generation,
         required_service_names=required_service_names,
         receipts=receipts,

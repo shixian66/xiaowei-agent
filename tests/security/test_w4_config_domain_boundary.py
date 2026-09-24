@@ -141,6 +141,7 @@ def _all_enabled() -> Settings:
         feishu_tenant_key="tenant-key",
         feishu_bot_open_id="ou_bot",
         feishu_identity_file="/run/config/feishu-identities.json",
+        web_public_origin="https://ops.example.test",
     )
 
 

@@ -75,6 +75,16 @@ def audit_stage_key(
     return (operation_id, stage)
 
 
+def stage_event_id(*, operation_id: str, stage: AuditStage) -> str:
+    """一次操作某个阶段的确定性 ``event_id``；:func:`seal` 与读回共用这一处。
+
+    两阶段调用方（W4a OAuth 回调）需要在写终态**之前**读回那条 ``STARTED``，
+    以确认这个 operation 确实是一次尚未结束的连接测试；各自再算一遍摘要就是第二份真源。
+    """
+    material = f"{_EVENT_ID_DOMAIN}\x1f{operation_id}\x1f{stage}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def seal(candidate: AdminAuditCandidate, *, now: _dt.datetime) -> AdminAuditEvent:
     """给候选盖上 ``event_id`` 与 ``created_at``，得到一条可落库的事件。
 
@@ -93,9 +103,8 @@ def seal(candidate: AdminAuditCandidate, *, now: _dt.datetime) -> AdminAuditEven
     operation_id, stage = audit_stage_key(
         operation_id=candidate.operation_id, outcome=candidate.outcome
     )
-    material = f"{_EVENT_ID_DOMAIN}\x1f{operation_id}\x1f{stage}"
     return AdminAuditEvent(
-        event_id=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        event_id=stage_event_id(operation_id=operation_id, stage=stage),
         created_at=now,
         operation_id=candidate.operation_id,
         tenant_id=candidate.tenant_id,
@@ -148,4 +157,5 @@ __all__ = [
     "AuditStage",
     "audit_stage_key",
     "seal",
+    "stage_event_id",
 ]

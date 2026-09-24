@@ -117,7 +117,10 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
     },
+    # 文件 adapter 实现 application 定义的窄 port：只允许 interfaces → application
+    # 这一个方向，application 绝不反向 import 它。
     "interfaces/integration_config_file.py": {
+        "xiaowei_agent.application",
         "xiaowei_agent.contracts",
     },
     # 一次性迁移器：只读写本地文件，不碰数据库、网络或任何服务装配。

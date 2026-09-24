@@ -22,6 +22,7 @@ pytestmark = pytest.mark.security
 _ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_TARGET = "/run/xiaowei-config"
 _CONFIG_CONSUMERS = ("worker", "feishu-listener", "channel-worker")
+_DOMAINS = ("ai", "feishu", "resources")
 _ALL_SERVICES = {
     "postgres",
     "migrate",
@@ -170,51 +171,72 @@ def test_the_old_provider_secrets_are_gone() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_api_does_not_mount_the_integration_config() -> None:
+def test_api_does_not_mount_any_config_domain() -> None:
     """读接口进程不该在内存里、也不该在文件系统上碰到明文 Provider 凭据。"""
     services = _yaml("docker-compose.yml")["services"]
     for name in ("api", "migrate", "postgres"):
         assert all(
-            volume.get("target") != _CONFIG_TARGET
+            not str(volume.get("target", "")).startswith(_CONFIG_TARGET)
             for volume in _volumes(services[name])
-        )
+        ), name
 
 
-def test_web_mounts_the_config_directory_read_write() -> None:
+def test_web_mounts_every_domain_read_write_and_nothing_else() -> None:
     volumes = _volumes(_yaml("docker-compose.yml")["services"]["web-app"])
-    config = [item for item in volumes if item["target"] == _CONFIG_TARGET]
-    assert len(config) == 1
+    config = {
+        item["target"]: item
+        for item in volumes
+        if str(item["target"]).startswith(_CONFIG_TARGET)
+    }
+    assert set(config) == {f"{_CONFIG_TARGET}/{domain}" for domain in _DOMAINS}
     # 只读会让"保存"在点下去之后才失败，而那时管理员已经改过密码、填过凭据。
-    assert "read_only" not in config[0]
+    assert all("read_only" not in item for item in config.values())
 
 
-def test_worker_and_feishu_mount_it_read_only() -> None:
+def test_consumers_mount_only_their_own_domains_read_only() -> None:
     services = _yaml("docker-compose.yml")["services"]
+    expected = {
+        "worker": {"ai", "resources"},
+        "feishu-listener": {"feishu"},
+        "channel-worker": {"feishu"},
+    }
     for name in _CONFIG_CONSUMERS:
         config = [
             item
             for item in _volumes(services[name])
-            if item["target"] == _CONFIG_TARGET
+            if str(item["target"]).startswith(_CONFIG_TARGET)
         ]
-        assert len(config) == 1, name
-        assert config[0]["read_only"] is True, name
+        assert {item["target"].rsplit("/", 1)[-1] for item in config} == expected[name]
+        assert all(item["read_only"] is True for item in config), name
 
 
-def test_container_target_path_is_fixed() -> None:
-    """挂载点与代码里的默认路径必须是同一个常量派生出来的。"""
+def test_container_target_paths_are_derived_from_the_code_constants() -> None:
+    """挂载点与代码里的默认路径必须是同一组常量派生出来的；父目录从不作为目标。"""
     from xiaowei_agent.interfaces.integration_config_file import (
-        DEFAULT_INTEGRATION_CONFIG_PATH,
+        CONFIG_ROOT,
+        DEFAULT_AI_CONFIG_PATH,
+        DEFAULT_FEISHU_CONFIG_PATH,
+        DEFAULT_RESOURCES_CONFIG_PATH,
     )
 
-    assert os.path.dirname(DEFAULT_INTEGRATION_CONFIG_PATH) == _CONFIG_TARGET
+    assert CONFIG_ROOT == _CONFIG_TARGET
+    defaults = {
+        os.path.dirname(path)
+        for path in (
+            DEFAULT_AI_CONFIG_PATH,
+            DEFAULT_FEISHU_CONFIG_PATH,
+            DEFAULT_RESOURCES_CONFIG_PATH,
+        )
+    }
     services = _yaml("docker-compose.yml")["services"]
     targets = {
         volume["target"]
         for service in services.values()
         for volume in _volumes(service)
-        if volume.get("source") == "./.config"
+        if str(volume.get("source", "")).startswith("./.config")
     }
-    assert targets == {_CONFIG_TARGET}
+    assert targets == defaults
+    assert _CONFIG_TARGET not in targets
 
 
 def test_the_config_directory_is_ignored_by_git_and_docker() -> None:
@@ -263,55 +285,100 @@ def test_preflight_module_lives_inside_the_packaged_source() -> None:
     assert "COPY scripts" not in dockerfile
 
 
-def test_preflight_probe_is_never_the_real_config_file() -> None:
-    """反例：哨兵文件名写成 `integrations.json` 会污染干净部署的起点。
+def _config_root(tmp_path: Path) -> Path:
+    root = tmp_path / ".config"
+    root.mkdir()
+    for domain in _DOMAINS:
+        (root / domain).mkdir()
+    return root
 
-    那样首次保存会从 1 递增到 2，页面显示的代次与"第一份配置"对不上，而
-    ``read_or_absent`` 再也读不到"尚未配置"。
-    """
-    from xiaowei_agent.interfaces.config_preflight import PROBE_FILE_NAME
+
+def test_preflight_probes_are_never_a_real_config_file() -> None:
+    """反例：哨兵写成 ``config.json`` 会污染干净部署的起点（首次保存从 2 开始）。"""
+    from xiaowei_agent.interfaces.config_preflight import probe_file_name
     from xiaowei_agent.interfaces.integration_config_file import (
-        DEFAULT_INTEGRATION_CONFIG_PATH,
+        CONFIG_FILE_NAME,
+        LEGACY_CONFIG_FILE_NAME,
     )
 
-    assert PROBE_FILE_NAME != os.path.basename(DEFAULT_INTEGRATION_CONFIG_PATH)
+    names = {probe_file_name(domain) for domain in _DOMAINS}
+    assert len(names) == len(_DOMAINS)  # 逐目录不同哨兵
+    assert not names & {CONFIG_FILE_NAME, LEGACY_CONFIG_FILE_NAME}
 
 
-def test_preflight_leaves_a_clean_directory_untouched(tmp_path: Path) -> None:
+def test_preflight_leaves_a_clean_root_untouched(tmp_path: Path) -> None:
     from xiaowei_agent.interfaces.config_preflight import run_preflight
-    from xiaowei_agent.interfaces.provider_consumption import read_or_absent
 
-    directory = tmp_path / ".config"
-    directory.mkdir()
-    assert run_preflight(str(directory)) == "preflight: ok"
-    # 目录里一个文件都不剩，"尚未配置"这个起点原封不动。
-    assert list(directory.iterdir()) == []
-    assert read_or_absent(str(directory / "integrations.json")) is None
+    root = _config_root(tmp_path)
+    assert run_preflight(str(root)) == "preflight: ok"
+    # 三个域目录一个文件都不剩，"尚未配置"这个起点原封不动。
+    assert sorted(path.name for path in root.iterdir()) == sorted(_DOMAINS)
+    assert all(list((root / domain).iterdir()) == [] for domain in _DOMAINS)
 
 
-def test_preflight_does_not_disturb_an_existing_configuration(tmp_path: Path) -> None:
+def test_preflight_does_not_disturb_existing_domain_configurations(tmp_path: Path) -> None:
     """反例：重复预检不得动一份正在被各进程使用的配置。"""
+    from xiaowei_agent.contracts import AiConfig, GeminiIntegration
+    from xiaowei_agent.interfaces.config_preflight import run_preflight
+    from xiaowei_agent.interfaces.integration_config_file import write_ai_config
+
+    root = _config_root(tmp_path)
+    existing = root / "ai" / "config.json"
+    write_ai_config(
+        str(existing),
+        AiConfig(
+            generation=7,
+            gemini=GeminiIntegration(enabled=True, api_key="preflight-" + "fixture-key"),
+        ),
+    )
+    before = existing.read_bytes(), existing.stat().st_ino, existing.stat().st_mtime_ns
+
+    assert run_preflight(str(root)) == "preflight: ok"
+
+    after = existing.read_bytes(), existing.stat().st_ino, existing.stat().st_mtime_ns
+    assert after == before
+    assert [path.name for path in (root / "ai").iterdir()] == ["config.json"]
+
+
+@pytest.mark.parametrize("missing", _DOMAINS)
+def test_preflight_requires_every_domain_directory(tmp_path: Path, missing: str) -> None:
+    from xiaowei_agent.interfaces.config_preflight import PreflightFailure, run_preflight
+
+    root = _config_root(tmp_path)
+    (root / missing).rmdir()
+    assert run_preflight(str(root)) == PreflightFailure.DIRECTORY_MISSING.value
+    (root / missing).symlink_to(tmp_path)
+    assert run_preflight(str(root)) == PreflightFailure.DIRECTORY_MISSING.value
+
+
+def test_preflight_never_creates_a_real_config_file(tmp_path: Path) -> None:
     from xiaowei_agent.interfaces.config_preflight import run_preflight
 
-    directory = tmp_path / ".config"
-    directory.mkdir()
-    existing = directory / "integrations.json"
-    document = {
-        "generation": 7,
-        "gemini": {"enabled": True, "api_key": "preflight-" + "fixture-key"},
-        "feishu": {"enabled": False},
-    }
-    existing.write_text(json.dumps(document), encoding="utf-8")
-    before = existing.stat()
+    root = _config_root(tmp_path)
+    assert run_preflight(str(root)) == "preflight: ok"
+    assert not any(root.rglob("config.json"))
 
-    assert run_preflight(str(directory)) == "preflight: ok"
 
-    assert json.loads(existing.read_text(encoding="utf-8")) == document
-    assert (existing.stat().st_ino, existing.stat().st_mtime_ns) == (
-        before.st_ino,
-        before.st_mtime_ns,
+def test_a_failed_probe_is_still_cleaned_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xiaowei_agent.interfaces import config_preflight
+    from xiaowei_agent.interfaces.integration_config_file import (
+        PreflightProbeUnreadableError,
     )
-    assert sorted(path.name for path in directory.iterdir()) == ["integrations.json"]
+
+    root = _config_root(tmp_path)
+
+    def _write_then_fail(path: str) -> None:
+        Path(path).write_text("{}", encoding="utf-8")
+        raise PreflightProbeUnreadableError
+
+    monkeypatch.setattr(config_preflight, "write_preflight_probe", _write_then_fail)
+    assert (
+        config_preflight.run_preflight(str(root))
+        == config_preflight.PreflightFailure.PROBE_NOT_READABLE.value
+    )
+    assert not any(path.is_file() for path in root.rglob("*"))
 
 
 def test_preflight_reports_a_closed_code_and_never_file_contents() -> None:

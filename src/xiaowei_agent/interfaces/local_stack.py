@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     ModelInvocationProfile,
     ReadinessProbe,
     ReadinessReport,
+    ReceiptKey,
 )
 from xiaowei_agent.contracts.identity import (
     LOCAL_ADMIN_ENVIRONMENT_ID,
@@ -96,6 +97,9 @@ if TYPE_CHECKING:
     )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.identity_activation import IdentityActivationService
+    from xiaowei_agent.application.integration_config_service import (
+        IntegrationConfigService,
+    )
     from xiaowei_agent.application.model_ports import (
         InteractionClassifierPort,
         SlowQueryAdvisoryPort,
@@ -156,7 +160,7 @@ class _PostResultBarrierGateway:
 class LocalStack:
     runtime: XiaoweiRuntime
     provider_state: ProviderStateStore
-    load_receipts: Mapping[tuple[str, str], LoadReceipt]
+    load_receipts: Mapping[ReceiptKey, LoadReceipt]
     task_store: TaskStore
     plan_store: PlanStore
     evidence_ledger: EvidenceLedger
@@ -194,7 +198,7 @@ class FeishuListenerStack:
     listener: FeishuListener
     transport: FeishuInboundTransport
     provider_state: ProviderStateStore
-    load_receipts: Mapping[tuple[str, str], LoadReceipt]
+    load_receipts: Mapping[ReceiptKey, LoadReceipt]
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
@@ -217,7 +221,7 @@ class ChannelWorkerStack:
     service: ChannelProjectionService
     message_port: ChannelMessagePort
     provider_state: ProviderStateStore
-    load_receipts: Mapping[tuple[str, str], LoadReceipt]
+    load_receipts: Mapping[ReceiptKey, LoadReceipt]
     runtime: TaskViewRuntime
     task_store: TaskStore
     channel_store: ChannelStore
@@ -250,6 +254,7 @@ class WebStack:
     identity_directory: FeishuIdentityDirectory | None
     activation_service: IdentityActivationService
     admin_identity_service: AdminIdentityService
+    integration_config_service: IntegrationConfigService
     task_access_service: TaskAccessService
     submission_service: ChannelSubmissionService
     clock: Clock
@@ -266,7 +271,7 @@ class WebStackConfigurationError(RuntimeError):
 def _feishu_credentials_or_fail(credentials: ProviderCredentials) -> tuple[str, str]:
     """把一对可能为 ``None`` 的飞书凭据变成确定的装配失败或一对真值。
 
-    调用点原本写 ``cast(str, credentials.feishu_app_id)``——`integrations.json`
+    调用点原本写 ``cast(str, credentials.feishu_app_id)``——飞书域文件
     缺失、损坏或飞书那一节没开时两个字段都是 ``None``，``cast`` 只骗过类型检查，
     ``None`` 会一路传进真实 SDK adapter。那时的失败发生在 SDK 内部，异常可能带上
     URL 或响应正文，而入口只允许记闭集诊断。这里在构造真实 adapter **之前**拒绝，
@@ -313,7 +318,7 @@ def _resolved_credentials(
     credentials: ProviderCredentials | None,
     *,
     service_name: str | None,
-) -> tuple[ProviderCredentials, Mapping[tuple[str, str], LoadReceipt]]:
+) -> tuple[ProviderCredentials, Mapping[ReceiptKey, LoadReceipt]]:
     """注入优先；没注入就从默认路径读一次，并一并交出这次读取的回执。
 
     读失败不抛：断供的后果是"这条链路不装配"，由各装配点自己判断，而不是让整个
@@ -504,7 +509,7 @@ def _assemble_local_stack(
     starrocks_live_assembly: StarRocksLiveAssembly | None,
     credentials: ProviderCredentials,
     provider_state: ProviderStateStore,
-    load_receipts: Mapping[tuple[str, str], LoadReceipt],
+    load_receipts: Mapping[ReceiptKey, LoadReceipt],
 ) -> LocalStack:
     from xiaowei_agent.application.runtime import XiaoweiRuntime
     from xiaowei_agent.capabilities.asset_inventory import (
@@ -695,7 +700,7 @@ def build_in_memory_local_stack(
 ) -> LocalStack:
     """装配不依赖 tests/ 的 fake 闭环；供打包证明与本地测试使用。
 
-    **不读 `integrations.json`**：内存栈是离线证明用的，凭据只能显式注入。
+    **不读任何配置域文件**：内存栈是离线证明用的，凭据只能显式注入。
     """
     state = InMemoryPersistenceState()
     task_store = InMemoryTaskStore(
@@ -997,17 +1002,23 @@ async def build_postgres_web_stack(
 ) -> WebStack:
     """用注入端口装配 Web 窄栈；不创建 Runner、Gateway 或真实 OAuth 客户端。
 
-    **本函数不读 `integrations.json`，也不看 ``settings.feishu_oauth_enabled``。**
+    **本函数不读任何配置域文件，也不看 ``settings.feishu_oauth_enabled``。**
     读配置、判双层开关、构造真实 adapter 全部属于 composition root
-    （``web_app.serve_web``）。目录、激活、审计与 Admin 服务始终装配；两个端口都在
-    才额外装配 OAuth 认证。谁传端口谁负责判断。
+    （``web_app.serve_web``）。目录、激活、审计、Admin 与唯一配置写服务始终装配；
+    两个端口都在才额外装配 OAuth 认证。谁传端口谁负责判断。
     """
     from xiaowei_agent.application.admin_identity import AdminIdentityService
+    from xiaowei_agent.application.integration_config_service import (
+        IntegrationConfigService,
+    )
     from xiaowei_agent.application.channel_access import TaskAccessService
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.identity_activation import IdentityActivationService
     from xiaowei_agent.interfaces.directory_identity import (
         DirectoryFeishuIdentityDirectory,
+    )
+    from xiaowei_agent.interfaces.integration_config_file import (
+        FileIntegrationConfigRepository,
     )
     from xiaowei_agent.interfaces.local_admin_auth import (
         INITIAL_LOCAL_ADMIN_PASSWORD,
@@ -1110,6 +1121,13 @@ async def build_postgres_web_stack(
             audit=audit_store,
             activation_decisions=activation_service,
         )
+        # 唯一配置写服务：文件 adapter 固定在容器内三个域路径，审计与测试结果共用
+        # 本进程的 PostgreSQL 事实。Web 是唯一配置写者，但不持有任何执行端口。
+        integration_config_service = IntegrationConfigService(
+            repository=FileIntegrationConfigRepository(),
+            audit=audit_store,
+            provider_state=provider_state,
+        )
 
         auth: WebAuthService | None = None
         identity_directory: FeishuIdentityDirectory | None = None
@@ -1151,6 +1169,7 @@ async def build_postgres_web_stack(
             identity_directory=identity_directory,
             activation_service=activation_service,
             admin_identity_service=admin_identity_service,
+            integration_config_service=integration_config_service,
             task_access_service=task_access_service,
             submission_service=submission_service,
             clock=clock,

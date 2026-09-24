@@ -42,12 +42,13 @@ from xiaowei_agent.interfaces.web_navigation import web_return_intent_allowed
 from xiaowei_agent.persistence.activation import ActivationCapacityError
 from xiaowei_agent.persistence.web_session import (
     ConsumeOAuthLoginStateCommand,
-    ConsumeOAuthStateCommand,
+    ConsumeOAuthTestStateCommand,
     IssueOAuthLoginStateCommand,
-    IssueOAuthStateCommand,
+    IssueOAuthTestStateCommand,
     OAuthLoginContextNotFoundError,
     OAuthStateCapacityError,
     OAuthStateNotFoundError,
+    OAuthTestContextNotFoundError,
     RevokeWebSessionCommand,
     RotateWebSessionCommand,
     WebSessionLookup,
@@ -415,8 +416,11 @@ class WebAuthService:
             max_age_seconds=self._oauth_state_ttl_seconds,
         )
 
-    async def start_connection_test(self) -> OAuthStart:
-        """签发一次**只能**被测试分支消费的 state。
+    async def start_connection_test(self, *, operation_id: str) -> OAuthStart:
+        """签发一次**只能**被测试分支消费的 state，并与审计 operation 同事务绑定。
+
+        ``operation_id`` 来自配置服务刚写下的 ``STARTED``（服务端 ``w4:`` 派生），浏览器
+        拿不到也改不了它；回调只能从 state 取回它来写终态。
 
         与登录共用授权 URL 与 redirect_uri——测的就是那条真实回调链路；换一个
         redirect_uri 等于测了一条生产环境里不存在的路径。
@@ -424,10 +428,11 @@ class WebAuthService:
         state, authorization_url = self._new_oauth_start()
         capacity_reached = False
         try:
-            await self._sessions.issue_oauth_state(
-                command=IssueOAuthStateCommand(
+            await self._sessions.issue_oauth_test_state(
+                command=IssueOAuthTestStateCommand(
                     state_digest=_digest(domain=OAUTH_TEST_STATE_DOMAIN, secret=state),
                     ttl_seconds=self._oauth_state_ttl_seconds,
+                    operation_id=operation_id,
                 )
             )
         except OAuthStateCapacityError:
@@ -489,39 +494,32 @@ class WebAuthService:
         ):
             raise WebOAuthStateError
 
-    async def _consume_state(
-        self, *, state: str, state_cookie: str | None, domain: str
-    ) -> None:
-        """一次性消费某个域下的 state；不属于这个域就当作不存在。
-
-        先比 cookie 再查库：``state`` 来自 URL（攻击者可控），``state_cookie``
-        来自浏览器。少了前一步，一个被诱导的回调就能替受害者消费掉 state。
-        """
-        self._validate_state_pair(state=state, state_cookie=state_cookie)
-        state_missing = False
-        try:
-            await self._sessions.consume_oauth_state(
-                command=ConsumeOAuthStateCommand(
-                    state_digest=_digest(domain=domain, secret=state)
-                )
-            )
-        except OAuthStateNotFoundError:
-            state_missing = True
-        if state_missing:
-            raise WebOAuthStateError
-
     async def consume_connection_test_state(
         self, *, state: str, state_cookie: str | None
-    ) -> None:
-        """确认这次回调属于连接测试；不属于就抛 ``WebOAuthStateError``。
+    ) -> str:
+        """确认这次回调属于连接测试并取回它的审计 operation id。
 
-        与 ``complete_connection_test`` **分成两步**是刻意的：路由必须在确认命中
-        测试域之后、发起 code 交换之前，再核对一遍本地管理员 session 仍然有效。
-        合成一个方法就没有插入那道检查的位置。
+        不属于测试域（未知、过期、重放，或是一张没有测试 context 的 state）就抛
+        ``WebOAuthStateError``——此时拿不到可信 operation id，调用方只能保留 ``STARTED``。
+
+        先比 cookie 再查库：``state`` 来自 URL（攻击者可控），``state_cookie`` 来自浏览器。
+        与 ``complete_connection_test`` **分成两步**是刻意的：路由必须在确认命中测试域之后、
+        发起 code 交换之前，再核对一遍本地管理员 session 仍然有效。
         """
-        await self._consume_state(
-            state=state, state_cookie=state_cookie, domain=OAUTH_TEST_STATE_DOMAIN
-        )
+        self._validate_state_pair(state=state, state_cookie=state_cookie)
+        operation_id: str | None = None
+        try:
+            consumed = await self._sessions.consume_oauth_test_state(
+                command=ConsumeOAuthTestStateCommand(
+                    state_digest=_digest(domain=OAUTH_TEST_STATE_DOMAIN, secret=state)
+                )
+            )
+            operation_id = consumed.operation_id
+        except (OAuthStateNotFoundError, OAuthTestContextNotFoundError):
+            operation_id = None
+        if operation_id is None:
+            raise WebOAuthStateError
+        return operation_id
 
     async def complete_connection_test(self, *, code: str) -> None:
         """只交换一次 code 以证明回调链路可用；成功即返回。

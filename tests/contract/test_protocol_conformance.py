@@ -73,6 +73,8 @@ _ANCHORED = {
     "UserDirectoryStore",
     "AdminAuditStore",
     "ActivationStore",
+    "IntegrationConfigRepository",
+    "ProbeVerdict",
 }
 _FROZEN_WITHOUT_IMPLEMENTATION = {"CapabilityRegistry", "CapabilityResolver"}
 
@@ -472,3 +474,43 @@ def test_identity_implementations_keep_the_protocol_keyword_arguments(
         for implementation in (memory, postgres):
             actual = set(inspect.signature(getattr(implementation, name)).parameters)
             assert actual == expected, f"{implementation.__name__}.{name}"
+
+
+def test_file_config_adapter_is_statically_anchored_to_the_application_port() -> None:
+    """W4a：文件 adapter 必须在 ``_conformance.py`` 里**赋值**给 application port。
+
+    只靠"测试里刚好调用成功"证明不了结构兼容；这里找的是那条带注解的赋值本身。
+    """
+    tree = ast.parse(Path(inspect.getfile(_conformance)).read_text(encoding="utf-8"))
+    assignments = {
+        (_annotation_name(node.annotation), ast.unparse(node.value))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign) and node.value is not None
+    }
+    assert ("IntegrationConfigRepository", "adapter") in assignments
+    assert ("ProbeVerdict", "probe") in assignments
+
+
+def test_file_config_adapter_keeps_the_port_keyword_signatures() -> None:
+    from xiaowei_agent.application.integration_config_service import (
+        IntegrationConfigRepository,
+    )
+    from xiaowei_agent.interfaces.integration_config_file import (
+        FileIntegrationConfigRepository,
+    )
+
+    for name in ("read_ai", "write_ai", "read_feishu", "write_feishu"):
+        assert inspect.signature(
+            getattr(FileIntegrationConfigRepository, name)
+        ) == inspect.signature(getattr(IntegrationConfigRepository, name)), name
+
+
+def test_application_never_imports_the_interfaces_file_adapter() -> None:
+    """依赖只能是 interfaces → application；反过来就是把文件原语拉进编排层。"""
+    source = Path(inspect.getfile(_conformance)).parent / "application"
+    offenders = sorted(
+        path.name
+        for path in source.rglob("*.py")
+        if "xiaowei_agent.interfaces" in path.read_text(encoding="utf-8")
+    )
+    assert offenders == []
