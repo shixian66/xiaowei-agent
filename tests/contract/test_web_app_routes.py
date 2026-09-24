@@ -730,6 +730,13 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
         # feishu_oauth 落进凭据探针那条分支。
         ("POST", "/admin/api/config/test/feishu_oauth"),
         ("POST", "/admin/api/config/test/{check_name}"),
+        ("GET", "/admin/api/users"),
+        ("POST", "/admin/api/users/status"),
+        ("POST", "/admin/api/users/role"),
+        ("GET", "/admin/api/activations"),
+        ("POST", "/admin/api/activations/approve"),
+        ("POST", "/admin/api/activations/reject"),
+        ("GET", "/admin/api/audit"),
         ("GET", "/app/static/app.css"),
         ("GET", "/app/static/app.js"),
         ("GET", "/app/static/admin.js"),
