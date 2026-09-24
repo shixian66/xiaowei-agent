@@ -447,3 +447,11 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .state-badge[data-state="test_failed"] { border-color: var(--red); color: var(--red); }
 .config-actions { display: flex; gap: 10px; }
 .config-actions button[disabled], .config-checks button[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+/* W4b 资源登记：只登记参数，没有测试或连接入口。 */
+.resources-heading-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.resource-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.resource-table td.resource-address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.resource-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.resource-actions button { min-height: 32px; padding: 4px 10px; font-size: 12px; }
+.resource-actions button[disabled] { opacity: 0.5; cursor: not-allowed; }

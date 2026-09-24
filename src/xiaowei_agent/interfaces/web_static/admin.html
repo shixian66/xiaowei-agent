@@ -145,6 +145,74 @@
           </div>
         </article>
       </section>
+
+      <section class="config-panel resources-panel is-hidden" id="resources-panel" aria-labelledby="resources-title">
+        <div class="stage-heading">
+          <div>
+            <p class="eyebrow">RESOURCES</p>
+            <h2 id="resources-title">运维资源登记</h2>
+            <p>只登记 StarRocks 与 Prometheus 的连接参数：不解析域名、不连接目标、不校验可达性。凭据只进不出。</p>
+          </div>
+          <div class="resources-heading-meta">
+            <span class="safe-view-pill">已保存，尚未接入</span>
+            <span class="generation-pill" id="resources-generation">代次 —</span>
+          </div>
+        </div>
+
+        <p class="config-pending is-hidden" id="resources-pending" role="status"></p>
+        <p class="config-notice is-hidden" id="resources-notice" role="status"></p>
+        <p class="form-message is-hidden" id="resources-message" role="alert"></p>
+
+        <div class="table-scroll">
+          <table class="identity-table resource-table">
+            <thead><tr><th>名称</th><th>类型</th><th>环境</th><th>地址</th><th>凭据</th><th>启用</th><th>接入</th><th>操作</th></tr></thead>
+            <tbody id="resources-body"></tbody>
+          </table>
+        </div>
+        <p class="empty-state is-hidden" id="resources-empty">还没有登记任何资源。</p>
+
+        <form class="config-card resource-form" id="resource-form" novalidate>
+          <header class="config-card-head">
+            <h3 id="resource-form-title">登记新资源</h3>
+          </header>
+          <input type="hidden" id="resource-id" value="">
+          <div class="resource-grid">
+            <label class="config-field"><span>类型</span>
+              <select id="resource-kind"><option value="starrocks">StarRocks</option><option value="prometheus">Prometheus</option></select>
+            </label>
+            <label class="config-field"><span>名称</span><input type="text" id="resource-display-name" maxlength="128" autocomplete="off"></label>
+            <label class="config-field"><span>环境</span>
+              <select id="resource-environment"><option value="" data-edit-only>保持不变</option><option value="dev">dev</option><option value="test">test</option><option value="staging">staging</option><option value="prod">prod</option></select>
+            </label>
+            <label class="config-field"><span>TLS</span>
+              <select id="resource-tls-mode"><option value="" data-edit-only>保持不变</option><option value="disabled">disabled</option><option value="verify_ca">verify_ca</option><option value="verify_identity">verify_identity</option></select>
+            </label>
+          </div>
+          <div class="resource-grid" data-kind="starrocks">
+            <label class="config-field"><span>主机或 IP</span><input type="text" id="resource-host" maxlength="253" autocomplete="off" placeholder="sr-fe.example.internal"></label>
+            <label class="config-field"><span>端口</span><input type="number" id="resource-port" min="1" max="65535" inputmode="numeric"></label>
+            <label class="config-field"><span>数据库</span><input type="text" id="resource-database" maxlength="128" autocomplete="off"></label>
+            <label class="config-field"><span>用户名</span><input type="text" id="resource-username" maxlength="128" autocomplete="off"></label>
+            <label class="config-field"><span>密码</span><input type="password" id="resource-password" autocomplete="off" placeholder="修改时留空表示不修改"></label>
+          </div>
+          <div class="resource-grid is-hidden" data-kind="prometheus">
+            <label class="config-field"><span>Base URL</span><input type="text" id="resource-base-url" maxlength="2048" autocomplete="off" placeholder="https://prom.example.internal"></label>
+            <label class="config-field"><span>认证方式</span>
+              <select id="resource-auth-mode"><option value="" data-edit-only>保持不变</option><option value="none">none</option><option value="basic">basic</option><option value="bearer">bearer</option></select>
+            </label>
+            <label class="config-field"><span>用户名（仅 basic）</span><input type="text" id="resource-prom-username" maxlength="128" autocomplete="off"></label>
+            <label class="config-field"><span>凭据</span><input type="password" id="resource-secret" autocomplete="off" placeholder="修改时留空表示不修改"></label>
+          </div>
+          <label class="config-switch">
+            <input type="checkbox" id="resource-enabled">
+            <span>启用（仅登记状态，不会建立连接）</span>
+          </label>
+          <div class="config-actions">
+            <button class="button button-primary" id="resource-save" type="submit">保存资源</button>
+            <button class="button button-quiet is-hidden" id="resource-cancel" type="button">取消修改</button>
+          </div>
+        </form>
+      </section>
       <section class="feishu-admin-callout is-hidden" id="feishu-admin-callout">
         <h2>配置变更需要本地管理员</h2><p>请使用本地管理员账号登录后继续。飞书管理员仅拥有脱敏状态查看权限。</p>
       </section>
