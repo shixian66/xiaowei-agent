@@ -51,11 +51,15 @@ from xiaowei_agent.contracts.activation import (
     ActivationRequest,
     ActivationStatus,
     CreateActivationCommand,
+    PendingActivationListQuery,
+    PendingActivationPage,
 )
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
     AdminAuditEvent,
+    AdminAuditListQuery,
+    AdminAuditPage,
     AdminAuditStart,
     AdminAuditTerminal,
     AdminOperationContext,
@@ -67,6 +71,9 @@ from xiaowei_agent.contracts.enums import (
     UserStatus,
 )
 from xiaowei_agent.contracts.identity import (
+    AdminUserListQuery,
+    AdminUserPage,
+    AdminUserRecord,
     ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
@@ -654,6 +661,42 @@ class InMemoryActivationStore:
                 return None
             return request
 
+    async def list_pending(
+        self, *, query: PendingActivationListQuery
+    ) -> PendingActivationPage:
+        """只返回显式作用域内仍有效的 pending 申请。"""
+        async with self._lock:
+            now = self._clock()
+            cursor = (
+                None
+                if query.before_requested_at is None
+                else (query.before_requested_at, query.before_request_id)
+            )
+            candidates = sorted(
+                (
+                    request
+                    for request in self._state.activation_requests.values()
+                    if request.tenant_id == query.tenant_id
+                    and request.environment_id == query.environment_id
+                    and request.status is ActivationStatus.PENDING
+                    and request.expires_at > now
+                    and (
+                        cursor is None
+                        or (request.requested_at, request.request_id) < cursor
+                    )
+                ),
+                key=lambda request: (request.requested_at, request.request_id),
+                reverse=True,
+            )
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            tail = items[-1] if has_more else None
+            return PendingActivationPage(
+                items=items,
+                next_requested_at=None if tail is None else tail.requested_at,
+                next_request_id=None if tail is None else tail.request_id,
+            )
+
 
 class InMemoryAdminAuditStore:
     """``AdminAuditStore`` 的单进程实现；与目录 store **共用同一把锁和同一份事实**。
@@ -771,6 +814,45 @@ class InMemoryAdminAuditStore:
         async with self._lock:
             return self._state.admin_audit_events.get(event_id)
 
+    async def list_events(self, *, query: AdminAuditListQuery) -> AdminAuditPage:
+        """按显式作用域、闭集过滤与复合 keyset 读取审计事实。"""
+        async with self._lock:
+            cursor = (
+                None
+                if query.before_created_at is None
+                else (query.before_created_at, query.before_event_id)
+            )
+            candidates = sorted(
+                (
+                    event
+                    for event in self._state.admin_audit_events.values()
+                    if event.tenant_id == query.tenant_id
+                    and event.environment_id == query.environment_id
+                    and (query.action is None or event.action is query.action)
+                    and (query.outcome is None or event.outcome is query.outcome)
+                    and (
+                        query.target_kind is None
+                        or (
+                            event.target_kind is query.target_kind
+                            and event.target_ref_digest == query.target_ref_digest
+                        )
+                    )
+                    and (
+                        cursor is None or (event.created_at, event.event_id) < cursor
+                    )
+                ),
+                key=lambda event: (event.created_at, event.event_id),
+                reverse=True,
+            )
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            tail = items[-1] if has_more else None
+            return AdminAuditPage(
+                items=items,
+                next_created_at=None if tail is None else tail.created_at,
+                next_event_id=None if tail is None else tail.event_id,
+            )
+
 
 _DirectorySnapshot = tuple[
     dict[str, UserAccount],
@@ -834,6 +916,40 @@ class InMemoryUserDirectoryStore:
                     "the bound subject is unavailable"
                 )
             return facts
+
+    async def list_admin_users(self, *, query: AdminUserListQuery) -> AdminUserPage:
+        """一次批量读取当前作用域角色、账号状态与飞书绑定事实。"""
+        async with self._lock:
+            candidates: list[AdminUserRecord] = []
+            for (user_id, tenant_id, environment_id), assignment in (
+                self._state.user_role_assignments.items()
+            ):
+                if tenant_id != query.tenant_id or environment_id != query.environment_id:
+                    continue
+                account = self._state.user_accounts[user_id]
+                if query.after_actor is not None and account.actor <= query.after_actor:
+                    continue
+                bound = any(
+                    binding.user_id == user_id
+                    and binding.tenant_id == query.tenant_id
+                    and binding.environment_id == query.environment_id
+                    and binding.provider is IdentitySource.FEISHU
+                    for binding in self._state.external_identities.values()
+                )
+                candidates.append(
+                    AdminUserRecord(
+                        account=account,
+                        assignment=assignment,
+                        feishu_bound=bound,
+                    )
+                )
+            candidates.sort(key=lambda item: item.account.actor)
+            items = tuple(candidates[: query.limit])
+            has_more = len(candidates) > query.limit
+            return AdminUserPage(
+                items=items,
+                next_after_actor=(items[-1].account.actor if has_more else None),
+            )
 
     async def apply(
         self, *, command: DirectoryCommand, context: AdminOperationContext

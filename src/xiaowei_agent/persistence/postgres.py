@@ -74,16 +74,23 @@ from xiaowei_agent.contracts.activation import (
     ActivationRequest,
     ActivationStatus,
     CreateActivationCommand,
+    PendingActivationListQuery,
+    PendingActivationPage,
 )
 from xiaowei_agent.contracts.admin_audit import (
     AdminAuditCandidate,
     AdminAuditDenial,
     AdminAuditEvent,
+    AdminAuditListQuery,
+    AdminAuditPage,
     AdminAuditStart,
     AdminAuditTerminal,
     AdminOperationContext,
 )
 from xiaowei_agent.contracts.identity import (
+    AdminUserListQuery,
+    AdminUserPage,
+    AdminUserRecord,
     ApproveActivationCommand,
     AssignRoleCommand,
     BindExternalIdentityCommand,
@@ -2904,6 +2911,39 @@ class PostgresActivationStore:
             )
         return None if row is None else row_to_activation_request(row)
 
+    @_persistence_boundary(write=False)
+    async def list_pending(
+        self, *, query: PendingActivationListQuery
+    ) -> PendingActivationPage:
+        statement = sa.select(ACTIVATION_REQUESTS).where(
+            ACTIVATION_REQUESTS.c.tenant_id == query.tenant_id,
+            ACTIVATION_REQUESTS.c.environment_id == query.environment_id,
+            ACTIVATION_REQUESTS.c.status == ActivationStatus.PENDING.value,
+            ACTIVATION_REQUESTS.c.expires_at > self._clock(),
+        )
+        if query.before_requested_at is not None:
+            statement = statement.where(
+                sa.tuple_(
+                    ACTIVATION_REQUESTS.c.requested_at,
+                    ACTIVATION_REQUESTS.c.request_id,
+                )
+                < (query.before_requested_at, query.before_request_id)
+            )
+        statement = statement.order_by(
+            ACTIVATION_REQUESTS.c.requested_at.desc(),
+            ACTIVATION_REQUESTS.c.request_id.desc(),
+        ).limit(query.limit + 1)
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(row_to_activation_request(row) for row in rows[: query.limit])
+        has_more = len(rows) > query.limit
+        tail = items[-1] if has_more else None
+        return PendingActivationPage(
+            items=items,
+            next_requested_at=None if tail is None else tail.requested_at,
+            next_request_id=None if tail is None else tail.request_id,
+        )
+
 
 async def _insert_audit_event(
     connection: AsyncConnection, candidate: AdminAuditCandidate, *, now: _dt.datetime
@@ -3055,6 +3095,48 @@ class PostgresAdminAuditStore:
             )
         return None if row is None else row_to_admin_audit_event(row)
 
+    @_persistence_boundary(write=False)
+    async def list_events(self, *, query: AdminAuditListQuery) -> AdminAuditPage:
+        statement = sa.select(ADMIN_AUDIT_EVENTS).where(
+            ADMIN_AUDIT_EVENTS.c.tenant_id == query.tenant_id,
+            ADMIN_AUDIT_EVENTS.c.environment_id == query.environment_id,
+        )
+        if query.before_created_at is not None:
+            statement = statement.where(
+                sa.tuple_(
+                    ADMIN_AUDIT_EVENTS.c.created_at,
+                    ADMIN_AUDIT_EVENTS.c.event_id,
+                )
+                < (query.before_created_at, query.before_event_id)
+            )
+        if query.action is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.action == query.action.value
+            )
+        if query.outcome is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.outcome == query.outcome.value
+            )
+        if query.target_kind is not None:
+            statement = statement.where(
+                ADMIN_AUDIT_EVENTS.c.target_kind == query.target_kind.value,
+                ADMIN_AUDIT_EVENTS.c.target_ref_digest == query.target_ref_digest,
+            )
+        statement = statement.order_by(
+            ADMIN_AUDIT_EVENTS.c.created_at.desc(),
+            ADMIN_AUDIT_EVENTS.c.event_id.desc(),
+        ).limit(query.limit + 1)
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(row_to_admin_audit_event(row) for row in rows[: query.limit])
+        has_more = len(rows) > query.limit
+        tail = items[-1] if has_more else None
+        return AdminAuditPage(
+            items=items,
+            next_created_at=None if tail is None else tail.created_at,
+            next_event_id=None if tail is None else tail.event_id,
+        )
+
 
 class PostgresUserDirectoryStore:
     """``UserDirectoryStore`` 的 PostgreSQL 实现。
@@ -3118,6 +3200,75 @@ class PostgresUserDirectoryStore:
                     "the bound subject is unavailable"
                 )
             return facts
+
+    @_persistence_boundary(write=False)
+    async def list_admin_users(self, *, query: AdminUserListQuery) -> AdminUserPage:
+        bound = sa.exists(
+            sa.select(1).where(
+                EXTERNAL_IDENTITIES.c.user_id == USER_ACCOUNTS.c.user_id,
+                EXTERNAL_IDENTITIES.c.provider == IdentitySource.FEISHU.value,
+                EXTERNAL_IDENTITIES.c.tenant_id == query.tenant_id,
+                EXTERNAL_IDENTITIES.c.environment_id == query.environment_id,
+            )
+        ).label("feishu_bound")
+        statement = (
+            sa.select(
+                USER_ACCOUNTS.c.user_id,
+                USER_ACCOUNTS.c.actor,
+                USER_ACCOUNTS.c.display_name,
+                USER_ACCOUNTS.c.status,
+                USER_ACCOUNTS.c.created_at.label("account_created_at"),
+                USER_ACCOUNTS.c.updated_at.label("account_updated_at"),
+                USER_ROLE_ASSIGNMENTS.c.role,
+                USER_ROLE_ASSIGNMENTS.c.created_by,
+                USER_ROLE_ASSIGNMENTS.c.created_at.label("role_created_at"),
+                USER_ROLE_ASSIGNMENTS.c.updated_at.label("role_updated_at"),
+                bound,
+            )
+            .join(
+                USER_ROLE_ASSIGNMENTS,
+                USER_ROLE_ASSIGNMENTS.c.user_id == USER_ACCOUNTS.c.user_id,
+            )
+            .where(
+                USER_ROLE_ASSIGNMENTS.c.tenant_id == query.tenant_id,
+                USER_ROLE_ASSIGNMENTS.c.environment_id == query.environment_id,
+            )
+        )
+        if query.after_actor is not None:
+            statement = statement.where(USER_ACCOUNTS.c.actor > query.after_actor)
+        statement = statement.order_by(USER_ACCOUNTS.c.actor.asc()).limit(
+            query.limit + 1
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = tuple(
+            AdminUserRecord(
+                account=UserAccount(
+                    user_id=row["user_id"],
+                    actor=row["actor"],
+                    display_name=row["display_name"],
+                    status=UserStatus(row["status"]),
+                    created_at=row["account_created_at"],
+                    updated_at=row["account_updated_at"],
+                ),
+                assignment=UserRoleAssignment(
+                    user_id=row["user_id"],
+                    tenant_id=query.tenant_id,
+                    environment_id=query.environment_id,
+                    role=ProductRole(row["role"]),
+                    created_by=row["created_by"],
+                    created_at=row["role_created_at"],
+                    updated_at=row["role_updated_at"],
+                ),
+                feishu_bound=bool(row["feishu_bound"]),
+            )
+            for row in rows[: query.limit]
+        )
+        has_more = len(rows) > query.limit
+        return AdminUserPage(
+            items=items,
+            next_after_actor=(items[-1].account.actor if has_more else None),
+        )
 
     @_persistence_boundary(write=True)
     async def apply(
