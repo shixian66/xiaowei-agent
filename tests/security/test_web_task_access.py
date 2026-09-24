@@ -124,8 +124,8 @@ async def test_view_only_user_gets_real_route_403_without_submission(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     submissions = ChannelSubmissionService(
         runtime=runtime,
@@ -200,8 +200,8 @@ async def test_web_route_reuses_scoped_idempotency_and_conflict_semantics(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     channel_store = InMemoryChannelStore(clock=clock, state=memory_state)
     submissions = ChannelSubmissionService(
@@ -277,8 +277,8 @@ async def test_group_membership_is_rechecked_and_revocation_becomes_404(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     access = TaskAccessService(
         runtime=runtime,

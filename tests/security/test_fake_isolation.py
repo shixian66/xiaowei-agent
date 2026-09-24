@@ -179,3 +179,192 @@ def test_only_local_stack_imports_a_fake_at_runtime() -> None:
         if path not in fake_paths and _imports_a_fake(path)
     }
     assert importers == {"interfaces/local_stack.py"}
+
+
+# --- W5 release：五个进程装配后不得加载任何 fake/recording 模块 -----------------
+
+_RELEASE_BUILD_SCRIPT = r'''
+import asyncio
+import json
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from xiaowei_agent.config import Settings
+from xiaowei_agent.interfaces import api, feishu_listener, feishu_worker, web_app, worker
+from xiaowei_agent.interfaces import local_stack
+from xiaowei_agent.interfaces.provider_consumption import ProviderCredentials
+
+PROFILE = __PROFILE__
+
+
+class _Result:
+    def mappings(self):
+        return self
+
+    def first(self):
+        return None
+
+    def all(self):
+        return []
+
+
+class _Connection:
+    async def execute(self, *_, **__):
+        return _Result()
+
+    async def scalar(self, *_, **__):
+        return "inserted"
+
+
+class _Engine:
+    async def dispose(self):
+        return None
+
+    def begin(self):
+        connection = _Connection()
+
+        class _Transaction:
+            async def __aenter__(self):
+                return connection
+
+            async def __aexit__(self, *_):
+                return False
+
+        return _Transaction()
+
+    connect = begin
+
+
+class _Messages:
+    async def send_to_chat(self, **_):
+        return "m"
+
+    async def send_to_user(self, **_):
+        return "m"
+
+    async def update_card(self, **_):
+        return None
+
+
+class _Transport:
+    def run_forever(self, *, on_event):
+        raise AssertionError("must not run")
+
+
+local_stack.create_database_engine = lambda _settings: _Engine()
+
+
+def _settings(**updates):
+    base = {"environment_id": "dev"}
+    if PROFILE == "release":
+        base |= {"runtime_profile": "release", "starrocks_adapter_mode": "disabled"}
+    return Settings.model_validate(base | updates)
+
+
+def _view_snapshot(runtime):
+    return vars(runtime)["_conversation_snapshot"].snapshot_id
+
+
+async def main():
+    snapshots = {}
+    with TemporaryDirectory() as directory:
+        identity = Path(directory) / "identities.json"
+        identity.write_text(
+            json.dumps(
+                {"version": 1, "tenant_id": "dev-local", "environment_id": "dev", "entries": []}
+            ),
+            encoding="utf-8",
+        )
+        credentials = ProviderCredentials(
+            feishu_app_id="cli_release", feishu_app_secret="release-" + "fixture"
+        )
+        stack = await local_stack.build_postgres_task_view_stack(settings=_settings())
+        snapshots["internal-api"] = _view_snapshot(stack.runtime)
+        stack = await local_stack.build_postgres_web_stack(
+            settings=_settings(web_app_enabled=True, web_public_origin="https://ops.example.test")
+        )
+        snapshots["web-app"] = _view_snapshot(stack.runtime)
+        stack = await local_stack.build_postgres_feishu_listener_stack(
+            settings=_settings(
+                feishu_listener_enabled=True,
+                feishu_tenant_key="tenant-test",
+                feishu_bot_open_id="bot-open-id",
+                feishu_identity_file=str(identity),
+            ),
+            transport=_Transport(),
+            message_port=_Messages(),
+            credentials=credentials,
+        )
+        snapshots["feishu-listener"] = _view_snapshot(stack.runtime)
+        stack = await local_stack.build_postgres_channel_worker_stack(
+            settings=_settings(
+                channel_worker_enabled=True, web_public_origin="https://ops.example.test"
+            ),
+            message_port=_Messages(),
+        )
+        snapshots["channel-worker"] = _view_snapshot(stack.runtime)
+        stack = await local_stack.build_postgres_local_stack(
+            settings=_settings(), credentials=ProviderCredentials()
+        )
+        snapshots["worker"] = _view_snapshot(stack.runtime._task_views)
+    loaded = sorted(
+        name.removeprefix("xiaowei_agent.")
+        for name in sys.modules
+        if name.startswith("xiaowei_agent.")
+    )
+    print(json.dumps({"loaded": loaded, "snapshots": snapshots}))
+
+
+asyncio.run(main())
+assert (api, feishu_listener, feishu_worker, web_app, worker)
+'''
+
+
+def _build_five_processes(profile: str) -> dict[str, object]:
+    import json
+    import subprocess
+    import sys
+
+    completed = subprocess.run(  # noqa: S603 -- 当前解释器与程序均由测试控制
+        [
+            sys.executable,
+            "-c",
+            _RELEASE_BUILD_SCRIPT.replace("__PROFILE__", repr(profile)),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return json.loads(completed.stdout.splitlines()[-1])
+
+
+def test_release_builders_load_no_fake_module_and_answer_from_the_empty_snapshot() -> None:
+    from xiaowei_agent.capabilities.registry import PROVIDER_OFF_SNAPSHOT_ID
+
+    result = _build_five_processes("release")
+
+    assert set(result["loaded"]) & set(_FAKE_MODULES) == set()  # type: ignore[arg-type]
+    assert result["snapshots"] == {
+        name: PROVIDER_OFF_SNAPSHOT_ID
+        for name in (
+            "internal-api",
+            "web-app",
+            "feishu-listener",
+            "channel-worker",
+            "worker",
+        )
+    }
+
+
+def test_offline_builders_still_load_recordings_so_the_release_probe_is_not_vacuous() -> None:
+    """反向对照：同一脚本在 offline 形态下必须能观测到 recording 模块。"""
+    from xiaowei_agent.capabilities.registry import SNAPSHOT_ID
+
+    result = _build_five_processes("offline_recording")
+
+    assert {"tools.starrocks_fake", "tools.prometheus_recording"} <= set(
+        result["loaded"]  # type: ignore[arg-type]
+    )
+    assert set(result["snapshots"].values()) == {SNAPSHOT_ID}  # type: ignore[union-attr]

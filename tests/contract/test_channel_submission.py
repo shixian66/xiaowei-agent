@@ -112,8 +112,8 @@ def service(store, channel_store, memory_state):
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     class NeverMembership:
         async def is_current_group_member(self, **_: object) -> bool:
@@ -608,8 +608,8 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     service = ChannelSubmissionService(
         runtime=runtime,

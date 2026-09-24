@@ -281,8 +281,8 @@ async def test_unauthorized_task_reads_are_indistinguishable(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     access = TaskAccessService(
         runtime=runtime,

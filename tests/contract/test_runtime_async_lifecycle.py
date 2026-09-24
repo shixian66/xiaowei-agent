@@ -259,7 +259,7 @@ async def test_terminal_query_uses_the_renderer_selected_by_the_stored_plan(
     selected = replace(SLOW_QUERY_BINDING, renderer=sentinel_renderer)
     monkeypatch.setattr(
         harness.runtime._task_views,
-        "_bindings",
+        "_rendering_bindings",
         CapabilityBindingRegistry(
             snapshot=harness.runtime._snapshot,
             policy_snapshot=POLICY_SNAPSHOT,

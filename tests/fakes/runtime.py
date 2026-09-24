@@ -16,12 +16,16 @@ from tests.fakes.recordings import EMPTY_WITHOUT_TRAFFIC, GOLDEN, TIMEOUT
 from tests.fakes.runner import CountingApprovalGate, CountingGateway, RecordingTaskStore
 from tests.fakes.sinks import RecordingTraceSink
 
+from xiaowei_agent.application.capability_runtime import CapabilityBindingRegistry
 from xiaowei_agent.application.default_capabilities import (
     build_default_capability_bindings,
 )
 from xiaowei_agent.application.runtime import XiaoweiRuntime
 from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
-from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
+from xiaowei_agent.capabilities.registry import (
+    PROVIDER_OFF_SNAPSHOT,
+    StaticCapabilityRegistry,
+)
 from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityResolver
 from xiaowei_agent.contracts import (
     AttemptIntent,
@@ -98,6 +102,7 @@ class RuntimeHarness:
         clear_ledger_before_render: bool = False,
         interaction_classifier: Any = None,
         slow_query_advisory: Any = None,
+        provider_off: bool = False,
     ) -> None:
         self.clock = ManualClock(start=as_of)
         self.as_of = as_of
@@ -148,15 +153,27 @@ class RuntimeHarness:
             runner = _SyntheticWriteRunner(runner)
         if clear_ledger_before_render:
             runner = _ClearingRunner(runner, self.ledger)
-        runtime_snapshot = StaticCapabilityRegistry().snapshot()
-        runtime_bindings = build_default_capability_bindings(
-            snapshot=runtime_snapshot, policy_snapshot=POLICY_SNAPSHOT
+        full_snapshot = StaticCapabilityRegistry().snapshot()
+        rendering_bindings = build_default_capability_bindings(
+            snapshot=full_snapshot, policy_snapshot=POLICY_SNAPSHOT
+        )
+        # provider_off 复现 W5 release 的权威划分：准入/执行为空，历史渲染仍完整。
+        runtime_snapshot = PROVIDER_OFF_SNAPSHOT if provider_off else full_snapshot
+        runtime_bindings = (
+            CapabilityBindingRegistry(
+                snapshot=PROVIDER_OFF_SNAPSHOT,
+                policy_snapshot=POLICY_SNAPSHOT,
+                bindings=(),
+            )
+            if provider_off
+            else rendering_bindings
         )
         self.runtime = XiaoweiRuntime(
             interpreter=RuleBasedIntentInterpreter(),
             resolver=DeterministicCapabilityResolver(),
             snapshot=runtime_snapshot,
             bindings=runtime_bindings,
+            rendering_bindings=rendering_bindings,
             task_store=self.store,
             plan_store=self.plan_store,
             ledger=self.ledger,

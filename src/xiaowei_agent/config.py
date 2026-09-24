@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Mapping
 from datetime import datetime
+from enum import StrEnum
 from hashlib import sha256
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -26,7 +27,7 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from xiaowei_agent.contracts.enums import WebMode
-from xiaowei_agent.contracts.identity import BoundedId
+from xiaowei_agent.contracts.identity import LOCAL_ADMIN_ENVIRONMENT_ID, BoundedId
 from xiaowei_agent.redaction import safe_error_details
 
 ENV_PREFIX: Final[str] = "XIAOWEI_"
@@ -218,6 +219,25 @@ def canonical_web_public_origin(value: str, *, mode: WebMode) -> str:
     return origin
 
 
+class RuntimeProfile(StrEnum):
+    """进程运行形态闭集（W5 §2.2）。
+
+    ``offline_recording`` 只用于开发、测试与 Compose smoke，保留三能力 recording；
+    ``release`` 是产品运行形态：不装配任何 fake/recording，普通对话只投影空准入快照。
+    """
+
+    OFFLINE_RECORDING = "offline_recording"
+    RELEASE = "release"
+
+
+class StarRocksAdapterMode(StrEnum):
+    """StarRocks adapter 形态闭集；``disabled`` 只属于 release。"""
+
+    RECORDING = "recording"
+    TEST_READONLY = "test_readonly"
+    DISABLED = "disabled"
+
+
 class ConfigError(RuntimeError):
     """配置缺失或非法。
 
@@ -257,7 +277,8 @@ class Settings(BaseModel):
     api_bind_host: IpLiteral = "127.0.0.1"
     api_bind_port: int = Field(default=8000, gt=0, le=65_535)
     smoke_step_barrier: bool = False
-    starrocks_adapter_mode: Literal["recording", "test_readonly"] = "recording"
+    runtime_profile: RuntimeProfile = RuntimeProfile.OFFLINE_RECORDING
+    starrocks_adapter_mode: StarRocksAdapterMode = StarRocksAdapterMode.RECORDING
     starrocks_host: StrictStr | None = None
     starrocks_port: int | None = Field(default=None, gt=0, le=65_535)
     starrocks_database: StrictStr | None = None
@@ -386,9 +407,14 @@ class Settings(BaseModel):
             "write_timeout_seconds": self.starrocks_write_timeout_seconds,
             "query_timeout_seconds": self.starrocks_query_timeout_seconds,
         }
-        if self.starrocks_adapter_mode == "recording":
+        if self.starrocks_adapter_mode in (
+            StarRocksAdapterMode.RECORDING,
+            StarRocksAdapterMode.DISABLED,
+        ):
             if any(value is not None for value in live_fields.values()):
-                raise ValueError("recording mode must not carry live StarRocks configuration")
+                raise ValueError(
+                    "recording and disabled modes must not carry live StarRocks configuration"
+                )
             return self
 
         if any(value is None for value in live_fields.values()):
@@ -424,6 +450,24 @@ class Settings(BaseModel):
             raise ValueError("StarRocks write timeout must not exceed read timeout")
         if self.starrocks_query_timeout_seconds > self.starrocks_read_timeout_seconds:
             raise ValueError("StarRocks server timeout must not exceed read timeout")
+        return self
+
+    @model_validator(mode="after")
+    def _runtime_profile_is_closed(self) -> "Settings":
+        """release 只有一种合法形态：固定 dev-local/dev、StarRocks disabled、无 smoke 屏障。
+
+        ``disabled`` 反过来也只属于 release——offline 形态关掉 StarRocks 只会让 smoke
+        与测试在"少一个能力"的非规范组合上变绿。
+        """
+        if self.runtime_profile is RuntimeProfile.RELEASE:
+            if self.starrocks_adapter_mode is not StarRocksAdapterMode.DISABLED:
+                raise ValueError("release profile requires the disabled StarRocks mode")
+            if self.environment_id != LOCAL_ADMIN_ENVIRONMENT_ID:
+                raise ValueError("release profile requires the fixed release scope")
+            if self.smoke_step_barrier:
+                raise ValueError("release profile must not install the smoke barrier")
+        elif self.starrocks_adapter_mode is StarRocksAdapterMode.DISABLED:
+            raise ValueError("disabled StarRocks mode requires the release profile")
         return self
 
     @model_validator(mode="before")
@@ -518,7 +562,7 @@ class Settings(BaseModel):
         sql_surface_ref: str,
     ) -> str:
         """计算真实 StarRocks profile 的稳定摘要，不读取 credential 文件内容。"""
-        if self.starrocks_adapter_mode != "test_readonly":
+        if self.starrocks_adapter_mode is not StarRocksAdapterMode.TEST_READONLY:
             raise ValueError("StarRocks config revision requires test_readonly mode")
         runtime_refs = {
             "driver_version": _strict_str(driver_version),
@@ -572,6 +616,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "api_bind_host": "XIAOWEI_API_BIND_HOST",
     "api_bind_port": "XIAOWEI_API_BIND_PORT",
     "smoke_step_barrier": "XIAOWEI_SMOKE_STEP_BARRIER",
+    "runtime_profile": "XIAOWEI_RUNTIME_PROFILE",
     "starrocks_adapter_mode": "XIAOWEI_STARROCKS_ADAPTER_MODE",
     "starrocks_host": "XIAOWEI_STARROCKS_HOST",
     "starrocks_port": "XIAOWEI_STARROCKS_PORT",

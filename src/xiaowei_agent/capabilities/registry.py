@@ -30,6 +30,20 @@ _SNAPSHOT: Final[CapabilitySnapshot] = CapabilitySnapshot(
     specs=(SLOW_QUERY_SPEC, PROMETHEUS_ALERT_SPEC, ASSET_INVENTORY_SPEC),
 )
 
+PROVIDER_OFF_SNAPSHOT_ID: Final[str] = "snapshot.w5.provider-off.empty.v1"
+"""W5 provider-off release 的准入快照标识；固定常量，理由同 :data:`SNAPSHOT_ID`。"""
+
+PROVIDER_OFF_SNAPSHOT: Final[CapabilitySnapshot] = CapabilitySnapshot(
+    snapshot_id=PROVIDER_OFF_SNAPSHOT_ID,
+    specs=(),
+)
+"""release 的**当前准入快照**：没有任何可执行能力。
+
+它只回答"此刻能做什么"（普通对话与 Resolver）；历史计划的渲染仍按精确版本查
+代码内完整注册表，两者不共用一份快照。真实能力进入 release 必须另立 RI 方案，
+而不是往这里加一条声明。
+"""
+
 
 class StaticCapabilityRegistry:
     """从代码内声明产出快照的 Registry。

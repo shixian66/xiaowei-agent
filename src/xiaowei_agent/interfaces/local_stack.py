@@ -19,8 +19,11 @@ from xiaowei_agent.application.integration_state import (
     SERVICE_WORKER,
 )
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
-from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
-from xiaowei_agent.config import Settings
+from xiaowei_agent.capabilities.registry import (
+    PROVIDER_OFF_SNAPSHOT,
+    StaticCapabilityRegistry,
+)
+from xiaowei_agent.config import RuntimeProfile, Settings, StarRocksAdapterMode
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     LoadReceipt,
@@ -48,11 +51,6 @@ from xiaowei_agent.persistence.database import (
     create_database_engine,
 )
 from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
-from xiaowei_agent.persistence.fake import (
-    InMemoryChannelStore,
-    InMemoryProviderStateStore,
-    InMemoryTaskStore,
-)
 from xiaowei_agent.persistence.local_admin import PostgresLocalAdminStore
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
 from xiaowei_agent.persistence.model_artifacts import (
@@ -154,6 +152,26 @@ class _PostResultBarrierGateway:
         self.entered.set()
         await asyncio.Event().wait()
         return result
+
+
+class _ReleaseClosedGateway:
+    """release worker 的 ToolGateway：不注册任何 adapter。
+
+    release 的准入快照为空，Resolver 已在更早阶段拒绝全部能力请求，正常路径永远
+    到不了这里。仍然装一个而不是传 ``None``：Runner 的执行依赖保持同一形状，
+    万一有调用越过前面的门，也只会以 adapter 缺失的装配故障停下，而不是落到某个
+    合成 adapter 上。
+    """
+
+    async def invoke(
+        self,
+        call: ToolCall,
+        *,
+        context: RequestContext,
+        admission: AdmissionCertificate,
+    ) -> ToolResult:
+        del call, context, admission
+        raise LookupError("release profile registers no tool adapter")
 
 
 @dataclass(frozen=True)
@@ -372,12 +390,20 @@ def _starrocks_gateway_registration(
         StarRocksReadonlyAdapter,
         StarRocksReadonlyAdapterConfig,
     )
-    from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
-    from xiaowei_agent.tools.starrocks_recording import default_recording
 
-    if settings.starrocks_adapter_mode == "recording":
+    if settings.starrocks_adapter_mode is StarRocksAdapterMode.DISABLED:
+        if live is not None:
+            raise ValueError("disabled mode cannot carry a live StarRocks assembly")
+        return {}, {}, None
+
+    if settings.starrocks_adapter_mode is StarRocksAdapterMode.RECORDING:
         if live is not None:
             raise ValueError("recording mode cannot carry a live StarRocks assembly")
+        # fake/recording 只在 offline 分支内 import：release 进程的 sys.modules 里
+        # 不得出现任何 fake 模块（tests/security/test_fake_isolation.py 承重）。
+        from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
+        from xiaowei_agent.tools.starrocks_recording import default_recording
+
         recording_adapter = StarRocksRecordingAdapter(
             default_recording(list_operation=OP_LIST, count_operation=OP_COUNT)
         )
@@ -484,6 +510,7 @@ def _starrocks_gateway_registration(
 def _build_capability_bindings(
     *, slow_query_live_policy: SlowQueryEvidencePolicy | None = None
 ) -> tuple[CapabilitySnapshot, CapabilityBindingRegistry]:
+    """代码内完整注册表：offline 的准入/执行权威，也是所有形态的历史渲染权威。"""
     snapshot = StaticCapabilityRegistry().snapshot()
     bindings = build_default_capability_bindings(
         snapshot=snapshot,
@@ -493,30 +520,55 @@ def _build_capability_bindings(
     return snapshot, bindings
 
 
-def _assemble_local_stack(
+def _provider_off_bindings() -> CapabilityBindingRegistry:
+    """release 的空准入/执行 binding；键集合精确等于空快照。"""
+    return CapabilityBindingRegistry(
+        snapshot=PROVIDER_OFF_SNAPSHOT,
+        policy_snapshot=ACTIVE_POLICY_SNAPSHOT,
+        bindings=(),
+    )
+
+
+def _conversation_snapshot(
+    settings: Settings, *, full_snapshot: CapabilitySnapshot
+) -> CapabilitySnapshot:
+    """按运行形态选当前准入快照；五个应用进程都经这一处，不各自判断。"""
+    if settings.runtime_profile is RuntimeProfile.RELEASE:
+        return PROVIDER_OFF_SNAPSHOT
+    return full_snapshot
+
+
+def _task_view_runtime(
     *,
     settings: Settings,
     task_store: TaskStore,
-    channel_store: ChannelStore,
     plan_store: PlanStore,
     ledger: EvidenceLedger,
-    model_artifacts: ModelArtifactStore,
     clarification_records: ClarificationRecordStore,
-    readiness: ReadinessProbe,
-    aclose: AsyncClose,
-    clock: Clock,
-    monotonic: MonotonicClock,
-    starrocks_live_assembly: StarRocksLiveAssembly | None,
-    credentials: ProviderCredentials,
-    provider_state: ProviderStateStore,
-    load_receipts: Mapping[ReceiptKey, LoadReceipt],
-) -> LocalStack:
-    from xiaowei_agent.application.runtime import XiaoweiRuntime
+    model_artifacts: ModelArtifactStore,
+) -> TaskViewRuntime:
+    """无执行权进程的投影 Runtime：当前准入快照与完整渲染注册表分开传入。"""
+    full_snapshot, rendering_bindings = _build_capability_bindings()
+    return TaskViewRuntime(
+        task_store=task_store,
+        plan_store=plan_store,
+        ledger=ledger,
+        conversation_snapshot=_conversation_snapshot(
+            settings, full_snapshot=full_snapshot
+        ),
+        rendering_bindings=rendering_bindings,
+        clarification_records=clarification_records,
+        model_artifacts=model_artifacts,
+        model_profile=ModelInvocationProfile(),
+    )
+
+
+def _offline_recording_adapters(*, clock: Clock) -> dict[str, ToolAdapter]:
+    """offline 形态的 Alertmanager/Prometheus/资产 recording；release 永不调用。"""
     from xiaowei_agent.capabilities.asset_inventory import (
         ASSET_INVENTORY_GATEWAY,
         OP_LOOKUP_ASSET,
     )
-    from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
     from xiaowei_agent.capabilities.prometheus_alert import (
         ALERTMANAGER_GATEWAY,
         OP_GET_ACTIVE_ALERTS,
@@ -524,18 +576,12 @@ def _assemble_local_stack(
         PROMETHEUS_GATEWAY,
         PROMQL_SURFACE,
     )
-    from xiaowei_agent.capabilities.resolver_impl import (
-        DeterministicCapabilityResolver,
-    )
-    from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
-    from xiaowei_agent.observability.durable_sink import DurableTraceSink
     from xiaowei_agent.planning.prometheus.compiler import compile_promql
     from xiaowei_agent.planning.prometheus.params import PrometheusAlertParams
     from xiaowei_agent.planning.prometheus.templates import (
         metric_name_for_template,
         template_for_alert,
     )
-    from xiaowei_agent.runners.deterministic import DeterministicStepRunner
     from xiaowei_agent.tools.alertmanager_fake import AlertmanagerRecordingAdapter
     from xiaowei_agent.tools.alertmanager_recording import (
         default_alertmanager_recording,
@@ -544,39 +590,12 @@ def _assemble_local_stack(
     from xiaowei_agent.tools.asset_inventory_recording import (
         default_asset_inventory_recording,
     )
-    from xiaowei_agent.tools.gateway import DeterministicToolGateway
     from xiaowei_agent.tools.prometheus_fake import (
         PrometheusRecordingAdapter,
         PrometheusRecordingKey,
     )
     from xiaowei_agent.tools.prometheus_recording import default_prometheus_recording
 
-    application_model_profile = ModelInvocationProfile()
-    model_adapter = None
-    model_profile = None
-    # 双层与关系：`.env` 装配了，且 JSON 里确实给出了可用的 Key，才构造 adapter。
-    # 缺凭据时不装配而不是构造一个注定失败的 adapter——断供是"这条链路不存在"，
-    # 不是"每次调用都报错"。
-    if settings.gemini_enabled and credentials.gemini_api_key is not None:
-        from xiaowei_agent.interfaces.gemini_model import (
-            GEMINI_MODEL_PROFILE,
-            GeminiModelAdapter,
-        )
-
-        model_profile = GEMINI_MODEL_PROFILE
-        model_adapter = GeminiModelAdapter(
-            profile=model_profile, api_key=credentials.gemini_api_key
-        )
-        application_model_profile = model_profile
-
-    starrocks_adapters, target_adapters, slow_query_live_policy = (
-        _starrocks_gateway_registration(
-            settings=settings,
-            live=starrocks_live_assembly,
-            clock=clock,
-            monotonic=monotonic,
-        )
-    )
     alertmanager_adapter = AlertmanagerRecordingAdapter(
         default_alertmanager_recording(operation=OP_GET_ACTIVE_ALERTS)
     )
@@ -615,26 +634,93 @@ def _assemble_local_stack(
                     window_end=params.window_end.isoformat(),
                 )
             )
-    prometheus_adapter = PrometheusRecordingAdapter(recording)
-    base_gateway = DeterministicToolGateway(
-        adapters={
-            **starrocks_adapters,
-            ALERTMANAGER_GATEWAY: alertmanager_adapter,
-            PROMETHEUS_GATEWAY: prometheus_adapter,
-            ASSET_INVENTORY_GATEWAY: asset_inventory_adapter,
-        },
-        target_adapters=target_adapters,
-        clock=clock,
+    return {
+        ALERTMANAGER_GATEWAY: alertmanager_adapter,
+        PROMETHEUS_GATEWAY: PrometheusRecordingAdapter(recording),
+        ASSET_INVENTORY_GATEWAY: asset_inventory_adapter,
+    }
+
+
+def _assemble_local_stack(
+    *,
+    settings: Settings,
+    task_store: TaskStore,
+    channel_store: ChannelStore,
+    plan_store: PlanStore,
+    ledger: EvidenceLedger,
+    model_artifacts: ModelArtifactStore,
+    clarification_records: ClarificationRecordStore,
+    readiness: ReadinessProbe,
+    aclose: AsyncClose,
+    clock: Clock,
+    monotonic: MonotonicClock,
+    starrocks_live_assembly: StarRocksLiveAssembly | None,
+    credentials: ProviderCredentials,
+    provider_state: ProviderStateStore,
+    load_receipts: Mapping[ReceiptKey, LoadReceipt],
+) -> LocalStack:
+    from xiaowei_agent.application.runtime import XiaoweiRuntime
+    from xiaowei_agent.capabilities.intent import RuleBasedIntentInterpreter
+    from xiaowei_agent.capabilities.resolver_impl import (
+        DeterministicCapabilityResolver,
     )
+    from xiaowei_agent.governance.approval import NeverGrantingApprovalGate
+    from xiaowei_agent.observability.durable_sink import DurableTraceSink
+    from xiaowei_agent.runners.deterministic import DeterministicStepRunner
+    from xiaowei_agent.tools.gateway import DeterministicToolGateway
+
+    application_model_profile = ModelInvocationProfile()
+    model_adapter = None
+    model_profile = None
+    # 双层与关系：`.env` 装配了，且 JSON 里确实给出了可用的 Key，才构造 adapter。
+    # 缺凭据时不装配而不是构造一个注定失败的 adapter——断供是"这条链路不存在"，
+    # 不是"每次调用都报错"。
+    if settings.gemini_enabled and credentials.gemini_api_key is not None:
+        from xiaowei_agent.interfaces.gemini_model import (
+            GEMINI_MODEL_PROFILE,
+            GeminiModelAdapter,
+        )
+
+        model_profile = GEMINI_MODEL_PROFILE
+        model_adapter = GeminiModelAdapter(
+            profile=model_profile, api_key=credentials.gemini_api_key
+        )
+        application_model_profile = model_profile
+
+    starrocks_adapters, target_adapters, slow_query_live_policy = (
+        _starrocks_gateway_registration(
+            settings=settings,
+            live=starrocks_live_assembly,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+    release = settings.runtime_profile is RuntimeProfile.RELEASE
+    base_gateway: ToolGateway
+    if release:
+        # release 不 import、不构造任何 recording：空准入快照下 Resolver 先拒绝，
+        # 这里也没有可落到的 adapter。
+        base_gateway = _ReleaseClosedGateway()
+    else:
+        base_gateway = DeterministicToolGateway(
+            adapters={
+                **starrocks_adapters,
+                **_offline_recording_adapters(clock=clock),
+            },
+            target_adapters=target_adapters,
+            clock=clock,
+        )
     gateway: ToolGateway = (
         _PostResultBarrierGateway(base_gateway)
         if settings.smoke_step_barrier
         else base_gateway
     )
     sink = DurableTraceSink(writer=task_store)
-    snapshot, bindings = _build_capability_bindings(
+    full_snapshot, rendering_bindings = _build_capability_bindings(
         slow_query_live_policy=slow_query_live_policy,
     )
+    snapshot = _conversation_snapshot(settings, full_snapshot=full_snapshot)
+    bindings = _provider_off_bindings() if release else rendering_bindings
     runner = DeterministicStepRunner(
         task_store=task_store,
         plan_store=plan_store,
@@ -653,6 +739,7 @@ def _assemble_local_stack(
         resolver=DeterministicCapabilityResolver(),
         snapshot=snapshot,
         bindings=bindings,
+        rendering_bindings=rendering_bindings,
         task_store=task_store,
         plan_store=plan_store,
         ledger=ledger,
@@ -702,6 +789,14 @@ def build_in_memory_local_stack(
 
     **不读任何配置域文件**：内存栈是离线证明用的，凭据只能显式注入。
     """
+    # 只有内存栈用到内存 fake store；放在函数内，让 release 进程 import 本模块时
+    # 不加载 ``persistence.fake``。
+    from xiaowei_agent.persistence.fake import (
+        InMemoryChannelStore,
+        InMemoryProviderStateStore,
+        InMemoryTaskStore,
+    )
+
     state = InMemoryPersistenceState()
     task_store = InMemoryTaskStore(
         clock=clock,
@@ -760,17 +855,14 @@ async def build_postgres_task_view_stack(
         clarification_records = PostgresClarificationRecordStore(
             engine=engine, clock=clock
         )
-        snapshot, bindings = _build_capability_bindings()
         return TaskViewStack(
-            runtime=TaskViewRuntime(
+            runtime=_task_view_runtime(
+                settings=settings,
                 task_store=task_store,
                 plan_store=plan_store,
                 ledger=ledger,
-                bindings=bindings,
-                snapshot=snapshot,
                 clarification_records=clarification_records,
                 model_artifacts=model_artifacts,
-                model_profile=ModelInvocationProfile(),
             ),
             task_store=task_store,
             plan_store=plan_store,
@@ -836,16 +928,13 @@ async def build_postgres_feishu_listener_stack(
         activation_store = PostgresActivationStore(engine=engine, clock=clock)
         directory_store = PostgresUserDirectoryStore(engine=engine, clock=clock)
         audit_store = PostgresAdminAuditStore(engine=engine, clock=clock)
-        snapshot, bindings = _build_capability_bindings()
-        runtime = TaskViewRuntime(
+        runtime = _task_view_runtime(
+            settings=settings,
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
-            bindings=bindings,
-            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
-            model_profile=ModelInvocationProfile(),
         )
         identity_directory = DirectoryFeishuIdentityDirectory(
             directory=directory_store,
@@ -946,16 +1035,13 @@ async def build_postgres_channel_worker_stack(
             engine=engine, clock=clock
         )
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
-        snapshot, bindings = _build_capability_bindings()
-        runtime = TaskViewRuntime(
+        runtime = _task_view_runtime(
+            settings=settings,
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
-            bindings=bindings,
-            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
-            model_profile=ModelInvocationProfile(),
         )
         messages = message_port
         if messages is None:
@@ -1066,16 +1152,13 @@ async def build_postgres_web_stack(
         channel_store = PostgresChannelStore(engine=engine, clock=clock)
         web_session_store = PostgresWebSessionStore(engine=engine, clock=clock)
         provider_state = PostgresProviderStateStore(engine=engine, clock=clock)
-        snapshot, bindings = _build_capability_bindings()
-        runtime = TaskViewRuntime(
+        runtime = _task_view_runtime(
+            settings=settings,
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
-            bindings=bindings,
-            snapshot=snapshot,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
-            model_profile=ModelInvocationProfile(),
         )
         task_access_service = TaskAccessService(
             runtime=runtime,

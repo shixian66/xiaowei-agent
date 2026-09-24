@@ -96,8 +96,8 @@ class TaskViewRuntime:
         task_store: TaskStore,
         plan_store: PlanStore,
         ledger: EvidenceLedger,
-        bindings: CapabilityBindingRegistry,
-        snapshot: CapabilitySnapshot,
+        conversation_snapshot: CapabilitySnapshot,
+        rendering_bindings: CapabilityBindingRegistry,
         clarification_records: ClarificationRecordStore | None = None,
         model_artifacts: ModelArtifactStore | None = None,
         model_profile: ModelInvocationProfile | None = None,
@@ -109,10 +109,15 @@ class TaskViewRuntime:
         self._tasks = task_store
         self._plans = plan_store
         self._ledger = ledger
-        self._bindings = bindings
-        # 必填而不是可选：I2-B 的普通对话回答**就是**这份快照。做成可选就会多出一条
-        # "装配漏了快照 → 对话任务投影不出内容"的静默路径。
-        self._snapshot = snapshot
+        # 两份权威刻意分开（W5 §2.2）：``conversation_snapshot`` 是**当前准入快照**，
+        # 只回答"此刻能做什么"；``rendering_bindings`` 是代码内完整渲染注册表，只按
+        # 已持久化计划的精确 capability/version 查投影器。用完整渲染注册表回答当前
+        # 能力，会让 provider-off release 仍声称三个 recording 能力可用。
+        #
+        # 快照必填而不是可选：I2-B 的普通对话回答**就是**这份快照。做成可选就会多出
+        # 一条"装配漏了快照 → 对话任务投影不出内容"的静默路径。
+        self._conversation_snapshot = conversation_snapshot
+        self._rendering_bindings = rendering_bindings
         self._clarification_records = clarification_records
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
@@ -166,7 +171,7 @@ class TaskViewRuntime:
         except PlanNotFoundError:
             return None
         try:
-            binding = self._bindings.runtime_for_plan(plan=stored.plan)
+            binding = self._rendering_bindings.runtime_for_plan(plan=stored.plan)
             return project_execution_disclosure(
                 plan=stored.plan,
                 target=stored.target,
@@ -220,9 +225,9 @@ class TaskViewRuntime:
             ):
                 # 不读 submission：回答只由能力快照决定，读一份不参与投影的用户文本
                 # 只会凭空多出一个失败面，并让"回答是否受用户文本影响"变得可疑。
-                return render_conversation_response(snapshot=self._snapshot)
+                return render_conversation_response(snapshot=self._conversation_snapshot)
             raise
-        binding = self._bindings.runtime_for_plan(plan=stored.plan)
+        binding = self._rendering_bindings.runtime_for_plan(plan=stored.plan)
         verdict = assess_evidence(binding=binding, evidences=evidences)
         advisory = await self._visible_advisory(
             record=record,

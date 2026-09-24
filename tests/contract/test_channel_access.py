@@ -72,8 +72,8 @@ def _service(store: Any, channel_store: Any, memory_state: Any, membership: Any)
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     return TaskAccessService(
         runtime=runtime,
@@ -514,8 +514,8 @@ async def test_detail_reuses_the_authorized_record_for_projection(
         task_store=counting,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
     service = TaskAccessService(
         runtime=runtime,
@@ -541,8 +541,8 @@ async def test_detail_retries_when_status_changes_during_runtime_projection(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
 
     class AdvanceOnceRuntime:
@@ -594,8 +594,8 @@ async def test_detail_fails_closed_when_no_consistent_snapshot_can_be_formed(
         task_store=store,
         plan_store=InMemoryPlanStore(state=memory_state),
         ledger=InMemoryEvidenceLedger(state=memory_state),
-        bindings=object(),
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
     )
 
     class ContinuouslyChangingReads:
