@@ -113,13 +113,6 @@ async def main():
         root = Path(directory)
         postgres = root / "postgres-credential"
         postgres.write_text("local-" + "fixture", encoding="utf-8")
-        identity = root / "identities.json"
-        identity.write_text(json.dumps({
-            "version": 1,
-            "tenant_id": "dev-local",
-            "environment_id": "dev",
-            "entries": [],
-        }), encoding="utf-8")
         stack = await build_postgres_feishu_listener_stack(
             settings=Settings(
                 environment_id="dev",
@@ -127,7 +120,6 @@ async def main():
                 feishu_listener_enabled=True,
                 feishu_tenant_key="tenant",
                 feishu_bot_open_id="bot",
-                feishu_identity_file=str(identity),
             ),
             transport=RecordingFeishuInboundTransport(),
             credentials=ProviderCredentials(

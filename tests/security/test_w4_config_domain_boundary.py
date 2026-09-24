@@ -168,7 +168,6 @@ def _all_enabled() -> Settings:
         channel_worker_enabled=True,
         feishu_tenant_key="tenant-key",
         feishu_bot_open_id="ou_bot",
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
 
@@ -224,7 +223,6 @@ def test_web_signs_feishu_only_when_oauth_is_enabled_and_never_reads_ai(
         web_app_enabled=True,
         web_public_origin="https://xiaowei.example.test",
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
     )
     _, receipts = provider_consumption.load_provider_credentials(
         settings=oauth, service_name=SERVICE_WEB, ai_path=ai_path, feishu_path=feishu_path

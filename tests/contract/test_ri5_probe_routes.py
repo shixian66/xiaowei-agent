@@ -164,7 +164,6 @@ def _build(
     }
     if with_feishu_auth:
         values["feishu_oauth_enabled"] = True
-        values["feishu_identity_file"] = "/run/config/feishu-identities.json"
     values.update(settings_updates)
     settings = Settings(**values)  # type: ignore[arg-type]
     auth = (

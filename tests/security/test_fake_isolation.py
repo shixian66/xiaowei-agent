@@ -187,8 +187,6 @@ _RELEASE_BUILD_SCRIPT = r'''
 import asyncio
 import json
 import sys
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from xiaowei_agent.config import Settings
 from xiaowei_agent.interfaces import api, feishu_listener, feishu_worker, web_app, worker
@@ -268,46 +266,37 @@ def _view_snapshot(runtime):
 
 async def main():
     snapshots = {}
-    with TemporaryDirectory() as directory:
-        identity = Path(directory) / "identities.json"
-        identity.write_text(
-            json.dumps(
-                {"version": 1, "tenant_id": "dev-local", "environment_id": "dev", "entries": []}
-            ),
-            encoding="utf-8",
-        )
-        credentials = ProviderCredentials(
-            feishu_app_id="cli_release", feishu_app_secret="release-" + "fixture"
-        )
-        stack = await local_stack.build_postgres_task_view_stack(settings=_settings())
-        snapshots["internal-api"] = _view_snapshot(stack.runtime)
-        stack = await local_stack.build_postgres_web_stack(
-            settings=_settings(web_app_enabled=True, web_public_origin="https://ops.example.test")
-        )
-        snapshots["web-app"] = _view_snapshot(stack.runtime)
-        stack = await local_stack.build_postgres_feishu_listener_stack(
-            settings=_settings(
-                feishu_listener_enabled=True,
-                feishu_tenant_key="tenant-test",
-                feishu_bot_open_id="bot-open-id",
-                feishu_identity_file=str(identity),
-            ),
-            transport=_Transport(),
-            message_port=_Messages(),
-            credentials=credentials,
-        )
-        snapshots["feishu-listener"] = _view_snapshot(stack.runtime)
-        stack = await local_stack.build_postgres_channel_worker_stack(
-            settings=_settings(
-                channel_worker_enabled=True, web_public_origin="https://ops.example.test"
-            ),
-            message_port=_Messages(),
-        )
-        snapshots["channel-worker"] = _view_snapshot(stack.runtime)
-        stack = await local_stack.build_postgres_local_stack(
-            settings=_settings(), credentials=ProviderCredentials()
-        )
-        snapshots["worker"] = _view_snapshot(stack.runtime._task_views)
+    credentials = ProviderCredentials(
+        feishu_app_id="cli_release", feishu_app_secret="release-" + "fixture"
+    )
+    stack = await local_stack.build_postgres_task_view_stack(settings=_settings())
+    snapshots["internal-api"] = _view_snapshot(stack.runtime)
+    stack = await local_stack.build_postgres_web_stack(
+        settings=_settings(web_app_enabled=True, web_public_origin="https://ops.example.test")
+    )
+    snapshots["web-app"] = _view_snapshot(stack.runtime)
+    stack = await local_stack.build_postgres_feishu_listener_stack(
+        settings=_settings(
+            feishu_listener_enabled=True,
+            feishu_tenant_key="tenant-test",
+            feishu_bot_open_id="bot-open-id",
+        ),
+        transport=_Transport(),
+        message_port=_Messages(),
+        credentials=credentials,
+    )
+    snapshots["feishu-listener"] = _view_snapshot(stack.runtime)
+    stack = await local_stack.build_postgres_channel_worker_stack(
+        settings=_settings(
+            channel_worker_enabled=True, web_public_origin="https://ops.example.test"
+        ),
+        message_port=_Messages(),
+    )
+    snapshots["channel-worker"] = _view_snapshot(stack.runtime)
+    stack = await local_stack.build_postgres_local_stack(
+        settings=_settings(), credentials=ProviderCredentials()
+    )
+    snapshots["worker"] = _view_snapshot(stack.runtime._task_views)
     loaded = sorted(
         name.removeprefix("xiaowei_agent.")
         for name in sys.modules
@@ -346,6 +335,8 @@ def test_release_builders_load_no_fake_module_and_answer_from_the_empty_snapshot
     result = _build_five_processes("release")
 
     assert set(result["loaded"]) & set(_FAKE_MODULES) == set()  # type: ignore[arg-type]
+    # 旧静态身份文档只属于一次性迁移命令；五个长期进程都不加载它。
+    assert "interfaces.legacy_identity_migration" not in result["loaded"]  # type: ignore[operator]
     assert result["snapshots"] == {
         name: PROVIDER_OFF_SNAPSHOT_ID
         for name in (

@@ -1,10 +1,12 @@
 """Web OAuth 边界不泄漏外部错误，也不接受可漂移的 state/origin。"""
 
+import ast
 import asyncio
 import logging
 import traceback
 from collections.abc import Iterator
 from dataclasses import fields
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -292,7 +294,6 @@ async def test_oauth_start_capacity_returns_503_without_cookie_body_or_log_leaka
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
@@ -586,7 +587,6 @@ async def test_unknown_application_exception_is_closed_inside_the_request_trace(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(
@@ -735,7 +735,6 @@ async def test_logging_failure_cannot_replace_http_result(
             environment_id="dev",
             web_app_enabled=True,
             feishu_oauth_enabled=True,
-            feishu_identity_file="/run/config/feishu-identities.json",
             web_public_origin="https://ops.example.test",
         ),
         task_access=TaskAccess(),
@@ -790,7 +789,6 @@ async def test_logging_failure_does_not_replace_request_cancellation(
             environment_id="dev",
             web_app_enabled=True,
             feishu_oauth_enabled=True,
-            feishu_identity_file="/run/config/feishu-identities.json",
             web_public_origin="https://ops.example.test",
         ),
         task_access=CancelledTaskAccess(),
@@ -898,7 +896,6 @@ async def test_oversized_logout_is_rejected_before_auth_state_changes(
         api_request_body_limit_bytes=32,
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
@@ -952,7 +949,6 @@ async def test_non_ascii_state_change_headers_are_forbidden_without_revocation(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
@@ -999,7 +995,6 @@ async def test_rejected_web_request_log_uses_only_closed_fields(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
@@ -1060,7 +1055,6 @@ async def test_provider_failure_log_omits_provider_body_and_opaque_identity(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin="https://ops.example.test",
     )
     app = _auth_app(service=service, settings=settings, clock=clock)
@@ -1199,20 +1193,12 @@ async def main():
         root = Path(directory)
         postgres = root / "postgres-credential"
         postgres.write_text("local-" + "fixture", encoding="utf-8")
-        identity = root / "identities.json"
-        identity.write_text(json.dumps({
-            "version": 1,
-            "tenant_id": "dev-local",
-            "environment_id": "dev",
-            "entries": [],
-        }), encoding="utf-8")
         stack = await build_postgres_web_stack(
             settings=Settings(
                 environment_id="dev",
                 postgres_password_file=str(postgres),
                 web_app_enabled=True,
                 feishu_oauth_enabled=True,
-                feishu_identity_file=str(identity),
                 web_public_origin="https://ops.example.test",
             ),
             oauth=OAuth(),
@@ -1251,3 +1237,67 @@ assert "lark_oapi" not in sys.modules
     assert loaded == (
         set(_TASK_VIEW_PROCESS_ALLOWED_MODULES) - internal_api_only
     ) | web_only
+
+
+# --- W5：旧静态身份文档只属于一次性迁移命令 ------------------------------------
+
+_LEGACY_IDENTITY_READERS = frozenset(
+    {"read_legacy_identity_document", "load_feishu_identity_directory"}
+)
+_LEGACY_IDENTITY_COMMAND = "interfaces/legacy_identity_migration.py"
+
+
+def _legacy_identity_references(path: Path) -> set[str]:
+    """AST：本文件 import 或调用了哪些旧文档读取入口 / 迁移命令模块。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "xiaowei_agent.interfaces.legacy_identity_migration":
+                hits.add(node.module)
+            hits.update(
+                alias.name
+                for alias in node.names
+                if alias.name in _LEGACY_IDENTITY_READERS
+                or alias.name == "legacy_identity_migration"
+            )
+        elif isinstance(node, ast.Import):
+            hits.update(
+                alias.name
+                for alias in node.names
+                if alias.name.endswith("legacy_identity_migration")
+            )
+        elif isinstance(node, ast.Name | ast.Attribute):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name in _LEGACY_IDENTITY_READERS:
+                hits.add(name)
+    return hits
+
+
+def test_only_the_one_shot_command_reads_the_legacy_identity_document() -> None:
+    src = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
+    definer = src / "interfaces" / "feishu_identity.py"
+    offenders = {
+        path.relative_to(src).as_posix(): hits
+        for path in src.rglob("*.py")
+        if path != definer
+        and (hits := _legacy_identity_references(path))
+        and path.relative_to(src).as_posix() != _LEGACY_IDENTITY_COMMAND
+    }
+    assert offenders == {}
+
+
+def test_legacy_identity_guard_catches_a_web_assembly_that_reads_the_file(
+    tmp_path: Path,
+) -> None:
+    """守卫自证：把旧文档读回 Web 装配的写法必须被抓到。"""
+    probe = tmp_path / "web_app.py"
+    probe.write_text(
+        "from xiaowei_agent.interfaces.feishu_identity import (\n"
+        "    load_feishu_identity_directory,\n"
+        ")\n"
+        "directory = load_feishu_identity_directory(path='/run/x', tenant_id='t',"
+        " environment_id='e')\n",
+        encoding="utf-8",
+    )
+    assert _legacy_identity_references(probe) == {"load_feishu_identity_directory"}

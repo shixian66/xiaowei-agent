@@ -9,7 +9,6 @@ _COMPLETE_PROFILE: dict[str, object] = {
     "feishu_listener_enabled": True,
     "feishu_tenant_key": "tenant-test",
     "feishu_bot_open_id": "bot-open-id",
-    "feishu_identity_file": "/run/config/feishu-identities.json",
 }
 
 _WORKER_PROFILE: dict[str, object] = {
@@ -26,7 +25,7 @@ def test_feishu_listener_is_disabled_without_any_live_profile_by_default() -> No
     assert settings.feishu_oauth_enabled is False
     assert settings.feishu_tenant_key is None
     assert settings.feishu_bot_open_id is None
-    assert settings.feishu_identity_file is None
+    assert "feishu_identity_file" not in Settings.model_fields
     assert settings.web_public_origin is None
     assert settings.feishu_api_timeout_seconds == 5.0
     assert settings.projection_claim_ttl_seconds == 15
@@ -66,12 +65,11 @@ def test_complete_listener_profile_loads_from_environment() -> None:
             "XIAOWEI_FEISHU_LISTENER_ENABLED": "true",
             "XIAOWEI_FEISHU_TENANT_KEY": "tenant-test",
             "XIAOWEI_FEISHU_BOT_OPEN_ID": "bot-open-id",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
         }
     )
 
     assert settings.feishu_listener_enabled is True
-    assert settings.feishu_identity_file == "/run/config/feishu-identities.json"
+    assert "feishu_identity_file" not in Settings.model_fields
     # 凭据不再是 Settings 的一部分——RI5 起唯一真源是 `integrations.json`。
     assert not any(name.startswith("feishu_app_") for name in Settings.model_fields)
 
@@ -94,7 +92,7 @@ def test_worker_only_profile_does_not_require_listener_identity_configuration() 
     assert settings.feishu_listener_enabled is False
     assert settings.feishu_tenant_key is None
     assert settings.feishu_bot_open_id is None
-    assert settings.feishu_identity_file is None
+    assert "feishu_identity_file" not in Settings.model_fields
     assert settings.web_public_origin == "https://ops.example.test"
 
 
@@ -242,7 +240,6 @@ def test_blank_optional_feishu_values_in_example_style_are_treated_as_absent() -
             "XIAOWEI_FEISHU_LISTENER_ENABLED": "false",
             "XIAOWEI_FEISHU_TENANT_KEY": "",
             "XIAOWEI_FEISHU_BOT_OPEN_ID": "",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": "",
         }
     )
 
@@ -250,10 +247,20 @@ def test_blank_optional_feishu_values_in_example_style_are_treated_as_absent() -
     assert settings.feishu_tenant_key is None
 
 
-@pytest.mark.parametrize("field", ["feishu_identity_file"])
-def test_feishu_file_references_must_be_absolute(field: str) -> None:
-    with pytest.raises(ValidationError, match="absolute path"):
-        Settings(environment_id="dev", **(_COMPLETE_PROFILE | {field: "relative/file"}))
+def test_legacy_identity_file_is_not_a_long_running_setting() -> None:
+    """W5：旧静态身份文件只是一次性迁移命令的固定挂载输入。"""
+    with pytest.raises(ValidationError):
+        Settings(
+            environment_id="dev",
+            **(_COMPLETE_PROFILE | {"feishu_identity_file": "/run/config/x.json"}),
+        )
+    with pytest.raises(ConfigError):
+        load_settings(
+            {
+                "XIAOWEI_ENVIRONMENT_ID": "dev",
+                "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
+            }
+        )
 
 
 def test_invalid_feishu_profile_does_not_expose_values() -> None:

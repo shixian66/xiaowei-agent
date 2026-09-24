@@ -19,7 +19,6 @@ from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 from ipaddress import ip_address, ip_network
-from pathlib import Path
 from socket import inet_aton
 from typing import Annotated, Final, Literal
 from urllib.parse import urlsplit
@@ -65,15 +64,6 @@ def _ip_literal(value: str) -> str:
 
 
 IpLiteral = Annotated[StrictStr, AfterValidator(_ip_literal)]
-
-
-def _absolute_path(value: str) -> str:
-    if not Path(value).is_absolute():
-        raise ValueError("must be an absolute path")
-    return value
-
-
-AbsolutePath = Annotated[StrictStr, AfterValidator(_absolute_path)]
 
 
 def _canonical_ip_literal(value: str) -> str | None:
@@ -311,7 +301,6 @@ class Settings(BaseModel):
     feishu_oauth_enabled: bool = False
     feishu_tenant_key: StrictStr | None = None
     feishu_bot_open_id: StrictStr | None = None
-    feishu_identity_file: AbsolutePath | None = None
     web_mode: WebMode = WebMode.HTTPS
     web_public_origin: StrictStr | None = None
     gemini_real_test_enabled: bool = False
@@ -494,11 +483,12 @@ class Settings(BaseModel):
     def _feishu_profiles_are_closed(self) -> "Settings":
         # Provider 凭据只有各配置域的 `config.json` 一个真源；`.env` 侧只剩
         # "这个进程装配了哪条链路"。凭据是否齐备由装配点在读 JSON 时判断。
+        # 身份只查 PostgreSQL 目录：旧静态身份文件自 W5 起只是一次性迁移命令的
+        # 固定挂载输入，不再是任何长期进程的配置。
         shared: tuple[object, ...] = ()
         listener_only = (self.feishu_tenant_key, self.feishu_bot_open_id)
-        identity = (self.feishu_identity_file,)
         web_origin = (self.web_public_origin,)
-        live_profile = shared + listener_only + identity + web_origin
+        live_profile = shared + listener_only + web_origin
         if not (
             self.feishu_listener_enabled
             or self.channel_worker_enabled
@@ -512,7 +502,7 @@ class Settings(BaseModel):
                 )
             return self
         if self.feishu_listener_enabled:
-            if any(value is None for value in shared + listener_only + identity):
+            if any(value is None for value in shared + listener_only):
                 raise ValueError(
                     "enabled listener requires the complete Feishu listener profile"
                 )
@@ -531,16 +521,10 @@ class Settings(BaseModel):
             if any(value is None for value in web_origin):
                 raise ValueError("enabled Web app requires a public origin")
         if self.feishu_oauth_enabled:
-            if any(value is None for value in shared + identity + web_origin):
+            if any(value is None for value in shared + web_origin):
                 raise ValueError(
                     "enabled Feishu OAuth requires the complete Web authentication profile"
                 )
-        if not self.feishu_listener_enabled and not self.web_app_enabled and any(
-            value is not None for value in identity
-        ):
-            raise ValueError(
-                "disabled Web app and Feishu listener must not carry identity configuration"
-            )
         if not self.channel_worker_enabled and not self.web_app_enabled and any(
             value is not None for value in web_origin
         ):
@@ -648,7 +632,6 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "feishu_oauth_enabled": "XIAOWEI_FEISHU_OAUTH_ENABLED",
     "feishu_tenant_key": "XIAOWEI_FEISHU_TENANT_KEY",
     "feishu_bot_open_id": "XIAOWEI_FEISHU_BOT_OPEN_ID",
-    "feishu_identity_file": "XIAOWEI_FEISHU_IDENTITY_FILE",
     "web_mode": "XIAOWEI_WEB_MODE",
     "web_public_origin": "XIAOWEI_WEB_PUBLIC_ORIGIN",
     "gemini_real_test_enabled": "XIAOWEI_GEMINI_REAL_TEST_ENABLED",

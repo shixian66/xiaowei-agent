@@ -108,28 +108,11 @@ class _Membership:
         return True
 
 
-def _identity_file(tmp_path: Path) -> Path:
-    path = tmp_path / "identities.json"
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "tenant_id": "dev-local",
-                "environment_id": "dev",
-                "entries": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
 def _settings(tmp_path: Path, **updates: object) -> Settings:
     values: dict[str, object] = {
         "environment_id": "dev",
         "web_app_enabled": True,
         "feishu_oauth_enabled": True,
-        "feishu_identity_file": str(_identity_file(tmp_path)),
         "web_public_origin": "https://ops.example.test",
     }
     values.update(updates)
@@ -221,9 +204,7 @@ async def test_static_identity_file_is_not_a_web_runtime_dependency(
     tmp_path: Path, engine: _Engine
 ) -> None:
     stack = await build_postgres_web_stack(
-        settings=_settings(
-            tmp_path, feishu_identity_file=str(tmp_path / "missing.json")
-        ),
+        settings=_settings(tmp_path),
         oauth=_OAuth(),
         membership=_Membership(),
     )

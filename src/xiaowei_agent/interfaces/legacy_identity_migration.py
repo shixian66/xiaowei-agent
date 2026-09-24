@@ -11,26 +11,47 @@ labels 映射成角色、把剩余条目装成**一个** :class:`MigrateLegacyId
 据必须自己 fail-closed：被剔除的条目不会进入批次，后面的唯一约束根本看不见它。
 
 旧静态文件在迁移成功后**保留只读**一个发布周期：本模块不删除它，也不回头写它。
+
+W5 起旧文档**只**经本模块的一次性命令读取（``python -m
+xiaowei_agent.interfaces.legacy_identity_migration``）：路径是固定挂载点，不进长期
+Settings，命令不接受任何参数；输出只有闭集状态与三个计数。
 """
 
+import asyncio
 import contextlib
+import datetime as _dt
 import hashlib
-from collections.abc import Iterator, Mapping
-from typing import Final
+import json
+import os
+import sys
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Final, TextIO
 
 from pydantic import StrictInt, StrictStr, ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xiaowei_agent.config import ConfigError, Settings, load_settings
 from xiaowei_agent.contracts.admin_audit import AdminOperationContext
 from xiaowei_agent.contracts.base import Contract
 from xiaowei_agent.contracts.enums import IdentitySource, ProductRole
 from xiaowei_agent.contracts.identity import (
+    LOCAL_ADMIN_ACTOR,
+    LOCAL_ADMIN_ENVIRONMENT_ID,
+    LOCAL_ADMIN_TENANT_ID,
+    LOCAL_ADMIN_USER_ID,
     LegacyIdentityMigrationEntry,
     MigrateLegacyIdentitiesCommand,
 )
 from xiaowei_agent.interfaces.feishu_identity import (
+    FeishuIdentityConfigurationError,
     LegacyIdentityEntry,
     read_legacy_identity_document,
 )
+from xiaowei_agent.persistence.database import (
+    DatabaseConfigurationError,
+    create_database_engine,
+)
+from xiaowei_agent.persistence.errors import PersistenceUnavailableError
 from xiaowei_agent.persistence.identity import (
     AdminAuditUnwritableError,
     UserDirectoryConflictError,
@@ -284,9 +305,137 @@ async def migrate_static_identities(
     )
 
 
+# --- 一次性命令 --------------------------------------------------------------
+
+LEGACY_IDENTITY_DOCUMENT_PATH: Final[str] = "/run/xiaowei-legacy/feishu-identities.json"
+"""一次性迁移容器里旧文档的唯一只读挂载点；长期服务不挂载它。"""
+
+_COMMAND: Final[str] = "legacy-identity-migration"
+
+Clock = Callable[[], _dt.datetime]
+EngineFactory = Callable[[Settings], AsyncEngine]
+DirectoryFactory = Callable[[AsyncEngine, Clock], UserDirectoryStore]
+
+
+def _utc_now() -> _dt.datetime:
+    return _dt.datetime.now(tz=_dt.UTC)
+
+
+def _postgres_directory(engine: AsyncEngine, clock: Clock) -> UserDirectoryStore:
+    from xiaowei_agent.persistence.postgres import PostgresUserDirectoryStore
+
+    return PostgresUserDirectoryStore(engine=engine, clock=clock)
+
+
+def _document_absent(path: str) -> bool:
+    """只有"路径上什么都没有"才算不适用；符号链接、目录等交给读取器 fail-closed。"""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+async def _migrate_with_engine(
+    *,
+    settings: Settings,
+    document_path: str,
+    engine_factory: EngineFactory,
+    directory_factory: DirectoryFactory,
+    clock: Clock,
+) -> LegacyMigrationReport:
+    engine = engine_factory(settings)
+    try:
+        return await migrate_static_identities(
+            document_path=document_path,
+            directory=directory_factory(engine, clock),
+            tenant_id=LOCAL_ADMIN_TENANT_ID,
+            environment_id=LOCAL_ADMIN_ENVIRONMENT_ID,
+            actor_user_id=LOCAL_ADMIN_USER_ID,
+            actor=LOCAL_ADMIN_ACTOR,
+        )
+    finally:
+        await engine.dispose()
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+    engine_factory: EngineFactory = create_database_engine,
+    directory_factory: DirectoryFactory = _postgres_directory,
+    clock: Clock = _utc_now,
+    document_path: str = LEGACY_IDENTITY_DOCUMENT_PATH,
+) -> int:
+    """执行一次旧身份迁移；0 成功或不适用，1 运行失败，2 调用或配置错误。
+
+    报告只投影成 ``created_count / skipped_count / deferred_count``：
+    :attr:`LegacyMigrationReport.deferred_labels` 带原始 actor，不能进入部署证据。
+    ``document_path`` 只供测试注入；命令行不接受任何参数。
+    """
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    if arguments:
+        stderr.write(f"{_COMMAND}: usage_invalid\n")
+        return 2
+    try:
+        settings = load_settings()
+    except ConfigError:
+        stderr.write(f"{_COMMAND}: configuration_error\n")
+        return 2
+    if _document_absent(document_path):
+        stdout.write(json.dumps({"status": "not_applicable"}) + "\n")
+        return 0
+    code: str | None = None
+    report: LegacyMigrationReport | None = None
+    try:
+        report = asyncio.run(
+            _migrate_with_engine(
+                settings=settings,
+                document_path=document_path,
+                engine_factory=engine_factory,
+                directory_factory=directory_factory,
+                clock=clock,
+            )
+        )
+    except DatabaseConfigurationError:
+        code = "configuration_error"
+    except FeishuIdentityConfigurationError:
+        code = "document_invalid"
+    except LegacyMigrationConflictError:
+        code = "migration_conflict"
+    except PersistenceUnavailableError:
+        code = "database_unavailable"
+    except Exception:
+        code = "migration_failed"
+    if code is not None or report is None:
+        stderr.write(f"{_COMMAND}: {code or 'migration_failed'}\n")
+        return 2 if code == "configuration_error" else 1
+    stdout.write(
+        json.dumps(
+            {
+                "status": "migrated",
+                "created_count": report.created,
+                "skipped_count": report.skipped,
+                "deferred_count": len(report.deferred_labels),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - 由运维一次性调用
+    sys.exit(main())
+
+
 __all__ = [
+    "LEGACY_IDENTITY_DOCUMENT_PATH",
     "LegacyMigrationConflictError",
     "LegacyMigrationReport",
     "legacy_user_id",
+    "main",
     "migrate_static_identities",
 ]

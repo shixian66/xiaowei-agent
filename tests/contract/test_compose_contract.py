@@ -30,7 +30,6 @@ _NON_CHANNEL_APP_SERVICES = _APP_SERVICES - _CHANNEL_SERVICES
 _FEISHU_LIVE_ENVIRONMENT = {
     "XIAOWEI_FEISHU_TENANT_KEY",
     "XIAOWEI_FEISHU_BOT_OPEN_ID",
-    "XIAOWEI_FEISHU_IDENTITY_FILE",
     "XIAOWEI_WEB_PUBLIC_ORIGIN",
 }
 _CHANNEL_ONLY_ENVIRONMENT = _FEISHU_LIVE_ENVIRONMENT | {
@@ -92,7 +91,6 @@ _COMPOSE_FILES = frozenset(
     {
         "docker-compose.yml",
         "docker-compose.barrier.yml",
-        "docker-compose.feishu.yml",
         "docker-compose.lan.yml",
         "docker-compose.m6b-test.yml",
         "docker-compose.model.yml",
@@ -325,36 +323,22 @@ def test_secrets_are_file_references_and_never_environment_values() -> None:
     )
 
 
-def test_feishu_identity_bind_is_read_only_and_only_in_the_feishu_override() -> None:
-    """身份目录是**可选插件的输入**，不属于基础文件。
+def test_no_long_running_service_mounts_or_names_the_legacy_identity_file() -> None:
+    """W5：旧静态身份文件只是一次性迁移命令的输入。
 
-    硬挂在基础文件上时，干净部署没有 ``./.secrets/feishu-identities.json`` 就会让
-    容器直接起不来（``create_host_path`` 是 false），runbook 第 5 步必然失败。
+    身份只查 PostgreSQL 目录；任何 Compose 文件里的任何服务都不得挂载旧文档，也不得
+    带 ``XIAOWEI_FEISHU_IDENTITY_FILE``。一次性迁移由 runbook 用 ``compose run -v ...:ro``
+    临时挂载，命令退出后没有容器继续持有它。
     """
-    compose = _yaml("docker-compose.yml")
-    services = compose["services"]
-    assert "configs" not in compose
-    expected = {
-        "type": "bind",
-        "source": "./.secrets/feishu-identities.json",
-        "target": "/run/config/feishu-identities.json",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
-    for name in _APP_SERVICES | {"postgres"}:
-        assert expected not in services[name].get("volumes", [])
-
-    override = _yaml("docker-compose.feishu.yml")
-    assert set(override) == {"services"}
-    assert set(override["services"]) == {"feishu-listener", "web-app"}
-    assert override["services"]["feishu-listener"]["volumes"] == [
-        _config_mount("feishu", read_only=True),
-        expected,
-    ]
-    assert override["services"]["web-app"]["volumes"] == [
-        *(_config_mount(domain, read_only=False) for domain in ("ai", "feishu", "resources")),
-        expected,
-    ]
+    assert not (_ROOT / "docker-compose.feishu.yml").exists()
+    for name in sorted(_COMPOSE_FILES):
+        text = (_ROOT / name).read_text(encoding="utf-8")
+        assert "feishu-identities.json" not in text, name
+        assert "XIAOWEI_FEISHU_IDENTITY_FILE" not in text, name
+        for service in (_yaml(name).get("services") or {}).values():
+            for volume in service.get("volumes", []):
+                target = volume.get("target") if isinstance(volume, dict) else volume
+                assert "identit" not in str(target), (name, target)
     assert not (_ROOT / ".secrets/feishu-identities.json").exists()
 
 
@@ -483,7 +467,6 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
     assert web["environment"] == {
         "XIAOWEI_WEB_APP_ENABLED": "true",
         "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-        "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
         "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://sso.example.invalid",
     }
     provider_origin = urlsplit(interfaces_module.FEISHU_PROVIDER_ORIGIN)

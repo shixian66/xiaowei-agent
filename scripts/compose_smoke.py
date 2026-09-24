@@ -422,20 +422,13 @@ def _config_mount(source: Path, *, domain: str, read_only: bool) -> dict[str, ob
 
 
 def _input_override_document(
-    *, postgres: Path, config_directories: dict[str, Path], identity: Path
+    *, postgres: Path, config_directories: dict[str, Path]
 ) -> str:
     """本次 smoke 的输入 override。
 
     Provider 凭据不是 Docker secret：它们躺在合成的 AI / 飞书域文件里，和真实部署走
     同一条读取路径。每个服务只拿到矩阵里属于它的那几个域。
     """
-    identity_mount = {
-        "type": "bind",
-        "source": str(identity),
-        "target": "/run/config/feishu-identities.json",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
     services: dict[str, object] = {}
     for service, domains in _CONFIG_MOUNT_MATRIX.items():
         volumes: list[dict[str, object]] = [
@@ -444,8 +437,6 @@ def _input_override_document(
             )
             for domain, writable in domains.items()
         ]
-        if service in {"feishu-listener", "web-app"}:
-            volumes.append(identity_mount)
         services[service] = {"volumes": volumes}
     return (
         json.dumps(
@@ -622,7 +613,6 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
     config_namespaces: dict[str, _PrivateInputNamespace] = {}
     postgres_secret = namespace.path / "postgres_password"
-    identity = namespace.path / "feishu-identities.json"
     override = namespace.path / "compose-smoke-inputs.json"
     created: list[_OwnedInput] = []
     config_created: dict[str, list[_OwnedInput]] = {domain: [] for domain in _CONFIG_DOMAINS}
@@ -663,20 +653,6 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
                 os.chmod(config_namespace.path, 0o711)  # noqa: S103 - 目录 bind mount 只开放遍历位
         except OSError:
             raise SmokeError("SMOKE_INPUT_DIRECTORY_PERMISSIONS") from None
-        identity_owned = _create_input(
-            identity,
-            json.dumps(
-                {
-                    "version": 1,
-                    "tenant_id": "dev-local",
-                    "environment_id": "dev",
-                    "entries": [],
-                },
-                separators=(",", ":"),
-            )
-            + "\n",
-        )
-        created.append(identity_owned)
         override_owned = _create_input(
             override,
             _input_override_document(
@@ -685,7 +661,6 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
                     domain: config_namespace.path
                     for domain, config_namespace in config_namespaces.items()
                 },
-                identity=identity,
             ),
         )
         created.append(override_owned)
@@ -1121,6 +1096,15 @@ def _require_model_secret_boundary(session: ComposeSession) -> None:
         raise SmokeError("SMOKE_MODEL_SECRET_BOUNDARY_FAILED")
 
 
+_LEGACY_IDENTITY_DESTINATIONS = frozenset(
+    {
+        "/run/config/feishu-identities.json",
+        "/run/xiaowei-legacy/feishu-identities.json",
+    }
+)
+"""旧身份文档曾经与现在的挂载点；任何长期服务都不得出现在这里。"""
+
+
 def _require_web_container_boundary(session: ComposeSession) -> None:
     container = _container_id(session, "web-app")
     result = session.run_docker(
@@ -1151,32 +1135,15 @@ def _require_web_container_boundary(session: ComposeSession) -> None:
     is_root = user_name == "root" or (
         numeric_user.isdecimal() and int(user_name) == 0
     )
-    required_environment = {
-        "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
-    }
-    # 飞书 App Secret 不再有自己的挂载点：它在 /run/xiaowei-config/feishu/config.json
-    # 里，而那份目录的读写属性由 _require_model_secret_boundary 逐服务核对。这里只
-    # 保留身份目录——它仍然是一份独立的、必须只读的输入。
-    required_mounts = {
-        "/run/config/feishu-identities.json",
-    }
-    reference_boundary_ok = all(
-        expected in environment
-        and sum(item.startswith(f"{expected.partition('=')[0]}=") for item in environment)
-        == 1
-        for expected in required_environment
+    # W5：旧静态身份文件只是一次性迁移命令的输入。长期 Web 进程既不得收到它的
+    # 变量，也不得挂载它——身份只查 PostgreSQL 目录。
+    reference_boundary_ok = not any(
+        item.startswith("XIAOWEI_FEISHU_IDENTITY_FILE=") for item in environment
     )
-    matches_by_destination = [
-        [
-            mount
-            for mount in mounts
-            if isinstance(mount, dict) and mount.get("Destination") == destination
-        ]
-        for destination in required_mounts
-    ]
-    mount_boundary_ok = all(
-        len(matches) == 1 and matches[0].get("RW") is False
-        for matches in matches_by_destination
+    mount_boundary_ok = not any(
+        isinstance(mount, dict)
+        and mount.get("Destination") in _LEGACY_IDENTITY_DESTINATIONS
+        for mount in mounts
     )
     if (
         not user_name

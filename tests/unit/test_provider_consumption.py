@@ -65,7 +65,6 @@ def settings_with_feishu_listener() -> Settings:
         feishu_listener_enabled=True,
         feishu_tenant_key="tenant-key",
         feishu_bot_open_id="ou_bot",
-        feishu_identity_file="/run/config/feishu-identities.json",
     )
 
 

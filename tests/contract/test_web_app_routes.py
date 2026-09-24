@@ -142,7 +142,6 @@ def _settings(*, public_origin: str = "https://ops.example.test") -> Settings:
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file="/run/config/feishu-identities.json",
         web_public_origin=public_origin,
     )
 
@@ -1215,7 +1214,6 @@ def test_real_module_entry_rejects_half_enabled_web_before_secret_access() -> No
         {
             "XIAOWEI_ENVIRONMENT_ID": "dev",
             "XIAOWEI_WEB_APP_ENABLED": "true",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }
     )
@@ -1440,7 +1438,6 @@ def test_real_uvicorn_bind_failure_emits_only_the_fixed_main_error(
             "XIAOWEI_POSTGRES_PASSWORD_FILE": str(postgres_secret),
             "XIAOWEI_WEB_APP_ENABLED": "true",
             "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": str(identities),
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
             "XIAOWEI_WEB_BIND_HOST": "192.0.2.1",
             "XIAOWEI_WEB_BIND_PORT": "49152",
@@ -1612,7 +1609,6 @@ def test_enabled_module_entry_maps_bad_secret_reference_to_configuration_error()
             "XIAOWEI_ENVIRONMENT_ID": "dev",
             "XIAOWEI_WEB_APP_ENABLED": "true",
             "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": "/missing/identity-reference",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://ops.example.test",
         }
     )

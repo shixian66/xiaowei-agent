@@ -16,7 +16,6 @@ def _profile(**updates: object) -> dict[str, object]:
         "environment_id": "dev",
         "web_app_enabled": True,
         "feishu_oauth_enabled": True,
-        "feishu_identity_file": "/run/config/feishu-identities.json",
         "web_public_origin": "https://ops.example.test",
     }
     return values | updates
@@ -33,16 +32,9 @@ def test_web_app_is_default_closed_with_short_bounded_lifetimes() -> None:
     assert settings.web_session_ttl_seconds == 3600
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "feishu_identity_file",
-        "web_public_origin",
-    ],
-)
-def test_enabled_web_app_requires_the_complete_auth_profile(field: str) -> None:
+def test_enabled_web_app_requires_the_complete_auth_profile() -> None:
     profile = _profile()
-    del profile[field]
+    del profile["web_public_origin"]
 
     with pytest.raises(ValueError):
         Settings(**profile)
@@ -58,7 +50,6 @@ def test_web_app_profile_loads_from_the_explicit_environment_only() -> None:
             "XIAOWEI_WEB_BIND_PORT": "8081",
             "XIAOWEI_WEB_OAUTH_STATE_TTL_SECONDS": "120",
             "XIAOWEI_WEB_SESSION_TTL_SECONDS": "7200",
-            "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
             "XIAOWEI_WEB_PUBLIC_ORIGIN": "https://OPS.example.test/",
         }
     )
@@ -93,11 +84,7 @@ def test_feishu_oauth_still_requires_the_web_app() -> None:
     OAuth 登录本身就是 Web 的一条路由，没有 Web 进程就没有 callback 落点。
     """
     profile = _profile(web_app_enabled=False, feishu_oauth_enabled=True)
-    for field in (
-        "feishu_identity_file",
-        "web_public_origin",
-    ):
-        profile.pop(field)
+    profile.pop("web_public_origin")
 
     with pytest.raises(ValueError, match="OAuth"):
         Settings(**profile)
@@ -165,7 +152,6 @@ def test_disabled_web_app_cannot_carry_a_web_only_identity_profile() -> None:
     with pytest.raises(ValueError):
         Settings(
             environment_id="dev",
-            feishu_identity_file="/run/config/feishu-identities.json",
             web_public_origin="https://ops.example.test",
         )
 
@@ -178,7 +164,6 @@ def test_invalid_web_profile_does_not_echo_configuration_values() -> None:
                 "XIAOWEI_ENVIRONMENT_ID": "dev",
                 "XIAOWEI_WEB_APP_ENABLED": "true",
                 "XIAOWEI_FEISHU_OAUTH_ENABLED": "true",
-                "XIAOWEI_FEISHU_IDENTITY_FILE": "/run/config/feishu-identities.json",
                 "XIAOWEI_WEB_PUBLIC_ORIGIN": sensitive,
             }
         )

@@ -945,18 +945,19 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
         override = json.loads(session.files[-1].read_text(encoding="utf-8"))
         postgres = Path(override["secrets"]["postgres_password"]["file"])
         web_volumes = override["services"]["web-app"]["volumes"]
+        # W5：只剩三个配置域；旧身份文件不再是任何长期服务的输入。
+        assert len(web_volumes) == 3
         config_directories = {
             volume["target"].rsplit("/", 1)[-1]: Path(volume["source"])
-            for volume in web_volumes[:3]
+            for volume in web_volumes
         }
-        identities = Path(web_volumes[3]["source"])
         assert session.config_sources == config_directories
         ai_file = config_directories["ai"] / "config.json"
         feishu_file = config_directories["feishu"] / "config.json"
-        observed_paths = (postgres, identities, ai_file, feishu_file)
+        observed_paths = (postgres, ai_file, feishu_file)
+        assert not (postgres.parent / "feishu-identities.json").exists()
         assert stat.S_IMODE(parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(postgres.parent.stat().st_mode) == 0o700
-        assert stat.S_IMODE(identities.parent.stat().st_mode) == 0o700
         assert all(
             stat.S_IMODE(directory.stat().st_mode) == 0o711
             for directory in config_directories.values()
@@ -965,12 +966,6 @@ def test_smoke_owns_and_cleans_all_generated_input_files(tmp_path: Path) -> None
             stat.S_IMODE(path.stat().st_mode) == 0o444
             for path in observed_paths
         )
-        assert json.loads(identities.read_text(encoding="utf-8")) == {
-            "version": 1,
-            "tenant_id": "dev-local",
-            "environment_id": "dev",
-            "entries": [],
-        }
         # 合成配置里的两个假串必须都在脱敏名单里：它们会随容器日志与 inspect
         # 输出流过多处，漏掉一个就等于漏掉一整条泄露通道。
         ai_document = json.loads(ai_file.read_text(encoding="utf-8"))
@@ -1028,18 +1023,18 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
         document = json.loads(override.read_text(encoding="utf-8"))
         assert set(document["secrets"]) == {"postgres_password"}
         postgres = Path(document["secrets"]["postgres_password"]["file"])
-        *config_mounts, identity_mount = document["services"]["web-app"]["volumes"]
-        identity = Path(identity_mount["source"])
+        config_mounts = document["services"]["web-app"]["volumes"]
         config_directories = {
             mount["target"].rsplit("/", 1)[-1]: Path(mount["source"])
             for mount in config_mounts
         }
         assert session.config_sources == config_directories
-        assert {path.parent for path in (postgres, identity)} == {override.parent}
-        assert {path.name for path in (postgres, identity)} == {
+        assert postgres.parent == override.parent
+        assert postgres.name == "postgres_password"
+        assert sorted(path.name for path in override.parent.iterdir()) == [
+            "compose-smoke-inputs.json",
             "postgres_password",
-            "feishu-identities.json",
-        }
+        ]
         # 每个配置域都是**另一个**私有命名空间：与 postgres 口令或兄弟域同目录时，
         # 目录挂载会把那些文件也送进只该看到本域的容器。
         assert len(set(config_directories.values())) == 3
@@ -1047,8 +1042,6 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
             assert directory.parent == input_root
             assert directory != override.parent
             assert re.fullmatch(r"compose-smoke-[0-9a-f]{32}", directory.name)
-        assert identity_mount["target"] == "/run/config/feishu-identities.json"
-        assert identity_mount["read_only"] is True
         assert [mount["target"] for mount in config_mounts] == [
             "/run/xiaowei-config/ai",
             "/run/xiaowei-config/feishu",
@@ -1062,7 +1055,7 @@ def test_smoke_uses_a_private_input_namespace_and_generated_compose_override(
             return {**by_target[f"/run/xiaowei-config/{domain}"], "read_only": True}
 
         listener_volumes = document["services"]["feishu-listener"]["volumes"]
-        assert listener_volumes == [read_only("feishu"), identity_mount]
+        assert listener_volumes == [read_only("feishu")]
         assert document["services"]["channel-worker"]["volumes"] == [read_only("feishu")]
         assert document["services"]["worker"]["volumes"] == [
             read_only("ai"),
@@ -2198,36 +2191,21 @@ def _web_inspect_payload(
     *,
     user: str = "xiaowei",
     read_only: bool = True,
-    identity_writable: bool = False,
-    include_identity_mount: bool = True,
-    duplicate_identity_mount: bool = False,
+    legacy_identity_mount: str | None = None,
     environment: list[str] | None = None,
 ) -> str:
-    """飞书 App Secret 不再有自己的挂载点——它在配置目录的那份 JSON 里。
+    """W5：长期 Web 进程不得挂载旧身份文档，也不得带它的变量。
 
-    因此这里只剩身份目录：它仍然是一份独立的、必须只读且**恰好一个**的输入。
-    配置目录的读写属性由 ``_require_model_secret_boundary`` 逐服务核对。
+    配置目录的读写属性由 ``_require_model_secret_boundary`` 逐服务核对，这里只看
+    进程身份、只读根文件系统、旧身份输入的缺席与环境里有没有敏感值。
     """
     mounts: list[dict[str, object]] = []
-    if include_identity_mount:
-        mounts.append(
-            {
-                "Destination": "/run/config/feishu-identities.json",
-                "RW": identity_writable,
-            }
-        )
-    if duplicate_identity_mount:
-        mounts.append(
-            {
-                "Destination": "/run/config/feishu-identities.json",
-                "RW": False,
-            }
-        )
+    if legacy_identity_mount is not None:
+        mounts.append({"Destination": legacy_identity_mount, "RW": False})
     return json.dumps(
         [
             user,
-            environment
-            or ["XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json"],
+            environment or ["XIAOWEI_WEB_APP_ENABLED=true"],
             read_only,
             mounts,
         ]
@@ -2269,7 +2247,7 @@ class WebBoundaryRunner(RecordingRunner):
         return result
 
 
-def test_web_container_boundary_accepts_non_root_readonly_reference_mounts() -> None:
+def test_web_container_boundary_accepts_a_non_root_readonly_process_without_identity() -> None:
     runner = WebBoundaryRunner()
     session = ComposeSession(
         docker="/usr/bin/docker",
@@ -2334,14 +2312,14 @@ def test_web_euid_command_failure_exposes_only_a_fixed_error() -> None:
         _web_inspect_payload(user="0"),
         _web_inspect_payload(user="+0:1000"),
         _web_inspect_payload(read_only=False),
-        _web_inspect_payload(identity_writable=True),
-        _web_inspect_payload(include_identity_mount=False),
-        _web_inspect_payload(duplicate_identity_mount=True),
         _web_inspect_payload(
-            environment=[
-                "XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json",
-                "XIAOWEI_FEISHU_IDENTITY_FILE=/tmp/alternate",
-            ]
+            legacy_identity_mount="/run/config/feishu-identities.json"
+        ),
+        _web_inspect_payload(
+            legacy_identity_mount="/run/xiaowei-legacy/feishu-identities.json"
+        ),
+        _web_inspect_payload(
+            environment=["XIAOWEI_FEISHU_IDENTITY_FILE=/run/config/feishu-identities.json"]
         ),
         _web_inspect_payload(environment=["LEAK=private-fake-secret"]),
     ],

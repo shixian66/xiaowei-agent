@@ -289,8 +289,38 @@ W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审
 飞书 Admin 使用，但配置写入与连接测试仍只允许本地 Admin。普通用户不获得后台或“我的结果”列表，
 仍只从具体任务/结果链接进入并接受原有 ACL 判定。
 
-启用飞书 OAuth 时另外准备 `.secrets/feishu-identities.json`，并叠加 `docker-compose.feishu.yml`；
-不启用飞书时**不需要**这个文件——它不在基础 Compose 里，干净部署不会因为缺它而起不来。
+身份只查 PostgreSQL 用户目录。旧 `.secrets/feishu-identities.json` 自 W5 起**只**是一次性迁移命令的
+输入，任何长期服务（Web、listener、channel-worker、worker、api）都不挂载它，也没有对应的
+`XIAOWEI_*` 变量；干净部署不需要这个文件。
+
+#### 一次性维护命令（W5）
+
+两条命令都不接受任何参数，stdout 只有一行闭集 JSON，失败只在 stderr 写一个闭集错误码；
+request id、主体、actor、作用域与异常正文一律不输出，可以原样贴进部署证据。
+
+- 旧身份迁移：只在确有旧文档时以**只读临时挂载**运行，命令退出后没有容器继续持有它。
+  固定挂载点是 `/run/xiaowei-legacy/feishu-identities.json`：
+
+  ```bash
+  compose run --rm \
+    -v "$PWD/.secrets/feishu-identities.json:/run/xiaowei-legacy/feishu-identities.json:ro" \
+    migrate python -m xiaowei_agent.interfaces.legacy_identity_migration
+  ```
+
+  输出 `{"status": "migrated", "created_count": …, "skipped_count": …, "deferred_count": …}`；
+  对同一文档再跑一次必须是 `created_count=0`。没有旧文档（未挂载）时输出
+  `{"status": "not_applicable"}`，不要为此造一份空文件。部分冲突、损坏或符号链接文件整批零写入，
+  分别报 `migration_conflict` / `document_invalid`。
+- 终态激活保留：全库所有作用域，固定保留 30 天；先把过期待办转为 `EXPIRED`，再删除
+  `decided_at`（批准/拒绝）或 `expires_at`（过期）早于等于 30 天前的申请行。仍有效的待办、
+  Admin 审计、用户目录、Session、任务与证据都不在清理面：
+
+  ```bash
+  compose run --rm migrate python -m xiaowei_agent.interfaces.activation_retention
+  ```
+
+  输出 `{"approved_deleted": …, "expired_deleted": …, "pending_expired": …, "rejected_deleted": …}`；
+  重复运行只会得到零删除。正式环境由 owner 每日调度并配置失败告警。
 
 #### 首启顺序（RI5 本地管理面）
 
@@ -394,19 +424,16 @@ W3 V1 在同一个 `/admin` shell 中增加用户、待激活申请与 Admin 审
 
 9. 从局域网地址用新密码重新登录。旧 Cookie 因 origin digest 变化已失效，属预期。
 
-启用飞书时额外叠加 `-f docker-compose.feishu.yml` 并准备 `./.secrets/feishu-identities.json`。
-
 **残余风险**：在第 6 步之前套用 LAN override，`admin/admin` 会暴露给同网段。补救是改密后
 重建 Web 并撤销全部 `local_admin` session。
 
 #### 飞书 OAuth
 
 基础 Compose 不会自行打开 OAuth。取得 RI2 现场许可后，在 `.env` 打开
-`XIAOWEI_FEISHU_OAUTH_ENABLED=true` 并设置 HTTPS SSO origin，然后叠加飞书 override：
+`XIAOWEI_FEISHU_OAUTH_ENABLED=true` 并设置 HTTPS SSO origin，然后重建 Web：
 
 ```bash
-compose -f docker-compose.yml -f docker-compose.feishu.yml \
-  up -d --force-recreate web-app
+compose up -d --force-recreate web-app
 ```
 
 App ID 与 App Secret 在管理面填写，不进 `.env`、不进命令行、不进任何已跟踪文件。回滚时先停止
