@@ -261,12 +261,13 @@ async def test_status_change_records_the_new_status(directory: Any) -> None:
 
 
 async def test_local_admin_can_manage_a_non_admin_with_expected_value_cas(
-    directory: Any,
+    directory: Any, directory_probe: Any
 ) -> None:
     await prepare_activation_admin(directory)
     await directory.apply(
         command=create_user("managed"), context=admin_context("op-create-managed")
     )
+    before = await directory_probe.facts()
 
     (role_event,) = await directory.apply(
         command=ChangeManagedUserRoleCommand(
@@ -294,6 +295,8 @@ async def test_local_admin_can_manage_a_non_admin_with_expected_value_cas(
     assert role_event.effect.role is ProductRole.OPERATOR
     assert status_event.action is AdminAuditAction.USER_STATUS_CHANGED
     assert status_event.effect.status is UserStatus.DISABLED
+    after = await directory_probe.facts()
+    assert len(after["audits"] - before["audits"]) == 2
 
 
 async def test_feishu_admin_can_manage_only_while_its_binding_is_current(
@@ -426,18 +429,21 @@ async def test_managed_write_refuses_protected_or_out_of_scope_targets(
     directory: Any, directory_probe: Any, case: str
 ) -> None:
     await prepare_activation_admin(directory)
-    role = ProductRole.ADMIN if case == "target-admin" else ProductRole.USER
     await directory.apply(
-        command=create_user("managed", role=role),
+        command=create_user("managed", role=ProductRole.USER),
         context=admin_context("op-create-managed"),
     )
-    if case == "other-scope":
+    if case in {"target-admin", "other-scope"}:
         await directory.apply(
             command=AssignRoleCommand(
                 user_id="managed",
                 tenant_id=TENANT,
                 environment_id=OTHER_ENVIRONMENT,
-                role=ProductRole.USER,
+                role=(
+                    ProductRole.ADMIN
+                    if case == "target-admin"
+                    else ProductRole.USER
+                ),
             ),
             context=admin_context("op-add-other-scope"),
         )
@@ -453,7 +459,7 @@ async def test_managed_write_refuses_protected_or_out_of_scope_targets(
         )
     before = await directory_probe.facts()
     command: SetManagedUserStatusCommand | ChangeManagedUserRoleCommand
-    if case == "inactive-role":
+    if case in {"target-admin", "inactive-role"}:
         command = ChangeManagedUserRoleCommand(
             user_id="managed",
             tenant_id=TENANT,
