@@ -379,7 +379,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 .table-secondary { margin-top: 2px; color: var(--ink-500); }
 .table-actions { display: flex; min-width: 150px; flex-wrap: wrap; align-items: center; gap: 6px; }
 .button-compact { min-height: 34px; padding: 6px 10px; font-size: 12px; }
-.identity-card > .button-quiet, .identity-dialog .button-quiet, .table-actions .button-quiet {
+.identity-card > .button-quiet, .identity-dialog .button-quiet, .table-actions .button-quiet,
+.resource-actions .button-quiet, .resource-form .button-quiet {
   color: var(--ink-700);
   border-color: var(--line-strong);
   background: var(--surface);
