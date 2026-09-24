@@ -19,6 +19,7 @@ from xiaowei_agent.contracts import (
     AdminAuditAction,
     AdminAuditOutcome,
     AdminAuditTargetKind,
+    AdminCapability,
     AuthenticatedPrincipal,
     IdentitySource,
     ProductRole,
@@ -95,8 +96,14 @@ class _LocalAuth:
 
 
 class _FeishuAuth:
-    def __init__(self, *, role: ProductRole = ProductRole.ADMIN) -> None:
+    def __init__(
+        self,
+        *,
+        role: ProductRole = ProductRole.ADMIN,
+        capabilities: frozenset[AdminCapability] | None = None,
+    ) -> None:
         self.role = role
+        self.capabilities = capabilities
 
     async def authenticate(
         self, *, session_cookie: str | None
@@ -115,8 +122,10 @@ class _FeishuAuth:
             user_id="feishu-admin-user",
             principal=principal,
             role=self.role,
-            admin_capabilities=admin_capabilities(
-                role=self.role, source=IdentitySource.FEISHU
+            admin_capabilities=(
+                self.capabilities
+                if self.capabilities is not None
+                else admin_capabilities(role=self.role, source=IdentitySource.FEISHU)
             ),
             csrf_token=web_csrf_token(_FEISHU_COOKIE),
         )
@@ -209,9 +218,13 @@ def _app(
     service: _AdminIdentity,
     *,
     feishu_role: ProductRole = ProductRole.ADMIN,
+    feishu_capabilities: frozenset[AdminCapability] | None = None,
 ) -> Any:
     return create_app(
-        auth=_FeishuAuth(role=feishu_role),  # type: ignore[arg-type]
+        auth=_FeishuAuth(  # type: ignore[arg-type]
+            role=feishu_role,
+            capabilities=feishu_capabilities,
+        ),
         local_admin_auth=_LocalAuth(),  # type: ignore[arg-type]
         oauth_available=True,
         settings=Settings(
@@ -322,6 +335,31 @@ async def test_identity_routes_require_a_live_admin_with_the_specific_capability
         assert (await operator.get("/admin/api/users")).status_code == 403
         assert (await operator.get("/admin/api/audit")).status_code == 403
     assert service.calls == []
+
+
+async def test_each_identity_capability_is_checked_independently_of_admin_role() -> None:
+    users_service = _AdminIdentity()
+    users_app = _app(
+        users_service,
+        feishu_capabilities=frozenset({AdminCapability.VIEW_ADMIN_AUDIT}),
+    )
+    async with _client(users_app, cookie=_FEISHU_COOKIE) as audit_only_admin:
+        denied_users = await audit_only_admin.get("/admin/api/users")
+        allowed_audit = await audit_only_admin.get("/admin/api/audit")
+
+    audit_service = _AdminIdentity()
+    audit_app = _app(
+        audit_service,
+        feishu_capabilities=frozenset({AdminCapability.MANAGE_USERS}),
+    )
+    async with _client(audit_app, cookie=_FEISHU_COOKIE) as users_only_admin:
+        allowed_users = await users_only_admin.get("/admin/api/users")
+        denied_audit = await users_only_admin.get("/admin/api/audit")
+
+    assert denied_users.status_code == denied_audit.status_code == 403
+    assert allowed_users.status_code == allowed_audit.status_code == 200
+    assert [call[0] for call in users_service.calls] == ["list_audit"]
+    assert [call[0] for call in audit_service.calls] == ["list_users"]
 
 
 async def test_local_and_feishu_admins_share_identity_routes_but_not_raw_config() -> None:
