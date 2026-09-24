@@ -1,4 +1,4 @@
-"""W4a 唯一配置写服务：AI/飞书两域的保存、清除与连接测试编排。
+"""唯一配置写服务：AI/飞书两域的保存、清除与连接测试（W4a），resources 域的资源维护（W4b）。
 
 Web handler 只做认证、CSRF 与 body 解析，然后调用这里；它不读写文件、不写审计、不记
 测试结果。文件访问经本模块定义的窄 :class:`IntegrationConfigRepository` port，由
@@ -20,9 +20,12 @@ state 存储，而不是请求）。
 """
 
 import asyncio
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Final, Protocol, TypeVar
+from typing import Any, Final, Protocol, TypeVar
+
+from pydantic import ValidationError
 
 from xiaowei_agent.application.admin_identity import AdminIdentityActor
 from xiaowei_agent.application.integration_state import web_holds_feishu_generation
@@ -47,6 +50,15 @@ from xiaowei_agent.contracts.admin_audit import (
     AdminAuditTerminal,
     admin_audit_target_digest,
 )
+from xiaowei_agent.contracts.resource_config import (
+    PrometheusAuthMode,
+    PrometheusResource,
+    ResourceEnvironment,
+    ResourcesConfig,
+    StarRocksResource,
+    TlsMode,
+    secret_required_on_create,
+)
 from xiaowei_agent.persistence.admin_audit import AdminAuditStore, stage_event_id
 from xiaowei_agent.persistence.provider_state import (
     CheckName,
@@ -59,6 +71,7 @@ OPERATION_ID_PREFIX: Final[str] = "w4:"
 
 _T = TypeVar("_T")
 _ConfigT = TypeVar("_ConfigT", AiConfig, FeishuConfig)
+_ReadT = TypeVar("_ReadT", AiConfig, FeishuConfig, ResourcesConfig)
 
 
 class IntegrationConfigUnreadableError(RuntimeError):
@@ -92,6 +105,27 @@ class OAuthTestGenerationDriftError(RuntimeError):
         super().__init__("oauth test generation drifted")
 
 
+class ResourceNotFoundError(RuntimeError):
+    """按 ID 找不到资源；审计已写 ``FAILED/target_not_found``。不携带 ID。"""
+
+    def __init__(self) -> None:
+        super().__init__("resource not found")
+
+
+class ResourceConflictError(RuntimeError):
+    """服务端生成的资源 ID 撞上了文档里已有的 ID；不覆盖、不重试。"""
+
+    def __init__(self) -> None:
+        super().__init__("resource conflict")
+
+
+class ResourceRejectedError(RuntimeError):
+    """合并后的资源或整份文档不满足契约（含 Secret 缺失、第 101 个资源、kind 不符）。"""
+
+    def __init__(self) -> None:
+        super().__init__("resource rejected")
+
+
 class IntegrationConfigUnavailableError(RuntimeError):
     """审计、文件或测试结果存储不可用，结果不能被当成成功。"""
 
@@ -104,7 +138,7 @@ class IntegrationConfigRepository(Protocol):
 
     ``read_*`` 在文件不存在时返回 ``None``（干净部署的起点），存在但坏时抛
     :class:`IntegrationConfigUnreadableError`；``write_*`` 失败抛
-    :class:`IntegrationConfigWriteError`。W4b 在 resources 契约真正存在时再加方法。
+    :class:`IntegrationConfigWriteError`。三个域各一对显式方法，resources 是 W4b 加入的。
     """
 
     def read_ai(self) -> AiConfig | None: ...
@@ -114,6 +148,10 @@ class IntegrationConfigRepository(Protocol):
     def read_feishu(self) -> FeishuConfig | None: ...
 
     def write_feishu(self, *, config: FeishuConfig) -> None: ...
+
+    def read_resources(self) -> ResourcesConfig | None: ...
+
+    def write_resources(self, *, config: ResourcesConfig) -> None: ...
 
 
 class ProbeVerdict(Protocol):
@@ -150,6 +188,69 @@ class FeishuUpdate:
 
 
 @dataclass(frozen=True)
+class StarRocksDraft:
+    """新建一个 StarRocks 资源；ID 与 kind 由服务端决定，不在这里。"""
+
+    environment: ResourceEnvironment
+    display_name: str
+    host: str
+    port: int
+    database: str
+    username: str
+    tls_mode: TlsMode
+    enabled: bool
+    password: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class PrometheusDraft:
+    """新建一个 Prometheus 资源；ID 与 kind 由服务端决定，不在这里。"""
+
+    environment: ResourceEnvironment
+    display_name: str
+    base_url: str
+    auth_mode: PrometheusAuthMode
+    tls_mode: TlsMode
+    enabled: bool
+    username: str | None = None
+    secret: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class ResourceUpdate:
+    """按 ID 修改一个资源；``None`` 只表示"未携带、保留原值"。
+
+    字段是两种 kind 的并集：携带了存量 kind 不认识的字段（如给 StarRocks 传 ``base_url``）
+    即整体拒绝，而不是静默忽略。显式清除 Secret 走独立确认动作，不在这里。
+    """
+
+    environment: ResourceEnvironment | None = None
+    display_name: str | None = None
+    enabled: bool | None = None
+    tls_mode: TlsMode | None = None
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    password: str | None = field(default=None, repr=False)
+    base_url: str | None = None
+    auth_mode: PrometheusAuthMode | None = None
+    secret: str | None = field(default=None, repr=False)
+
+
+_STARROCKS_ONLY: Final = frozenset({"host", "port", "database", "password"})
+_PROMETHEUS_ONLY: Final = frozenset({"base_url", "auth_mode", "secret"})
+
+
+@dataclass(frozen=True)
+class ResourceSaved:
+    """一次成功资源写入后的资源 ID 与 resources 新 generation；不含任何参数值。"""
+
+    resource_id: str
+    generation: int
+
+
+@dataclass(frozen=True)
 class ConfigSaved:
     """一次成功写入后的域与它的新 generation；不含任何配置值。"""
 
@@ -165,6 +266,95 @@ def _config_target(domain: ConfigDomain) -> str:
     return admin_audit_target_digest(
         target_kind=AdminAuditTargetKind.CONFIG, target_ref=f"config_domain:{domain.value}"
     )
+
+
+def _resource_target(resource_id: str) -> str:
+    return admin_audit_target_digest(
+        target_kind=AdminAuditTargetKind.CONFIG, target_ref=f"resource:{resource_id}"
+    )
+
+
+def new_resource_id() -> str:
+    """服务端资源 ID：32 位小写十六进制，来自 CSPRNG。"""
+    return secrets.token_hex(16)
+
+
+def _starrocks_from_draft(resource_id: str, draft: StarRocksDraft) -> StarRocksResource:
+    return StarRocksResource(
+        kind="starrocks",
+        resource_id=resource_id,
+        environment=draft.environment,
+        display_name=draft.display_name,
+        host=draft.host,
+        port=draft.port,
+        database=draft.database,
+        username=draft.username,
+        password=draft.password,
+        tls_mode=draft.tls_mode,
+        enabled=draft.enabled,
+    )
+
+
+def _prometheus_from_draft(resource_id: str, draft: PrometheusDraft) -> PrometheusResource:
+    return PrometheusResource(
+        kind="prometheus",
+        resource_id=resource_id,
+        environment=draft.environment,
+        display_name=draft.display_name,
+        base_url=draft.base_url,
+        auth_mode=draft.auth_mode,
+        username=draft.username,
+        secret=draft.secret,
+        tls_mode=draft.tls_mode,
+        enabled=draft.enabled,
+    )
+
+
+def _with_secret(
+    resource: StarRocksResource | PrometheusResource,
+) -> dict[str, Any]:
+    """资源的全部字段**含 Secret**：``model_dump()`` 会按 ``exclude=True`` 丢掉它。"""
+    values = resource.model_dump()
+    if isinstance(resource, StarRocksResource):
+        values["password"] = resource.password
+    else:
+        values["secret"] = resource.secret
+    return values
+
+
+def _merged_resource(
+    current: StarRocksResource | PrometheusResource, update: ResourceUpdate
+) -> StarRocksResource | PrometheusResource:
+    """把部分更新合进存量资源并**交回契约重新校验**；不适用于该 kind 的字段直接拒绝。"""
+    carried = {
+        name: value
+        for name, value in vars(update).items()
+        if value is not None
+    }
+    foreign = _PROMETHEUS_ONLY if isinstance(current, StarRocksResource) else _STARROCKS_ONLY
+    if carried.keys() & foreign:
+        raise ResourceRejectedError
+    values = _with_secret(current) | carried
+    if isinstance(current, StarRocksResource):
+        return StarRocksResource.model_validate(values)
+    # 认证方式决定哪些字段存在：切走 basic 时 username 随之消失，切到 none 时 secret 也消失。
+    # 这不是第二套规则，只是把"新模式禁止的旧值"删掉，余下组合仍由契约校验。
+    if values["auth_mode"] != "basic":
+        values["username"] = None
+    if values["auth_mode"] == "none":
+        values["secret"] = None
+    return PrometheusResource.model_validate(values)
+
+
+def _without_secret(
+    resource: StarRocksResource | PrometheusResource,
+) -> StarRocksResource | PrometheusResource:
+    values = _with_secret(resource)
+    if isinstance(resource, StarRocksResource):
+        values["password"] = None
+        return StarRocksResource.model_validate(values)
+    values["secret"] = None
+    return PrometheusResource.model_validate(values)
 
 
 def _probe_target(check: CheckName) -> str:
@@ -201,6 +391,21 @@ def _merged_feishu(current: FeishuIntegration, update: FeishuUpdate) -> FeishuIn
     )
 
 
+def _replace_one(
+    existing: tuple[StarRocksResource | PrometheusResource, ...],
+    resource_id: str,
+    transform: Callable[
+        [StarRocksResource | PrometheusResource], StarRocksResource | PrometheusResource
+    ],
+) -> tuple[StarRocksResource | PrometheusResource, ...]:
+    """只替换目标资源、保持其余对象与顺序不变；找不到即 :class:`ResourceNotFoundError`。"""
+    positions = [index for index, item in enumerate(existing) if item.resource_id == resource_id]
+    if not positions:
+        raise ResourceNotFoundError
+    (position,) = positions
+    return (*existing[:position], transform(existing[position]), *existing[position + 1 :])
+
+
 class IntegrationConfigService:
     """两域配置的唯一写编排；读取视图也经它，但只读不审计。"""
 
@@ -210,10 +415,12 @@ class IntegrationConfigService:
         repository: IntegrationConfigRepository,
         audit: AdminAuditStore,
         provider_state: ProviderStateStore,
+        resource_id_factory: Callable[[], str] = new_resource_id,
     ) -> None:
         self._repository = repository
         self._audit = audit
         self._provider_state = provider_state
+        self._new_resource_id = resource_id_factory
         # 必须随实例走，不能是模块级：每个 Web 进程只有一个服务实例。
         self._lock = asyncio.Lock()
 
@@ -226,8 +433,11 @@ class IntegrationConfigService:
     async def read_feishu(self) -> FeishuConfig | None:
         return await self._read(self._repository.read_feishu)
 
+    async def read_resources(self) -> ResourcesConfig | None:
+        return await self._read(self._repository.read_resources)
+
     @staticmethod
-    async def _read(reader: Callable[[], _ConfigT | None]) -> _ConfigT | None:
+    async def _read(reader: Callable[[], _ReadT | None]) -> _ReadT | None:
         try:
             return await asyncio.to_thread(reader)
         except IntegrationConfigUnreadableError:
@@ -442,6 +652,206 @@ class IntegrationConfigService:
             reader=self._repository.read_feishu,
             build=build,
             writer=lambda config: self._repository.write_feishu(config=config),
+        )
+
+    # ------------------------------------------------------------------ 资源（W4b）
+
+    async def _mutate_resources(
+        self,
+        *,
+        actor: AdminIdentityActor,
+        trace_id: str,
+        action: AdminAuditAction,
+        resource_id: str,
+        change: Callable[
+            [tuple[StarRocksResource | PrometheusResource, ...]],
+            tuple[StarRocksResource | PrometheusResource, ...],
+        ],
+    ) -> ResourceSaved:
+        """资源写入的共同骨架：拒绝审计 → 锁 → STARTED → 读 → 变换 → 整份写回 → 终态。
+
+        ``change`` 只返回新的资源元组；它抛 :class:`ResourceNotFoundError` /
+        :class:`ResourceConflictError` / :class:`ResourceRejectedError` 或契约
+        ``ValidationError`` 时，文件与 generation 都不动，审计写对应的闭集 ``FAILED``。
+        其余资源对象原样复用：不重排、不重写、不清空它们的 Secret。
+        """
+        operation_id = _operation_id(trace_id)
+        target = _resource_target(resource_id)
+        async with self._lock:
+            await self._start(
+                actor=actor, operation_id=operation_id, action=action, target_ref_digest=target
+            )
+            try:
+                current = await asyncio.to_thread(self._repository.read_resources)
+            except IntegrationConfigUnreadableError:
+                await self._fail(
+                    operation_id=operation_id, reason=AdminAuditReasonCode.CONFIG_INVALID
+                )
+                raise IntegrationConfigUnavailableError from None
+            existing = () if current is None else current.resources
+            try:
+                updated = ResourcesConfig(
+                    generation=(0 if current is None else current.generation) + 1,
+                    resources=change(existing),
+                )
+            except ResourceNotFoundError:
+                await self._fail(
+                    operation_id=operation_id, reason=AdminAuditReasonCode.TARGET_NOT_FOUND
+                )
+                raise
+            except ResourceConflictError:
+                await self._fail(operation_id=operation_id, reason=AdminAuditReasonCode.CONFLICT)
+                raise
+            except (ResourceRejectedError, ValidationError):
+                await self._fail(
+                    operation_id=operation_id, reason=AdminAuditReasonCode.CONFIG_INVALID
+                )
+                raise ResourceRejectedError from None
+            try:
+                await asyncio.to_thread(
+                    lambda: self._repository.write_resources(config=updated)
+                )
+            except IntegrationConfigWriteError:
+                await self._fail(
+                    operation_id=operation_id, reason=AdminAuditReasonCode.FILE_IO_FAILED
+                )
+                raise IntegrationConfigUnavailableError from None
+            await self._terminal(operation_id=operation_id, reason=None)
+        return ResourceSaved(resource_id=resource_id, generation=updated.generation)
+
+    async def _deny_resource_change(
+        self,
+        *,
+        actor: AdminIdentityActor,
+        trace_id: str,
+        action: AdminAuditAction,
+        resource_id: str,
+    ) -> None:
+        await self._deny_unless_allowed(
+            actor=actor,
+            capability=AdminCapability.MANAGE_INTEGRATIONS,
+            operation_id=_operation_id(trace_id),
+            action=action,
+            target_ref_digest=_resource_target(resource_id),
+        )
+
+    async def create_resource(
+        self,
+        *,
+        actor: AdminIdentityActor,
+        trace_id: str,
+        draft: StarRocksDraft | PrometheusDraft,
+    ) -> ResourceSaved:
+        """新建一个资源：ID 由注入的 factory 在服务端生成，撞上已有 ID 即闭集冲突。
+
+        被拒的主体连 ID 都不生成（拒绝审计的 target 是固定的 ``resource:new``）。
+        """
+        if _denial_reason(actor, AdminCapability.MANAGE_INTEGRATIONS) is not None:
+            await self._deny_unless_allowed(
+                actor=actor,
+                capability=AdminCapability.MANAGE_INTEGRATIONS,
+                operation_id=_operation_id(trace_id),
+                action=AdminAuditAction.CONFIG_SAVED,
+                target_ref_digest=_resource_target("new"),
+            )
+        resource_id = self._new_resource_id()
+
+        def change(
+            existing: tuple[StarRocksResource | PrometheusResource, ...],
+        ) -> tuple[StarRocksResource | PrometheusResource, ...]:
+            if any(item.resource_id == resource_id for item in existing):
+                raise ResourceConflictError
+            created = (
+                _starrocks_from_draft(resource_id, draft)
+                if isinstance(draft, StarRocksDraft)
+                else _prometheus_from_draft(resource_id, draft)
+            )
+            if secret_required_on_create(created) and not created.secret_configured:
+                raise ResourceRejectedError
+            return (*existing, created)
+
+        return await self._mutate_resources(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_SAVED,
+            resource_id=resource_id,
+            change=change,
+        )
+
+    async def update_resource(
+        self,
+        *,
+        actor: AdminIdentityActor,
+        trace_id: str,
+        resource_id: str,
+        update: ResourceUpdate,
+    ) -> ResourceSaved:
+        """按 ID 合并修改；省略的字段（含 Secret）保留，kind 与 ID 不可改。"""
+        await self._deny_resource_change(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_SAVED,
+            resource_id=resource_id,
+        )
+
+        def change(
+            existing: tuple[StarRocksResource | PrometheusResource, ...],
+        ) -> tuple[StarRocksResource | PrometheusResource, ...]:
+            return _replace_one(
+                existing, resource_id, lambda current: _merged_resource(current, update)
+            )
+
+        return await self._mutate_resources(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_SAVED,
+            resource_id=resource_id,
+            change=change,
+        )
+
+    async def clear_resource_secret(
+        self, *, actor: AdminIdentityActor, trace_id: str, resource_id: str
+    ) -> ResourceSaved:
+        """显式清除一个资源的 Secret；资源本身与其他资源的 Secret 都保留。"""
+        await self._deny_resource_change(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_CLEARED,
+            resource_id=resource_id,
+        )
+        return await self._mutate_resources(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_CLEARED,
+            resource_id=resource_id,
+            change=lambda existing: _replace_one(existing, resource_id, _without_secret),
+        )
+
+    async def delete_resource(
+        self, *, actor: AdminIdentityActor, trace_id: str, resource_id: str
+    ) -> ResourceSaved:
+        """显式删除一个资源；其余资源原样保留。"""
+        await self._deny_resource_change(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_CLEARED,
+            resource_id=resource_id,
+        )
+
+        def change(
+            existing: tuple[StarRocksResource | PrometheusResource, ...],
+        ) -> tuple[StarRocksResource | PrometheusResource, ...]:
+            kept = tuple(item for item in existing if item.resource_id != resource_id)
+            if len(kept) == len(existing):
+                raise ResourceNotFoundError
+            return kept
+
+        return await self._mutate_resources(
+            actor=actor,
+            trace_id=trace_id,
+            action=AdminAuditAction.CONFIG_CLEARED,
+            resource_id=resource_id,
+            change=change,
         )
 
     # ------------------------------------------------------------------ 同步探针
@@ -703,4 +1113,12 @@ __all__ = [
     "IntegrationConfigWriteError",
     "OAuthTestGenerationDriftError",
     "ProbeVerdict",
+    "PrometheusDraft",
+    "ResourceConflictError",
+    "ResourceNotFoundError",
+    "ResourceRejectedError",
+    "ResourceSaved",
+    "ResourceUpdate",
+    "StarRocksDraft",
+    "new_resource_id",
 ]

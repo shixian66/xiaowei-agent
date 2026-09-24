@@ -12,15 +12,19 @@ from xiaowei_agent.application.integration_config_service import (
     IntegrationConfigWriteError,
 )
 from xiaowei_agent.contracts import AiConfig, FeishuConfig
+from xiaowei_agent.contracts.resource_config import ResourcesConfig
 from xiaowei_agent.interfaces.integration_config_file import (
     DEFAULT_AI_CONFIG_PATH,
     DEFAULT_FEISHU_CONFIG_PATH,
+    DEFAULT_RESOURCES_CONFIG_PATH,
     IntegrationConfigError,
     IntegrationConfigMissingError,
     read_ai_config,
     read_feishu_config,
+    read_resources_config,
     write_ai_config,
     write_feishu_config,
+    write_resources_config,
 )
 
 
@@ -37,9 +41,11 @@ class FileIntegrationConfigRepository:
         *,
         ai_path: str = DEFAULT_AI_CONFIG_PATH,
         feishu_path: str = DEFAULT_FEISHU_CONFIG_PATH,
+        resources_path: str = DEFAULT_RESOURCES_CONFIG_PATH,
     ) -> None:
         self._ai_path = ai_path
         self._feishu_path = feishu_path
+        self._resources_path = resources_path
 
     def read_ai(self) -> AiConfig | None:
         try:
@@ -66,6 +72,21 @@ class FileIntegrationConfigRepository:
     def write_feishu(self, *, config: FeishuConfig) -> None:
         try:
             write_feishu_config(self._feishu_path, config)
+        except IntegrationConfigError:
+            raise IntegrationConfigWriteError from None
+
+
+    def read_resources(self) -> ResourcesConfig | None:
+        try:
+            return read_resources_config(self._resources_path)
+        except IntegrationConfigMissingError:
+            return None
+        except IntegrationConfigError:
+            raise IntegrationConfigUnreadableError from None
+
+    def write_resources(self, *, config: ResourcesConfig) -> None:
+        try:
+            write_resources_config(self._resources_path, config)
         except IntegrationConfigError:
             raise IntegrationConfigWriteError from None
 

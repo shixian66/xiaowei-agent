@@ -787,13 +787,21 @@ async def test_oauth_finish_fails_closed_when_the_bound_generation_drifted(
     assert CheckName.FEISHU_OAUTH.value not in (await harness.provider_state.snapshot()).tests
 
 
-def test_the_repository_protocol_lists_only_explicit_ai_and_feishu_methods() -> None:
+def test_the_repository_protocol_lists_only_explicit_per_domain_methods() -> None:
+    """三个域各一对显式方法（resources 由 W4b 加入）；没有动态 domain/schema/path。"""
     members = {
         name
         for name, _ in inspect.getmembers(IntegrationConfigRepository)
         if not name.startswith("_")
     }
-    assert members == {"read_ai", "write_ai", "read_feishu", "write_feishu"}
+    assert members == {
+        "read_ai",
+        "write_ai",
+        "read_feishu",
+        "write_feishu",
+        "read_resources",
+        "write_resources",
+    }
     for name in members:
         parameters = set(inspect.signature(getattr(IntegrationConfigRepository, name)).parameters)
         assert not parameters & {"schema", "domain", "path", "serializer"}, name
