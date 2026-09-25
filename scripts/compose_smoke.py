@@ -1,8 +1,15 @@
-"""API/Worker/PostgreSQL fake 闭环与 M7 渠道进程离线装配验收。"""
+"""API/Worker/PostgreSQL fake 闭环、M7 渠道进程离线装配与 W5 release 装配验收。
+
+两段依次运行、各用独立随机 project：先是 offline_recording 全流程（base + smoke
+override），再从同一 Dockerfile 构建不可变候选镜像，以 base + release override 验证
+provider-off 产品壳——普通请求在 Resolver 阶段被拒、零工具调用、只有 Web 发布端口。
+"""
 
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import functools
 import http.client
 import json
 import os
@@ -15,7 +22,7 @@ import sys
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
@@ -83,6 +90,26 @@ _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: migration_command_error", "SMOKE_MIGRATION_COMMAND_ERROR"),
     ("xiaowei-migrate: io_error", "SMOKE_MIGRATION_IO_ERROR"),
 )
+# W5 release smoke：临时 registry 只绑定 loopback，镜像按 digest 钉死。它只为把本次
+# Dockerfile 构建的候选镜像变成真实的 ``name@sha256:<digest>`` 引用；不是部署制品库。
+_REGISTRY_IMAGE = (
+    "registry:3.0.0@sha256:"
+    "6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e"
+)
+_RELEASE_CANDIDATE_TAG = "release-candidate"
+_RELEASE_SMOKE_ACTOR = "release-smoke-admin"
+_RELEASE_SERVICES = ("api", "worker", "web-app")
+_RELEASE_LOGIN_PATH = "/login"
+_RELEASE_WEB_BINDINGS = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+_RELEASE_RETENTION_REPORT = {
+    "approved_deleted": 0,
+    "expired_deleted": 0,
+    "pending_expired": 0,
+    "rejected_deleted": 0,
+}
+_RELEASE_IDENTITY_REPORT = {"status": "not_applicable"}
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+_DIGEST_REFERENCE_RE = re.compile(r"localhost:[0-9]{1,5}/xiaowei-agent@sha256:[0-9a-f]{64}")
 _DISABLED_CHANNEL_ENTRYPOINTS = (
     "xiaowei_agent.interfaces.feishu_listener",
     "xiaowei_agent.interfaces.feishu_worker",
@@ -204,6 +231,7 @@ class _SmokeInputs:
     config_inputs: dict[str, tuple[_OwnedInput, ...]]
     override_path: Path
     config_sources: dict[str, Path]
+    release_env_path: Path | None = None
 
 
 def _cleanup_unreturned_input(
@@ -609,11 +637,27 @@ def _synthetic_resources_config(*, password_value: str, token_value: str) -> str
     )
 
 
-def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
+def _release_env_document(*, image: str) -> str:
+    """release smoke 的部署模板：只有 ``.invalid`` origin 与本次候选镜像 digest。"""
+    values = {
+        "XIAOWEI_RELEASE_IMAGE": image,
+        "XIAOWEI_RELEASE_ACTOR": _RELEASE_SMOKE_ACTOR,
+        "XIAOWEI_RELEASE_SOURCE_SHA": "0" * 40,
+        "XIAOWEI_RELEASE_EDGE_EVIDENCE_REF": "smoke-no-edge-evidence",
+        "XIAOWEI_RELEASE_WEB_BIND_IP": "127.0.0.1",
+        "XIAOWEI_WEB_PUBLIC_ORIGIN": f"https://{_WEB_PUBLIC_HOST}",
+    }
+    return "".join(f"{key}={value}\n" for key, value in values.items())
+
+
+def _create_smoke_inputs(
+    *, input_root: Path, release_image: str | None = None
+) -> _SmokeInputs:
     namespace = _create_private_input_namespace(input_root)
     config_namespaces: dict[str, _PrivateInputNamespace] = {}
     postgres_secret = namespace.path / "postgres_password"
     override = namespace.path / "compose-smoke-inputs.json"
+    release_env = namespace.path / "release.env" if release_image is not None else None
     created: list[_OwnedInput] = []
     config_created: dict[str, list[_OwnedInput]] = {domain: [] for domain in _CONFIG_DOMAINS}
     try:
@@ -664,6 +708,10 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
             ),
         )
         created.append(override_owned)
+        if release_env is not None and release_image is not None:
+            created.append(
+                _create_input(release_env, _release_env_document(image=release_image))
+            )
     except BaseException as exc:
         # 全部命名空间都要清，但诊断**只挂一次**：同一条闭集码重复多遍不多给任何
         # 信息，只会让读者以为发生了几类不同的失败。
@@ -700,6 +748,7 @@ def _create_smoke_inputs(*, input_root: Path) -> _SmokeInputs:
             domain: config_namespace.path
             for domain, config_namespace in config_namespaces.items()
         },
+        release_env_path=release_env,
     )
 
 
@@ -712,12 +761,15 @@ class ComposeSession:
     compose_command: tuple[str, ...]
     sensitive_values: tuple[str, ...] = ()
     config_sources: dict[str, Path] | None = None
+    env_file: Path | None = None
     up_started: bool = False
     failure_code: str = "SMOKE_COMPOSE_COMMAND_FAILED"
     _resource_owner: ComposeSession | None = None
 
     def argv(self, *arguments: str) -> list[str]:
         command = list(self.compose_command)
+        if self.env_file is not None:
+            command.extend(("--env-file", str(self.env_file)))
         command.extend(("--profile", "m7-channels", "-p", self.project))
         for path in self.files:
             command.extend(("-f", str(path)))
@@ -736,6 +788,7 @@ class ComposeSession:
             compose_command=self.compose_command,
             sensitive_values=self.sensitive_values,
             config_sources=self.config_sources,
+            env_file=self.env_file,
             up_started=self.up_started,
             failure_code=failure_code,
             _resource_owner=self._resource_owner or self,
@@ -785,23 +838,36 @@ def run_smoke(
     runner: CommandRunner = _default_runner,
     workflow: Workflow,
     input_root: Path = _SMOKE_INPUT_ROOT,
+    release_image: str | None = None,
 ) -> None:
-    """只清理本次随机 Compose project 与私有输入命名空间。"""
+    """只清理本次随机 Compose project 与私有输入命名空间。
+
+    ``release_image`` 为空时是 offline_recording 全流程（base + smoke override）；给出
+    不可变候选镜像时改用 base + release override，并附上同一命名空间里的部署模板。
+    """
     project = project_name()
     _preflight(docker=docker, runner=runner, project=project)
-    smoke_inputs = _create_smoke_inputs(input_root=input_root)
+    smoke_inputs = _create_smoke_inputs(
+        input_root=input_root, release_image=release_image
+    )
+    override = (
+        _ROOT / "docker-compose.smoke.yml"
+        if release_image is None
+        else _ROOT / "docker-compose.release.yml"
+    )
     session = ComposeSession(
         docker=docker,
         runner=runner,
         project=project,
         files=(
             _ROOT / "docker-compose.yml",
-            _ROOT / "docker-compose.smoke.yml",
+            override,
             smoke_inputs.override_path,
         ),
         compose_command=compose_command,
         sensitive_values=smoke_inputs.sensitive_values,
         config_sources=smoke_inputs.config_sources,
+        env_file=smoke_inputs.release_env_path,
     )
     primary_error: BaseException | None = None
     try:
@@ -1555,14 +1621,10 @@ def _run_barrier_recovery_start(session: ComposeSession) -> ComposeSession:
     return barrier
 
 
-def _full_workflow(session: ComposeSession) -> None:
-    sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
-    session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
-    session.run("build", timeout=300.0)
-    session.failure_code = "SMOKE_POSTGRES_COMMAND_FAILED"
-    session.run("up", "-d", "--wait", "postgres", timeout=120.0)
+def _require_migrated(session: ComposeSession, *pull: str) -> None:
+    """运行一次 migrate 容器并按退出码收敛成固定失败码。"""
     session.failure_code = "SMOKE_MIGRATION_COMMAND_FAILED"
-    session.run("up", "--no-deps", "migrate", timeout=120.0)
+    session.run("up", "--no-deps", *pull, "migrate", timeout=120.0)
     migrate_id = _container_id(session, "migrate", include_stopped=True)
     exit_code = session.run_docker(
         (
@@ -1577,6 +1639,15 @@ def _full_workflow(session: ComposeSession) -> None:
     if exit_code != "0":
         logs = session.run("logs", "--no-color", "migrate", timeout=30.0).stdout
         raise SmokeError(_migration_failure_code(logs))
+
+
+def _full_workflow(session: ComposeSession) -> None:
+    sensitive_canary = "token" + "=" + secrets.token_urlsafe(24)
+    session.failure_code = "SMOKE_BUILD_COMMAND_FAILED"
+    session.run("build", timeout=300.0)
+    session.failure_code = "SMOKE_POSTGRES_COMMAND_FAILED"
+    session.run("up", "-d", "--wait", "postgres", timeout=120.0)
+    _require_migrated(session)
     session.failure_code = "SMOKE_API_COMMAND_FAILED"
     session.run("up", "-d", "--wait", "--no-deps", "api", timeout=120.0)
     _wait_ready(timeout=60.0)
@@ -1747,6 +1818,325 @@ def _full_workflow(session: ComposeSession) -> None:
     _require_model_secret_boundary(session)
 
 
+# ---------------------------------------------------------------------------
+# W5 provider-off release smoke
+# ---------------------------------------------------------------------------
+
+
+def _local_image() -> str:
+    """base 文件为 ``build`` 生成的本地镜像名；与 Compose 插值同一默认值。"""
+    tag = os.environ.get("COMPOSE_XIAOWEI_IMAGE_TAG") or "m5-local"
+    return f"xiaowei-agent:{tag}"
+
+
+def _docker(
+    runner: CommandRunner,
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    failure_code: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return runner(argv, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        raise SmokeError(failure_code) from None
+
+
+@contextlib.contextmanager
+def _release_candidate(
+    *,
+    docker: str,
+    compose_command: tuple[str, ...],
+    runner: CommandRunner = _default_runner,
+) -> Iterator[str]:
+    """从原始 Dockerfile 构建一次候选镜像，推到 loopback 临时 registry，给出 digest 引用。
+
+    推送后本地镜像带上 ``localhost:<port>/xiaowei-agent@sha256:<digest>``；release
+    Compose 以 ``--pull never`` 按这个不可变引用启动，不存在"smoke 用 tag、部署用 digest"
+    的两套路径。registry 容器与候选 tag 在退出时删除，失败不覆盖原始异常。
+    """
+    _docker(
+        runner,
+        (
+            *compose_command,
+            "-p",
+            project_name(),
+            "-f",
+            str(_ROOT / "docker-compose.yml"),
+            "build",
+            "migrate",
+        ),
+        timeout=600.0,
+        failure_code="SMOKE_RELEASE_BUILD_FAILED",
+    )
+    registry = _docker(
+        runner,
+        (
+            docker,
+            "run",
+            "-d",
+            "--rm",
+            "-p",
+            "127.0.0.1::5000",
+            _REGISTRY_IMAGE,
+        ),
+        timeout=180.0,
+        failure_code="SMOKE_RELEASE_REGISTRY_FAILED",
+    ).stdout.strip()
+    if _CONTAINER_ID_RE.fullmatch(registry) is None:
+        raise SmokeError("SMOKE_RELEASE_REGISTRY_FAILED")
+    candidate: str | None = None
+    try:
+        binding = _docker(
+            runner,
+            (docker, "port", registry, "5000/tcp"),
+            timeout=15.0,
+            failure_code="SMOKE_RELEASE_REGISTRY_FAILED",
+        ).stdout.splitlines()
+        port = binding[0].rpartition(":")[2] if binding else ""
+        if not port.isdecimal():
+            raise SmokeError("SMOKE_RELEASE_REGISTRY_FAILED")
+        repository = f"localhost:{int(port)}/xiaowei-agent"
+        candidate = f"{repository}:{_RELEASE_CANDIDATE_TAG}"
+        _docker(
+            runner,
+            (docker, "tag", _local_image(), candidate),
+            timeout=15.0,
+            failure_code="SMOKE_RELEASE_PUSH_FAILED",
+        )
+        for attempt in range(20):
+            try:
+                runner((docker, "push", candidate), timeout=180.0)
+                break
+            except (OSError, subprocess.SubprocessError):
+                if attempt == 19:
+                    raise SmokeError("SMOKE_RELEASE_PUSH_FAILED") from None
+                time.sleep(0.5)
+        inspected = _docker(
+            runner,
+            (docker, "image", "inspect", "--format", "{{json .RepoDigests}}", candidate),
+            timeout=15.0,
+            failure_code="SMOKE_RELEASE_DIGEST_INVALID",
+        ).stdout
+        try:
+            digests = json.loads(inspected)
+        except json.JSONDecodeError:
+            raise SmokeError("SMOKE_RELEASE_DIGEST_INVALID") from None
+        references = [
+            item
+            for item in (digests if isinstance(digests, list) else [])
+            if isinstance(item, str)
+            and item.startswith(f"{repository}@")
+            and _DIGEST_REFERENCE_RE.fullmatch(item) is not None
+        ]
+        if len(references) != 1:
+            raise SmokeError("SMOKE_RELEASE_DIGEST_INVALID")
+        yield references[0]
+    finally:
+        primary = sys.exception()
+        cleanup = [(docker, "rm", "-f", registry)]
+        if candidate is not None:
+            cleanup.insert(0, (docker, "image", "rm", candidate))
+        for argv in cleanup:
+            try:
+                runner(argv, timeout=60.0)
+            except (OSError, subprocess.SubprocessError):
+                if primary is None:
+                    raise SmokeError("SMOKE_RELEASE_CLEANUP_FAILED") from None
+                _safe_add_fixed_note(primary, "SMOKE_RELEASE_CLEANUP_FAILED")
+
+
+def _require_release_model(session: ComposeSession) -> None:
+    """合成 base + release + 本次输入 override，按部署前检查同一套规则核对。
+
+    输出只在内存里解析，不写日志、不回显；任何违例只给一个固定码。
+    """
+    from scripts.release_compose import release_violations
+
+    result = session.run(
+        "config",
+        "--format",
+        "json",
+        timeout=60.0,
+        failure_code="SMOKE_RELEASE_MODEL_COMMAND_FAILED",
+    )
+    try:
+        model = json.loads(result.stdout)
+    except (json.JSONDecodeError, RecursionError):
+        raise SmokeError("SMOKE_RELEASE_MODEL_INVALID") from None
+    if not isinstance(model, dict) or release_violations(model):
+        raise SmokeError("SMOKE_RELEASE_MODEL_INVALID")
+
+
+def _one_shot(session: ComposeSession, module: str, *, failure_code: str) -> object:
+    """在 release 镜像里跑一次性维护命令；只接受一行 JSON。"""
+    result = session.run(
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "migrate",
+        "python",
+        "-m",
+        module,
+        timeout=120.0,
+        failure_code=failure_code,
+    )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise SmokeError(failure_code) from None
+
+
+def _require_release_containers(session: ComposeSession, *, image: str) -> None:
+    """三个长期进程都以同一 digest 镜像、release 形态运行；只有 Web 发布端口。"""
+    for service in _RELEASE_SERVICES:
+        container = _container_id(session, service)
+        result = session.run_docker(
+            (
+                session.docker,
+                "inspect",
+                "--format",
+                "[{{json .Config.Image}},{{json .Config.Env}},"
+                "{{json .HostConfig.PortBindings}}]",
+                container,
+            ),
+            timeout=15.0,
+            failure_code="SMOKE_RELEASE_INSPECT_FAILED",
+        )
+        try:
+            values = json.loads(result.stdout)
+        except (json.JSONDecodeError, RecursionError):
+            raise SmokeError("SMOKE_RELEASE_INSPECT_FAILED") from None
+        if not isinstance(values, list) or len(values) != 3:
+            raise SmokeError("SMOKE_RELEASE_INSPECT_FAILED")
+        container_image, environment, bindings = values
+        if not isinstance(environment, list):
+            raise SmokeError("SMOKE_RELEASE_INSPECT_FAILED")
+        expected_bindings = _RELEASE_WEB_BINDINGS if service == "web-app" else {}
+        if (
+            container_image != image
+            or "XIAOWEI_RUNTIME_PROFILE=release" not in environment
+            or "XIAOWEI_STARROCKS_ADAPTER_MODE=disabled" not in environment
+            or any(
+                isinstance(item, str) and item.startswith("XIAOWEI_RELEASE_")
+                for item in environment
+            )
+            or (bindings or {}) != expected_bindings
+        ):
+            raise SmokeError("SMOKE_RELEASE_CONTAINER_INVALID")
+
+
+def _request_web(path: str, *, host: str) -> _WebProbeResponse:
+    """与 OAuth start 探针同一直连方式：不读代理、不跟随重定向。"""
+    connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=2.0)
+    try:
+        connection.request("GET", path, headers={"Host": host})
+        response = connection.getresponse()
+        body = response.read(_MAX_WEB_RESPONSE_BYTES + 1)
+        return _WebProbeResponse(
+            status=response.status,
+            headers=tuple(response.getheaders()),
+            body=body,
+        )
+    except (OSError, http.client.HTTPException):
+        raise SmokeError("SMOKE_RELEASE_WEB_REQUEST_FAILED") from None
+    finally:
+        connection.close()
+
+
+def _require_release_web_surface() -> None:
+    """登录页经 public Host 可达；直连 Host 被拒；OAuth 路由在 release 下根本不存在。
+
+    合成的飞书域配置里**有** App ID/Secret：release 仍不装配 OAuth，证明开关不是
+    "有凭据就自动打开"。
+    """
+    login = _request_web(_RELEASE_LOGIN_PATH, host=_WEB_PUBLIC_HOST)
+    direct = _request_web(_RELEASE_LOGIN_PATH, host=_WEB_DIRECT_HOST)
+    oauth = _request_web(_WEB_OAUTH_START_PATH, host=_WEB_PUBLIC_HOST)
+    if (
+        login.status != 200
+        or direct.status != 403
+        or direct.body != _WEB_FORBIDDEN_BODY
+        or oauth.status != 404
+        or _header_values(oauth, "location")
+        or _header_values(oauth, "set-cookie")
+    ):
+        raise SmokeError("SMOKE_RELEASE_WEB_SURFACE_INVALID")
+
+
+def _release_workflow(session: ComposeSession, *, image: str) -> None:
+    """provider-off release：装配、一次性命令、零工具调用与端口面。"""
+    _require_release_model(session)
+    session.failure_code = "SMOKE_POSTGRES_COMMAND_FAILED"
+    session.run("up", "-d", "--wait", "postgres", timeout=120.0)
+    _require_migrated(session, "--pull", "never")
+
+    if _one_shot(
+        session,
+        "xiaowei_agent.interfaces.activation_retention",
+        failure_code="SMOKE_RELEASE_RETENTION_FAILED",
+    ) != _RELEASE_RETENTION_REPORT:
+        raise SmokeError("SMOKE_RELEASE_RETENTION_FAILED")
+    if _one_shot(
+        session,
+        "xiaowei_agent.interfaces.legacy_identity_migration",
+        failure_code="SMOKE_RELEASE_IDENTITY_FAILED",
+    ) != _RELEASE_IDENTITY_REPORT:
+        raise SmokeError("SMOKE_RELEASE_IDENTITY_FAILED")
+
+    session.failure_code = "SMOKE_RELEASE_START_COMMAND_FAILED"
+    session.run(
+        "up",
+        "-d",
+        "--wait",
+        "--pull",
+        "never",
+        "--no-deps",
+        *_RELEASE_SERVICES,
+        timeout=180.0,
+    )
+    _wait_ready(web=True, timeout=60.0)
+    _require_release_containers(session, image=image)
+    _require_web_container_boundary(session)
+    _require_release_web_surface()
+
+    session.failure_code = "SMOKE_RELEASE_TASK_COMMAND_FAILED"
+    task_id = _submit(session, key=f"release-{uuid.uuid4().hex}")
+    if _wait_task(session, task_id, timeout=120.0).get("status") != "rejected":
+        raise SmokeError("SMOKE_RELEASE_TASK_NOT_REJECTED")
+    footprint = _psql(
+        session,
+        task_id,
+        "SELECT (SELECT count(*) FROM task_plans WHERE task_id = :'task_id'), "
+        "(SELECT count(*) FROM task_step_executions WHERE task_id = :'task_id'), "
+        "(SELECT count(*) FROM task_evidence WHERE task_id = :'task_id')",
+    )
+    if footprint != "0|0|0":
+        raise SmokeError("SMOKE_RELEASE_EXECUTION_PRESENT")
+    session.run("ps", "-a", timeout=15.0)
+    _require_logs_clean(session)
+
+
+def run_release_smoke(
+    *,
+    docker: str,
+    compose_command: tuple[str, ...],
+    runner: CommandRunner = _default_runner,
+) -> None:
+    """构建候选 digest 后，在独立随机 project 里跑 provider-off release smoke。"""
+    with _release_candidate(
+        docker=docker, compose_command=compose_command, runner=runner
+    ) as image:
+        run_smoke(
+            docker=docker,
+            compose_command=compose_command,
+            runner=runner,
+            workflow=functools.partial(_release_workflow, image=image),
+            release_image=image,
+        )
+
+
 def main() -> int:
     docker = shutil.which("docker")
     if docker is None:
@@ -1761,6 +2151,7 @@ def main() -> int:
             compose_command=compose_command,
             workflow=_full_workflow,
         )
+        run_release_smoke(docker=docker, compose_command=compose_command)
     except SmokeError as exc:
         sys.stderr.write(f"compose-smoke: {exc}\n")
         return 1
