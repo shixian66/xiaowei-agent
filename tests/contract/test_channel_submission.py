@@ -23,6 +23,7 @@ from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     ChannelKind,
     ChannelPermission,
+    DestinationKind,
     IdentitySource,
     ProjectionState,
     TaskLookup,
@@ -530,9 +531,59 @@ async def test_same_event_cannot_be_replayed_from_a_different_conversation(
         )
 
 
+async def _notices(channel_store) -> list:
+    due = await channel_store.list_due_projection_subscriptions(
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
+    )
+    return [
+        item
+        for item in due
+        if item.destination_kind is DestinationKind.FEISHU_PRIVATE_NOTICE
+    ]
+
+
+async def test_web_notice_goes_to_the_users_latest_p2p_chat(
+    service, channel_store, clock
+) -> None:
+    # 真实飞书拒绝按 open_id 发私聊（230101）；网页任务的通知改发到该用户最近一次
+    # 私聊小维时记录的 p2p 会话。
+    await service.submit(
+        command=_command(clock, channel=ChannelKind.FEISHU_PRIVATE, client_key="p2p")
+    )
+    web = await service.submit(
+        command=_command(clock, channel=ChannelKind.WEB, client_key="web-user")
+    )
+
+    notices = await _notices(channel_store)
+    assert [(item.task_id, item.destination_ref) for item in notices] == [
+        (web.task_view.task_id, "p2p-chat-1")
+    ]
+
+
+async def test_web_user_who_never_messaged_the_bot_gets_no_feishu_notice(
+    service, channel_store, clock
+) -> None:
+    await service.submit(
+        command=_command(clock, channel=ChannelKind.WEB, client_key="web-user")
+    )
+    other = _principal(actor="bob")
+    await service.submit(
+        command=_command(
+            clock, principal=other, channel=ChannelKind.FEISHU_PRIVATE, client_key="bob"
+        )
+    )
+
+    assert await _notices(channel_store) == []
+
+
 async def test_web_user_gets_terminal_notice_but_admin_gets_no_subscription(
     service, channel_store, clock
 ) -> None:
+    await service.submit(
+        command=_command(clock, channel=ChannelKind.FEISHU_PRIVATE, client_key="p2p")
+    )
     ordinary = await service.submit(
         command=_command(clock, channel=ChannelKind.WEB, client_key="web-user")
     )
@@ -554,11 +605,7 @@ async def test_web_user_gets_terminal_notice_but_admin_gets_no_subscription(
             client_key="web-admin",
         )
     )
-    due = await channel_store.list_due_projection_subscriptions(
-        query=ProjectionDueQuery(
-            tenant_id="dev-local", environment_id="dev", limit=100
-        )
-    )
+    due = await _notices(channel_store)
 
     assert [item.task_id for item in due] == [ordinary.task_view.task_id]
     assert due[0].state is ProjectionState.WAITING_TERMINAL

@@ -67,7 +67,8 @@
   与 tenant/bot 标识才启动；不与 release 叠加，只是本机体验，不构成 W5-C、RI2、RI3 证据。
   飞书私聊回复改按事件里的 p2p `chat_id` 发送（`ChannelSubmitCommand.private_chat_ref`）：本机真实租户对
   `receive_id_type=open_id` 的私聊发送返回 `230101`，同一会话用 `chat_id` 发送成功。Web 发起任务的飞书私聊通知
-  （`feishu_private_notice`）仍按 open_id 发送，在该租户下预计同样被拒，**未修复**。
+  （`feishu_private_notice`）同理改发到该用户同 scope 内最近一次私聊小维的 p2p 会话
+  （`ChannelStore.find_private_chat_ref`，不加表、不加迁移）；从没私聊过小维的用户不建飞书通知，只在 Web 看结果。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
