@@ -260,6 +260,20 @@ def _settings(**updates):
     return Settings.model_validate(base | updates)
 
 
+def _bypassed(**updates):
+    """W5-B 起 Settings 在 release 下拒绝 listener/channel-worker 开关；这里**刻意绕过**
+    校验，证明即使那道闸失守，这两个装配函数也只投影空准入快照（纵深防御）。"""
+    if PROFILE != "release":
+        return _settings(**updates)
+    try:
+        _settings(**updates)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("release Settings must reject live channel switches")
+    return _settings().model_copy(update=updates)
+
+
 def _view_snapshot(runtime):
     return vars(runtime)["_conversation_snapshot"].snapshot_id
 
@@ -276,7 +290,7 @@ async def main():
     )
     snapshots["web-app"] = _view_snapshot(stack.runtime)
     stack = await local_stack.build_postgres_feishu_listener_stack(
-        settings=_settings(
+        settings=_bypassed(
             feishu_listener_enabled=True,
             feishu_tenant_key="tenant-test",
             feishu_bot_open_id="bot-open-id",
@@ -287,7 +301,7 @@ async def main():
     )
     snapshots["feishu-listener"] = _view_snapshot(stack.runtime)
     stack = await local_stack.build_postgres_channel_worker_stack(
-        settings=_settings(
+        settings=_bypassed(
             channel_worker_enabled=True, web_public_origin="https://ops.example.test"
         ),
         message_port=_Messages(),

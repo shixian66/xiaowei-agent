@@ -1,0 +1,72 @@
+# W5 provider-off release：只能与 docker-compose.yml 一起、且只以这两份文件渲染。
+#
+#   docker compose --env-file <部署模板> -f docker-compose.yml -f docker-compose.release.yml ...
+#
+# - 六个 app service 全部使用同一个不可变镜像 ``name@sha256:<64 hex>``，清除 ``build``：
+#   发布主机不现场构建，也不接受可漂移的 tag。
+# - 运行形态、作用域、StarRocks 与全部真实调用开关都写成**字面量**：Compose 的
+#   ``environment:`` 优先于 ``.env``，所以部署模板改不动它们；Settings 在 release 下
+#   也会拒绝任何被打开的开关（纵深防御，不靠这一层单独承重）。
+# - 只发布 Web，绑定地址由部署模板显式给出；API 的 loopback 端口在最终模型里被清除。
+#   PostgreSQL、worker、listener、channel-worker 不发布端口。
+# - 飞书 listener / channel-worker 仍在 ``m7-channels`` profile 后，本集合不启动它们；
+#   它们同样收到 release 形态与关闭开关，万一被显式拉起也只会 fail-closed。
+# - 部署模板中的 XIAOWEI_RELEASE_* 只用于 Compose 插值，不进入任何容器环境。
+x-release-environment: &release-environment
+  XIAOWEI_RUNTIME_PROFILE: release
+  XIAOWEI_ENVIRONMENT_ID: dev
+  XIAOWEI_ACTOR: ${XIAOWEI_RELEASE_ACTOR:?required}
+  XIAOWEI_STARROCKS_ADAPTER_MODE: disabled
+  XIAOWEI_SMOKE_STEP_BARRIER: "false"
+  XIAOWEI_GEMINI_ENABLED: "false"
+
+x-release-labels: &release-labels
+  io.xiaowei.release.source-sha: ${XIAOWEI_RELEASE_SOURCE_SHA:?required}
+  io.xiaowei.release.edge-evidence: ${XIAOWEI_RELEASE_EDGE_EVIDENCE_REF:?required}
+
+x-release-service: &release-service
+  image: ${XIAOWEI_RELEASE_IMAGE:?required}
+  build: !reset null
+  labels: *release-labels
+
+services:
+  migrate:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+
+  api:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+    ports: !reset []
+
+  worker:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+
+  feishu-listener:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+      XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
+
+  channel-worker:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+      XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
+
+  web-app:
+    <<: *release-service
+    environment:
+      <<: *release-environment
+      XIAOWEI_WEB_APP_ENABLED: "true"
+      XIAOWEI_WEB_MODE: https
+      XIAOWEI_WEB_PUBLIC_ORIGIN: ${XIAOWEI_WEB_PUBLIC_ORIGIN:?required}
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "false"
+      XIAOWEI_GEMINI_REAL_TEST_ENABLED: "false"
+      XIAOWEI_FEISHU_REAL_TEST_ENABLED: "false"
+    ports: !override
+      - "${XIAOWEI_RELEASE_WEB_BIND_IP:?required}:8080:8080"

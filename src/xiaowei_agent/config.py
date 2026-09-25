@@ -455,6 +455,18 @@ class Settings(BaseModel):
                 raise ValueError("release profile requires the fixed release scope")
             if self.smoke_step_barrier:
                 raise ValueError("release profile must not install the smoke barrier")
+            # W5 V1 release 是 provider-off 产品壳：任何真实调用开关都没有获批组合。
+            # Compose release 契约把它们写成字面 false；这里是进程层的第二道闸，
+            # 手工 docker run 或额外 override 打开任一开关时进程直接起不来。
+            if (
+                self.gemini_enabled
+                or self.feishu_oauth_enabled
+                or self.feishu_listener_enabled
+                or self.channel_worker_enabled
+                or self.gemini_real_test_enabled
+                or self.feishu_real_test_enabled
+            ):
+                raise ValueError("release profile keeps every live provider switch off")
         elif self.starrocks_adapter_mode is StarRocksAdapterMode.DISABLED:
             raise ValueError("disabled StarRocks mode requires the release profile")
         return self

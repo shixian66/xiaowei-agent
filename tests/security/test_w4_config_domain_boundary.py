@@ -59,13 +59,20 @@ _EXPECTED_MOUNTS: Final[dict[str, set[tuple[str, str, bool]]]] = {
 
 
 class _ComposeLoader(yaml.SafeLoader):
-    """``!override`` / ``!reset`` 是 Compose 渲染期指令，静态读取时按普通序列对待。"""
+    """``!override`` / ``!reset`` 是 Compose 渲染期指令，静态读取时按普通值对待。"""
+
+
+def _construct_tagged(loader: yaml.SafeLoader, node: yaml.Node) -> object:
+    """``!override`` 作用于序列，``!reset`` 还可以作用于 ``null``（W5 release 清除 ``build``）。"""
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return None
 
 
 for _tag in ("!override", "!reset"):
-    _ComposeLoader.add_constructor(
-        _tag, lambda loader, node: loader.construct_sequence(node, deep=True)
-    )
+    _ComposeLoader.add_constructor(_tag, _construct_tagged)
 
 
 def _compose_services() -> dict[str, Any]:
