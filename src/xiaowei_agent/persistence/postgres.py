@@ -45,6 +45,7 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     ChannelKind,
     ClarificationRecord,
+    DestinationKind,
     EvidenceEnvelope,
     ExecutionPlan,
     GrantRejection,
@@ -136,6 +137,7 @@ from xiaowei_agent.persistence.channel import (
     DeadLetterProjectionCommand,
     GroupBindingLookup,
     GroupBoundTaskIdsQuery,
+    PrivateChatLookup,
     ProjectionClaimMutation,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
@@ -749,6 +751,34 @@ class PostgresChannelStore:
         if row is None:
             raise ChannelBindingNotFoundError
         return row_to_channel_binding(row)
+
+    @_persistence_boundary(write=False)
+    async def find_private_chat_ref(self, *, lookup: PrivateChatLookup) -> str | None:
+        statement = (
+            sa.select(PROJECTION_SUBSCRIPTIONS.c.destination_ref)
+            .select_from(
+                CHANNEL_BINDINGS.join(
+                    PROJECTION_SUBSCRIPTIONS,
+                    PROJECTION_SUBSCRIPTIONS.c.task_id == CHANNEL_BINDINGS.c.task_id,
+                )
+            )
+            .where(
+                CHANNEL_BINDINGS.c.tenant_id == lookup.tenant_id,
+                CHANNEL_BINDINGS.c.environment_id == lookup.environment_id,
+                CHANNEL_BINDINGS.c.channel == ChannelKind.FEISHU_PRIVATE.value,
+                CHANNEL_BINDINGS.c.initiator_subject_ref == lookup.subject_ref,
+                PROJECTION_SUBSCRIPTIONS.c.destination_kind
+                == DestinationKind.FEISHU_MESSAGE_CARD.value,
+            )
+            .order_by(
+                CHANNEL_BINDINGS.c.created_at.desc(),
+                CHANNEL_BINDINGS.c.binding_id.desc(),
+            )
+            .limit(1)
+        )
+        async with self._engine.connect() as connection:
+            value = (await connection.execute(statement)).scalar()
+        return value if isinstance(value, str) else None
 
     @_persistence_boundary(write=False)
     async def list_group_bound_task_ids(

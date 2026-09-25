@@ -307,7 +307,7 @@ async def test_waiting_for_task_is_not_counted_as_a_provider_failure(
 
 
 @pytest.mark.asyncio
-async def test_web_terminal_notice_is_sent_to_the_initiating_user_once(
+async def test_web_terminal_notice_is_sent_into_the_users_p2p_chat_once(
     clock, context
 ) -> None:
     harness = _harness(clock)
@@ -317,6 +317,7 @@ async def test_web_terminal_notice_is_sent_to_the_initiating_user_once(
         suffix="web-terminal",
         channel=ChannelKind.WEB,
         destination_kind=DestinationKind.FEISHU_PRIVATE_NOTICE,
+        destination_ref="p2p-chat-alice",
         initial_state=ProjectionState.WAITING_TERMINAL,
     )
     await drive_to_terminal(harness.tasks, lookup_for(task), TaskStatus.SUCCEEDED)
@@ -324,8 +325,8 @@ async def test_web_terminal_notice_is_sent_to_the_initiating_user_once(
     assert await harness.service.poll_once() == 1
 
     assert _stored_subscription(harness, subscription).state is ProjectionState.COMPLETED
-    assert [item[0] for item in harness.messages.user_sends] == ["subject-alice"]
-    assert harness.messages.chat_sends == []
+    assert [item[0] for item in harness.messages.chat_sends] == ["p2p-chat-alice"]
+    assert harness.messages.user_sends == []
     assert await harness.service.poll_once() == 0
 
 

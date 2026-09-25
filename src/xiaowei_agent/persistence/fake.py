@@ -26,6 +26,7 @@ from xiaowei_agent.contracts import (
     ActorTaskPageQuery,
     ApprovalRequest,
     ChannelKind,
+    DestinationKind,
     GrantRejection,
     IdentitySource,
     LeaseGrant,
@@ -124,6 +125,7 @@ from xiaowei_agent.persistence.channel import (
     DeadLetterProjectionCommand,
     GroupBindingLookup,
     GroupBoundTaskIdsQuery,
+    PrivateChatLookup,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
     ProjectionSubscription,
@@ -366,6 +368,30 @@ class InMemoryChannelStore:
             ):
                 raise ChannelBindingNotFoundError
             return binding
+
+    async def find_private_chat_ref(self, *, lookup: PrivateChatLookup) -> str | None:
+        async with self._lock:
+            candidates = sorted(
+                (
+                    binding
+                    for binding in self._state.channel_bindings.values()
+                    if binding.tenant_id == lookup.tenant_id
+                    and binding.environment_id == lookup.environment_id
+                    and binding.channel is ChannelKind.FEISHU_PRIVATE
+                    and binding.initiator_subject_ref == lookup.subject_ref
+                ),
+                key=lambda binding: (binding.created_at, binding.binding_id),
+                reverse=True,
+            )
+            for binding in candidates:
+                for subscription in self._state.projection_subscriptions.values():
+                    if (
+                        subscription.task_id == binding.task_id
+                        and subscription.destination_kind
+                        is DestinationKind.FEISHU_MESSAGE_CARD
+                    ):
+                        return subscription.destination_ref
+            return None
 
     async def list_group_bound_task_ids(
         self, *, query: GroupBoundTaskIdsQuery

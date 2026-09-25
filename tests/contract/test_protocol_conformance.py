@@ -303,8 +303,9 @@ def test_every_channel_store_implementation_keeps_the_protocol_keyword_arguments
     module_path, class_name = implementation_path.split(":")
     implementation = getattr(importlib.import_module(module_path), class_name)
     methods = _protocol_methods(ChannelStore)
-    # 14：RI3 PR 3D 增加按 task 精确读取渠道绑定；扩约必须显式过审。
-    assert len(methods) == 14, f"ChannelStore 的方法集变了：{methods}"
+    # 14：RI3 PR 3D 增加按 task 精确读取渠道绑定；15：Web 通知按主体查最近 p2p 会话
+    # （飞书拒绝按 open_id 发私聊）。扩约必须显式过审。
+    assert len(methods) == 15, f"ChannelStore 的方法集变了：{methods}"
     for method in methods:
         assert _keyword_params(getattr(implementation, method)) == _keyword_params(
             getattr(ChannelStore, method)

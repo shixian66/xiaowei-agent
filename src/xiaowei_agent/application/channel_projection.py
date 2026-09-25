@@ -234,7 +234,8 @@ class ChannelProjectionService:
     ) -> tuple[Literal["chat", "user"], str]:
         """在 provider 异常域之外解析新消息目的地。"""
         if subscription.destination_kind is DestinationKind.FEISHU_PRIVATE_NOTICE:
-            return "user", subscription.destination_ref
+            # 目的地是提交时查到的该用户 p2p 会话（见 ChannelSubmissionService）。
+            return "chat", subscription.destination_ref
         if subscription.destination_kind is not DestinationKind.FEISHU_MESSAGE_CARD:
             raise ChannelProjectionInvariantError("unsupported projection destination")
 

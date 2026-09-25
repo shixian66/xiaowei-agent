@@ -25,6 +25,7 @@ from xiaowei_agent.persistence.channel import (
     DeadLetterProjectionCommand,
     GroupBindingLookup,
     GroupBoundTaskIdsQuery,
+    PrivateChatLookup,
     ProjectionClaimNotFoundError,
     ProjectionDueQuery,
     ProjectionSubscriptionConflictError,
@@ -82,13 +83,14 @@ def _binding(
     projection: CreateProjectionSubscriptionCommand | None = None,
     tenant_id: str = "dev-local",
     environment_id: str = "dev",
+    subject_ref: str = "subject-alice",
 ) -> BindTaskCommand:
     return BindTaskCommand(
         task_id=task_id,
         tenant_id=tenant_id,
         environment_id=environment_id,
         channel=channel,
-        initiator_subject_ref="subject-alice",
+        initiator_subject_ref=subject_ref,
         conversation_ref="chat-1" if channel is ChannelKind.FEISHU_GROUP else None,
         source_event_ref=source_event_ref,
         created_at=now,
@@ -220,6 +222,45 @@ async def test_group_binding_lookup_is_scope_hidden_and_excludes_private_binding
     ):
         with pytest.raises(ChannelBindingNotFoundError):
             await channel_store.get_group_binding(lookup=lookup)
+
+
+async def test_private_chat_lookup_returns_the_latest_p2p_chat_in_scope(
+    channel_store: Any, store: Any, context: Any, clock: Any
+) -> None:
+    now = clock()
+    cases = (
+        ("old", ChannelKind.FEISHU_PRIVATE, "subject-alice", "p2p-old", 0),
+        ("new", ChannelKind.FEISHU_PRIVATE, "subject-alice", "p2p-new", 1),
+        ("group", ChannelKind.FEISHU_GROUP, "subject-alice", "chat-1", 2),
+        ("bob", ChannelKind.FEISHU_PRIVATE, "subject-bob", "p2p-bob", 3),
+    )
+    for suffix, channel, subject_ref, destination_ref, offset in cases:
+        task = await _task(store, context, f"p2p-{suffix}")
+        created_at = now + dt.timedelta(seconds=offset)
+        await channel_store.bind_task(
+            command=_binding(
+                task.task_id,
+                created_at,
+                source_event_ref=f"event-p2p-{suffix}",
+                channel=channel,
+                subject_ref=subject_ref,
+                projection=_subscription(
+                    task.task_id, created_at, destination_ref=destination_ref
+                ),
+            )
+        )
+
+    async def lookup(subject_ref: str, tenant_id: str = "dev-local") -> str | None:
+        return await channel_store.find_private_chat_ref(
+            lookup=PrivateChatLookup(
+                tenant_id=tenant_id, environment_id="dev", subject_ref=subject_ref
+            )
+        )
+
+    assert await lookup("subject-alice") == "p2p-new"
+    assert await lookup("subject-bob") == "p2p-bob"
+    assert await lookup("subject-carol") is None
+    assert await lookup("subject-alice", tenant_id="other-tenant") is None
 
 
 async def test_binding_lookup_returns_any_channel_but_stays_scope_hidden(
@@ -878,6 +919,7 @@ CHANNEL_STORE_CASES = (
     test_binding_rolls_back_when_its_nested_subscription_conflicts,
     test_group_binding_lookup_is_scope_hidden_and_excludes_private_bindings,
     test_binding_lookup_returns_any_channel_but_stays_scope_hidden,
+    test_private_chat_lookup_returns_the_latest_p2p_chat_in_scope,
     test_group_bound_task_ids_are_batched_and_scope_hidden,
     test_projection_creation_is_idempotent_but_semantic_conflicts_fail_closed,
     test_projection_subscription_cannot_reference_an_unknown_task,

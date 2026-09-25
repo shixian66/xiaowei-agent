@@ -199,6 +199,24 @@ def _group_event(
     )
 
 
+def _private_event() -> FeishuMessageEvent:
+    return FeishuMessageEvent(
+        schema="2.0",
+        event_id="event-private-1",
+        event_type="im.message.receive_v1",
+        app_id="offline_test_app",
+        tenant_key="offline-tenant",
+        sender_type="user",
+        sender_subject_ref="subject-alice",
+        message_id="incoming-message-private-1",
+        chat_id="p2p-alice",
+        chat_type="p2p",
+        message_type="text",
+        text="检查最近三十分钟慢查询",
+        mentions=(),
+    )
+
+
 def _i1_rejected_text() -> str:
     data = json.loads(_I1_FIXTURE.read_text(encoding="utf-8"))
     case = next(
@@ -488,6 +506,15 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
             "subject-bob",
         )
 
+    # 飞书拒绝按 open_id 发私聊，Web 任务通知只能发进 alice 私聊小维时的 p2p 会话。
+    assert await listener.listener.handle_event(event=_private_event()) is True
+    assert await projection.service.poll_once() == 1
+    assert messages.chat_sends[-1][0] == "p2p-alice"
+    assert await worker.poll_once() == 1
+    clock.advance(seconds=2)
+    assert await projection.service.poll_once() == 1
+    sends_before_web = len(messages.chat_sends)
+
     alice_cookie = await _web_session(
         web.auth, code="alice-code", return_intent=_WORKBENCH_INTENT
     )
@@ -513,8 +540,10 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     normal_task_id = normal_submit.json()["task_id"]
     assert await worker.poll_once() == 1
     assert await projection.service.poll_once() == 1
-    assert [item[0] for item in messages.user_sends] == ["subject-alice"]
-    assert normal_task_id in messages.user_sends[0][1].content_json
+    assert messages.user_sends == []
+    web_notices = messages.chat_sends[sends_before_web:]
+    assert [item[0] for item in web_notices] == ["p2p-alice"]
+    assert normal_task_id in web_notices[0][1].content_json
     assert await projection.service.poll_once() == 0
 
     admin_cookie = await _web_session(
@@ -540,7 +569,8 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
     assert admin_submit.status_code == 202
     assert await worker.poll_once() == 1
     assert await projection.service.poll_once() == 0
-    assert [item[0] for item in messages.user_sends] == ["subject-alice"]
+    assert messages.user_sends == []
+    assert len(messages.chat_sends) == sends_before_web + 1
 
 
 async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(

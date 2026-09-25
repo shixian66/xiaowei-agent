@@ -29,6 +29,7 @@ from xiaowei_agent.persistence.channel import (
     ChannelBinding,
     ChannelStore,
     CreateProjectionSubscriptionCommand,
+    PrivateChatLookup,
 )
 from xiaowei_agent.persistence.store import TaskNotFoundError
 from xiaowei_agent.planning import canonical_json
@@ -130,20 +131,25 @@ def channel_idempotency_key(command: ChannelSubmitCommand) -> str:
     return derive_channel_submission_references(command).idempotency_key
 
 
-def _projection_command(
-    command: ChannelSubmitCommand, *, task_id: str
-) -> CreateProjectionSubscriptionCommand | None:
-    principal = command.principal
-    if (
+def _wants_web_notice(command: ChannelSubmitCommand) -> bool:
+    return (
         command.channel is ChannelKind.WEB
-        and ChannelPermission.ADMIN_ALL_SAFE_TASKS in principal.permissions
-    ):
-        return None
+        and ChannelPermission.ADMIN_ALL_SAFE_TASKS not in command.principal.permissions
+    )
+
+
+def _projection_command(
+    command: ChannelSubmitCommand, *, task_id: str, web_notice_chat_ref: str | None
+) -> CreateProjectionSubscriptionCommand | None:
     if command.channel is ChannelKind.WEB:
+        # 真实飞书拒绝按 open_id 发私聊（230101），只能发进用户私聊小维时的 p2p
+        # 会话；从没私聊过小维的用户没有可达会话，不建飞书通知，结果只在 Web 上看。
+        if not _wants_web_notice(command) or web_notice_chat_ref is None:
+            return None
         return CreateProjectionSubscriptionCommand(
             task_id=task_id,
             destination_kind=DestinationKind.FEISHU_PRIVATE_NOTICE,
-            destination_ref=principal.subject_ref,
+            destination_ref=web_notice_chat_ref,
             initial_state=ProjectionState.WAITING_TERMINAL,
             next_attempt_at=command.submitted_at,
         )
@@ -218,6 +224,15 @@ class ChannelSubmissionService:
                 )
         except TaskNotFoundError:
             raise ChannelParentNotFoundError from None
+        web_notice_chat_ref = None
+        if _wants_web_notice(command):
+            web_notice_chat_ref = await self._channels.find_private_chat_ref(
+                lookup=PrivateChatLookup(
+                    tenant_id=principal.tenant_id,
+                    environment_id=principal.environment_id,
+                    subject_ref=principal.subject_ref,
+                )
+            )
         binding = await self._channels.bind_task(
             command=BindTaskCommand(
                 task_id=task_view.task_id,
@@ -228,7 +243,11 @@ class ChannelSubmissionService:
                 conversation_ref=command.conversation_ref,
                 source_event_ref=references.source_event_ref,
                 created_at=command.submitted_at,
-                projection=_projection_command(command, task_id=task_view.task_id),
+                projection=_projection_command(
+                    command,
+                    task_id=task_view.task_id,
+                    web_notice_chat_ref=web_notice_chat_ref,
+                ),
             )
         )
         return SubmittedTask(

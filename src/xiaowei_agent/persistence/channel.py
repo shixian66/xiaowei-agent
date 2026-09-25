@@ -167,6 +167,14 @@ class GroupBindingLookup(Contract):
     environment_id: StrictStr
 
 
+class PrivateChatLookup(Contract):
+    """按作用域与主体查找其最近一次私聊小维时记录的 p2p 会话。"""
+
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    subject_ref: StrictStr
+
+
 class ChannelBindingLookup(Contract):
     """按任务与作用域读取唯一渠道绑定，不对渠道种类做推断。"""
 
@@ -531,6 +539,9 @@ class ChannelStore(Protocol):
     ) -> frozenset[str]:
         """批量返回指定 scope 中存在飞书群绑定的任务 ID。"""
 
+    async def find_private_chat_ref(self, *, lookup: PrivateChatLookup) -> str | None:
+        """返回该主体在同 scope 内最近一次飞书私聊任务的回复会话；没有则为 ``None``。"""
+
     async def create_projection_subscription(
         self, *, command: CreateProjectionSubscriptionCommand
     ) -> ProjectionSubscription:
@@ -592,6 +603,7 @@ __all__ = [
     "DeadLetterProjectionCommand",
     "GroupBindingLookup",
     "GroupBoundTaskIdsQuery",
+    "PrivateChatLookup",
     "ProjectionClaimNotFoundError",
     "ProjectionDueQuery",
     "ProjectionSubscription",
