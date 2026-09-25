@@ -249,3 +249,31 @@ def test_the_resources_script_only_uses_the_registration_routes() -> None:
     # 没有资源测试或连接入口：W4c 才决定真实调用路径。
     for forbidden in ("/admin/api/resources/test", "resources/probe", "resources/connect"):
         assert forbidden not in admin_script
+
+
+def test_login_shell_without_oauth_does_not_mention_feishu() -> None:
+    from xiaowei_agent.interfaces.web_app import _login_shell
+
+    shell = (_STATIC / "login.html").read_text(encoding="utf-8")
+    off = _login_shell(shell=shell, oauth_available=False)
+    on = _login_shell(shell=shell, oauth_available=True)
+
+    intro_off = re.search(r'<p class="auth-intro">(.*?)</p>', off)
+    assert intro_off is not None
+    assert "飞书" not in intro_off.group(1)
+    assert intro_off.group(1) == "请使用本地管理员账号登录。"
+    assert '<div class="oauth-entry is-hidden" id="oauth-entry">' in off
+    # 装配了 OAuth 时，登录页与静态壳逐字一致。
+    assert on == shell
+
+
+def test_login_shell_markup_drift_fails_at_startup() -> None:
+    import pytest
+
+    from xiaowei_agent.interfaces.web_app import _login_shell
+
+    shell = (_STATIC / "login.html").read_text(encoding="utf-8")
+    without_intro = re.sub(r'<p class="auth-intro">.*?</p>', "", shell)
+    for drifted in ("<main></main>", without_intro):
+        with pytest.raises(RuntimeError, match="login shell markup drifted"):
+            _login_shell(shell=drifted, oauth_available=False)

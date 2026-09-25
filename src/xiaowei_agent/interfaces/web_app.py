@@ -698,15 +698,33 @@ def _single_cookie(request: Request, *, name: str) -> tuple[str | None, bool]:
     return (matches[0] if matches else None), True
 
 
+_LOGIN_OAUTH_ENTRY: Final[str] = '<div class="oauth-entry" id="oauth-entry">'
+_LOGIN_INTRO_RE: Final[re.Pattern[str]] = re.compile(
+    r'(<p class="auth-intro">)[^<]*(</p>)'
+)
+_LOCAL_ONLY_INTRO: Final[str] = "请使用本地管理员账号登录。"
+
+
 def _login_shell(*, shell: str, oauth_available: bool) -> str:
-    """按装配事实裁掉不可用的 OAuth 入口，不生成第二套登录页面。"""
+    """按装配事实裁掉不可用的 OAuth 入口与文案，不生成第二套登录页面。
+
+    标记不是恰好一次时启动即失败，避免静默漏删飞书文案。
+    """
     if oauth_available:
         return shell
-    return shell.replace(
-        '<div class="oauth-entry" id="oauth-entry">',
+    if shell.count(_LOGIN_OAUTH_ENTRY) != 1:
+        raise RuntimeError("login shell markup drifted")
+    hidden = shell.replace(
+        _LOGIN_OAUTH_ENTRY,
         '<div class="oauth-entry is-hidden" id="oauth-entry">',
         1,
     )
+    replaced, count = _LOGIN_INTRO_RE.subn(
+        rf"\g<1>{_LOCAL_ONLY_INTRO}\g<2>", hidden
+    )
+    if count != 1:
+        raise RuntimeError("login shell markup drifted")
+    return replaced
 
 
 _CAPABILITY_STRIP_RE: Final[re.Pattern[str]] = re.compile(
