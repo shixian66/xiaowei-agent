@@ -698,15 +698,33 @@ def _single_cookie(request: Request, *, name: str) -> tuple[str | None, bool]:
     return (matches[0] if matches else None), True
 
 
+_LOGIN_OAUTH_ENTRY: Final[str] = '<div class="oauth-entry" id="oauth-entry">'
+_LOGIN_INTRO_RE: Final[re.Pattern[str]] = re.compile(
+    r'(<p class="auth-intro">)[^<]*(</p>)'
+)
+_LOCAL_ONLY_INTRO: Final[str] = "请使用本地管理员账号登录。"
+
+
 def _login_shell(*, shell: str, oauth_available: bool) -> str:
-    """按装配事实裁掉不可用的 OAuth 入口，不生成第二套登录页面。"""
+    """按装配事实裁掉不可用的 OAuth 入口与文案，不生成第二套登录页面。
+
+    标记不是恰好一次时启动即失败，避免静默漏删飞书文案。
+    """
     if oauth_available:
         return shell
-    return shell.replace(
-        '<div class="oauth-entry" id="oauth-entry">',
+    if shell.count(_LOGIN_OAUTH_ENTRY) != 1:
+        raise RuntimeError("login shell markup drifted")
+    hidden = shell.replace(
+        _LOGIN_OAUTH_ENTRY,
         '<div class="oauth-entry is-hidden" id="oauth-entry">',
         1,
     )
+    replaced, count = _LOGIN_INTRO_RE.subn(
+        rf"\g<1>{_LOCAL_ONLY_INTRO}\g<2>", hidden
+    )
+    if count != 1:
+        raise RuntimeError("login shell markup drifted")
+    return replaced
 
 
 _CAPABILITY_STRIP_RE: Final[re.Pattern[str]] = re.compile(
@@ -1809,6 +1827,11 @@ def create_app(
             raise _WebForbiddenError
         return session
 
+    @app.get("/")
+    async def root_entry() -> Response:
+        # 不查 Session：登录入口自己决定渲染登录壳、改密壳还是跳到工作台。
+        return _login_redirect(WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH))
+
     @app.get("/login")
     async def login_shell_route(request: Request) -> Response:
         return_intent, notice = _login_query(request)
@@ -1834,22 +1857,25 @@ def create_app(
 
     @app.get("/app")
     async def shell(request: Request) -> Response:
+        intent = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
         try:
             await workbench_session(request)
         except (WebAuthenticationError, LocalAdminAuthenticationError):
-            return _login_redirect(
-                WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
-            )
+            return _login_redirect(intent)
+        except _PasswordChangeRequiredError:
+            # 登录入口已会为未改密会话渲染改密壳；壳路由只负责把浏览器带过去。
+            return _login_redirect(intent)
         return HTMLResponse(index_shell)
 
     @app.get("/admin")
     async def admin_shell_route(request: Request) -> Response:
+        intent = WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER)
         try:
             await admin_session(request)
         except (WebAuthenticationError, LocalAdminAuthenticationError):
-            return _login_redirect(
-                WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER)
-            )
+            return _login_redirect(intent)
+        except _PasswordChangeRequiredError:
+            return _login_redirect(intent)
         return HTMLResponse(admin_shell)
 
     @app.get("/app/tasks/{task_id}")
@@ -1861,6 +1887,18 @@ def create_app(
                 task_id = _task_id_or_not_found(task_id)
             except TaskAccessNotFoundError:
                 raise WebAuthenticationError from None
+            return _login_redirect(
+                WebReturnIntent(
+                    kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                    task_id=task_id,
+                )
+            )
+        except _PasswordChangeRequiredError:
+            # 非法 task_id 不进 Location：保留基线的改密拒绝。
+            try:
+                task_id = _task_id_or_not_found(task_id)
+            except TaskAccessNotFoundError:
+                raise _PasswordChangeRequiredError from None
             return _login_redirect(
                 WebReturnIntent(
                     kind=WebReturnIntentKind.SAFE_TASK_DETAIL,

@@ -26,6 +26,7 @@ const elements = Object.freeze({
   role: document.querySelector("#role-name"),
   environment: document.querySelector("#environment-name"),
   logout: document.querySelector("#logout-button"),
+  adminLink: document.querySelector("#admin-center-link"),
   refreshList: document.querySelector("#refresh-list"),
   listTitle: document.querySelector("#task-list-title"),
   list: document.querySelector("#task-list"),
@@ -487,6 +488,12 @@ async function loadIdentity() {
   const admin = me.role === "admin";
   elements.role.textContent = admin ? "Admin · 全部安全任务" : "运维人员";
   elements.listTitle.textContent = admin ? "全部安全任务" : "我的任务";
+  // 只决定入口是否可见；/admin 是否放行仍由服务端闸门判定。
+  const capabilities = Array.isArray(me.admin_capabilities) ? me.admin_capabilities : [];
+  elements.adminLink.classList.toggle(
+    "is-hidden",
+    !capabilities.includes("view_integration_status"),
+  );
   return me;
 }
 

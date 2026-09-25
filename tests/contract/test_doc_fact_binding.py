@@ -2001,7 +2001,8 @@ _W5_PLAN_MERGE_COMMIT: Final[str] = "4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047"
 _W5A_MERGE_COMMIT: Final[str] = "3c83ea5b087aa85b8ec06e097bc16526031df28a"
 _W5A_REVIEWED_HEAD: Final[str] = "cfd0de47b7c0c5ce2ae8063ae06f10cdb073cbba"
 _W5B_MERGE_COMMIT: Final[str] = "d357330e4718d9ef8480ed96e9d058ef04f51032"
-_LOCAL_PROBE_COMMIT: Final[str] = "d4e619a1b25553c64f39f93df81fef50e63dc001"
+_S0_PLAN_COMMIT: Final[str] = "86263e90f9dbcca587a534b80a3cc2f42bee1c02"
+_S0_PLAN = "docs/superpowers/plans/2026-09-25-s0-first-login-entry.md"
 _FULL_ACCEPTANCE_PLAN = "docs/superpowers/plans/2026-09-25-full-feature-deployment-acceptance.md"
 _W5B_REVIEWED_HEAD: Final[str] = "9278a88a0611993d0b6846b3dc45c17750a70d16"
 _W5_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w5-product-deployment.md"
@@ -2029,7 +2030,9 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 
 def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _LOCAL_PROBE_COMMIT
+    assert _current_baseline(handoff) == _S0_PLAN_COMMIT
+    assert _S0_PLAN in handoff and "PR #89" in handoff
+    assert "待 exact-SHA 独立复审" in handoff
     assert _FULL_ACCEPTANCE_PLAN in handoff and "PR #88" in handoff
     assert "批准范围**仅为计划**" in handoff
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
@@ -2053,9 +2056,20 @@ def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     next_step = _handoff_baseline_field(handoff, "下一步")
     assert "W5-C" in next_step and "GO" in next_step
     assert "Task 10" in next_step
-    assert "S0" in next_step and "详细计划" in next_step
+    assert "S0" in next_step and "复审" in next_step
+    assert "详细计划" in next_step
     for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
+
+
+def test_s0_plan_header_records_its_approval() -> None:
+    """handoff 已记录 PR #89 批准合入，计划头不能仍停在草案。"""
+    plan = (_ROOT / _S0_PLAN).read_text(encoding="utf-8")
+    header = "\n".join(plan.splitlines()[:8])
+    assert header.startswith("# S0 首登与入口体验 实施计划（Approved V0.1）")
+    assert "状态：Approved V0.1" in header and "PR #89" in header
+    for stale in ("Draft", "草案", "待批准"):
+        assert stale not in header, stale
 
 
 def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:

@@ -887,3 +887,113 @@ def test_an_unrenderable_csrf_token_is_refused_instead_of_interpolated() -> None
 
     rendered = _password_change_shell(csrf_token="a" * 64)
     assert '<meta name="csrf-token" content="' + "a" * 64 + '">' in rendered
+
+
+# --------------------------------------------------------------------------
+# S0：首登后浏览器落在 HTML 壳上，必须被带回改密页，而不是一段 JSON
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "location"),
+    [
+        ("/app", "/login?intent=workbench"),
+        ("/admin", "/login?intent=admin_center"),
+        ("/app/tasks/task-1", "/login?intent=safe_task_detail&task_id=task-1"),
+    ],
+)
+async def test_unchanged_password_shells_redirect_to_the_change_form(
+    clock, memory_state, path: str, location: str
+) -> None:
+    """首登后浏览器落在壳路由上，必须被带回能改密的页面，而不是一段 JSON。"""
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        shell = await client.get(path, follow_redirects=False)
+        api = await client.get("/app/api/me")
+
+    assert (shell.status_code, shell.headers["location"]) == (302, location)
+    # API 语义不变：脚本仍靠这个闭集码识别。
+    assert api.status_code == 403
+    assert api.json() == {"error": {"code": "password_change_required"}}
+
+
+@pytest.mark.parametrize("path", ["/app/api/me", "/admin/api/integration-status"])
+async def test_unchanged_password_apis_keep_the_json_refusal(
+    clock, memory_state, path: str
+) -> None:
+    """壳路由改成重定向，不能顺手把 API 的闭集错误体也改掉。"""
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        api = await client.get(path, follow_redirects=False)
+
+    assert api.status_code == 403
+    assert api.json() == {"error": {"code": "password_change_required"}}
+
+
+async def test_unchanged_password_detail_shell_keeps_bad_ids_refused(
+    clock, memory_state
+) -> None:
+    """非法 task_id 不能借改密重定向被写进 Location。"""
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        shell = await client.get("/app/tasks/bad%20id", follow_redirects=False)
+
+    assert shell.status_code == 403
+    assert "location" not in shell.headers
+    assert shell.json() == {"error": {"code": "password_change_required"}}
+
+
+async def test_browser_login_lands_on_the_change_form(clock, memory_state) -> None:
+    app, admins, origin, initial, hash_password = _app(clock, memory_state)
+    await _seed(admins, hash_password, initial)
+
+    async with _client(app) as client:
+        signed_in = await client.post(
+            "/login/api/login",
+            content=_login_body(initial),
+            headers={"origin": origin, "content-type": "application/json"},
+        )
+        landed = await client.get(signed_in.json()["destination"], follow_redirects=True)
+
+    assert "change-password-form" in landed.text
+
+
+# --------------------------------------------------------------------------
+# S0：根路径是登录入口，但不是可信 Host 的例外
+# --------------------------------------------------------------------------
+
+
+async def test_root_is_the_login_entry(clock, memory_state) -> None:
+    app, *_ = _app(clock, memory_state)
+    async with _client(app) as client:
+        response = await client.get("/", follow_redirects=False)
+        direct = await client.get(
+            "/", headers={"host": "127.0.0.1:8080"}, follow_redirects=False
+        )
+    assert (response.status_code, response.headers["location"]) == (
+        302,
+        "/login?intent=workbench",
+    )
+    # 根路径不是可信 Host 的例外。
+    assert direct.status_code == 403

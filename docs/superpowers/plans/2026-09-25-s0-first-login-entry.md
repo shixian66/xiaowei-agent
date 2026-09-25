@@ -1,8 +1,9 @@
-# S0 首登与入口体验 实施计划（Draft V0.1，待批准）
+# S0 首登与入口体验 实施计划（Approved V0.1）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **状态**：草案，待独立复审与负责人开工口令。本文件合入前不修改源码。
+> **状态：Approved V0.1**。经独立复审批准，由 PR #89 合入 `main@86263e9`；负责人随后下达 S0 开工口令。
+> 批准范围仅为本计划四项，不授权 W5-C、真实 Provider、部署、canary 或 UAT。
 > 上位计划：[完整功能部署验收总控计划](2026-09-25-full-feature-deployment-acceptance.md) 切片 S0。
 
 **Goal:** 让 Local Admin 在浏览器里不借助手输 URL 就能完成“登录 → 强制改密 → 工作台 → 管理中心”，并去掉 provider-off 下误导的飞书文案。
