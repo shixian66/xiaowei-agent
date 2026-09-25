@@ -210,4 +210,3 @@ async def test_a_planning_task_beyond_the_first_page_is_not_drained(
         "non_terminal_tasks": 1,
         "tasks_with_execution_data": 0,
     }
-

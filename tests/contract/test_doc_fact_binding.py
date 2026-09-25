@@ -2189,6 +2189,23 @@ def test_w5a_docs_match_the_implemented_release_constants() -> None:
     assert "XIAOWEI_FEISHU_IDENTITY_FILE" not in readme
 
 
+def test_env_example_rollback_never_returns_release_to_recording() -> None:
+    """运维入口的回滚说明必须与 W5 计划一致：只回退到 W5-compatible release digest。
+
+    首次部署没有安全旧 digest 时停服并保留数据库与证据；任何写法都不得把
+    offline_recording 当作 release 的恢复目标，否则发布库会重新写入合成执行事实。
+    """
+    env_example = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    profile_block = env_example.split("XIAOWEI_RUNTIME_PROFILE=", 1)[0].rsplit("\n\n", 1)[1]
+
+    assert "不得回退到 offline_recording" in profile_block
+    assert "W5-compatible release" in profile_block and "不可变 digest" in profile_block
+    assert "首次部署" in profile_block and "停止全部应用服务" in profile_block
+    assert "保留数据库与证据" in profile_block
+    for forbidden in ("改回 offline_recording", "回滚即改回", "切回 offline_recording"):
+        assert forbidden not in env_example, forbidden
+
+
 def test_w5_plan_task_2_keeps_the_global_retention_lock() -> None:
     """复审非阻断建议：Task 2 的全局锁与全库语义按章节绑定，删句会转红。"""
     task_2 = _section_between(
