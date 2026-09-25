@@ -198,7 +198,11 @@ async def test_classify_uses_fixed_profile_schema_and_maps_usage() -> None:
         "user_text": "检查慢查询",
         "clarification": None,
     }
-    assert call["config"].response_schema is ProviderInteractionResponse
+    assert call["config"].response_schema is None
+    assert (
+        call["config"].response_json_schema
+        == ProviderInteractionResponse.model_json_schema()
+    )
     assert call["config"].automatic_function_calling.disable is True
     assert call["config"].max_output_tokens == 2_048
     assert factory.clients[0].aio.close_calls == 1
@@ -224,7 +228,8 @@ async def test_generate_advisory_uses_advisory_schema_and_token_limit() -> None:
         usage=ModelUsage(),
     )
     call = factory.clients[0].aio.models.calls[0]
-    assert call["config"].response_schema is ModelAdvisory
+    assert call["config"].response_schema is None
+    assert call["config"].response_json_schema == ModelAdvisory.model_json_schema()
     assert call["config"].max_output_tokens == 4_000
 
 
@@ -533,3 +538,53 @@ async def test_connection_probe_asks_for_a_tiny_answer() -> None:
     config = factory.clients[0].aio.models.calls[0]["config"]
     assert config.max_output_tokens == gemini_model.GEMINI_PROBE_OUTPUT_TOKENS == 16
     assert config.automatic_function_calling.disable is True
+
+
+@pytest.mark.parametrize("call_kind", ["interaction", "advisory"])
+@pytest.mark.asyncio
+async def test_wire_request_sends_the_json_schema_gemini_accepts(
+    call_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``response_schema`` 会被 SDK 转成 OpenAPI 子集并带上 ``additional_properties``，
+    真实 Gemini 以 400 INVALID_ARGUMENT 拒收（本机实测，任务因此 route_not_available）。
+    线上请求必须改走 ``responseJsonSchema``，且原样携带契约自己的 JSON Schema。
+    """
+    bodies: list[dict[str, Any]] = []
+    response_text = (
+        _interaction_json()
+        if call_kind == "interaction"
+        else json.dumps({"analysis": "分析", "suggestions": [], "uncertainties": []})
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_sdk_response(response_text))
+
+    transport = httpx.MockTransport(handle)
+
+    def real_client_factory(**kwargs: Any) -> genai.Client:
+        options = kwargs["http_options"].model_copy(
+            update={"async_client_args": {"transport": transport, "trust_env": False}}
+        )
+        return genai.Client(**{**kwargs, "http_options": options})
+
+    for name in gemini_model._PROXY_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    adapter = GeminiModelAdapter(
+        client_factory=real_client_factory, api_key="AIza" + "w" * 35
+    )
+    if call_kind == "interaction":
+        await adapter.classify(InteractionClassifierRequest(user_text="你好"))
+        expected = gemini_model.ProviderInteractionResponse.model_json_schema()
+    else:
+        await adapter.generate_advisory(
+            SlowQueryAdvisoryRequest(rows=({"queryId": "q"},), sampled=False),
+            max_output_tokens=100,
+        )
+        expected = ModelAdvisory.model_json_schema()
+
+    config = bodies[0]["generationConfig"]
+    assert "responseSchema" not in config
+    assert config["responseJsonSchema"] == expected
+    assert config["responseMimeType"] == "application/json"
+    assert "additional_properties" not in json.dumps(bodies[0])
