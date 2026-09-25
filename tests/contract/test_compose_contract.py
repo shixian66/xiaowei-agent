@@ -99,6 +99,7 @@ _COMPOSE_FILES = frozenset(
         "docker-compose.yml",
         "docker-compose.barrier.yml",
         "docker-compose.lan.yml",
+        "docker-compose.local-full.yml",
         "docker-compose.local-test.yml",
         "docker-compose.m6b-test.yml",
         "docker-compose.model.yml",

@@ -1,0 +1,57 @@
+# 本机完整体验：在基础 Compose 上一次打开 Gemini/飞书相关开关，并自带 HTTPS 入口。
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.local-full.yml up -d --wait --build
+#   浏览器打开 https://xiaowei.localhost:8443/
+#
+# 只与 docker-compose.yml 叠加，不能与 release override 一起使用。
+# 打开的是：worker 调 Gemini 理解任务、Web 的 Gemini/飞书“测试连接”、飞书扫码登录。
+# 凭据仍只从管理面写进 .config/{ai,feishu}；缺凭据时对应能力自动不装配，本地管理员登录始终可用。
+# 管理面保存新凭据后需重启 worker 与 web-app 才会加载。
+# 不打开飞书机器人收发消息（listener / channel worker），它们会直接回复真人。
+services:
+  worker:
+    environment:
+      XIAOWEI_GEMINI_ENABLED: "true"
+
+  web-app:
+    environment:
+      XIAOWEI_WEB_APP_ENABLED: "true"
+      XIAOWEI_WEB_MODE: https
+      XIAOWEI_WEB_PUBLIC_ORIGIN: "${XIAOWEI_WEB_PUBLIC_ORIGIN:-https://xiaowei.localhost:8443}"
+      XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
+      XIAOWEI_GEMINI_REAL_TEST_ENABLED: "true"
+      XIAOWEI_FEISHU_REAL_TEST_ENABLED: "true"
+
+  # 本机 HTTPS 入口：Caddy 内置 CA 自签证书，只做 TLS 终止与反代，不含限流，不是 W5 edge。
+  # 只绑 loopback；CA 存在命名卷里，重启后证书不变。
+  edge:
+    image: caddy@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    command:
+      - caddy
+      - reverse-proxy
+      - --from
+      - https://xiaowei.localhost:8443
+      - --to
+      - web-app:8080
+      - --internal-certs
+      - --disable-redirects
+    ports:
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - edge_data:/data
+    read_only: true
+    tmpfs:
+      - /config
+    cap_drop:
+      - ALL
+    # caddy 二进制带 cap_net_bind_service 文件能力；边界集里没有它时 exec 直接 EPERM。
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      web-app:
+        condition: service_healthy
+
+volumes:
+  edge_data:
