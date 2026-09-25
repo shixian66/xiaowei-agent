@@ -2062,6 +2062,16 @@ def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
         assert forbidden_claim not in next_step
 
 
+def test_s0_plan_header_records_its_approval() -> None:
+    """handoff 已记录 PR #89 批准合入，计划头不能仍停在草案。"""
+    plan = (_ROOT / _S0_PLAN).read_text(encoding="utf-8")
+    header = "\n".join(plan.splitlines()[:8])
+    assert header.startswith("# S0 首登与入口体验 实施计划（Approved V0.1）")
+    assert "状态：Approved V0.1" in header and "PR #89" in header
+    for stale in ("Draft", "草案", "待批准"):
+        assert stale not in header, stale
+
+
 def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:
     assert _W5_PLAN.is_file(), "W5 详细计划尚未落盘"
     plan = _W5_PLAN.read_text(encoding="utf-8")

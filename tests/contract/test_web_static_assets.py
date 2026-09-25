@@ -251,7 +251,7 @@ def test_the_resources_script_only_uses_the_registration_routes() -> None:
         assert forbidden not in admin_script
 
 
-def test_login_shell_without_oauth_does_not_mention_feishu() -> None:
+def test_login_shell_without_oauth_does_not_show_feishu_entry_or_hint() -> None:
     from xiaowei_agent.interfaces.web_app import _login_shell
 
     shell = (_STATIC / "login.html").read_text(encoding="utf-8")
