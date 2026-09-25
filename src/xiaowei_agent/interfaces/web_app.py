@@ -1834,22 +1834,25 @@ def create_app(
 
     @app.get("/app")
     async def shell(request: Request) -> Response:
+        intent = WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
         try:
             await workbench_session(request)
         except (WebAuthenticationError, LocalAdminAuthenticationError):
-            return _login_redirect(
-                WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH)
-            )
+            return _login_redirect(intent)
+        except _PasswordChangeRequiredError:
+            # 登录入口已会为未改密会话渲染改密壳；壳路由只负责把浏览器带过去。
+            return _login_redirect(intent)
         return HTMLResponse(index_shell)
 
     @app.get("/admin")
     async def admin_shell_route(request: Request) -> Response:
+        intent = WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER)
         try:
             await admin_session(request)
         except (WebAuthenticationError, LocalAdminAuthenticationError):
-            return _login_redirect(
-                WebReturnIntent(kind=WebReturnIntentKind.ADMIN_CENTER)
-            )
+            return _login_redirect(intent)
+        except _PasswordChangeRequiredError:
+            return _login_redirect(intent)
         return HTMLResponse(admin_shell)
 
     @app.get("/app/tasks/{task_id}")
@@ -1861,6 +1864,18 @@ def create_app(
                 task_id = _task_id_or_not_found(task_id)
             except TaskAccessNotFoundError:
                 raise WebAuthenticationError from None
+            return _login_redirect(
+                WebReturnIntent(
+                    kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
+                    task_id=task_id,
+                )
+            )
+        except _PasswordChangeRequiredError:
+            # 非法 task_id 不进 Location：保留基线的改密拒绝。
+            try:
+                task_id = _task_id_or_not_found(task_id)
+            except TaskAccessNotFoundError:
+                raise _PasswordChangeRequiredError from None
             return _login_redirect(
                 WebReturnIntent(
                     kind=WebReturnIntentKind.SAFE_TASK_DETAIL,
