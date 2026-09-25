@@ -424,3 +424,76 @@ def test_shell_environment_that_compose_would_prefer_is_rejected(
 def test_missing_template_file_is_a_closed_failure(tmp_path: Path) -> None:
     code, out, _ = _check(("--env-file", str(tmp_path / "missing.env")))
     assert (code, out) == (1, "release-compose: release_env_template_invalid\n")
+
+
+# 发布面地址：bind IP 与 public origin 必须与运行时同一套规则，预检不能对部署后
+# 才暴露的错误假绿。
+@pytest.mark.parametrize(
+    "bind_ip", ["127.0.0.1", "10.20.30.40", "172.16.5.4", "172.31.255.254", "192.168.1.20"]
+)
+def test_check_accepts_loopback_and_rfc1918_web_bind_addresses(
+    tmp_path: Path, bind_ip: str
+) -> None:
+    _compose_command()
+    values = dict(_TEMPLATE, XIAOWEI_RELEASE_WEB_BIND_IP=bind_ip)
+    template = _write_template(tmp_path / "release.env", values)
+    code, out, err = _check(("--env-file", str(template)))
+    assert (code, out, err) == (0, "release-compose: ok\n", "")
+
+
+@pytest.mark.parametrize(
+    "bind_ip",
+    [
+        "8.8." + "8.8",  # 公网：绕过 HTTPS edge 直接暴露明文 8080
+        "172.32.0.1",  # 紧邻 172.16/12 之外
+        "100.64.0.1",  # CGNAT 共享地址，不是 RFC1918
+        "169.254.10.20",  # link-local：is_private 为真，但不是 edge 所在内网
+        "127.1",  # 非规范 IPv4 文本
+        "edge.internal",
+        "::1",
+        "[::1]",
+        "0.0." + "0.0",
+    ],
+)
+def test_check_rejects_web_bind_addresses_outside_loopback_and_rfc1918(
+    tmp_path: Path, bind_ip: str
+) -> None:
+    _compose_command()
+    values = dict(_TEMPLATE, XIAOWEI_RELEASE_WEB_BIND_IP=bind_ip)
+    template = _write_template(tmp_path / "release.env", values)
+    code, out, err = _check(("--env-file", str(template)))
+    assert code == 1
+    assert out in {
+        "release-compose: port_surface_invalid\n",
+        "release-compose: release_render_failed\n",
+    }
+    assert bind_ip not in err
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://sso.example.invalid/path",
+        "https://user@sso.example.invalid",
+        "https://sso.example.invalid?x=1",
+        "https://sso.example.invalid#frag",
+        "https://10.0.0.8",
+        "http://sso.example.invalid",
+    ],
+)
+def test_check_rejects_origins_the_web_process_would_refuse(
+    tmp_path: Path, origin: str
+) -> None:
+    _compose_command()
+    values = dict(_TEMPLATE, XIAOWEI_WEB_PUBLIC_ORIGIN=origin)
+    template = _write_template(tmp_path / "release.env", values)
+    code, out, err = _check(("--env-file", str(template)))
+    assert (code, out) == (1, "release-compose: web_profile_invalid\n")
+    assert origin not in out + err
+
+
+def test_check_accepts_an_origin_with_an_explicit_https_port(tmp_path: Path) -> None:
+    _compose_command()
+    values = dict(_TEMPLATE, XIAOWEI_WEB_PUBLIC_ORIGIN="https://sso.example.invalid:8443")
+    template = _write_template(tmp_path / "release.env", values)
+    assert _check(("--env-file", str(template)))[:2] == (0, "release-compose: ok\n")

@@ -173,6 +173,18 @@ def test_cleanup_failure_alone_is_a_fixed_code() -> None:
         _candidate(runner)
 
 
+@pytest.mark.parametrize("workflow_fails", [False, True])
+def test_a_failed_untag_does_not_skip_removing_the_registry(workflow_fails: bool) -> None:
+    runner = CandidateRunner(fail="untag")
+    with pytest.raises((SmokeError, RuntimeError)):
+        with compose_smoke._release_candidate(
+            docker=_DOCKER, compose_command=_COMPOSE, runner=runner
+        ):
+            if workflow_fails:
+                raise RuntimeError("workflow")
+    assert runner.steps()[-2:] == ["untag", "registry-rm"]
+
+
 # --------------------------------------------------------------------------
 # 部署模板与 session
 # --------------------------------------------------------------------------

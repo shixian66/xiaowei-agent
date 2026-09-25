@@ -1937,13 +1937,17 @@ def _release_candidate(
         cleanup = [(docker, "rm", "-f", registry)]
         if candidate is not None:
             cleanup.insert(0, (docker, "image", "rm", candidate))
+        # 每一项都要尝试：前一项失败不能让临时 registry 容器留下来。
+        cleanup_failed = False
         for argv in cleanup:
             try:
                 runner(argv, timeout=60.0)
             except (OSError, subprocess.SubprocessError):
-                if primary is None:
-                    raise SmokeError("SMOKE_RELEASE_CLEANUP_FAILED") from None
-                _safe_add_fixed_note(primary, "SMOKE_RELEASE_CLEANUP_FAILED")
+                cleanup_failed = True
+        if cleanup_failed:
+            if primary is None:
+                raise SmokeError("SMOKE_RELEASE_CLEANUP_FAILED") from None
+            _safe_add_fixed_note(primary, "SMOKE_RELEASE_CLEANUP_FAILED")
 
 
 def _require_release_model(session: ComposeSession) -> None:

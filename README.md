@@ -576,7 +576,8 @@ api 的 loopback 端口在最终模型里被清除。Settings 在 release 下同
 python -m scripts.release_compose --env-file /srv/xiaowei-private/w5-release.env
 ```
 
-只有 `release-compose: ok` 可以继续；叠加 LAN/model/smoke override、shell 里残留 `XIAOWEI_*` /
+检查器复用运行时的 Web 绑定地址（只接受 loopback/RFC1918 IPv4）与 public origin 规则，需在已安装
+项目依赖的检出里运行。只有 `release-compose: ok` 可以继续；叠加 LAN/model/smoke override、shell 里残留 `XIAOWEI_*` /
 `COMPOSE_*`、模板多键缺键或任何开关被打开都会得到固定失败码。完整执行顺序、回滚（只回到
 W5-compatible release digest，首次部署停服，**绝不**回到 recording 栈）与三层证据见
 [W5 部署 runbook](docs/runbooks/w5-product-deployment.md) 与 `docs/checklists/` 下的四份清单。

@@ -207,8 +207,14 @@ loopback 临时 registry 取得 digest 引用并以 `--pull never` 启动，维�
 首轮 PR CI（head `d104159`）在 runner 的 Compose 2.38.2 上发现 `build: !reset null` 经 `<<` 锚点合并时不生效、渲染结果仍带
 `build`：部署前检查与 smoke 以 `build_present` / `SMOKE_RELEASE_MODEL_INVALID` 拦下。修复为逐服务书写 `!reset` 并加原文静态契约；
 本机用 Compose 5.5.1 与下载的 2.38.2 分别运行 Compose 相关测试（各 153 passed）与 release 段本机脚本，均通过；恢复锚点写法时
-静态契约与 2.38.2 渲染用例各自转红。
-**未覆盖**：窄屏只读任务详情的视觉核对（需真实任务视图）；GitHub CI 传统镜像存储上的临时 registry 路径待 PR CI 证明；
+静态契约与 2.38.2 渲染用例各自转红。随后 PR CI run `36095152159`（head `a448fd4`）8/8 通过，compose-smoke 的 release 段
+在 CI 传统镜像存储上走通临时 registry digest 路径。
+Codex 对 `a448fd4` 的复审发现预检只做浅层字符串判断：公网 IP（如 `8.8.8.8`）作 Web 绑定地址、带路径/query/userinfo 或
+IP host 的 public origin 都能拿到 `ok`，前者绕过 HTTPS edge，后者在 Web 启动时才失败（P1）；另外候选镜像 untag 失败会跳过
+registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`（loopback/RFC1918 IPv4，`lan_http` origin 同用，
+顺带让 IPv6 以固定消息拒绝），检查器复用它与 `canonical_web_public_origin`；清理项全部尝试后再报固定码。完整命令路径正反例
+与清理顺序测试在恢复旧校验/旧清理时各自转红。
+**未覆盖**：窄屏只读任务详情的视觉核对（需真实任务视图）；
 目标主机、edge、真实 registry 与部署均未执行。这些只是离线证据：没有部署、canary、真实调用或用户验收。
 
 ## 1. 当前基线

@@ -69,6 +69,8 @@ Secret/config 文件权限；记录时脱敏。
    ```
 
    只有 `release-compose: ok` 可以继续。禁止 `config --environment` 或输出完整解析配置。
+   检查器直接复用运行时的 Web 绑定地址与 public origin 规则，需在已安装项目依赖的仓库检出里
+   运行（与 `python -m scripts.compose_smoke` 同一环境）。
 
 ## 3. 备份、迁移、预检与首次启动（W5-C Task 11）
 

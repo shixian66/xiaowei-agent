@@ -26,6 +26,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final, TextIO
 
+from xiaowei_agent.config import canonical_lan_ipv4, canonical_web_public_origin
+from xiaowei_agent.contracts.enums import WebMode
+
 _ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 _COMMAND: Final[str] = "release-compose"
 
@@ -113,7 +116,6 @@ _WEB_ONLY: Final[frozenset[str]] = frozenset(
     {"XIAOWEI_WEB_APP_ENABLED", "XIAOWEI_WEB_MODE", "XIAOWEI_WEB_PUBLIC_ORIGIN"}
 )
 _WEB_TARGET_PORT: Final[int] = 8080
-_WILDCARD_HOSTS: Final[frozenset[str]] = frozenset({"", "0.0.0.0", "::", "[::]"})  # noqa: S104
 
 _IMAGE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?/)?"
@@ -204,17 +206,33 @@ def _check_environment(name: str, environment: Mapping[str, str]) -> set[str]:
             violations.add(LIVE_SWITCH_ENABLED)
         if key.startswith("XIAOWEI_RELEASE_"):
             violations.add(RELEASE_VARIABLE_LEAKED)
-    if name == "web-app":
-        origin = environment.get("XIAOWEI_WEB_PUBLIC_ORIGIN", "")
-        if (
-            environment.get("XIAOWEI_WEB_APP_ENABLED") != "true"
-            or environment.get("XIAOWEI_WEB_MODE") != "https"
-            or not origin.startswith("https://")
-        ):
-            violations.add(WEB_PROFILE_INVALID)
-    elif _WEB_ONLY & environment.keys():
+    if name == "web-app" and (
+        environment.get("XIAOWEI_WEB_APP_ENABLED") != "true"
+        or environment.get("XIAOWEI_WEB_MODE") != "https"
+        or not _is_https_public_origin(environment.get("XIAOWEI_WEB_PUBLIC_ORIGIN", ""))
+    ):
+        violations.add(WEB_PROFILE_INVALID)
+    elif name != "web-app" and _WEB_ONLY & environment.keys():
         violations.add(WEB_PROFILE_INVALID)
     return violations
+
+
+def _is_https_public_origin(value: str) -> bool:
+    """与 Web 进程启动时同一条规则；预检不能放过进程会拒绝的 origin。"""
+    try:
+        canonical_web_public_origin(value, mode=WebMode.HTTPS)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_edge_bind_address(value: object) -> bool:
+    """只允许 edge 所在的 loopback/RFC1918 IPv4，且必须是规范文本。
+
+    公网地址会绕过 HTTPS edge、WAF 与限流直接暴露明文 8080；``is_private`` 还会放过
+    link-local 等非 edge 地址，所以不用它。
+    """
+    return isinstance(value, str) and canonical_lan_ipv4(value) == value
 
 
 def _check_ports(services: Mapping[str, Mapping[str, object]]) -> set[str]:
@@ -234,8 +252,7 @@ def _check_ports(services: Mapping[str, Mapping[str, object]]) -> set[str]:
             port.get("target") != _WEB_TARGET_PORT
             or str(port.get("published")) != str(_WEB_TARGET_PORT)
             or port.get("protocol", "tcp") != "tcp"
-            or not isinstance(host_ip, str)
-            or host_ip in _WILDCARD_HOSTS
+            or not _is_edge_bind_address(host_ip)
         ):
             return {PORT_SURFACE_INVALID}
     return set()
