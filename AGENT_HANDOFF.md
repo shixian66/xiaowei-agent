@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@3c83ea5b087aa85b8ec06e097bc16526031df28a`（2026-09-25，PR #84 已 squash 合入 W5-A 发布安全前置）。
+- **当前基线**：`main@d357330e4718d9ef8480ed96e9d058ef04f51032`（2026-09-25，PR #85 已 squash 合入 W5-B release 资产与证据合同）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -37,7 +37,7 @@
   [36006554930](https://github.com/shixian66/xiaowei-agent/actions/runs/36006554930) 八项全绿；负责人授权后由
   PR #82 squash 合入 `88a63a054062db2041e51f4105846920040f3037`。证据见下文「W4b 离线证据」。
   W4a/W4b 都没有真实目标、连接、DNS、部署、canary 或用户验收；W4c 与真实调用仍未授权。
-- **W5-A 已离线实现并合入，W5-B 离线实现候选待复审**：[W5 详细计划](docs/superpowers/plans/2026-09-24-w5-product-deployment.md)
+- **W5-A/W5-B 已离线实现并合入，W5-C 等待明确 GO**：[W5 详细计划](docs/superpowers/plans/2026-09-24-w5-product-deployment.md)
   V0.2 经两轮 exact-SHA 独立复审（首轮 `9028a0a` 需修改，复审 `9d95402d19ed2a0cdb8348e344ae147fab8ae3d5` 通过）后由
   PR #83 合入 `4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047`；负责人于 2026-09-25 在会话中下达“按照计划开始开发”，
   授权 W5-A（Task 0–5）离线实现（无公开 GitHub permalink）。W5-A 实现：
@@ -48,8 +48,13 @@
   `3c83ea5b087aa85b8ec06e097bc16526031df28a`。证据见下文「W5-A 离线证据」。
   负责人随后在会话中确认“审核合并了，继续开发吧”，据此从 `3c83ea5` 开始 W5-B（Task 6–9）离线实现
   （无公开 GitHub permalink）：分支 `claude/w5b-release-assets` 已离线实现不可变镜像 provider-off release
-  Compose override、部署模板与部署前检查、release smoke、runbook 与四份证据清单。证据见下文「W5-B 离线证据」。
-  **W5-B 尚未合入**；W5-C 部署、canary、UAT 另需明确 GO；W5 证据只覆盖 provider-off 产品壳，不构成 RI6 或只读 V1 发布。
+  Compose override、部署模板与部署前检查、release smoke、runbook 与四份证据清单。首轮 head `d104159` 的 CI 暴露
+  Compose 2.38.2 锚点 `!reset` 问题并修复；head `a448fd4` 经独立复审打回 1 组 P1（部署前检查放过公网绑定地址与运行时会拒绝的
+  public origin）与 1 个 P2（清理中断），修复后 head `9278a88a0611993d0b6846b3dc45c17750a70d16` 复核通过，CI
+  [36096691338](https://github.com/shixian66/xiaowei-agent/actions/runs/36096691338) 八项全绿；负责人授权后由 PR #85 squash 合入
+  `d357330e4718d9ef8480ed96e9d058ef04f51032`。证据见下文「W5-B 离线证据」。
+  W5-C 部署、canary、UAT 另需明确 GO 与计划 Task 10 的冻结输入；负责人在 W5-B 合入后的“继续开发”不构成该 GO。
+  W5 证据只覆盖 provider-off 产品壳，不构成 RI6 或只读 V1 发布。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
@@ -183,7 +188,7 @@ W5-A 时 release 下 Gemini/OAuth/listener/channel-worker 与真实测试开关�
 Compose 字面量与 Settings release 闸共同承担（见下文）。这些只是离线证据：没有目标主机部署、真实环境迁移、canary 或用户验收。
 
 <a id="w5b-offline-candidate-evidence"></a>
-**W5-B 离线证据（候选，尚未合入；受审 SHA 以 PR 为准）**（基线 `3c83ea5`，分支 `claude/w5b-release-assets`）：
+**W5-B 离线证据（已由 PR #85 合入 `d357330`；受审 head `9278a88`）**（基线 `3c83ea5`）：
 本机 Python 3.11.16、依赖按 uv.lock，`PYTHONPATH` 指向该 worktree 的 `src` 并隔离 pycache；Docker Compose 5.5.1。
 `python -m pytest -q` 为 `5206 passed, 428 skipped`，`python -m pytest -m security -q` 为 `1659 passed, 83 skipped`，
 `ruff check .` 与 `mypy src`（215 个源文件）通过；base + release 的渲染契约与额外 override 负例矩阵在本机真实
@@ -221,10 +226,10 @@ registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/w5b-release-assets`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `claude/w5b-merge-handoff`（仅同步交接）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-25（Asia/Shanghai） |
-| 阶段 | W5 详细计划 Approved V0.2 与 W5-A 已分别由 PR #83、PR #84 合入；W5-B 离线实现候选待 exact-SHA 复审，尚未合入 |
-| 下一步 | 对 W5-B 候选做 exact-SHA 独立复审与 CI；W5-C 目标环境执行（部署、canary、UAT）另需明确 GO，真实调用另有独立门 |
+| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成 |
+| 下一步 | 等待负责人为 W5-C 下达明确 GO 并书面冻结 Task 10 输入（目标主机、窗口、digest、edge、验收人、备份、回滚 owner）；此前不做部署、canary、UAT，真实调用另有独立门 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -267,7 +272,8 @@ registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`
 - W5 [详细计划 Approved V0.2](docs/superpowers/plans/2026-09-24-w5-product-deployment.md) 已由 PR #83 合入
   `4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047`；负责人于 2026-09-25 在会话中确认合入并下达“按照计划开始开发”，
   授权范围仅为 W5-A（Task 0–5）离线实现，无公开 GitHub permalink；W5-A 已由 PR #84 合入，该授权已用完。
-  负责人随后确认 W5-A 合入并指示“继续开发”，授权范围仅为 W5-B（Task 6–9）离线实现，同样无公开 GitHub permalink。
+  负责人随后确认 W5-A 合入并指示“继续开发”，授权范围仅为 W5-B（Task 6–9）离线实现，同样无公开 GitHub permalink；
+  W5-B 已由 PR #85 合入，该授权已用完。
   两段授权都不含 W5-C 目标环境执行、RI2/RI3/RI4/RI6、H 层、E1、W4c、R1 或任何真实 Provider/目标调用。
 - RI5 成套设计于 2026-09-14 接受；它不授权 RI2 或 RI3 PR 3E。ADR-014 R2 取消首次强制改密必须先在 loopback 完成的顺序门，
   但 `WebMode.LAN_HTTP` 的 loopback/RFC1918 Host 约束继续生效，release/canary 仍需边缘限流证据。
@@ -312,9 +318,9 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 ## 5. 下一步顺序
 
 1. 通用流程治理已由 PR #70 合入当前 main；后续任务按 AGENTS 的分档、授权复用与证据规则执行，不再把它写成待集成候选。
-2. W3 V1 已按精简范围离线收口；W4a/W4b 已分别由 PR #81/#82 合入，W5 详细计划与 W5-A 已由 PR #83/#84 合入。
-   下一步只对 W5-B 离线实现候选做 exact-SHA 审查与 CI；W5-A/B 合入不等于真实调用、真实环境配置迁移、
-   部署、canary 或 UAT 已获授权，W5-C 需新的明确 GO。
+2. W3 V1 已按精简范围离线收口；W4a/W4b 已分别由 PR #81/#82 合入，W5 详细计划、W5-A 与 W5-B 已由 PR #83/#84/#85 合入。
+   下一步等待 W5-C 的明确 GO 与 Task 10 冻结输入；W5-A/B 合入不等于真实调用、真实环境配置迁移、
+   部署、canary 或 UAT 已获授权。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 
@@ -323,7 +329,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 - M8 审批主体/渠道/有效期、拒绝/过期/冲突恢复语义与 ADR-005；生产写独立授权与验收计划。
 - RI3 首次 GO、供应商保留/训练/区域条款与 synthetic corpus；M6b 现场输入与证据处置、现场 GO。
 - W5 计划已批准终态激活申请固定保留 30 天，W5-A 已离线实现清理命令、旧静态身份一次性迁移与发布预检，
-  W5-B 候选已把它们写进部署 runbook 与证据清单；
+  W5-B 已把它们写进部署 runbook 与证据清单并合入；
   正式发布前仍须在目标环境证明清理结果、每日调度与失败告警、边缘限流、旧身份迁移计数与预检结论（W5-C，
   需 GO）。1024 上限只限制活跃申请，不能据此取消终态清理门。
 - W3 后续增强：DBA/值班/激活通知人绑定，群 @ Admin、私聊通知、持久化通知状态、重试/dead-letter，

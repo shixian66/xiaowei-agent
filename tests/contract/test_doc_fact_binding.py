@@ -1712,8 +1712,8 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    # W5-A 合入后，延期的 W3 增强仍不应把当前动作从 W5-B 候选审查拉回去。
-    assert "W5-B" in next_step and "exact-SHA" in next_step
+    # W5-B 合入后，延期的 W3 增强仍不应把当前动作从 W5-C 的 GO 门拉回去。
+    assert "W5-C" in next_step
     assert "W3" not in next_step and "GO" in next_step
 
     development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
@@ -1990,21 +1990,23 @@ def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
         _check_w4_plan_header(_replace_once(header, old, new))
 
 
-# --- W4 收口、W5 计划、W5-A 合入与 W5-B 门 -----------------------------------
+# --- W4 收口、W5 计划、W5-A/B 合入与 W5-C 门 ----------------------------------
 #
-# W4a/W4b 已分别由 PR #81/#82 合入；W5 详细计划与 W5-A 已由 PR #83/#84 合入，负责人随后
-# 口头授权 W5-B 离线实现。下一步只能审查 W5-B 候选，不能把计划、实现、部署、canary 或 UAT
-# 写成同一件事。
+# W4a/W4b 已分别由 PR #81/#82 合入；W5 详细计划、W5-A 与 W5-B 已由 PR #83/#84/#85 合入。
+# 下一步只能等待 W5-C 的明确 GO 与冻结输入，不能把离线资产合入写成部署、canary 或 UAT。
 
 _W4A_MERGE_COMMIT: Final[str] = "dcef09a903224fb86e8b053a15ab4865a7b731d1"
 _W4B_MERGE_COMMIT: Final[str] = "88a63a054062db2041e51f4105846920040f3037"
 _W5_PLAN_MERGE_COMMIT: Final[str] = "4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047"
 _W5A_MERGE_COMMIT: Final[str] = "3c83ea5b087aa85b8ec06e097bc16526031df28a"
 _W5A_REVIEWED_HEAD: Final[str] = "cfd0de47b7c0c5ce2ae8063ae06f10cdb073cbba"
+_W5B_MERGE_COMMIT: Final[str] = "d357330e4718d9ef8480ed96e9d058ef04f51032"
+_W5B_REVIEWED_HEAD: Final[str] = "9278a88a0611993d0b6846b3dc45c17750a70d16"
 _W5_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w5-product-deployment.md"
 _W5A_OVERCLAIMS: Final[tuple[str, ...]] = (
     "W5 已部署",
-    "W5-B 已合入",
+    "W5-C 已获 GO",
+    "W5-C 已开始",
     "W5-A 已部署",
     "W5-B 已部署",
     "release 已部署",
@@ -2023,28 +2025,30 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 )
 
 
-def test_handoff_records_the_w5a_merge_and_points_only_to_w5b_review() -> None:
+def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _W5A_MERGE_COMMIT
+    assert _current_baseline(handoff) == _W5B_MERGE_COMMIT
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
     assert _W4B_MERGE_COMMIT in handoff and "PR #82" in handoff
     assert _W5_PLAN_MERGE_COMMIT in handoff and "PR #83" in handoff
     assert _W5A_MERGE_COMMIT in handoff and "PR #84" in handoff
     assert _W5A_REVIEWED_HEAD in handoff
+    assert _W5B_MERGE_COMMIT in handoff and "PR #85" in handoff
+    assert _W5B_REVIEWED_HEAD in handoff
     assert "W4a/W4b 已离线实现并合入" in handoff
     assert "W5 详细计划 Approved V0.2" in handoff
-    assert "W5-A 已离线实现并合入" in handoff
-    assert "W5-B 尚未合入" in handoff
+    assert "W5-A/W5-B 已离线实现并合入" in handoff
+    assert "W5-B 尚未合入" not in handoff
     assert "W5-B（Task 6–9）" in handoff
     assert "无公开 GitHub permalink" in handoff
     for overclaim in (*_W4B_OVERCLAIMS, *_W5A_OVERCLAIMS):
         assert overclaim not in handoff, overclaim
     stage = _handoff_baseline_field(handoff, "阶段")
     assert "W5-A" in stage and "PR #84" in stage
-    assert "W5-B" in stage and "尚未合入" in stage
+    assert "W5-B" in stage and "PR #85" in stage
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "W5-B" in next_step and "exact-SHA" in next_step
     assert "W5-C" in next_step and "GO" in next_step
+    assert "Task 10" in next_step
     for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
 
