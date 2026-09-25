@@ -869,3 +869,60 @@ async def test_transport_error_and_adapter_repr_never_expose_inputs(
     # Secret 现在常驻内存，repr 泄露的风险比持路径时更高，这条因此更承重。
     for private in (code, provider, app_id, app_secret):
         assert private not in rendered
+
+
+def _real_shaped_app_token(**extra: object):
+    """飞书 ``app_access_token/internal`` 的真实回包形状（本机实测字段名）。"""
+    payload: dict[str, object] = {
+        "code": 0,
+        "msg": "ok",
+        "app_access_token": _FAKE_APP_TOKEN,
+        "expire": 3600,
+        "tenant_access_token": "tenant-unit-test-" + "token",
+    }
+    payload.update(extra)
+    return _json_response(payload)
+
+
+async def test_exchange_accepts_the_real_app_token_response_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实飞书同时回 ``tenant_access_token``；闭集缺它时每次扫码都报 unavailable。"""
+    responses = _success_responses()
+    responses[0] = _real_shaped_app_token()
+    adapter, calls = _adapter(tmp_path, monkeypatch, responses)
+
+    with bind_trace_id(_TRACE_ID):
+        identity = await adapter.exchange_code(
+            code="one-time-code", redirect_uri=_CALLBACK
+        )
+
+    assert identity.subject_ref == "ou_test_subject"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "tenant_token",
+    [None, "", 7, " padded ", "x" * 9000, "bad\u0085token", "bad\ttoken"],
+)
+async def test_a_malformed_tenant_token_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tenant_token: object
+) -> None:
+    responses = _success_responses()
+    responses[0] = _real_shaped_app_token(tenant_access_token=tenant_token)
+    adapter, calls = _adapter(tmp_path, monkeypatch, responses)
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)
+    assert len(calls) == 1
+
+
+async def test_fields_beyond_the_documented_app_token_set_still_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = _success_responses()
+    responses[0] = _real_shaped_app_token(unknown="field")
+    adapter, _ = _adapter(tmp_path, monkeypatch, responses)
+
+    with bind_trace_id(_TRACE_ID), pytest.raises(FeishuOAuthUnavailableError):
+        await adapter.exchange_code(code="one-time-code", redirect_uri=_CALLBACK)

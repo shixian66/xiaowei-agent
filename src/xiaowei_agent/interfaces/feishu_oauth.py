@@ -165,13 +165,36 @@ def _valid_code_and_message(payload: dict[str, object]) -> bool:
     return type(payload.get("code")) is int and _bounded_string(payload.get("msg"))
 
 
+_APP_TOKEN_FIELDS: Final[frozenset[str]] = frozenset(
+    {"code", "msg", "app_access_token", "expire"}
+)
+_APP_TOKEN_FIELD_SETS: Final[tuple[frozenset[str], ...]] = (
+    _APP_TOKEN_FIELDS,
+    # 真实飞书（自建应用 internal 端点）同时回 tenant_access_token；只校验形状、不使用。
+    _APP_TOKEN_FIELDS | {"tenant_access_token"},
+)
+
+
+def _usable_token(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _bounded_string(value)
+        and bool(value)
+        and value == value.strip()
+    )
+
+
 def _parse_app_token(response: _HttpResponse) -> str | None:
     payload = _decode_object(response)
     if payload is None or not _valid_code_and_message(payload):
         return None
     if payload["code"] != 0:
         return "" if set(payload) == {"code", "msg"} else None
-    if set(payload) != {"code", "msg", "app_access_token", "expire"}:
+    if set(payload) not in _APP_TOKEN_FIELD_SETS:
+        return None
+    if "tenant_access_token" in payload and not _usable_token(
+        payload["tenant_access_token"]
+    ):
         return None
     token = payload["app_access_token"]
     expire = payload["expire"]
