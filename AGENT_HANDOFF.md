@@ -62,6 +62,8 @@
   S0 实现在分支 `claude/s0-first-login-implementation` 上离线完成、**待 exact-SHA 独立复审**，证据见下文「S0 离线证据」。
   PR #87 起，本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
   `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
+  本机完整体验另有 `docker-compose.local-full.yml`：打开 worker Gemini、Web 两个探针与飞书 OAuth，并带只绑 loopback 的
+  Caddy 自签入口；不启动飞书 listener / channel worker，不与 release 叠加，只是本机体验，不构成 W5-C、RI2、RI3 证据。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。

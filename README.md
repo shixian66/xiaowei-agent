@@ -285,6 +285,22 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 docker-compose -f docker-compose.yml -f docker-compose.local-test.yml up -d --wait web-app
 ```
 
+**本机完整体验（一条命令）**：想在本机直接用上 Gemini 与飞书，叠加 `docker-compose.local-full.yml`。
+它打开 worker 调 Gemini 理解任务、Web 的 Gemini/飞书“测试连接”和飞书扫码登录，并自带只绑
+`127.0.0.1:8443` 的 Caddy 自签 HTTPS 入口。凭据仍只在 `/admin` 里填写（写进 `.config/{ai,feishu}`），
+保存后重启 `worker web-app` 才会加载；缺凭据时对应能力自动不装配，本地管理员登录始终可用。
+它**不**启动飞书机器人收发消息（listener / channel worker），也不能与 release override 叠加。
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.local-full.yml up -d --wait --build
+# 浏览器打开 https://xiaowei.localhost:8443/（首次需信任 Caddy 自签证书）
+# 保存新凭据后：
+docker-compose -f docker-compose.yml -f docker-compose.local-full.yml restart worker web-app
+```
+
+飞书扫码登录还需在飞书开放平台为应用登记回调地址
+`https://xiaowei.localhost:8443/oauth/feishu/callback`；换域名时设置 `XIAOWEI_WEB_PUBLIC_ORIGIN`。
+
 **运维资源登记（W4b）**：本地 Admin 在 `/admin` 的"运维资源登记"区新增、修改、清除凭据或删除
 StarRocks 与 Prometheus 资源，写进 `.config/resources/config.json`（最多 100 个，资源 ID 由服务端生成）。
 这里只做本地语法与字段组合校验：不解析 DNS、不探测端口、不发 HTTP、不登录，也没有"测试连接"
