@@ -24,42 +24,49 @@ x-release-labels: &release-labels
   io.xiaowei.release.source-sha: ${XIAOWEI_RELEASE_SOURCE_SHA:?required}
   io.xiaowei.release.edge-evidence: ${XIAOWEI_RELEASE_EDGE_EVIDENCE_REF:?required}
 
+# ``build: !reset null`` 必须逐个写在服务上：Compose 2.38（CI runner）不对经 ``<<`` 锚点合并进来的
+# ``!reset`` 生效，渲染结果会原样保留基础文件的 build。部署前检查的 ``build_present`` 兜底此类漂移。
 x-release-service: &release-service
   image: ${XIAOWEI_RELEASE_IMAGE:?required}
-  build: !reset null
   labels: *release-labels
 
 services:
   migrate:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
 
   api:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
     ports: !reset []
 
   worker:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
 
   feishu-listener:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
       XIAOWEI_FEISHU_LISTENER_ENABLED: "false"
 
   channel-worker:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
       XIAOWEI_CHANNEL_WORKER_ENABLED: "false"
 
   web-app:
     <<: *release-service
+    build: !reset null
     environment:
       <<: *release-environment
       XIAOWEI_WEB_APP_ENABLED: "true"

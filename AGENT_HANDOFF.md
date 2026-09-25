@@ -204,6 +204,10 @@ loopback 临时 registry 取得 digest 引用并以 `--pull never` 启动，维�
 提示需桌面宽度。隔离变异各自转红并恢复：撤掉 Settings release 闸；release 开关改回插值；保留 api 端口；保留 `build`；
 检查器放过被打开的开关、放过通配绑定、放过 shell 残留变量；无消费者域恢复“已加载”；工作台恢复能力示例；smoke 放过
 非 `rejected` 终态、放过执行足迹、跳过模型检查、接受非本次 registry 的 digest。
+首轮 PR CI（head `d104159`）在 runner 的 Compose 2.38.2 上发现 `build: !reset null` 经 `<<` 锚点合并时不生效、渲染结果仍带
+`build`：部署前检查与 smoke 以 `build_present` / `SMOKE_RELEASE_MODEL_INVALID` 拦下。修复为逐服务书写 `!reset` 并加原文静态契约；
+本机用 Compose 5.5.1 与下载的 2.38.2 分别运行 Compose 相关测试（各 153 passed）与 release 段本机脚本，均通过；恢复锚点写法时
+静态契约与 2.38.2 渲染用例各自转红。
 **未覆盖**：窄屏只读任务详情的视觉核对（需真实任务视图）；GitHub CI 传统镜像存储上的临时 registry 路径待 PR CI 证明；
 目标主机、edge、真实 registry 与部署均未执行。这些只是离线证据：没有部署、canary、真实调用或用户验收。
 

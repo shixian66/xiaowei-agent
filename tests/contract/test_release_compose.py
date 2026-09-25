@@ -125,6 +125,18 @@ def test_release_override_is_registered_and_covers_every_app_service() -> None:
     assert "volumes" not in release
 
 
+def test_build_is_reset_directly_on_every_service_not_through_the_anchor() -> None:
+    """Compose 2.38（CI runner）不对经 ``<<`` 锚点合并进来的 ``!reset`` 生效。
+
+    合并后的静态值看不出差别，所以按原文逐行钉住：锚点里不得出现 ``build``，
+    每个 app service 自己写 ``build: !reset null``。
+    """
+    text = (_ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
+    assert "build" not in _release_yaml()["x-release-service"]
+    assert text.count("    build: !reset null\n") == len(_APP_SERVICES)
+    assert "  build: !reset null\n  labels" not in text
+
+
 def test_release_switches_are_literals_the_template_cannot_override() -> None:
     """Compose 的 ``environment:`` 优先于 ``--env-file``；写成插值就等于把开关交给模板。"""
     services = _release_yaml()["services"]
