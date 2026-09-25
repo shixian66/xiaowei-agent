@@ -40,6 +40,9 @@ GEMINI_MODEL_PROFILE: Final[ModelInvocationProfile] = ModelInvocationProfile()
 GEMINI_MODEL: Final[str] = GEMINI_MODEL_PROFILE.model
 GEMINI_API_VERSION: Final[str] = GEMINI_MODEL_PROFILE.api_version
 GEMINI_PROVIDER_ORIGIN: Final[str] = GEMINI_MODEL_PROFILE.origin
+GEMINI_PROBE_OUTPUT_TOKENS: Final[int] = 16
+"""连通性探针的输出上限。探针不读正文，只需换到一次真实回应；按 2048 上限作答
+会让思考型模型写上数秒，越过 Web 探针的超时（本机实测 6–8 秒 → 约 1 秒）。"""
 _CLIENT_CLOSE_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _PROXY_ENVIRONMENT: Final[tuple[str, ...]] = (
@@ -380,7 +383,7 @@ async def probe_connection(
             model=profile.model,
             contents=contents,
             config=types.GenerateContentConfig(
-                max_output_tokens=profile.interaction_output_tokens,
+                max_output_tokens=GEMINI_PROBE_OUTPUT_TOKENS,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
@@ -404,6 +407,7 @@ __all__ = [
     "GEMINI_API_VERSION",
     "GEMINI_MODEL",
     "GEMINI_MODEL_PROFILE",
+    "GEMINI_PROBE_OUTPUT_TOKENS",
     "GEMINI_PROVIDER_ORIGIN",
     "GeminiModelAdapter",
     "probe_connection",
