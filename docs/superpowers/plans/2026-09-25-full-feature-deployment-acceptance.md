@@ -50,6 +50,7 @@ W5-A/W5-B 已由 PR #84/#85 合入；W5-C 未获 GO；RI2、RI3 PR 3E、RI4、RI
 | StarRocks | 两个 operation 的慢查询 capability；`StarRocksReadonlyAdapter` + PyMySQL、target-bound Gateway、version/grants/DDL/identity digest 预检 | M6b 离线；**产品入口未装配 live assembly**；目标目录是占位 `dev → starrocks-dev-1` |
 | Prometheus / Alertmanager / 资产 | `prometheus.alert.evidence`、`asset.inventory.lookup` capability 与 PromQL 模板准入 | **只有 fake/recording adapter**，没有真实 adapter |
 | 审批链 | `ApprovalGate` 在 StepAdmission 中；plan_hash / target_fingerprint 绑定 | tests；**当前没有任何需要审批的 capability**（全部只读） |
+| 写入的边界 | 系统内部写已有：Admin 配置、用户目录与角色、激活审批、Admin 审计、TaskStore/evidence 持久化 | **被管运维目标写操作（E1）尚未实现**，也不在本计划开放 |
 | 发布 | W5 provider-off release：不可变 digest、字面关闭开关、部署前检查、发布预检、runbook 与四份清单 | W5-B 离线；W5-C 未执行 |
 
 ## 2. 仍缺的配置与代码
