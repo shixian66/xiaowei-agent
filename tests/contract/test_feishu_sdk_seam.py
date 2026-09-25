@@ -322,6 +322,38 @@ def test_create_message_request_fixes_target_kind_card_type_and_idempotency(
     assert request.request_body.uuid == "delivery-1"
 
 
+def test_create_message_uuid_fits_feishus_fifty_character_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """飞书 ``uuid`` 最长 50（真实回包 99992402: uuid the max len is 50）。
+
+    投影层的幂等编号是 64 位 SHA-256 十六进制；原样发出去每张卡都被 400 拒收。
+    """
+    _install_request_model_fakes(monkeypatch)
+    card = _card()
+    long_refs = ("a" * 64, "b" * 64, "a" * 63 + "b")
+
+    uuids = [
+        feishu_sdk._build_create_message_request(
+            receive_id_type="open_id",
+            receive_id="ou-1",
+            card=card,
+            idempotency_ref=ref,
+        ).request_body.uuid
+        for ref in long_refs
+    ]
+    again = feishu_sdk._build_create_message_request(
+        receive_id_type="open_id",
+        receive_id="ou-1",
+        card=card,
+        idempotency_ref=long_refs[0],
+    ).request_body.uuid
+
+    assert all(len(value) <= 50 for value in uuids)
+    assert len(set(uuids)) == len(long_refs)
+    assert again == uuids[0]
+
+
 def test_patch_message_request_targets_only_the_persisted_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
