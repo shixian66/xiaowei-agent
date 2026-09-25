@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@d4e619a1b25553c64f39f93df81fef50e63dc001`（2026-09-25，PR #87 合入本机 Gemini/飞书测试探针覆盖）。
+- **当前基线**：`main@86263e90f9dbcca587a534b80a3cc2f42bee1c02`（2026-09-25，S0 首登与入口体验详细计划合入）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -58,7 +58,9 @@
   [完整功能部署验收总控计划](docs/superpowers/plans/2026-09-25-full-feature-deployment-acceptance.md)
   （PR #88）经独立复审批准，批准范围**仅为计划**：不授权任何切片实现、真实 Provider 调用、生产目标、RI6 部署、
   canary、UAT、R1 或 M8。每个切片须先写详细计划并经 exact-SHA 复审，真实调用另需各自 GO。
-  本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
+  [S0 首登与入口体验详细计划](docs/superpowers/plans/2026-09-25-s0-first-login-entry.md)（PR #89）已批准并合入；
+  S0 实现在分支 `claude/s0-first-login-implementation` 上离线完成、**待 exact-SHA 独立复审**，证据见下文「S0 离线证据」。
+  PR #87 起，本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
   `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
@@ -227,14 +229,27 @@ registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`
 **未覆盖**：窄屏只读任务详情的视觉核对（需真实任务视图）；
 目标主机、edge、真实 registry 与部署均未执行。这些只是离线证据：没有部署、canary、真实调用或用户验收。
 
+<a id="s0-offline-evidence"></a>
+**S0 离线证据（分支 `claude/s0-first-login-implementation`，待 exact-SHA 复审）**（基线 `86263e9`）：
+只改 `interfaces/web_app.py` 与 `web_static/index.html`、`app.js`。四项：`/app`、`/admin`、`/app/tasks/{id}` 对未改密会话由
+JSON 403 改为 302 回登录入口（登录入口原已渲染改密壳），非法 task_id 仍按基线返回 `password_change_required`、不进
+Location；新增 `GET /` → `302 /login?intent=workbench`，仍受可信 Host 约束；OAuth 未装配时登录页隐藏飞书入口并把引导文案
+换成“请使用本地管理员账号登录。”，标记漂移时启动即失败；工作台顶栏按 `/app/api/me` 的 `admin_capabilities` 显示“管理中心”，
+`/admin` 服务端闸门不变。API 状态码与错误体、认证服务、Session/CSRF、权限检查、数据库与 Provider 行为均未改。
+本机 `python -m pytest -q` 为 `5254 passed, 428 skipped`，`python -m pytest -m security -q` 为 `1667 passed, 83 skipped`，
+`ruff check .` 与 `mypy src`（215 个源文件）通过。每项先红后绿；隔离变异各自转红并恢复：撤掉 `/app` 的改密重定向、撤掉
+详情壳非法 ID 守卫、删掉 `GET /`、不替换引导文案、删掉管理中心链接。本机 Chrome headless 以真实 `create_app`、内存存储、
+loopback `lan_http` 与合成凭据核对 1440/1280：`/` 落到登录页且无“飞书”，登录后直接出现改密表单，改密后工作台顶栏显示
+“管理中心”且无横向溢出，点击进入 `/admin`。operator 会话隐藏链接只由静态契约覆盖，未做浏览器核对。未部署、未 canary、未 UAT。
+
 ## 1. 当前基线
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/full-acceptance-plan`（总控计划与交接同步）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `claude/s0-first-login-implementation`（S0 实现）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-25（Asia/Shanghai） |
-| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划） |
-| 下一步 | 先写总控计划 S0（首登与入口体验）详细计划并经复审，获开工口令后再实现；W5-C 仍等待负责人明确 GO 并书面冻结 Task 10 输入（目标主机、窗口、digest、edge、验收人、备份、回滚 owner），此前不做部署、canary、UAT，真实调用另有独立门 |
+| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划）；S0 详细计划已批准（PR #89），S0 实现离线完成待复审 |
+| 下一步 | S0 实现等待 exact-SHA 独立复审与负责人合入；之后的切片仍须先写详细计划并经复审、获开工口令再实现；W5-C 仍等待负责人明确 GO 并书面冻结 Task 10 输入（目标主机、窗口、digest、edge、验收人、备份、回滚 owner），此前不做部署、canary、UAT，真实调用另有独立门 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -326,6 +341,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 2. W3 V1 已按精简范围离线收口；W4a/W4b 已分别由 PR #81/#82 合入，W5 详细计划、W5-A 与 W5-B 已由 PR #83/#84/#85 合入。
    下一步等待 W5-C 的明确 GO 与 Task 10 冻结输入；W5-A/B 合入不等于真实调用、真实环境配置迁移、
    部署、canary 或 UAT 已获授权。
+   S0 实现只改 Web 入口层与静态壳，待复审；合入后在本机体验需重建镜像，仍只算本地体验，不是 W5-C 证据。
 3. I3 延期但未取消，恢复前仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
 
