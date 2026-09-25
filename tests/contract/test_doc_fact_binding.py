@@ -2001,6 +2001,8 @@ _W5_PLAN_MERGE_COMMIT: Final[str] = "4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047"
 _W5A_MERGE_COMMIT: Final[str] = "3c83ea5b087aa85b8ec06e097bc16526031df28a"
 _W5A_REVIEWED_HEAD: Final[str] = "cfd0de47b7c0c5ce2ae8063ae06f10cdb073cbba"
 _W5B_MERGE_COMMIT: Final[str] = "d357330e4718d9ef8480ed96e9d058ef04f51032"
+_LOCAL_PROBE_COMMIT: Final[str] = "d4e619a1b25553c64f39f93df81fef50e63dc001"
+_FULL_ACCEPTANCE_PLAN = "docs/superpowers/plans/2026-09-25-full-feature-deployment-acceptance.md"
 _W5B_REVIEWED_HEAD: Final[str] = "9278a88a0611993d0b6846b3dc45c17750a70d16"
 _W5_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w5-product-deployment.md"
 _W5A_OVERCLAIMS: Final[tuple[str, ...]] = (
@@ -2027,7 +2029,9 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 
 def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _W5B_MERGE_COMMIT
+    assert _current_baseline(handoff) == _LOCAL_PROBE_COMMIT
+    assert _FULL_ACCEPTANCE_PLAN in handoff and "PR #88" in handoff
+    assert "批准范围**仅为计划**" in handoff
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
     assert _W4B_MERGE_COMMIT in handoff and "PR #82" in handoff
     assert _W5_PLAN_MERGE_COMMIT in handoff and "PR #83" in handoff
@@ -2049,6 +2053,7 @@ def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     next_step = _handoff_baseline_field(handoff, "下一步")
     assert "W5-C" in next_step and "GO" in next_step
     assert "Task 10" in next_step
+    assert "S0" in next_step and "详细计划" in next_step
     for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
 

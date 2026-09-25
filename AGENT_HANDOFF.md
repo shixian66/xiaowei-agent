@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@d357330e4718d9ef8480ed96e9d058ef04f51032`（2026-09-25，PR #85 已 squash 合入 W5-B release 资产与证据合同）。
+- **当前基线**：`main@d4e619a1b25553c64f39f93df81fef50e63dc001`（2026-09-25，PR #87 合入本机 Gemini/飞书测试探针覆盖）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -55,6 +55,9 @@
   `d357330e4718d9ef8480ed96e9d058ef04f51032`。证据见下文「W5-B 离线证据」。
   W5-C 部署、canary、UAT 另需明确 GO 与计划 Task 10 的冻结输入；负责人在 W5-B 合入后的“继续开发”不构成该 GO。
   W5 证据只覆盖 provider-off 产品壳，不构成 RI6 或只读 V1 发布。
+  [完整功能部署验收总控计划](docs/superpowers/plans/2026-09-25-full-feature-deployment-acceptance.md)
+  （PR #88）经独立复审批准，批准范围**仅为计划**：不授权任何切片实现、真实 Provider 调用、生产目标、RI6 部署、
+  canary、UAT、R1 或 M8。每个切片须先写详细计划并经 exact-SHA 复审，真实调用另需各自 GO。
   本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
   `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
@@ -228,10 +231,10 @@ registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/w5b-merge-handoff`（仅同步交接）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前开发分支 `claude/full-acceptance-plan`（总控计划与交接同步）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-25（Asia/Shanghai） |
-| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成 |
-| 下一步 | 等待负责人为 W5-C 下达明确 GO 并书面冻结 Task 10 输入（目标主机、窗口、digest、edge、验收人、备份、回滚 owner）；此前不做部署、canary、UAT，真实调用另有独立门 |
+| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划） |
+| 下一步 | 先写总控计划 S0（首登与入口体验）详细计划并经复审，获开工口令后再实现；W5-C 仍等待负责人明确 GO 并书面冻结 Task 10 输入（目标主机、窗口、digest、edge、验收人、备份、回滚 owner），此前不做部署、canary、UAT，真实调用另有独立门 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
