@@ -22,7 +22,8 @@
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
 各阶段进度见顶部交接入口；当前可照做的首启流程见下文：W4a 起 Provider 配置拆为 AI、飞书、
 resources 三个固定配置域并仍走 loopback 发布；W4b 起 resources 域可登记 StarRocks 与 Prometheus
-参数，但只登记、不接入。W4c 连接测试与 W5 部署尚未实现，不能提前套用。
+参数，但只登记、不接入。W5 provider-off release 的离线部署资产见下文「Release 部署资产（W5）」；
+它们存在不表示已部署，目标环境执行需要单独 GO。W4c 连接测试尚未实现，不能提前套用。
 
 ## 目标能力
 
@@ -544,10 +545,41 @@ callback，也不跟随 Location 或调用 provider。镜像 build 仍可能访�
 同 UID 本机进程——这类进程本来就能检查和修改同一用户的路径。发现目录身份漂移或未知内容时，
 脚本会固定失败并保留现场，不会递归清理。
 
+自 W5 起，上述 offline 全流程通过后，同一条命令再跑一段 **provider-off release smoke**（独立随机
+project）：从同一 Dockerfile 构建候选镜像，推到只绑定 loopback 的临时 registry（镜像按 digest 钉死）
+取得真实的 `localhost:<port>/xiaowei-agent@sha256:<digest>` 引用；以 `docker-compose.yml` +
+`docker-compose.release.yml` 与合成部署模板（origin 在 `.invalid`）渲染最终模型，并按部署前检查
+同一套规则核对；随后以 `--pull never` 按 digest 启动，运行 migrate、终态激活保留（四个零计数）与
+旧身份迁移（`not_applicable`），只起 api/worker/web-app。它核对三个容器的 image 等于该 digest、
+带 release 形态且只有 Web 发布 `127.0.0.1:8080`；登录页经受信 Host 可达、直连 Host 为 403、
+OAuth 路由为 404（合成飞书域里**有**凭据也不装配）；提交一条普通运维请求必须以 `rejected` 终结，
+且 plan、步骤执行与 evidence 均为零。registry 容器与候选 tag 在退出时删除。
+
 执行前检查本机 Docker daemon、Compose 版本、credential helper 与端口占用；历史环境记录不能
 替代当次预检。已取得的 CI/本机证据与缺口统一见
 [交接文档](AGENT_HANDOFF.md#current-status)。隔离 smoke 只证明对应 `tests`，不替代真实服务、
 部署、canary 或用户验收。
+
+### Release 部署资产（W5）
+
+W5 provider-off 产品壳只用一个固定文件集合：`docker-compose.yml` + `docker-compose.release.yml`。
+release override 让六个 app service 都使用同一个不可变镜像 `name@sha256:<64 hex>`、清除 `build`；
+运行形态 `release`、作用域 `dev-local/dev`、`starrocks_adapter_mode=disabled` 以及 Gemini、OAuth、
+listener、channel-worker 与两个真实测试开关都写成**字面量**（`.env` 或部署模板改不动）；只发布 Web，
+api 的 loopback 端口在最终模型里被清除。Settings 在 release 下同样拒绝任何被打开的真实调用开关，
+两层互不代替。
+
+部署模板见 [docs/examples/w5-release.env.example](docs/examples/w5-release.env.example)：只有六个键，
+复制到仓库外填写。部署前在干净 shell 里运行一次检查，它渲染最终模型但只输出一行闭集结果：
+
+```bash
+python -m scripts.release_compose --env-file /srv/xiaowei-private/w5-release.env
+```
+
+只有 `release-compose: ok` 可以继续；叠加 LAN/model/smoke override、shell 里残留 `XIAOWEI_*` /
+`COMPOSE_*`、模板多键缺键或任何开关被打开都会得到固定失败码。完整执行顺序、回滚（只回到
+W5-compatible release digest，首次部署停服，**绝不**回到 recording 栈）与三层证据见
+[W5 部署 runbook](docs/runbooks/w5-product-deployment.md) 与 `docs/checklists/` 下的四份清单。
 
 ### 模型与真实服务的激活边界
 
