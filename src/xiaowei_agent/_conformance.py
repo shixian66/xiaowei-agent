@@ -74,7 +74,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     from xiaowei_agent.interfaces.web_auth import FeishuOAuthPort
     from xiaowei_agent.observability.log_sink import StructuredLogTraceSink
     from xiaowei_agent.observability.sink import TraceSink
-    from xiaowei_agent.persistence.activation import ActivationStore
+    from xiaowei_agent.persistence.activation import (
+        ActivationRetentionStore,
+        ActivationStore,
+    )
     from xiaowei_agent.persistence.admin_audit import AdminAuditStore
     from xiaowei_agent.persistence.channel import ChannelStore
     from xiaowei_agent.persistence.clarification_records import (
@@ -83,6 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.evidence import EvidenceLedger, InMemoryEvidenceLedger
     from xiaowei_agent.persistence.fake import (
+        InMemoryActivationRetentionStore,
         InMemoryActivationStore,
         InMemoryAdminAuditStore,
         InMemoryChannelStore,
@@ -97,6 +101,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
     )
     from xiaowei_agent.persistence.plans import InMemoryPlanStore, PlanStore
     from xiaowei_agent.persistence.postgres import (
+        PostgresActivationRetentionStore,
         PostgresActivationStore,
         PostgresAdminAuditStore,
         PostgresChannelStore,
@@ -207,6 +212,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供 mypy 检查结构兼容性
         """两种激活实现都只能创建/读取待办，不能决定授权。"""
         memory_port: ActivationStore = memory
         postgres_port: ActivationStore = postgres
+        _ = (memory_port, postgres_port)
+
+    def _activation_retention_anchors(
+        memory: "InMemoryActivationRetentionStore",
+        postgres: "PostgresActivationRetentionStore",
+    ) -> None:
+        """两种保留实现都只有无参的全库清理入口。"""
+        memory_port: ActivationRetentionStore = memory
+        postgres_port: ActivationRetentionStore = postgres
         _ = (memory_port, postgres_port)
 
     def _lease_renewal_anchor(store: "PostgresTaskStore") -> None:

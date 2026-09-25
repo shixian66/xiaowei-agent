@@ -2,7 +2,6 @@
 
 import asyncio
 import datetime as dt
-import json
 from dataclasses import fields
 from pathlib import Path
 from types import MappingProxyType
@@ -544,8 +543,8 @@ async def test_postgres_task_view_stack_has_only_projection_dependencies(
         "_tasks",
         "_plans",
             "_ledger",
-            "_bindings",
-            "_snapshot",
+            "_conversation_snapshot",
+            "_rendering_bindings",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -586,13 +585,12 @@ async def test_postgres_task_view_stack_disposes_engine_when_assembly_fails(
     assert engine.disposed is True
 
 
-def _feishu_settings(identity_file: Path, secret_file: Path) -> Settings:
+def _feishu_settings() -> Settings:
     return Settings(
         environment_id="dev",
         feishu_listener_enabled=True,
         feishu_tenant_key="tenant-test",
         feishu_bot_open_id="bot-open-id",
-        feishu_identity_file=str(identity_file),
     )
 
 
@@ -651,32 +649,11 @@ class _OfflineMembership:
         return True
 
 
-def _write_identity(path: Path) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "tenant_id": "dev-local",
-                "environment_id": "dev",
-                "entries": [
-                    {
-                        "subject_ref": "user-open-id",
-                        "actor": "alice",
-                        "labels": ["operator"],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def _web_settings(identity_file: Path) -> Settings:
+def _web_settings() -> Settings:
     return Settings(
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file=str(identity_file),
         web_public_origin="https://ops.example.test",
     )
 
@@ -737,8 +714,6 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine = _FakeWebEngine()
-    identity_file = tmp_path / "identities.json"
-    _write_identity(identity_file)
     oauth = _OfflineOAuth()
     membership = _OfflineMembership()
     monkeypatch.setattr(
@@ -747,7 +722,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
     )
 
     stack = await build_postgres_web_stack(
-        settings=_web_settings(identity_file),
+        settings=_web_settings(),
         oauth=oauth,
         membership=membership,
     )
@@ -789,8 +764,8 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
         "_tasks",
         "_plans",
             "_ledger",
-            "_bindings",
-            "_snapshot",
+            "_conversation_snapshot",
+            "_rendering_bindings",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -838,7 +813,7 @@ async def test_web_stack_assembles_admin_identity_without_oauth(
     )
 
     stack = await build_postgres_web_stack(
-        settings=_web_settings(tmp_path / "unused-identities.json"),
+        settings=_web_settings(),
         oauth=None,
         membership=None,
     )
@@ -878,7 +853,7 @@ async def test_web_stack_rejects_local_admin_scope_mismatch(
     )
     settings = Settings(
         **(
-            _web_settings(tmp_path / "unused-identities.json").model_dump()
+            _web_settings().model_dump()
             | {"environment_id": "staging"}
         )
     )
@@ -895,15 +870,13 @@ async def test_web_stack_rejects_local_admin_scope_mismatch(
 async def test_web_stack_uses_fixed_oauth_deadline_not_channel_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    identity_file = tmp_path / "identities.json"
-    _write_identity(identity_file)
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
         lambda _: _FakeWebEngine(),
     )
     settings = Settings(
         **(
-            _web_settings(identity_file).model_dump()
+            _web_settings().model_dump()
             | {"feishu_api_timeout_seconds": 10.0}
         )
     )
@@ -954,7 +927,7 @@ async def test_web_stack_maps_database_credential_failure_to_its_narrow_error(
 
     with pytest.raises(WebStackConfigurationError) as caught:
         await build_postgres_web_stack(
-            settings=_web_settings(tmp_path / "unused-identities.json"),
+            settings=_web_settings(),
             oauth=_OfflineOAuth(),
             membership=_OfflineMembership(),
         )
@@ -975,7 +948,7 @@ async def test_static_identity_file_is_not_a_web_runtime_dependency(
     )
 
     stack = await build_postgres_web_stack(
-        settings=_web_settings(tmp_path / "missing-identities.json"),
+        settings=_web_settings(),
         oauth=_OfflineOAuth(),
         membership=_OfflineMembership(),
     )
@@ -1001,8 +974,6 @@ async def test_local_admin_seed_failure_disposes_the_engine(
     与上一条互为对照——飞书失败是"降级"，本地管理员失败是"起不来"。
     """
     engine = _FakeWebEngine()
-    identity_file = tmp_path / "identities.json"
-    _write_identity(identity_file)
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
         lambda _: engine,
@@ -1018,7 +989,7 @@ async def test_local_admin_seed_failure_disposes_the_engine(
 
     with pytest.raises(RuntimeError, match="constant seed failure"):
         await build_postgres_web_stack(
-            settings=_web_settings(identity_file),
+            settings=_web_settings(),
             oauth=_OfflineOAuth(),
             membership=_OfflineMembership(),
         )
@@ -1036,8 +1007,6 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
             self.disposed = True
 
     engine = FakeEngine()
-    identity_file = tmp_path / "identities.json"
-    _write_identity(identity_file)
     fake_transport = RecordingFeishuInboundTransport()
     monkeypatch.setattr(
         "xiaowei_agent.interfaces.local_stack.create_database_engine",
@@ -1045,7 +1014,7 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
     )
 
     stack = await build_postgres_feishu_listener_stack(
-        settings=_feishu_settings(identity_file, tmp_path / "missing-secret"),
+        settings=_feishu_settings(),
         transport=fake_transport,
         credentials=ProviderCredentials(
             feishu_app_id="cli_listener",
@@ -1079,8 +1048,8 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
         "_tasks",
         "_plans",
             "_ledger",
-            "_bindings",
-            "_snapshot",
+            "_conversation_snapshot",
+            "_rendering_bindings",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -1101,8 +1070,6 @@ async def test_feishu_listener_stack_requires_credentials_even_with_fake_transpo
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """事件 scope 校验仍要用 app_id；fake transport 不能让 listener 带 None 启动。"""
-    identity_file = tmp_path / "identities.json"
-    _write_identity(identity_file)
 
     def fail_engine(_: object) -> object:
         raise AssertionError("missing credentials must stop before database assembly")
@@ -1113,7 +1080,7 @@ async def test_feishu_listener_stack_requires_credentials_even_with_fake_transpo
 
     with pytest.raises(ValueError, match="feishu credentials are not configured"):
         await build_postgres_feishu_listener_stack(
-            settings=_feishu_settings(identity_file, tmp_path / "missing-secret"),
+            settings=_feishu_settings(),
             transport=RecordingFeishuInboundTransport(),
             credentials=ProviderCredentials(),
         )
@@ -1153,9 +1120,7 @@ async def test_static_identity_file_is_not_a_listener_runtime_dependency(
     )
 
     stack = await build_postgres_feishu_listener_stack(
-        settings=_feishu_settings(
-            tmp_path / "missing-identities.json", tmp_path / "missing-secret"
-        ),
+        settings=_feishu_settings(),
         transport=RecordingFeishuInboundTransport(),
         credentials=ProviderCredentials(
             feishu_app_id="cli_listener",
@@ -1215,8 +1180,8 @@ async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
         "_tasks",
         "_plans",
             "_ledger",
-            "_bindings",
-            "_snapshot",
+            "_conversation_snapshot",
+            "_rendering_bindings",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",

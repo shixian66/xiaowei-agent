@@ -10,7 +10,6 @@ services:
     environment:
       XIAOWEI_WEB_APP_ENABLED: "true"
       XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
-      XIAOWEI_FEISHU_IDENTITY_FILE: /run/config/feishu-identities.json
       XIAOWEI_WEB_PUBLIC_ORIGIN: https://sso.example.invalid
     extra_hosts:
       - "open.feishu.cn:127.0.0.1"

@@ -1712,8 +1712,8 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    # W4a/W4b 已合入后，延期的 W3 增强仍不应把当前动作从 W5 计划审查拉回去。
-    assert "W5" in next_step and "计划" in next_step and "exact-SHA" in next_step
+    # W5 计划合入后，延期的 W3 增强仍不应把当前动作从 W5-A 候选审查拉回去。
+    assert "W5-A" in next_step and "exact-SHA" in next_step
     assert "exact-SHA" in next_step and "合入前" in next_step and "不" in next_step
 
     development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
@@ -1990,14 +1990,23 @@ def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
         _check_w4_plan_header(_replace_once(header, old, new))
 
 
-# --- W4 收口与 W5 计划门 ---------------------------------------------------
+# --- W4 收口、W5 计划与 W5-A 门 ---------------------------------------------
 #
-# W4a/W4b 已分别由 PR #81/#82 合入；两者都只到离线证据。下一步只能送审
-# W5 详细计划，不能把计划、实现、部署、canary 或 UAT 写成同一件事。
+# W4a/W4b 已分别由 PR #81/#82 合入；W5 详细计划已由 PR #83 合入并取得 W5-A 离线开工
+# 口令。下一步只能审查 W5-A 候选，不能把计划、实现、部署、canary 或 UAT 写成同一件事。
 
 _W4A_MERGE_COMMIT: Final[str] = "dcef09a903224fb86e8b053a15ab4865a7b731d1"
 _W4B_MERGE_COMMIT: Final[str] = "88a63a054062db2041e51f4105846920040f3037"
+_W5_PLAN_MERGE_COMMIT: Final[str] = "4e82b6ae4b3ea2ebb44bc60b2d74dd275a39a047"
 _W5_PLAN = _ROOT / "docs/superpowers/plans/2026-09-24-w5-product-deployment.md"
+_W5A_OVERCLAIMS: Final[tuple[str, ...]] = (
+    "W5 已部署",
+    "W5-A 已合入",
+    "W5-A 已部署",
+    "RI6 已完成",
+    "只读 V1 已发布",
+    "canary 已通过",
+)
 _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
     "W4b 已部署",
     "W4b 已上线",
@@ -2009,18 +2018,24 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 )
 
 
-def test_handoff_records_both_w4_merges_and_points_only_to_w5_plan_review() -> None:
+def test_handoff_records_the_w5_plan_merge_and_points_only_to_w5a_review() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _W4B_MERGE_COMMIT
+    assert _current_baseline(handoff) == _W5_PLAN_MERGE_COMMIT
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
     assert _W4B_MERGE_COMMIT in handoff and "PR #82" in handoff
+    assert _W5_PLAN_MERGE_COMMIT in handoff and "PR #83" in handoff
     assert "W4a/W4b 已离线实现并合入" in handoff
-    assert "W5 详细计划为 Review Draft V0.2" in handoff
-    for overclaim in _W4B_OVERCLAIMS:
+    assert "W5 详细计划 Approved V0.2" in handoff
+    assert "W5-A 尚未合入" in handoff
+    assert "无公开 GitHub permalink" in handoff
+    for overclaim in (*_W4B_OVERCLAIMS, *_W5A_OVERCLAIMS):
         assert overclaim not in handoff, overclaim
+    stage = _handoff_baseline_field(handoff, "阶段")
+    assert "W5-A" in stage and "尚未合入" in stage
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "W5" in next_step and "计划" in next_step and "exact-SHA" in next_step
-    for forbidden_claim in ("开始实现", "开始部署", "开始 canary", "开始 UAT"):
+    assert "W5-A" in next_step and "exact-SHA" in next_step
+    assert "W5-B" in next_step and "GO" in next_step
+    for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
 
 
@@ -2029,7 +2044,8 @@ def test_w5_plan_keeps_release_safety_and_evidence_gates_separate() -> None:
     plan = _W5_PLAN.read_text(encoding="utf-8")
     header = "\n".join(plan.splitlines()[:24])
     assert header.startswith("# W5 产品发布与分级验收实施计划")
-    assert "状态：Review Draft V0.2" in header
+    assert "状态：Approved V0.2" in header
+    assert "PR #83" in header and "W5-A（Task 0–5）" in header
     assert _W4B_MERGE_COMMIT in header
     assert "计划送审不授权" in header
     for gate in ("源码", "部署", "真实调用", "canary", "UAT"):
@@ -2138,6 +2154,68 @@ def test_w5_plan_closes_release_snapshot_history_and_scope_gaps() -> None:
         assert omitted_file in task_3
     assert "首次部署" in w5_c and "停止全部应用服务" in w5_c
     assert "recording" in w5_c
+
+
+def test_w5a_docs_match_the_implemented_release_constants() -> None:
+    """ARCHITECTURE/README 描述的 W5-A 事实必须与代码常量逐字一致，不留第二个真源。"""
+    from xiaowei_agent.capabilities.registry import PROVIDER_OFF_SNAPSHOT_ID
+    from xiaowei_agent.interfaces.legacy_identity_migration import (
+        LEGACY_IDENTITY_DOCUMENT_PATH,
+    )
+    from xiaowei_agent.persistence.activation import ACTIVATION_TERMINAL_RETENTION_DAYS
+
+    architecture = _truth_doc_text("ARCHITECTURE.md")
+    readme = _truth_doc_text("README.md")
+    for token in (
+        "conversation_snapshot",
+        "rendering_bindings",
+        "offline_recording",
+        PROVIDER_OFF_SNAPSHOT_ID,
+        LEGACY_IDENTITY_DOCUMENT_PATH,
+        f"{ACTIVATION_TERMINAL_RETENTION_DAYS} 天",
+        "全库所有作用域",
+        "tasks_not_drained",
+        "historical_execution_data_present",
+    ):
+        assert token in architecture, token
+    for command in (
+        "xiaowei_agent.interfaces.legacy_identity_migration",
+        "xiaowei_agent.interfaces.activation_retention",
+        "xiaowei_agent.interfaces.release_preflight",
+    ):
+        assert command in readme, command
+    assert LEGACY_IDENTITY_DOCUMENT_PATH in readme
+    assert "docker-compose.feishu.yml" not in readme
+    assert "XIAOWEI_FEISHU_IDENTITY_FILE" not in readme
+
+
+def test_env_example_rollback_never_returns_release_to_recording() -> None:
+    """运维入口的回滚说明必须与 W5 计划一致：只回退到 W5-compatible release digest。
+
+    首次部署没有安全旧 digest 时停服并保留数据库与证据；任何写法都不得把
+    offline_recording 当作 release 的恢复目标，否则发布库会重新写入合成执行事实。
+    """
+    env_example = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    profile_block = env_example.split("XIAOWEI_RUNTIME_PROFILE=", 1)[0].rsplit("\n\n", 1)[1]
+
+    assert "不得回退到 offline_recording" in profile_block
+    assert "W5-compatible release" in profile_block and "不可变 digest" in profile_block
+    assert "首次部署" in profile_block and "停止全部应用服务" in profile_block
+    assert "保留数据库与证据" in profile_block
+    for forbidden in ("改回 offline_recording", "回滚即改回", "切回 offline_recording"):
+        assert forbidden not in env_example, forbidden
+
+
+def test_w5_plan_task_2_keeps_the_global_retention_lock() -> None:
+    """复审非阻断建议：Task 2 的全局锁与全库语义按章节绑定，删句会转红。"""
+    task_2 = _section_between(
+        _W5_PLAN.read_text(encoding="utf-8"),
+        start="### Task 2：实现固定终态保留与维护 CLI",
+        end="### Task 3：旧身份迁移 CLI 与运行时去旧真源",
+    )
+    assert "全局 activation advisory lock" in task_2
+    assert "全库所有作用域" in task_2
+    assert "不接受 scope 参数" in task_2
 
 
 def test_readme_and_architecture_describe_resources_as_registration_only() -> None:

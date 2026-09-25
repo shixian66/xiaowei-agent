@@ -314,7 +314,6 @@ async def test_process_boundary_does_not_log_sdk_exception_text(
         feishu_listener_enabled=True,
         feishu_tenant_key="tenant",
         feishu_bot_open_id="bot",
-        feishu_identity_file="/missing/identity-reference",
     )
 
     with caplog.at_level(logging.ERROR):

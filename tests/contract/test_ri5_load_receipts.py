@@ -160,7 +160,6 @@ def _every_switch_on(tmp_path: Path) -> Settings:
         web_app_enabled=True,
         feishu_tenant_key="tenant",
         feishu_bot_open_id="bot",
-        feishu_identity_file=str(tmp_path / "identities.json"),
         web_public_origin="https://ops.example.test",
     )
 
@@ -301,22 +300,6 @@ class _FakeEngine:
         return None
 
 
-def _identity_file(tmp_path: Path) -> Path:
-    path = tmp_path / "identities.json"
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "tenant_id": "dev-local",
-                "environment_id": "dev",
-                "entries": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
 @pytest.mark.parametrize(
     ("builder", "expected_service", "extra"),
     [
@@ -375,9 +358,6 @@ def test_each_builder_declares_its_own_service_name(
         ports["message_port"] = _NoMessages()
 
     settings = _every_switch_on(tmp_path)
-    settings = settings.model_copy(
-        update={"feishu_identity_file": str(_identity_file(tmp_path))}
-    )
     stack = asyncio.run(
         getattr(local_stack_module, builder)(settings=settings, **ports)
     )
@@ -441,9 +421,7 @@ def test_a_real_feishu_adapter_is_never_built_from_missing_credentials(
         "xiaowei_agent.interfaces.feishu_sdk.FeishuSdkMessageAdapter", refuse
     )
 
-    settings = _every_switch_on(tmp_path).model_copy(
-        update={"feishu_identity_file": str(_identity_file(tmp_path))}
-    )
+    settings = _every_switch_on(tmp_path)
     for builder in (
         "build_postgres_feishu_listener_stack",
         "build_postgres_channel_worker_stack",

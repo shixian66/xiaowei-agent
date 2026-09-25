@@ -102,7 +102,6 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.persistence.decisions
     xiaowei_agent.persistence.errors
     xiaowei_agent.persistence.evidence
-    xiaowei_agent.persistence.fake
     xiaowei_agent.persistence.memory
     xiaowei_agent.persistence.model_artifacts
     xiaowei_agent.persistence.migrations
@@ -231,9 +230,13 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
     }
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_plans") == {"load"}
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_ledger") == {"load"}
-    assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_bindings") == {
-        "runtime_for_plan"
-    }
+    assert _self_dependency_attributes(
+        _TASK_VIEW_RUNTIME, "_rendering_bindings"
+    ) == {"runtime_for_plan"}
+    # 当前准入快照只被整体交给对话投影，不被查询任何能力或 binding。
+    assert _self_dependency_attributes(
+        _TASK_VIEW_RUNTIME, "_conversation_snapshot"
+    ) == set()
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_model_artifacts") == {
         "load_advisory"
     }

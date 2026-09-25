@@ -82,13 +82,15 @@ class _Stack:
         self.approval_gate = CountingApprovalGate()
         self.sink = RecordingTraceSink()
         self.port = _ConversationPort()
+        bindings = build_default_capability_bindings(
+            snapshot=snapshot, policy_snapshot=POLICY_SNAPSHOT
+        )
         self.runtime = XiaoweiRuntime(
             interpreter=RuleBasedIntentInterpreter(),
             resolver=DeterministicCapabilityResolver(),
             snapshot=snapshot,
-            bindings=build_default_capability_bindings(
-                snapshot=snapshot, policy_snapshot=POLICY_SNAPSHOT
-            ),
+            bindings=bindings,
+            rendering_bindings=bindings,
             task_store=self.task_store,
             plan_store=self.plan_store,
             ledger=self.ledger,

@@ -40,8 +40,8 @@ def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
         task_store=harness.store,
         plan_store=harness.plan_store,
         ledger=harness.ledger,
-        bindings=harness.runtime._bindings,
-        snapshot=StaticCapabilityRegistry().snapshot(),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=harness.runtime._rendering_bindings,
         model_artifacts=harness.model_artifacts,
         model_profile=ModelInvocationProfile(),
     )

@@ -171,7 +171,6 @@ def _settings(tmp_path: Path) -> Settings:
         feishu_oauth_enabled=True,
         feishu_tenant_key="offline-tenant",
         feishu_bot_open_id="bot-open-id",
-        feishu_identity_file=str(_identity_file(tmp_path)),
         web_public_origin="https://ops.example.test",
     )
 
@@ -229,10 +228,11 @@ async def _migrate_legacy_identities(
     settings: Settings,
     engine: AsyncEngine,
     clock,
+    document: Path,
 ) -> None:
-    assert settings.feishu_identity_file is not None
+    """旧文档只作一次性迁移输入（W5）；不再经 Settings 传给任何长期进程。"""
     report = await migrate_static_identities(
-        document_path=settings.feishu_identity_file,
+        document_path=str(document),
         directory=PostgresUserDirectoryStore(engine=engine, clock=clock),
         tenant_id=settings.tenant_id,
         environment_id=settings.environment_id,
@@ -303,7 +303,10 @@ async def test_bound_but_disabled_identity_never_reenters_activation(
         lambda _: clean_database,
     )
     await _migrate_legacy_identities(
-        settings=settings, engine=clean_database, clock=clock
+        settings=settings,
+        engine=clean_database,
+        clock=clock,
+        document=_identity_file(tmp_path),
     )
     web = await build_postgres_web_stack(
         settings=settings,
@@ -385,7 +388,10 @@ async def test_feishu_and_web_share_one_runtime_task_truth_and_notification_poli
         lambda _: clean_database,
     )
     await _migrate_legacy_identities(
-        settings=settings, engine=clean_database, clock=clock
+        settings=settings,
+        engine=clean_database,
+        clock=clock,
+        document=_identity_file(tmp_path),
     )
     full = await build_postgres_local_stack(
         settings=settings,
@@ -551,7 +557,10 @@ async def test_feishu_and_web_submit_same_i1_rejected_case_with_same_projection(
         lambda _: clean_database,
     )
     await _migrate_legacy_identities(
-        settings=settings, engine=clean_database, clock=clock
+        settings=settings,
+        engine=clean_database,
+        clock=clock,
+        document=_identity_file(tmp_path),
     )
     full = await build_postgres_local_stack(
         settings=settings,

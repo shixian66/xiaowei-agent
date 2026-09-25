@@ -218,6 +218,7 @@ class XiaoweiRuntime:
         resolver: DeterministicCapabilityResolver,
         snapshot: CapabilitySnapshot,
         bindings: CapabilityBindingRegistry,
+        rendering_bindings: CapabilityBindingRegistry,
         task_store: TaskStore,
         plan_store: PlanStore,
         ledger: EvidenceLedger,
@@ -236,8 +237,12 @@ class XiaoweiRuntime:
     ) -> None:
         self._interpreter = interpreter
         self._resolver = resolver
+        # 三份权威各管一件事：``snapshot`` 是当前准入快照（Resolver 与普通对话），
+        # ``bindings`` 是当前执行 binding（精确等于准入快照），``rendering_bindings``
+        # 只按已持久化计划的精确版本查投影器。release 下前两者为空、后者仍完整。
         self._snapshot = snapshot
         self._bindings = bindings
+        self._rendering_bindings = rendering_bindings
         self._tasks = task_store
         self._plans = plan_store
         self._ledger = ledger
@@ -257,8 +262,8 @@ class XiaoweiRuntime:
             task_store=task_store,
             plan_store=plan_store,
             ledger=ledger,
-            bindings=bindings,
-            snapshot=snapshot,
+            conversation_snapshot=snapshot,
+            rendering_bindings=rendering_bindings,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=model_profile,

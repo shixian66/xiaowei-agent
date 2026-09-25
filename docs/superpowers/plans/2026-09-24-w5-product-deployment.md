@@ -1,7 +1,9 @@
 # W5 产品发布与分级验收实施计划
 
-> 状态：Review Draft V0.2。规划基线：
+> 状态：Approved V0.2。规划基线：
 > `origin/main@88a63a054062db2041e51f4105846920040f3037`（PR #82 已 squash 合入 W4b）。
+> 计划经两轮 exact-SHA 独立复审后由 PR #83 合入；负责人随后在会话中下达“按照计划开始开发”，
+> 授权 W5-A（Task 0–5）离线实现（无公开 GitHub 审批 permalink，合入事实本身不是批准来源）。
 >
 > 规格真源：[Web 运维工作台总体设计](../specs/2026-09-19-web-operations-console-identity-activation-design.md)，
 > 真实调用与环境授权真源：[ADR-007](../../adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)。

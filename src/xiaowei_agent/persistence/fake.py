@@ -50,6 +50,7 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.contracts.activation import (
     ActivationLookup,
     ActivationRequest,
+    ActivationRetentionReport,
     ActivationStatus,
     CreateActivationCommand,
     PendingActivationListQuery,
@@ -98,8 +99,10 @@ from xiaowei_agent.persistence.activation import (
     ACTIVATION_TTL_SECONDS,
     MAX_PENDING_ACTIVATIONS,
     ActivationCapacityError,
+    activation_retention_cutoff,
     activation_source_ref_digest,
     activation_subject_digest,
+    activation_terminal_at,
 )
 from xiaowei_agent.persistence.admin_audit import (
     AdminAuditConflictError,
@@ -702,6 +705,55 @@ class InMemoryActivationStore:
                 items=items,
                 next_requested_at=None if tail is None else tail.requested_at,
                 next_request_id=None if tail is None else tail.request_id,
+            )
+
+
+class InMemoryActivationRetentionStore:
+    """``ActivationRetentionStore`` 的单进程实现；与激活/目录 store 共用同一把锁。"""
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        state: InMemoryPersistenceState | None = None,
+    ) -> None:
+        self._clock = clock
+        self._state = InMemoryPersistenceState() if state is None else state
+        self._lock = self._state.lock
+
+    async def purge_expired_terminal(self) -> ActivationRetentionReport:
+        async with self._lock:
+            now = self._clock()
+            pending_expired = 0
+            for request_id, request in tuple(self._state.activation_requests.items()):
+                if (
+                    request.status is ActivationStatus.PENDING
+                    and request.expires_at <= now
+                ):
+                    self._state.activation_requests[request_id] = request.model_copy(
+                        update={"status": ActivationStatus.EXPIRED}
+                    )
+                    pending_expired += 1
+
+            cutoff = activation_retention_cutoff(now)
+            deleted = dict.fromkeys(
+                (
+                    ActivationStatus.APPROVED,
+                    ActivationStatus.REJECTED,
+                    ActivationStatus.EXPIRED,
+                ),
+                0,
+            )
+            for request_id, request in tuple(self._state.activation_requests.items()):
+                terminal_at = activation_terminal_at(request)
+                if terminal_at is not None and terminal_at <= cutoff:
+                    del self._state.activation_requests[request_id]
+                    deleted[request.status] += 1
+            return ActivationRetentionReport(
+                pending_expired=pending_expired,
+                approved_deleted=deleted[ActivationStatus.APPROVED],
+                rejected_deleted=deleted[ActivationStatus.REJECTED],
+                expired_deleted=deleted[ActivationStatus.EXPIRED],
             )
 
 

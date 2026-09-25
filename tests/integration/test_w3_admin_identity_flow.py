@@ -97,17 +97,16 @@ def _settings(tmp_path: Path) -> Settings:
         environment_id="dev",
         web_app_enabled=True,
         feishu_oauth_enabled=True,
-        feishu_identity_file=str(_identity_file(tmp_path)),
         web_public_origin=_ORIGIN,
     )
 
 
 async def _migrate(
-    *, settings: Settings, engine: AsyncEngine, clock
+    *, settings: Settings, engine: AsyncEngine, clock, document: Path
 ) -> None:
-    assert settings.feishu_identity_file is not None
+    """旧文档只作一次性迁移输入（W5）；不再经 Settings 传给任何长期进程。"""
     report = await migrate_static_identities(
-        document_path=settings.feishu_identity_file,
+        document_path=str(document),
         directory=PostgresUserDirectoryStore(engine=engine, clock=clock),
         tenant_id=settings.tenant_id,
         environment_id=settings.environment_id,
@@ -166,7 +165,12 @@ async def test_oauth_activation_admin_approval_restores_only_the_saved_intent_an
         "create_database_engine",
         lambda _: clean_database,
     )
-    await _migrate(settings=settings, engine=clean_database, clock=clock)
+    await _migrate(
+        settings=settings,
+        engine=clean_database,
+        clock=clock,
+        document=_identity_file(tmp_path),
+    )
     web = await build_postgres_web_stack(
         settings=settings,
         oauth=_OAuth(),

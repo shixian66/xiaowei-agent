@@ -73,6 +73,7 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.contracts.activation import (
     ActivationLookup,
     ActivationRequest,
+    ActivationRetentionReport,
     ActivationStatus,
     CreateActivationCommand,
     PendingActivationListQuery,
@@ -113,6 +114,7 @@ from xiaowei_agent.persistence.activation import (
     ACTIVATION_TTL_SECONDS,
     MAX_PENDING_ACTIVATIONS,
     ActivationCapacityError,
+    activation_retention_cutoff,
     activation_source_ref_digest,
     activation_subject_digest,
 )
@@ -2991,6 +2993,72 @@ class PostgresActivationStore:
             next_requested_at=None if tail is None else tail.requested_at,
             next_request_id=None if tail is None else tail.request_id,
         )
+
+
+class PostgresActivationRetentionStore:
+    """全库终态激活保留；与 ``create_or_reuse`` 抢同一把全局事务锁。
+
+    同一把锁是承重的：容量门先收割过期 PENDING 再计数，清理也先收割再删除。两者
+    若不串行，清理删掉的行与容量门刚读到的计数会在两个事务里各说各话。
+    """
+
+    def __init__(self, *, engine: AsyncEngine, clock: Clock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    @_persistence_boundary(write=True)
+    async def purge_expired_terminal(self) -> ActivationRetentionReport:
+        async with _write_transaction(self._engine) as connection:
+            await connection.execute(_ACTIVATION_CAPACITY_LOCK)
+            now = self._clock()
+            expired = (
+                await connection.execute(
+                    sa.update(ACTIVATION_REQUESTS)
+                    .where(
+                        ACTIVATION_REQUESTS.c.status
+                        == ActivationStatus.PENDING.value,
+                        ACTIVATION_REQUESTS.c.expires_at <= now,
+                    )
+                    .values(status=ActivationStatus.EXPIRED.value)
+                    .returning(ACTIVATION_REQUESTS.c.request_id)
+                )
+            ).all()
+            cutoff = activation_retention_cutoff(now)
+            deleted = (
+                (
+                    await connection.execute(
+                        sa.delete(ACTIVATION_REQUESTS)
+                        .where(
+                            sa.or_(
+                                sa.and_(
+                                    ACTIVATION_REQUESTS.c.status.in_(
+                                        (
+                                            ActivationStatus.APPROVED.value,
+                                            ActivationStatus.REJECTED.value,
+                                        )
+                                    ),
+                                    ACTIVATION_REQUESTS.c.decided_at <= cutoff,
+                                ),
+                                sa.and_(
+                                    ACTIVATION_REQUESTS.c.status
+                                    == ActivationStatus.EXPIRED.value,
+                                    ACTIVATION_REQUESTS.c.expires_at <= cutoff,
+                                ),
+                            )
+                        )
+                        .returning(ACTIVATION_REQUESTS.c.status)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return ActivationRetentionReport(
+                pending_expired=len(expired),
+                approved_deleted=deleted.count(ActivationStatus.APPROVED.value),
+                rejected_deleted=deleted.count(ActivationStatus.REJECTED.value),
+                expired_deleted=deleted.count(ActivationStatus.EXPIRED.value),
+            )
+        raise AssertionError("unreachable")  # pragma: no cover - 事务体必然 return 或抛
 
 
 async def _insert_audit_event(

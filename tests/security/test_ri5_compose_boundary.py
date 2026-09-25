@@ -149,14 +149,13 @@ def test_web_switches_are_interpolated_not_hardcoded() -> None:
     assert environment["XIAOWEI_WEB_MODE"] == "${XIAOWEI_WEB_MODE:-https}"
 
 
-def test_base_compose_does_not_require_the_feishu_identity_file() -> None:
-    """干净 checkout（没有 ``.secrets/``）必须仍然渲染得出来。"""
-    base = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "feishu-identities.json" not in base
+def test_no_compose_file_requires_the_feishu_identity_file() -> None:
+    """干净 checkout（没有 ``.secrets/``）必须仍然渲染得出来；W5 起旧身份文件
+    不再挂给任何长期服务，失效的飞书 override 也已删除。"""
+    for path in sorted(_ROOT.glob("docker-compose*.yml")):
+        assert "feishu-identities.json" not in path.read_text(encoding="utf-8"), path.name
     assert not (_ROOT / ".secrets" / "feishu-identities.json").exists()
-    assert "feishu-identities.json" in (
-        _ROOT / "docker-compose.feishu.yml"
-    ).read_text(encoding="utf-8")
+    assert not (_ROOT / "docker-compose.feishu.yml").exists()
 
 
 def test_the_old_provider_secrets_are_gone() -> None:
@@ -277,10 +276,17 @@ def test_read_only_rootfs_and_dropped_caps_are_unchanged() -> None:
 
 def test_preflight_module_lives_inside_the_packaged_source() -> None:
     """``scripts/`` 不进镜像；预检放在那里会在容器里 ``ModuleNotFoundError``。"""
-    assert (
-        _ROOT / "src" / "xiaowei_agent" / "interfaces" / "config_preflight.py"
-    ).is_file()
-    assert not (_ROOT / "scripts" / "config_preflight.py").exists()
+    # W5 的三条一次性维护命令同理：release 镜像里只能用 ``python -m`` 调到它们。
+    for module in (
+        "config_preflight",
+        "release_preflight",
+        "activation_retention",
+        "legacy_identity_migration",
+    ):
+        assert (
+            _ROOT / "src" / "xiaowei_agent" / "interfaces" / f"{module}.py"
+        ).is_file(), module
+        assert not (_ROOT / "scripts" / f"{module}.py").exists(), module
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY scripts" not in dockerfile
 

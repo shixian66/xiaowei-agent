@@ -166,8 +166,23 @@ _ALLOWED_INTERNAL_BY_FILE = {
         "xiaowei_agent.persistence",
     },
     "interfaces/legacy_identity_migration.py": {
+        # W5：一次性命令自己读 Settings 建 engine；与 ``migrate.py`` 同形。
+        "xiaowei_agent.config",
         "xiaowei_agent.contracts",
         "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
+    "interfaces/release_preflight.py": {
+        # 组合三域目录预检与只读 PostgreSQL 扫描；不 import application、tools 或
+        # Provider 消费。
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
+        "xiaowei_agent.interfaces",
+        "xiaowei_agent.persistence",
+    },
+    "interfaces/activation_retention.py": {
+        "xiaowei_agent.config",
+        "xiaowei_agent.contracts",
         "xiaowei_agent.persistence",
     },
     "interfaces/feishu_listener.py": {

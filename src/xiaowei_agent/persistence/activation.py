@@ -1,11 +1,14 @@
 """身份激活申请的窄持久化边界与摘要规则。"""
 
+import datetime as _dt
 import hashlib
 from typing import Final, Literal, Protocol
 
 from xiaowei_agent.contracts.activation import (
     ActivationLookup,
     ActivationRequest,
+    ActivationRetentionReport,
+    ActivationStatus,
     CreateActivationCommand,
     PendingActivationListQuery,
     PendingActivationPage,
@@ -13,6 +16,8 @@ from xiaowei_agent.contracts.activation import (
 
 ACTIVATION_TTL_SECONDS: Final[int] = 24 * 60 * 60
 MAX_PENDING_ACTIVATIONS: Final[int] = 1024
+ACTIVATION_TERMINAL_RETENTION_DAYS: Final[int] = 30
+"""终态激活行（含受控 PII）的固定保留期；不是配置项，见 W5 §2.1。"""
 
 _SUBJECT_DIGEST_DOMAIN: Final[str] = "xiaowei.activation.subject.v1"
 _EVENT_DIGEST_DOMAIN: Final[str] = "xiaowei.activation.event.v1"
@@ -64,12 +69,41 @@ class ActivationStore(Protocol):
         """按复合 keyset 分页读取当前仍有效的 pending 申请。"""
 
 
+
+def activation_terminal_at(request: ActivationRequest) -> _dt.datetime | None:
+    """终态时间：批准/拒绝取 ``decided_at``，过期取 ``expires_at``；PENDING 没有终态。"""
+    if request.status in (ActivationStatus.APPROVED, ActivationStatus.REJECTED):
+        return request.decided_at
+    if request.status is ActivationStatus.EXPIRED:
+        return request.expires_at
+    return None
+
+
+def activation_retention_cutoff(now: _dt.datetime) -> _dt.datetime:
+    """``terminal_at <= cutoff`` 的终态行到期；边界本身也删除。"""
+    return now - _dt.timedelta(days=ACTIVATION_TERMINAL_RETENTION_DAYS)
+
+
+class ActivationRetentionStore(Protocol):
+    """全库终态激活保留的唯一入口；不接受作用域、cutoff 或 request id。"""
+
+    async def purge_expired_terminal(self) -> ActivationRetentionReport:
+        """在全局激活锁下先把过期 PENDING 转为 EXPIRED，再删除到期终态行。
+
+        仍有效的 PENDING 永不删除；只触及 ``activation_requests``。
+        """
+
+
 __all__ = [
+    "ACTIVATION_TERMINAL_RETENTION_DAYS",
     "ACTIVATION_TTL_SECONDS",
     "MAX_PENDING_ACTIVATIONS",
     "ActivationCapacityError",
     "ActivationError",
+    "ActivationRetentionStore",
     "ActivationStore",
+    "activation_retention_cutoff",
     "activation_source_ref_digest",
     "activation_subject_digest",
+    "activation_terminal_at",
 ]

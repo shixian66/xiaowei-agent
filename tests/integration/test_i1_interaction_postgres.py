@@ -94,6 +94,7 @@ def _runtime(clean_database: AsyncEngine, clock: ManualClock) -> _PostgresI1Stac
         resolver=DeterministicCapabilityResolver(),
         snapshot=snapshot,
         bindings=runtime_bindings,
+        rendering_bindings=runtime_bindings,
         task_store=task_store,
         plan_store=plan_store,
         ledger=ledger,

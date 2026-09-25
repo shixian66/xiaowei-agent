@@ -77,6 +77,16 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
         "activation_store",
         "postgres",
     ),
+    "tests.contract.test_activation_retention": (
+        "activation_store",
+        "activation_retention",
+        "memory",
+    ),
+    "tests.integration.test_activation_retention_postgres": (
+        "activation_store",
+        "activation_retention",
+        "postgres",
+    ),
     "tests.contract.test_channel_store": (
         "channel_store",
         "channel_store",
