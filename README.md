@@ -289,13 +289,27 @@ docker-compose -f docker-compose.yml -f docker-compose.local-test.yml up -d --wa
 它打开 worker 调 Gemini 理解任务、Web 的 Gemini/飞书“测试连接”和飞书扫码登录，并自带只绑
 `127.0.0.1:8443` 的 Caddy 自签 HTTPS 入口。凭据仍只在 `/admin` 里填写（写进 `.config/{ai,feishu}`），
 保存后重启 `worker web-app` 才会加载；缺凭据时对应能力自动不装配，本地管理员登录始终可用。
-它**不**启动飞书机器人收发消息（listener / channel worker），也不能与 release override 叠加。
+它默认**不**启动飞书机器人收发消息（listener / channel worker），也不能与 release override 叠加。
+常驻服务都带 `restart: unless-stopped`：进程崩溃或 Docker 重启后自动拉起（手动 `stop` 的不会）；
+机器重启后只要 Docker 服务本身开机自启，容器就会跟着起来。
 
 ```bash
 docker-compose -f docker-compose.yml -f docker-compose.local-full.yml up -d --wait --build
 # 浏览器打开 https://xiaowei.localhost:8443/（首次需信任 Caddy 自签证书）
 # 保存新凭据后：
 docker-compose -f docker-compose.yml -f docker-compose.local-full.yml restart worker web-app
+```
+
+**飞书机器人（可选，会直接回复真人）**：在本机 `.env`（已被 Git 忽略）写入下面三行后，用同一条命令部署，
+listener 与 channel worker 会一起启动。飞书后台需开启机器人、用“长连接”订阅 `im.message.receive_v1`，
+并开通下列权限后**发布新版本**（改权限不发版不生效）：`im:message`（发消息）、`im:message.p2p_msg:readonly`
+（收私聊）、`im:message.group_at_msg:readonly`（收群里 @机器人 的消息，缺它群聊静默无响应）、群成员读取、
+`tenant:tenant:readonly`（查询 tenant_key）。群里必须 @机器人，并先把机器人加进群。
+
+```bash
+COMPOSE_PROFILES=m7-channels
+XIAOWEI_FEISHU_TENANT_KEY=<企业 tenant_key>
+XIAOWEI_FEISHU_BOT_OPEN_ID=<机器人 open_id>
 ```
 
 飞书扫码登录还需在飞书开放平台为应用登记回调地址
