@@ -1809,6 +1809,11 @@ def create_app(
             raise _WebForbiddenError
         return session
 
+    @app.get("/")
+    async def root_entry() -> Response:
+        # 不查 Session：登录入口自己决定渲染登录壳、改密壳还是跳到工作台。
+        return _login_redirect(WebReturnIntent(kind=WebReturnIntentKind.WORKBENCH))
+
     @app.get("/login")
     async def login_shell_route(request: Request) -> Response:
         return_intent, notice = _login_query(request)

@@ -977,3 +977,23 @@ async def test_browser_login_lands_on_the_change_form(clock, memory_state) -> No
         landed = await client.get(signed_in.json()["destination"], follow_redirects=True)
 
     assert "change-password-form" in landed.text
+
+
+# --------------------------------------------------------------------------
+# S0：根路径是登录入口，但不是可信 Host 的例外
+# --------------------------------------------------------------------------
+
+
+async def test_root_is_the_login_entry(clock, memory_state) -> None:
+    app, *_ = _app(clock, memory_state)
+    async with _client(app) as client:
+        response = await client.get("/", follow_redirects=False)
+        direct = await client.get(
+            "/", headers={"host": "127.0.0.1:8080"}, follow_redirects=False
+        )
+    assert (response.status_code, response.headers["location"]) == (
+        302,
+        "/login?intent=workbench",
+    )
+    # 根路径不是可信 Host 的例外。
+    assert direct.status_code == 403

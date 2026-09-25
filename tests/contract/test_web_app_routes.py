@@ -719,6 +719,7 @@ async def test_web_routes_and_internal_routes_are_mutually_closed(
     } == {
         ("GET", "/oauth/feishu/start"),
         ("GET", "/oauth/feishu/callback"),
+        ("GET", "/"),
         ("GET", "/login"),
         ("GET", "/app"),
         ("GET", "/admin"),
