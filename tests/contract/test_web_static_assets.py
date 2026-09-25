@@ -277,3 +277,17 @@ def test_login_shell_markup_drift_fails_at_startup() -> None:
     for drifted in ("<main></main>", without_intro):
         with pytest.raises(RuntimeError, match="login shell markup drifted"):
             _login_shell(shell=drifted, oauth_available=False)
+
+
+def test_workbench_links_to_the_admin_center_only_by_capability() -> None:
+    index = (_STATIC / "index.html").read_text(encoding="utf-8")
+    script = (_STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        '<a class="button button-quiet is-hidden" id="admin-center-link" '
+        'href="/admin">管理中心</a>'
+    ) in index
+    assert 'document.querySelector("#admin-center-link")' in script
+    assert 'capabilities.includes("view_integration_status")' in script
+    # 入口只是展示，不绕过服务端：脚本不直接读取任何 /admin/api 路由。
+    assert "/admin/api/" not in script
