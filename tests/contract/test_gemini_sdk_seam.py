@@ -515,3 +515,21 @@ def test_profile_must_be_the_fixed_gemini_profile() -> None:
             api_key="AIza" + "x" * 35,
             profile=profile,
         )
+
+
+@pytest.mark.asyncio
+async def test_connection_probe_asks_for_a_tiny_answer() -> None:
+    """探针只证明“这把 Key 通不通”，不能让模型写满 2048 token 再回来。
+
+    本机实测 gemini-3-flash-preview 对固定探针输入按 2048 上限作答要 6–8 秒，
+    超过 Web 探针 5 秒上限，于是“测试连接”永远报超时；上限 16 时约 1 秒。
+    """
+    factory = RecordingClientFactory("ok")
+
+    await gemini_model.probe_connection(
+        api_key="AIza" + "x" * 35, contents="probe", client_factory=factory
+    )
+
+    config = factory.clients[0].aio.models.calls[0]["config"]
+    assert config.max_output_tokens == gemini_model.GEMINI_PROBE_OUTPUT_TOKENS == 16
+    assert config.automatic_function_calling.disable is True
