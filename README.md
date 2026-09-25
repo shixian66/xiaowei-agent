@@ -290,6 +290,8 @@ docker-compose -f docker-compose.yml -f docker-compose.local-test.yml up -d --wa
 `127.0.0.1:8443` 的 Caddy 自签 HTTPS 入口。凭据仍只在 `/admin` 里填写（写进 `.config/{ai,feishu}`），
 保存后重启 `worker web-app` 才会加载；缺凭据时对应能力自动不装配，本地管理员登录始终可用。
 它默认**不**启动飞书机器人收发消息（listener / channel worker），也不能与 release override 叠加。
+常驻服务都带 `restart: unless-stopped`：进程崩溃或 Docker 重启后自动拉起（手动 `stop` 的不会）；
+机器重启后只要 Docker 服务本身开机自启，容器就会跟着起来。
 
 ```bash
 docker-compose -f docker-compose.yml -f docker-compose.local-full.yml up -d --wait --build

@@ -13,12 +13,22 @@
 #   XIAOWEI_FEISHU_TENANT_KEY=<企业 tenant_key>
 #   XIAOWEI_FEISHU_BOT_OPEN_ID=<机器人 open_id>
 # 部署命令不变。飞书后台需用“长连接”订阅 im.message.receive_v1。
+# 常驻服务都带 restart: unless-stopped：进程崩溃或 Docker 重启后自动拉起；
+# 手动 stop 的服务不会被拉起。一次性 migrate 不在此列。
 services:
+  postgres:
+    restart: unless-stopped
+
+  api:
+    restart: unless-stopped
+
   worker:
+    restart: unless-stopped
     environment:
       XIAOWEI_GEMINI_ENABLED: "true"
 
   web-app:
+    restart: unless-stopped
     environment:
       XIAOWEI_WEB_APP_ENABLED: "true"
       XIAOWEI_WEB_MODE: https
@@ -28,12 +38,14 @@ services:
       XIAOWEI_FEISHU_REAL_TEST_ENABLED: "true"
 
   feishu-listener:
+    restart: unless-stopped
     environment:
       XIAOWEI_FEISHU_LISTENER_ENABLED: "true"
       XIAOWEI_FEISHU_TENANT_KEY: "${XIAOWEI_FEISHU_TENANT_KEY:-}"
       XIAOWEI_FEISHU_BOT_OPEN_ID: "${XIAOWEI_FEISHU_BOT_OPEN_ID:-}"
 
   channel-worker:
+    restart: unless-stopped
     environment:
       XIAOWEI_CHANNEL_WORKER_ENABLED: "true"
       XIAOWEI_WEB_MODE: https
@@ -42,6 +54,7 @@ services:
   # 本机 HTTPS 入口：Caddy 内置 CA 自签证书，只做 TLS 终止与反代，不含限流，不是 W5 edge。
   # 只绑 loopback；CA 存在命名卷里，重启后证书不变。
   edge:
+    restart: unless-stopped
     image: caddy@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     command:
       - caddy

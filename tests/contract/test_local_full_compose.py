@@ -21,16 +21,22 @@ def test_local_full_override_opens_exactly_the_provider_switches() -> None:
 
     assert set(compose) == {"services", "volumes"}
     assert set(compose["services"]) == {
+        "postgres",
+        "api",
         "worker",
         "web-app",
         "edge",
         "feishu-listener",
         "channel-worker",
     }
+    assert compose["services"]["postgres"] == {"restart": "unless-stopped"}
+    assert compose["services"]["api"] == {"restart": "unless-stopped"}
     assert compose["services"]["worker"] == {
-        "environment": {"XIAOWEI_GEMINI_ENABLED": "true"}
+        "restart": "unless-stopped",
+        "environment": {"XIAOWEI_GEMINI_ENABLED": "true"},
     }
     assert compose["services"]["web-app"] == {
+        "restart": "unless-stopped",
         "environment": {
             "XIAOWEI_WEB_APP_ENABLED": "true",
             "XIAOWEI_WEB_MODE": "https",
@@ -54,7 +60,7 @@ def test_feishu_message_channels_stay_behind_their_profile() -> None:
     text = (_ROOT / "docker-compose.local-full.yml").read_text(encoding="utf-8")
 
     for name in ("feishu-listener", "channel-worker"):
-        assert set(compose["services"][name]) == {"environment"}, name
+        assert set(compose["services"][name]) == {"restart", "environment"}, name
         assert base["services"][name]["profiles"] == ["m7-channels"], name
     assert "profiles:" not in text
     assert "!reset" not in text and "!override" not in text
@@ -104,3 +110,23 @@ def test_local_edge_is_pinned_loopback_only_and_hardened() -> None:
     assert edge["cap_add"] == ["NET_BIND_SERVICE"]
     assert edge["security_opt"] == ["no-new-privileges:true"]
     assert edge["depends_on"] == {"web-app": {"condition": "service_healthy"}}
+
+
+_LONG_RUNNING = (
+    "postgres",
+    "api",
+    "worker",
+    "web-app",
+    "edge",
+    "feishu-listener",
+    "channel-worker",
+)
+
+
+def test_local_full_services_come_back_after_a_crash_or_reboot() -> None:
+    services = _override()["services"]
+
+    for name in _LONG_RUNNING:
+        assert services[name].get("restart") == "unless-stopped", name
+    # 一次性迁移跑完即退出，不能被拉起重跑。
+    assert "migrate" not in services
