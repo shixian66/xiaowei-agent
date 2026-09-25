@@ -19,6 +19,7 @@ from xiaowei_agent.contracts import (
     StrictStr,
 )
 from xiaowei_agent.contracts.enums import ProjectionErrorCode
+from xiaowei_agent.contracts.external import content_digest
 from xiaowei_agent.interfaces import FEISHU_PROVIDER_ORIGIN
 
 if TYPE_CHECKING:
@@ -306,6 +307,17 @@ def _build_chat_members_request(
     return _callable_attr(builder, "build")()
 
 
+_FEISHU_UUID_MAX_LENGTH: Final[int] = 50
+"""飞书创建消息 ``uuid`` 的长度上限（超出即 400 ``field validation failed``）。"""
+
+
+def _feishu_uuid(idempotency_ref: str) -> str:
+    """把任意长度的幂等编号确定性地收进飞书上限；短编号原样透传。"""
+    if len(idempotency_ref) <= _FEISHU_UUID_MAX_LENGTH:
+        return idempotency_ref
+    return content_digest(idempotency_ref)[:_FEISHU_UUID_MAX_LENGTH]
+
+
 def _build_create_message_request(
     *,
     receive_id_type: str,
@@ -325,7 +337,7 @@ def _build_create_message_request(
     body = _callable_attr(body, "receive_id")(receive_id)
     body = _callable_attr(body, "msg_type")("interactive")
     body = _callable_attr(body, "content")(card.content_json)
-    body = _callable_attr(body, "uuid")(idempotency_ref)
+    body = _callable_attr(body, "uuid")(_feishu_uuid(idempotency_ref))
     body = _callable_attr(body, "build")()
     request = _callable_attr(
         _required_attr(request_model, "CreateMessageRequest"), "builder"
