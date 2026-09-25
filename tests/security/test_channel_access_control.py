@@ -86,6 +86,7 @@ def test_submit_command_cannot_override_authenticated_scope_or_server_key() -> N
         "text",
         "client_submission_ref",
         "conversation_ref",
+        "private_chat_ref",
         "submitted_at",
         "clarification_parent_task_id",
     }

@@ -247,7 +247,8 @@ class ChannelProjectionService:
                 )
             )
         except ChannelBindingNotFoundError:
-            return "user", subscription.destination_ref
+            # 私聊卡片的目的地是提交时记录的 p2p 会话 id（见 ChannelSubmitCommand）。
+            return "chat", subscription.destination_ref
         if binding.conversation_ref != subscription.destination_ref:
             raise ChannelProjectionInvariantError(
                 "projection destination differs from its group binding"

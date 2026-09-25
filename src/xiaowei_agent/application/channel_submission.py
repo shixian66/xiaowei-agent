@@ -69,6 +69,10 @@ class ChannelSubmitCommand(Contract):
     text: NonEmptyText = Field(max_length=8192)
     client_submission_ref: StrictStr
     conversation_ref: StrictStr | None = None
+    # 飞书私聊事件里的 p2p 会话 id。真实飞书拒绝以 open_id 为 receive_id 发私聊
+    # （230101），同一会话按 chat_id 发送才可达；它只决定回复落点，不进入绑定
+    # 与群成员鉴权。
+    private_chat_ref: StrictStr | None = None
     submitted_at: AwareDatetime
     clarification_parent_task_id: TaskId | None = None
 
@@ -76,6 +80,11 @@ class ChannelSubmitCommand(Contract):
     def _shape_is_supported(self) -> Self:
         if self.channel is ChannelKind.FEISHU_GROUP and self.conversation_ref is None:
             raise ValueError("group submission requires conversation_ref")
+        if self.channel is ChannelKind.FEISHU_PRIVATE:
+            if self.private_chat_ref is None:
+                raise ValueError("private submission requires private_chat_ref")
+        elif self.private_chat_ref is not None:
+            raise ValueError("private_chat_ref is only supported for private")
         if self.clarification_parent_task_id is not None and self.channel is not ChannelKind.WEB:
             raise ValueError("parent task is only supported for web")
         return self
@@ -138,10 +147,13 @@ def _projection_command(
             initial_state=ProjectionState.WAITING_TERMINAL,
             next_attempt_at=command.submitted_at,
         )
+    destination_ref = command.conversation_ref or command.private_chat_ref
+    if destination_ref is None:  # pragma: no cover - 由命令校验器保证
+        raise ValueError("feishu submission has no reply destination")
     return CreateProjectionSubscriptionCommand(
         task_id=task_id,
         destination_kind=DestinationKind.FEISHU_MESSAGE_CARD,
-        destination_ref=command.conversation_ref or principal.subject_ref,
+        destination_ref=destination_ref,
         initial_state=ProjectionState.PENDING_INITIAL,
         next_attempt_at=command.submitted_at,
     )
