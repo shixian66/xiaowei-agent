@@ -55,6 +55,8 @@
   `d357330e4718d9ef8480ed96e9d058ef04f51032`。证据见下文「W5-B 离线证据」。
   W5-C 部署、canary、UAT 另需明确 GO 与计划 Task 10 的冻结输入；负责人在 W5-B 合入后的“继续开发”不构成该 GO。
   W5 证据只覆盖 provider-off 产品壳，不构成 RI6 或只读 V1 发布。
+  本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
+  `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。

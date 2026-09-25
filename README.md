@@ -276,6 +276,15 @@ Compose 启动前只需要准备一个已被 Git 忽略的本地文件：
 旧单文件 `.config/integrations.json` 只作为下文显式一次性迁移的输入：运行时既不读它，也不自动迁移；
 它还在时预检固定报 `migration_required`。
 
+**本机 Provider 测试探针**：开发环境如需点击“测试连接”，启动时在基础 Compose 上叠加
+`docker-compose.local-test.yml`。它只打开 Web 管理面的 Gemini/飞书连通性探针，不打开 Gemini 模型执行、
+飞书 OAuth、listener 或 channel worker；release Compose 仍固定关闭这些探针。探针只有在管理员明确点击
+测试按钮时才会访问外部服务，未配置凭据时仍返回本地配置错误。
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.local-test.yml up -d --wait web-app
+```
+
 **运维资源登记（W4b）**：本地 Admin 在 `/admin` 的"运维资源登记"区新增、修改、清除凭据或删除
 StarRocks 与 Prometheus 资源，写进 `.config/resources/config.json`（最多 100 个，资源 ID 由服务端生成）。
 这里只做本地语法与字段组合校验：不解析 DNS、不探测端口、不发 HTTP、不登录，也没有"测试连接"

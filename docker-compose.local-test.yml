@@ -1,0 +1,9 @@
+# 本机开发用：允许 Web 管理面执行 Gemini/飞书连通性探针。
+#
+# 这个文件只应与 docker-compose.yml 叠加使用，不能与 release override 一起使用。
+# 它不打开 Gemini 模型执行、飞书 OAuth、listener 或 channel worker。
+services:
+  web-app:
+    environment:
+      XIAOWEI_GEMINI_REAL_TEST_ENABLED: "true"
+      XIAOWEI_FEISHU_REAL_TEST_ENABLED: "true"
