@@ -222,6 +222,11 @@ class FeishuListener:
                             if channel is ChannelKind.FEISHU_GROUP
                             else None
                         ),
+                        private_chat_ref=(
+                            event.chat_id
+                            if channel is ChannelKind.FEISHU_PRIVATE
+                            else None
+                        ),
                         submitted_at=self._clock(),
                     )
                 )

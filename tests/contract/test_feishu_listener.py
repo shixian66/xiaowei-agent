@@ -170,6 +170,7 @@ async def test_private_text_uses_only_server_owned_identity_and_context() -> Non
     assert command.policy_revision == "policy-1"
     assert command.submitted_at == _NOW
     assert command.conversation_ref is None
+    assert command.private_chat_ref == "chat-1"
 
 
 async def test_group_text_requires_exact_bot_mention_and_removes_only_its_key() -> None:
@@ -191,6 +192,7 @@ async def test_group_text_requires_exact_bot_mention_and_removes_only_its_key() 
     command = service.commands[0]
     assert command.channel is ChannelKind.FEISHU_GROUP
     assert command.conversation_ref == "chat-1"
+    assert command.private_chat_ref is None
     assert command.text == " inspect @someone"
 
 

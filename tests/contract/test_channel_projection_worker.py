@@ -330,7 +330,7 @@ async def test_web_terminal_notice_is_sent_to_the_initiating_user_once(
 
 
 @pytest.mark.asyncio
-async def test_private_feishu_card_uses_subject_not_a_guessed_chat_identifier(
+async def test_private_feishu_card_replies_into_the_recorded_p2p_chat(
     clock, context
 ) -> None:
     harness = _harness(clock)
@@ -339,13 +339,13 @@ async def test_private_feishu_card_uses_subject_not_a_guessed_chat_identifier(
         context,
         suffix="private",
         channel=ChannelKind.FEISHU_PRIVATE,
-        destination_ref="subject-alice",
+        destination_ref="p2p-chat-alice",
     )
 
     await harness.service.poll_once()
 
-    assert [item[0] for item in harness.messages.user_sends] == ["subject-alice"]
-    assert harness.messages.chat_sends == []
+    assert [item[0] for item in harness.messages.chat_sends] == ["p2p-chat-alice"]
+    assert harness.messages.user_sends == []
 
 
 @pytest.mark.asyncio

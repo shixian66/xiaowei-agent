@@ -86,6 +86,7 @@ def _command(
         text=text,
         client_submission_ref=client_key,
         conversation_ref="chat-1" if channel is ChannelKind.FEISHU_GROUP else None,
+        private_chat_ref="p2p-chat-1" if channel is ChannelKind.FEISHU_PRIVATE else None,
         submitted_at=clock(),
         clarification_parent_task_id=clarification_parent_task_id,
     )
@@ -94,6 +95,22 @@ def _command(
 def test_group_submission_requires_a_conversation_reference(clock) -> None:
     with pytest.raises(ValueError, match="group submission requires conversation_ref"):
         _command(clock).model_copy(update={"conversation_ref": None})
+
+
+def test_private_submission_requires_the_provider_p2p_chat(clock) -> None:
+    with pytest.raises(ValueError, match="private submission requires private_chat_ref"):
+        ChannelSubmitCommand.model_validate(
+            _command(clock, channel=ChannelKind.FEISHU_PRIVATE).model_dump()
+            | {"private_chat_ref": None}
+        )
+
+
+@pytest.mark.parametrize("channel", [ChannelKind.FEISHU_GROUP, ChannelKind.WEB])
+def test_only_private_submissions_carry_a_p2p_chat(clock, channel: ChannelKind) -> None:
+    with pytest.raises(ValueError, match="private_chat_ref is only supported for private"):
+        ChannelSubmitCommand.model_validate(
+            _command(clock, channel=channel).model_dump() | {"private_chat_ref": "p2p-chat-1"}
+        )
 
 
 def test_only_web_submissions_can_name_a_parent(clock) -> None:
@@ -472,6 +489,24 @@ async def test_same_client_key_replays_one_runtime_task_and_one_binding(
     assert due[0].state is ProjectionState.PENDING_INITIAL
 
 
+async def test_private_reply_goes_to_the_p2p_chat_not_the_user_id(
+    service, channel_store, clock
+) -> None:
+    # 真实飞书对 receive_id_type=open_id 的私聊发送返回 230101；同一会话用
+    # 事件里的 p2p chat_id 发送成功。私聊回复目标因此是会话，不是用户 id。
+    submitted = await service.submit(
+        command=_command(clock, channel=ChannelKind.FEISHU_PRIVATE)
+    )
+    due = await channel_store.list_due_projection_subscriptions(
+        query=ProjectionDueQuery(
+            tenant_id="dev-local", environment_id="dev", limit=100
+        )
+    )
+
+    assert [item.destination_ref for item in due] == ["p2p-chat-1"]
+    assert submitted.binding.conversation_ref is None
+
+
 async def test_same_scoped_client_key_with_different_text_keeps_runtime_conflict(
     service, clock
 ) -> None:
@@ -536,7 +571,13 @@ def test_server_idempotency_key_is_scoped_by_every_authority_dimension(clock) ->
         base.model_copy(update={"principal": _principal(actor="bob")}),
         base.model_copy(update={"principal": _principal(tenant_id="other-tenant")}),
         base.model_copy(update={"principal": _principal(environment_id="prod")}),
-        base.model_copy(update={"channel": ChannelKind.FEISHU_PRIVATE, "conversation_ref": None}),
+        base.model_copy(
+            update={
+                "channel": ChannelKind.FEISHU_PRIVATE,
+                "conversation_ref": None,
+                "private_chat_ref": "p2p-chat-1",
+            }
+        ),
         base.model_copy(update={"client_submission_ref": "event-2"}),
     )
 
