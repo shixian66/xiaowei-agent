@@ -267,7 +267,9 @@ class GeminiModelAdapter:
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     response_mime_type="application/json",
-                    response_schema=response_schema,
+                    # 走 JSON Schema 通道：``response_schema`` 会被 SDK 转成 OpenAPI 子集并带上
+                    # ``additional_properties``，真实 Gemini 以 400 拒收。本地仍用同一契约校验回包。
+                    response_json_schema=response_schema.model_json_schema(),
                     max_output_tokens=max_output_tokens,
                     thinking_config=types.ThinkingConfig(
                         thinking_level=thinking_level,
