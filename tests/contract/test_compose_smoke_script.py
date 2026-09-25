@@ -1632,16 +1632,72 @@ def test_main_passes_the_resolved_compose_command_to_run_smoke(
         lambda **_: resolved,
     )
 
+    order: list[str] = []
+
     def capture_smoke(**kwargs: object) -> None:
+        order.append("offline")
         captured.update(kwargs)
 
+    def capture_release(**kwargs: object) -> None:
+        order.append("release")
+        assert kwargs == {"docker": "/usr/bin/docker", "compose_command": resolved}
+
     monkeypatch.setattr(compose_smoke, "run_smoke", capture_smoke)
+    monkeypatch.setattr(compose_smoke, "run_release_smoke", capture_release)
 
     assert compose_smoke.main() == 0
     assert capsys.readouterr().out == "compose-smoke: passed\n"
     assert captured["docker"] == "/usr/bin/docker"
     assert captured["compose_command"] is resolved
     assert captured["workflow"] is compose_smoke._full_workflow
+    # W5：offline 全流程先过，再跑 release；两段都过才算 passed。
+    assert order == ["offline", "release"]
+
+
+def test_main_does_not_start_the_release_smoke_after_an_offline_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(
+        compose_smoke,
+        "_resolve_compose_command",
+        lambda **_: ("/usr/bin/docker", "compose"),
+    )
+    monkeypatch.setattr(
+        compose_smoke,
+        "run_smoke",
+        lambda **_: (_ for _ in ()).throw(SmokeError("SMOKE_BASELINE_COMMAND_FAILED")),
+    )
+    started: list[object] = []
+    monkeypatch.setattr(
+        compose_smoke, "run_release_smoke", lambda **kwargs: started.append(kwargs)
+    )
+
+    assert compose_smoke.main() == 1
+    assert started == []
+    assert capsys.readouterr().err == "compose-smoke: SMOKE_BASELINE_COMMAND_FAILED\n"
+
+
+def test_main_reports_a_release_failure_with_its_fixed_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(compose_smoke.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(
+        compose_smoke,
+        "_resolve_compose_command",
+        lambda **_: ("/usr/bin/docker", "compose"),
+    )
+    monkeypatch.setattr(compose_smoke, "run_smoke", lambda **_: None)
+    monkeypatch.setattr(
+        compose_smoke,
+        "run_release_smoke",
+        lambda **_: (_ for _ in ()).throw(SmokeError("SMOKE_RELEASE_TASK_NOT_REJECTED")),
+    )
+
+    assert compose_smoke.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "compose-smoke: SMOKE_RELEASE_TASK_NOT_REJECTED\n"
 
 
 def test_web_smoke_uses_profile_health_boundary_and_offline_oauth_start(

@@ -5,6 +5,7 @@ import pytest
 from xiaowei_agent.config import (
     ConfigError,
     Settings,
+    canonical_lan_ipv4,
     canonical_web_public_origin,
     load_settings,
 )
@@ -204,6 +205,33 @@ def test_lan_http_accepts_loopback_and_rfc1918_with_explicit_port(value: str) ->
 def test_lan_http_rejects_everything_else(value: str) -> None:
     with pytest.raises(ValueError):
         canonical_web_public_origin(value, mode=WebMode.LAN_HTTP)
+
+
+@pytest.mark.parametrize("value", ["http://[::1]:8080", "http://[fd00::1]:8080"])
+def test_lan_http_rejects_ipv6_with_the_fixed_message(value: str) -> None:
+    """IPv6 走同一条固定拒绝，而不是让 ``ip_address`` 把取值带进异常消息。"""
+    with pytest.raises(ValueError, match=r"^must be a lan_http origin$"):
+        canonical_web_public_origin(value, mode=WebMode.LAN_HTTP)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("10.0.0.8", "10.0.0.8"),
+        ("172.16.0.1", "172.16.0.1"),
+        ("192.168.1.20", "192.168.1.20"),
+        ("8.8." + "8.8", None),
+        ("169.254.10.20", None),
+        ("100.64.0.1", None),
+        ("::1", None),
+        ("example.com", None),
+    ],
+)
+def test_canonical_lan_ipv4_is_loopback_or_rfc1918_only(
+    value: str, expected: str | None
+) -> None:
+    assert canonical_lan_ipv4(value) == expected
 
 
 @pytest.mark.parametrize(

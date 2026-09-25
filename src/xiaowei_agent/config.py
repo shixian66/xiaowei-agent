@@ -154,6 +154,20 @@ _RFC1918_NETWORKS: Final = (
 )
 
 
+def canonical_lan_ipv4(value: str) -> str | None:
+    """规范化 loopback/RFC1918 IPv4 文本；公网、link-local、IPv6 与主机名返回 ``None``。
+
+    ``lan_http`` origin 与 release Web 宿主端口绑定共用这一条规则。
+    """
+    literal = _canonical_ip_literal(value)
+    if literal is None or literal.startswith("["):
+        return None
+    address = ip_address(literal)
+    if address.is_loopback or any(address in net for net in _RFC1918_NETWORKS):
+        return literal
+    return None
+
+
 def _lan_http_origin(value: str) -> str:
     """只接受显式 http + canonical loopback/RFC1918 IPv4 + 显式端口。
 
@@ -183,14 +197,8 @@ def _lan_http_origin(value: str) -> str:
         or "#" in value
     ):
         raise ValueError("must be a lan_http origin")
-    literal = _canonical_ip_literal(parsed.hostname or "")
+    literal = canonical_lan_ipv4(parsed.hostname or "")
     if literal is None:
-        raise ValueError("must be a lan_http origin")
-    address = ip_address(literal)
-    if not (
-        address.version == 4
-        and (address.is_loopback or any(address in net for net in _RFC1918_NETWORKS))
-    ):
         raise ValueError("must be a lan_http origin")
     return f"http://{literal}:{port}"
 
@@ -455,6 +463,18 @@ class Settings(BaseModel):
                 raise ValueError("release profile requires the fixed release scope")
             if self.smoke_step_barrier:
                 raise ValueError("release profile must not install the smoke barrier")
+            # W5 V1 release 是 provider-off 产品壳：任何真实调用开关都没有获批组合。
+            # Compose release 契约把它们写成字面 false；这里是进程层的第二道闸，
+            # 手工 docker run 或额外 override 打开任一开关时进程直接起不来。
+            if (
+                self.gemini_enabled
+                or self.feishu_oauth_enabled
+                or self.feishu_listener_enabled
+                or self.channel_worker_enabled
+                or self.gemini_real_test_enabled
+                or self.feishu_real_test_enabled
+            ):
+                raise ValueError("release profile keeps every live provider switch off")
         elif self.starrocks_adapter_mode is StarRocksAdapterMode.DISABLED:
             raise ValueError("disabled StarRocks mode requires the release profile")
         return self

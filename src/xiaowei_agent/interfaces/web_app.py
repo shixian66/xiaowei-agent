@@ -74,6 +74,7 @@ from xiaowei_agent.application.task_view_runtime import (
 )
 from xiaowei_agent.config import (
     ConfigError,
+    RuntimeProfile,
     Settings,
     canonical_non_ip_hostname,
     canonical_web_public_origin,
@@ -708,6 +709,35 @@ def _login_shell(*, shell: str, oauth_available: bool) -> str:
     )
 
 
+_CAPABILITY_STRIP_RE: Final[re.Pattern[str]] = re.compile(
+    r'<div class="capability-strip" aria-label="当前只读能力示例">.*?</div>', re.DOTALL
+)
+_TASK_INPUT_PLACEHOLDER_RE: Final[re.Pattern[str]] = re.compile(
+    r'(<textarea id="task-input"[^>]*?) placeholder="[^"]*"'
+)
+_PROVIDER_OFF_CAPABILITY_STRIP: Final[str] = (
+    '<div class="capability-strip" aria-label="当前可执行能力">'
+    "<span>当前无可执行能力</span></div>"
+)
+_PROVIDER_OFF_PLACEHOLDER: Final[str] = "描述想检查的内容；当前部署尚未接入可执行能力"
+
+
+def _provider_off_workbench_shell(shell: str) -> str:
+    """W5 release：工作台壳不再展示三个 recording 能力的示例与占位提示。
+
+    普通对话只投影空准入快照；页面上的静态示例若仍写着"慢查询证据"等能力，就是在
+    替 Runtime 虚报当前能力。两处标记都必须恰好出现一次，壳的标记漂移时启动即失败，
+    而不是静默放过一个仍在宣称能力的页面。
+    """
+    stripped, strips = _CAPABILITY_STRIP_RE.subn(_PROVIDER_OFF_CAPABILITY_STRIP, shell)
+    replaced, placeholders = _TASK_INPUT_PLACEHOLDER_RE.subn(
+        rf'\1 placeholder="{_PROVIDER_OFF_PLACEHOLDER}"', stripped
+    )
+    if strips != 1 or placeholders != 1:
+        raise RuntimeError("workbench shell markup drifted")
+    return replaced
+
+
 def _password_change_shell(*, csrf_token: str) -> str:
     """强制改密壳；初始口令是源码常量，改完之前不放行任何业务接口。
 
@@ -1209,7 +1239,11 @@ def _integration_domain_status(
     )
     restart_required = False
     load_status: WebIntegrationLoadStatus = "unconfigured"
-    if configured:
+    if configured and not required_services:
+        # 已保存、但本次部署没有任何进程消费它（例如 W5 provider-off release）。
+        # 对空集合取 any() 会落到"已加载"——那是虚报，凭据其实没被任何进程使用。
+        load_status = "not_applicable"
+    elif configured:
         receipts = [
             snapshot.receipts.get((service_name, domain))
             for service_name in required_services
@@ -1481,6 +1515,8 @@ def create_app(
     oauth_state_cookie = oauth_state_cookie_name(mode)
     public_origin = cast(str, settings.web_public_origin).rstrip("/")
     index_shell = _asset_text("index.html")
+    if settings.runtime_profile is RuntimeProfile.RELEASE:
+        index_shell = _provider_off_workbench_shell(index_shell)
     detail_shell = _asset_text("detail.html")
     login_shell = _login_shell(
         shell=_asset_text("login.html"), oauth_available=oauth_available

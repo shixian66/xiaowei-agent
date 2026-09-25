@@ -841,6 +841,19 @@ M5/M7 基础栈只装配确定性无模型 interpreter、fake/recording ToolGate
 真实模型要由独立 Compose override 显式开启，且只在 task worker 装配固定 provider/model 和窄口。
 Compose 可运行不等于获得真实模型、真实渠道或真实运维目标的调用许可。
 
+**W5 provider-off release 部署面。** 发布只接受 `docker-compose.yml` + `docker-compose.release.yml` 这一个
+文件集合：六个 app service 使用同一个不可变 `name@sha256:<64 hex>` 镜像且没有 `build`；运行形态、固定作用域、
+StarRocks `disabled` 与全部真实调用开关（Gemini、OAuth、listener、channel-worker、两个真实测试开关）是
+Compose **字面量**，部署模板只提供镜像、actor、source SHA、edge 证据引用、Web 绑定地址与 public origin 六个
+插值变量，且这些变量不进入任何容器环境；只发布 Web，api/worker/postgres/渠道进程无宿主端口，三域挂载矩阵
+与基础文件相同。两层互不代替：进程层 `Settings` 在 `release` 下拒绝任何被打开的真实调用开关；部署层
+`scripts.release_compose` 在 `up` 之前合成最终模型逐项核对，任何额外 override 打开开关、放宽端口/挂载/镜像/
+加固都得到闭集失败码，且只输出一行结果、不打印解析后的配置。检查器属于部署工具面，不进 wheel/镜像。
+管理面对"已保存但本次部署没有消费者"的 Provider 域显示"尚未接入"（`not_applicable`），不虚报"已加载"；
+release 下工作台壳去掉三个 recording 能力的示例与占位提示，改为"当前无可执行能力"，与空准入快照一致。
+回滚只回到更早的 W5-compatible release digest；首次部署没有这样的 digest 时停服并保留数据库与证据，
+任何情况都不回到 recording 栈。执行顺序与证据分级见 [W5 部署 runbook](docs/runbooks/w5-product-deployment.md)。
+
 初始不强制 Redis。只有出现可测的队列吞吐、分布式租约或缓存需求时，才增加服务，并先更新契约、迁移和运维文档。PostgreSQL 的全文检索先满足知识/证据索引；只有 eval 和查询指标证明不足时才引入 pgvector。
 
 ## 12. LangGraph 的位置与准入

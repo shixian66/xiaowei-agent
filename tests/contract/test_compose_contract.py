@@ -50,10 +50,17 @@ class _ComposeLoader(yaml.SafeLoader):
     """
 
 
+def _construct_tagged(loader: yaml.SafeLoader, node: yaml.Node) -> object:
+    """``!override`` 作用于序列，``!reset`` 还可以作用于 ``null``（清除 ``build``）。"""
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return None
+
+
 for _tag in ("!override", "!reset"):
-    _ComposeLoader.add_constructor(
-        _tag, lambda loader, node: loader.construct_sequence(node, deep=True)
-    )
+    _ComposeLoader.add_constructor(_tag, _construct_tagged)
 
 
 def _yaml(name: str) -> dict[str, Any]:
@@ -94,6 +101,7 @@ _COMPOSE_FILES = frozenset(
         "docker-compose.lan.yml",
         "docker-compose.m6b-test.yml",
         "docker-compose.model.yml",
+        "docker-compose.release.yml",
         "docker-compose.smoke.yml",
     }
 )
