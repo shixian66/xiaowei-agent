@@ -7,7 +7,12 @@
 # 打开的是：worker 调 Gemini 理解任务、Web 的 Gemini/飞书“测试连接”、飞书扫码登录。
 # 凭据仍只从管理面写进 .config/{ai,feishu}；缺凭据时对应能力自动不装配，本地管理员登录始终可用。
 # 管理面保存新凭据后需重启 worker 与 web-app 才会加载。
-# 不打开飞书机器人收发消息（listener / channel worker），它们会直接回复真人。
+# 飞书机器人收发消息（listener / channel worker）会直接回复真人，默认不启动：
+# 它们仍留在基础 Compose 的 m7-channels profile 里。要开时只在本机 .env（已被 Git 忽略）写：
+#   COMPOSE_PROFILES=m7-channels
+#   XIAOWEI_FEISHU_TENANT_KEY=<企业 tenant_key>
+#   XIAOWEI_FEISHU_BOT_OPEN_ID=<机器人 open_id>
+# 部署命令不变。飞书后台需用“长连接”订阅 im.message.receive_v1。
 services:
   worker:
     environment:
@@ -21,6 +26,18 @@ services:
       XIAOWEI_FEISHU_OAUTH_ENABLED: "true"
       XIAOWEI_GEMINI_REAL_TEST_ENABLED: "true"
       XIAOWEI_FEISHU_REAL_TEST_ENABLED: "true"
+
+  feishu-listener:
+    environment:
+      XIAOWEI_FEISHU_LISTENER_ENABLED: "true"
+      XIAOWEI_FEISHU_TENANT_KEY: "${XIAOWEI_FEISHU_TENANT_KEY:-}"
+      XIAOWEI_FEISHU_BOT_OPEN_ID: "${XIAOWEI_FEISHU_BOT_OPEN_ID:-}"
+
+  channel-worker:
+    environment:
+      XIAOWEI_CHANNEL_WORKER_ENABLED: "true"
+      XIAOWEI_WEB_MODE: https
+      XIAOWEI_WEB_PUBLIC_ORIGIN: "${XIAOWEI_WEB_PUBLIC_ORIGIN:-https://xiaowei.localhost:8443}"
 
   # 本机 HTTPS 入口：Caddy 内置 CA 自签证书，只做 TLS 终止与反代，不含限流，不是 W5 edge。
   # 只绑 loopback；CA 存在命名卷里，重启后证书不变。

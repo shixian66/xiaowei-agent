@@ -63,7 +63,8 @@
   PR #87 起，本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
   `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
   本机完整体验另有 `docker-compose.local-full.yml`：打开 worker Gemini、Web 两个探针与飞书 OAuth，并带只绑 loopback 的
-  Caddy 自签入口；不启动飞书 listener / channel worker，不与 release 叠加，只是本机体验，不构成 W5-C、RI2、RI3 证据。
+  Caddy 自签入口；飞书 listener / channel worker 仍在 `m7-channels` profile 后，只有本机 `.env` 写了 `COMPOSE_PROFILES`
+  与 tenant/bot 标识才启动；不与 release 叠加，只是本机体验，不构成 W5-C、RI2、RI3 证据。
   飞书私聊回复改按事件里的 p2p `chat_id` 发送（`ChannelSubmitCommand.private_chat_ref`）：本机真实租户对
   `receive_id_type=open_id` 的私聊发送返回 `230101`，同一会话用 `chat_id` 发送成功。Web 发起任务的飞书私聊通知
   （`feishu_private_notice`）仍按 open_id 发送，在该租户下预计同样被拒，**未修复**。

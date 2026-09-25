@@ -20,7 +20,13 @@ def test_local_full_override_opens_exactly_the_provider_switches() -> None:
     compose = _override()
 
     assert set(compose) == {"services", "volumes"}
-    assert set(compose["services"]) == {"worker", "web-app", "edge"}
+    assert set(compose["services"]) == {
+        "worker",
+        "web-app",
+        "edge",
+        "feishu-listener",
+        "channel-worker",
+    }
     assert compose["services"]["worker"] == {
         "environment": {"XIAOWEI_GEMINI_ENABLED": "true"}
     }
@@ -38,15 +44,37 @@ def test_local_full_override_opens_exactly_the_provider_switches() -> None:
     }
 
 
-def test_local_full_override_never_starts_the_feishu_message_channels() -> None:
+def test_feishu_message_channels_stay_behind_their_profile() -> None:
+    """机器人会直接回复真人：override 只给开关与身份插值，不摘掉 m7-channels profile。
+
+    默认 ``up`` 不启动它们；只有本机 .env 显式写了 ``COMPOSE_PROFILES`` 才会起。
+    """
     compose = _override()
+    base = yaml.safe_load((_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     text = (_ROOT / "docker-compose.local-full.yml").read_text(encoding="utf-8")
 
-    assert "feishu-listener" not in compose["services"]
-    assert "channel-worker" not in compose["services"]
-    assert "XIAOWEI_FEISHU_LISTENER_ENABLED" not in text
-    assert "XIAOWEI_CHANNEL_WORKER_ENABLED" not in text
-    assert "profiles" not in text
+    for name in ("feishu-listener", "channel-worker"):
+        assert set(compose["services"][name]) == {"environment"}, name
+        assert base["services"][name]["profiles"] == ["m7-channels"], name
+    assert "profiles:" not in text
+    assert "!reset" not in text and "!override" not in text
+    assert compose["services"]["feishu-listener"]["environment"] == {
+        "XIAOWEI_FEISHU_LISTENER_ENABLED": "true",
+        "XIAOWEI_FEISHU_TENANT_KEY": "${XIAOWEI_FEISHU_TENANT_KEY:-}",
+        "XIAOWEI_FEISHU_BOT_OPEN_ID": "${XIAOWEI_FEISHU_BOT_OPEN_ID:-}",
+    }
+    assert compose["services"]["channel-worker"]["environment"] == {
+        "XIAOWEI_CHANNEL_WORKER_ENABLED": "true",
+        "XIAOWEI_WEB_MODE": "https",
+        "XIAOWEI_WEB_PUBLIC_ORIGIN": (
+            "${XIAOWEI_WEB_PUBLIC_ORIGIN:-https://xiaowei.localhost:8443}"
+        ),
+    }
+    # 开关只在各自进程里：Web / task worker 不因此获得消息通道能力。
+    for name in ("worker", "web-app"):
+        environment = compose["services"][name]["environment"]
+        assert "XIAOWEI_FEISHU_LISTENER_ENABLED" not in environment
+        assert "XIAOWEI_CHANNEL_WORKER_ENABLED" not in environment
 
 
 def test_local_full_override_keeps_the_web_port_and_carries_no_credentials() -> None:
