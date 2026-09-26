@@ -1325,8 +1325,8 @@ def test_w0_handoff_binding_is_discriminating() -> None:
 
     machine_path = _replace_once(
         handoff,
-        "| 项目目录 | 当前开发分支",
-        "| 项目目录 | 当前在 worktree `/Users/someone/agent`，当前开发分支",
+        "| 项目目录 | ",
+        "| 项目目录 | 当前在 worktree `/Users/someone/agent`，",
     )
     assert "/Users/" in _handoff_baseline_field(machine_path, "项目目录")
 
@@ -2003,6 +2003,8 @@ _W5A_MERGE_COMMIT: Final[str] = "3c83ea5b087aa85b8ec06e097bc16526031df28a"
 _W5A_REVIEWED_HEAD: Final[str] = "cfd0de47b7c0c5ce2ae8063ae06f10cdb073cbba"
 _W5B_MERGE_COMMIT: Final[str] = "d357330e4718d9ef8480ed96e9d058ef04f51032"
 _S0_PLAN_COMMIT: Final[str] = "86263e90f9dbcca587a534b80a3cc2f42bee1c02"
+_S0_IMPL_MERGE_COMMIT: Final[str] = "87497d8f4939a88b6f7d9dd8df809edc2fbb3194"
+_W5C_CANCEL_MERGE_COMMIT: Final[str] = "905ba405a4e66d6dff5606618a015c241acdb852"
 _S0_PLAN = "docs/superpowers/plans/2026-09-25-s0-first-login-entry.md"
 _FULL_ACCEPTANCE_PLAN = "docs/superpowers/plans/2026-09-25-full-feature-deployment-acceptance.md"
 _W5B_REVIEWED_HEAD: Final[str] = "9278a88a0611993d0b6846b3dc45c17750a70d16"
@@ -2031,9 +2033,10 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 
 def test_handoff_records_the_w5b_merge_and_the_w5c_cancellation() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _S0_PLAN_COMMIT
+    assert _current_baseline(handoff) == _W5C_CANCEL_MERGE_COMMIT
     assert _S0_PLAN in handoff and "PR #89" in handoff
-    assert "待 exact-SHA 独立复审" in handoff
+    assert _S0_IMPL_MERGE_COMMIT in handoff and "PR #90" in handoff
+    assert "S0 实现在分支" not in handoff and "S0 实现离线完成待复审" not in handoff
     assert _FULL_ACCEPTANCE_PLAN in handoff and "PR #88" in handoff
     assert "批准范围**仅为计划**" in handoff
     assert _W4A_MERGE_COMMIT in handoff and "PR #81" in handoff
@@ -2058,7 +2061,7 @@ def test_handoff_records_the_w5b_merge_and_the_w5c_cancellation() -> None:
     assert "W5-C 已取消" in next_step and "GO" in next_step
     assert "两容器" in next_step and "RI6" in next_step
     assert "W5-C 仍等待" not in handoff
-    assert "S0" in next_step and "复审" in next_step
+    assert "S0" not in next_step and "复审" in next_step
     assert "详细计划" in next_step
     for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
