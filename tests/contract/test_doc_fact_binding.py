@@ -1129,10 +1129,99 @@ def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
     assert "W4c" in gates
     assert "R1 不再作为独立功能门" in gates
     assert "§11.2 的六项前置条件" in gates
-    assert "路线 V3.0" in plan
+    assert "路线 V3.1" in plan
     assert _W0_OWNER_APPROVAL in plan
     assert "I3/I4 原定义不再推进" in plan
     assert "对话能力方向" in plan
+
+
+def test_development_plan_records_conversation_and_two_container_gates() -> None:
+    plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
+    tracks = _section_between(
+        plan,
+        start="### 两条后续规划轨道（不新增既有阶段编号）",
+        end="### Web 产品线交付序列（V2.5 新增）",
+    )
+
+    assert "不插入或重排 F1–F5、M、W、RI、I 阶段" in tracks
+    assert "exact-SHA 独立复审和负责人明确 GO" in tracks
+    for conversation_scope in (
+        "自然沟通",
+        "缺槽澄清",
+        "任务进度/结果说明",
+        "通用、知识、运维、诊断请求分流",
+        "不恢复 I3/I4 旧定义",
+        "不含隐式多轮记忆",
+        "跨 capability 组合与证据驱动的自主调查须另立 ADR 并获批准",
+    ):
+        assert conversation_scope in tracks
+
+    for ri3_boundary in (
+        "负责人 2026-09-26 决定",
+        "Web 与飞书群 @小维手动测试真实 Gemini",
+        "慢查询诊断的意图识别与模型分析、能力清单问答均正常",
+        "不以正式 RI3 验证为前置",
+        "PR 3E）推迟至验收阶段",
+        "`.config/ai/config.json`",
+        "按 ADR-017 当前入口改写旧 20 轮父链注入测试",
+        "现场执行仍须负责人明确 GO",
+        "不是 RI3 `test-env verified` 证据",
+    ):
+        assert ri3_boundary in tracks
+
+    for deployment_gate in (
+        "`postgres` + 一个 `xiaowei` 容器",
+        "先为本机目标形态",
+        "本机验收后",
+        "负责人可按需提前启动该轨道，不依赖 F1",
+        "修订 `ARCHITECTURE.md` §11",
+        "ADR-001",
+        "本机验证不授权正式部署",
+        "W5-C 已取消",
+    ):
+        assert deployment_gate in tracks
+
+    m5 = _section_between(
+        plan,
+        start="### M5：API、CLI、Worker 与 Compose",
+        end="### M6a：第二、第三条 fake 能力",
+    )
+    assert "`api`、`worker`、`postgres` 是 M5 的既有里程碑范围" in m5
+    assert "不因后续两容器方向而追溯改写 M5" in m5
+
+    ri6 = _section_between(
+        plan,
+        start="### RI6：Compose 正式部署、canary 与用户验收",
+        end="### M8：第一条受控写闭环",
+    )
+    assert "两容器本机验证与 RI6 正式部署各有独立详细计划和负责人 GO" in ri6
+    assert "本机验收不能替代 RI6 授权" in ri6
+    assert "W5 资产不能作为当前部署入口" in ri6
+
+    web_stages = _section_between(
+        plan,
+        start="### Web 产品线交付序列（V2.5 新增）",
+        end="### 独立阻塞门（不在上述必经序列内）",
+    )
+    w5_stage = next(line for line in web_stages.splitlines() if "**W5 产品部署**" in line)
+    assert "W5-C 已于 2026-09-26 取消" in w5_stage
+    assert "W5-A/B 资产保留备用" in w5_stage
+    assert "不是当前部署入口" in w5_stage
+
+    handoff_section = _section_between(
+        _truth_doc_text("AGENT_HANDOFF.md"),
+        start="## 6. 仍需拍板或补证的事项",
+        end="## 7. 不要盲改",
+    )
+    for observation in (
+        "advisory 模型分析输出为英文",
+        "面向中文用户应为中文",
+        "发送“你好”在执行前被拒绝",
+        "纳入对话能力方向处理",
+        "不构成 RI3 `test-env verified`",
+        "旧 20 轮父链注入测试按 ADR-017 现行入口重写",
+    ):
+        assert observation in handoff_section
 
 
 def test_feature_roadmap_records_the_approved_minimal_query_route() -> None:
