@@ -32,7 +32,6 @@
 - 不伪造测试、部署或线上验证结果。没有执行就明确写“未验证”。
 - 不使用 `git add -A`，只暂存本次任务明确涉及的文件；保留他人的修改和未跟踪文件。
 - 禁止把 secret、token、password、webhook、连接串或真实生产数据写入代码、日志、测试夹具、文档和提交记录。
-- 脱敏测试需要「看起来像 secret」的输入才能证明脱敏有效，因此**伪造字面量一律拆开写**（`"hunter" + "2-plain"`、`"token=" + _FAKE`），使它在源码里从不构成连续可扫描串。连续写法会被 CI 的 `secret-scan` 拦下，且**一旦提交就进了历史**——只能靠豁免或重写历史清除，两者代价都不小。本地由 `tests/security/test_secret_shaped_literals.py` 在 `python -m pytest -m security -q` 内前置拦截。
 
 ## 不可破坏的运行边界
 

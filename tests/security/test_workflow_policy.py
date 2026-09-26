@@ -249,7 +249,6 @@ def test_no_env_block_outside_declared_allowlist() -> None:
 def test_env_values_carry_no_credentials() -> None:
     """env 取值里不得出现任何凭证。
 
-    与 ``test_secret_shaped_literals.py`` 互补：那边扫的是源码，这边扫的是 workflow。
     DSN 是这里唯一一个"长得像连接串"的取值，因此单独钉死它的形状——**无密码段**。
     """
     values = re.findall(r"(?m)^\s+[A-Z][A-Z0-9_]*:\s*(.+)$", _TEXT)
