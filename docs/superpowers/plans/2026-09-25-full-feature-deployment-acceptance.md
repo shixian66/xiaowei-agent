@@ -5,6 +5,9 @@
 > **状态**：草案，待负责人审批。本计划**不授权**任何源码、Compose、数据库或真实环境改动，也不授权任何真实调用、
 > 部署、canary 或 UAT。批准本计划只确认顺序与门槛；每个切片仍按 AGENTS 要求各自取得开工口令，
 > 每个真实调用各自取得现场 GO。
+>
+> **2026-09-26 变更**：用户决定取消 W5-C，本计划 S1 / G1 作废，不再执行；其目标环境证明事项转入两容器正式部署 /
+> S7 RI6。依据见 [当前状态](../../../AGENT_HANDOFF.md#current-status) 第 6 节“W5-C 取消”一条。
 
 **Goal:** 在不删除、不绕过既有安全链的前提下，把 Gemini、飞书、StarRocks、Prometheus、Web、权限、任务与结果
 预览依次推进到可真实使用，并分层取得 `test-env verified → deployed SHA → canary → user-accepted` 证据。
