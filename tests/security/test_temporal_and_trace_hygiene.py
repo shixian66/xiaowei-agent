@@ -25,9 +25,6 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.governance import BindingError, verify_approval_binding
 from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 
-# 伪造取值必须**拆开写**：连续的 ``token=<值>`` 会被 secret-scan 判为泄漏。
-# 这是仓库既有约定（见 tests/security/test_redaction.py 的 _PW / _TOKEN），
-# 由 test_no_contiguous_secret_shaped_literal 在本地 gate 内强制。
 _FAKE = "abc123" + "def456"
 
 pytestmark = pytest.mark.security
