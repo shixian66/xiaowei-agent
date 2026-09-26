@@ -1712,8 +1712,8 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
-    # W5-B 合入后，延期的 W3 增强仍不应把当前动作从 W5-C 的 GO 门拉回去。
-    assert "W5-C" in next_step
+    # W5-C 已取消；延期的 W3 增强仍不应被拉回成当前动作。
+    assert "W5-C 已取消" in next_step
     assert "W3" not in next_step and "GO" in next_step
 
     development_plan = _truth_doc_text("DEVELOPMENT_PLAN.md")
@@ -1993,7 +1993,8 @@ def test_w4_plan_header_binding_is_discriminating(old: str, new: str) -> None:
 # --- W4 收口、W5 计划、W5-A/B 合入与 W5-C 门 ----------------------------------
 #
 # W4a/W4b 已分别由 PR #81/#82 合入；W5 详细计划、W5-A 与 W5-B 已由 PR #83/#84/#85 合入。
-# 下一步只能等待 W5-C 的明确 GO 与冻结输入，不能把离线资产合入写成部署、canary 或 UAT。
+# W5-C 已于 2026-09-26 由负责人取消，部署改走“两容器 → RI6”；
+# 不能把离线资产合入写成部署、canary 或 UAT。
 
 _W4A_MERGE_COMMIT: Final[str] = "dcef09a903224fb86e8b053a15ab4865a7b731d1"
 _W4B_MERGE_COMMIT: Final[str] = "88a63a054062db2041e51f4105846920040f3037"
@@ -2028,7 +2029,7 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 )
 
 
-def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
+def test_handoff_records_the_w5b_merge_and_the_w5c_cancellation() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     assert _current_baseline(handoff) == _S0_PLAN_COMMIT
     assert _S0_PLAN in handoff and "PR #89" in handoff
@@ -2054,13 +2055,30 @@ def test_handoff_records_the_w5b_merge_and_waits_for_the_w5c_go() -> None:
     assert "W5-A" in stage and "PR #84" in stage
     assert "W5-B" in stage and "PR #85" in stage
     next_step = _handoff_baseline_field(handoff, "下一步")
-    assert "W5-C" in next_step and "GO" in next_step
-    assert "Task 10" in next_step
+    assert "W5-C 已取消" in next_step and "GO" in next_step
+    assert "两容器" in next_step and "RI6" in next_step
+    assert "W5-C 仍等待" not in handoff
     assert "S0" in next_step and "复审" in next_step
     assert "详细计划" in next_step
     for forbidden_claim in ("开始部署", "开始 canary", "开始 UAT"):
         assert forbidden_claim not in next_step
 
+
+def test_full_acceptance_plan_voids_s1_and_moves_w5c_proofs_to_s7() -> None:
+    """W5-C 已取消：S1/G1 不能再是可执行待办，五项目标环境证明必须由 S7 承接。"""
+    plan = (_ROOT / _FULL_ACCEPTANCE_PLAN).read_text(encoding="utf-8")
+    s1 = _section_between(plan, start="### Task S1：", end="### Task S2：")
+    assert "已作废，不可执行" in s1.splitlines()[0]
+    assert "- [ ]" not in s1
+    g1_rows = [line for line in plan.splitlines() if line.startswith("| G1 ")]
+    assert len(g1_rows) == 1 and "已作废，不可执行" in g1_rows[0]
+    assert "W5-C 未获 GO" not in plan and "W5-C 未执行" not in plan
+    s7 = _section_between(plan, start="### Task S7：", end="## 5. 验收步骤")
+    assert "两容器" in s7
+    for proof in ("清理结果", "每日清理调度与失败告警", "限流", "旧身份迁移计数", "发布预检结论"):
+        assert proof in s7, proof
+    runbook = (_ROOT / "docs/runbooks/w5-product-deployment.md").read_text(encoding="utf-8")
+    assert "历史保留资产，不可执行" in "\n".join(runbook.splitlines()[:4])
 
 def test_s0_plan_header_records_its_approval() -> None:
     """handoff 已记录 PR #89 批准合入，计划头不能仍停在草案。"""

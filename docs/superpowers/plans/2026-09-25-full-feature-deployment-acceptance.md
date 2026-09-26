@@ -5,6 +5,9 @@
 > **状态**：草案，待负责人审批。本计划**不授权**任何源码、Compose、数据库或真实环境改动，也不授权任何真实调用、
 > 部署、canary 或 UAT。批准本计划只确认顺序与门槛；每个切片仍按 AGENTS 要求各自取得开工口令，
 > 每个真实调用各自取得现场 GO。
+>
+> **2026-09-26 变更**：用户决定取消 W5-C，本计划 S1 / G1 **已作废、不可执行**（正文已逐处标注）；其五项目标环境
+> 证明事项转入两容器正式部署 / S7 RI6（见 Task S7）。依据见 [当前状态](../../../AGENT_HANDOFF.md#current-status) 第 6 节“W5-C 取消”一条。
 
 **Goal:** 在不删除、不绕过既有安全链的前提下，把 Gemini、飞书、StarRocks、Prometheus、Web、权限、任务与结果
 预览依次推进到可真实使用，并分层取得 `test-env verified → deployed SHA → canary → user-accepted` 证据。
@@ -18,7 +21,7 @@ Provider 逐个进入 release；W5 的 provider-off release 是起点，不是�
 PyMySQL、sqlglot；Prometheus/Alertmanager HTTP 客户端待本计划切片 P 的 ADR 决定。
 
 **核对基线**：`main@d4e619a1b25553c64f39f93df81fef50e63dc001`（PR #87，本机 Provider 测试探针覆盖）。
-W5-A/W5-B 已由 PR #84/#85 合入；W5-C 未获 GO；RI2、RI3 PR 3E、RI4、RI6、H 层、W4c、R1、M8 均未开放。
+W5-A/W5-B 已由 PR #84/#85 合入；W5-C 已于 2026-09-26 取消（从未执行）；RI2、RI3 PR 3E、RI4、RI6、H 层、W4c、R1、M8 均未开放。
 
 ## Global Constraints
 
@@ -51,7 +54,7 @@ W5-A/W5-B 已由 PR #84/#85 合入；W5-C 未获 GO；RI2、RI3 PR 3E、RI4、RI
 | Prometheus / Alertmanager / 资产 | `prometheus.alert.evidence`、`asset.inventory.lookup` capability 与 PromQL 模板准入 | **只有 fake/recording adapter**，没有真实 adapter |
 | 审批链 | `ApprovalGate` 在 StepAdmission 中；plan_hash / target_fingerprint 绑定 | tests；**当前没有任何需要审批的 capability**（全部只读） |
 | 写入的边界 | 系统内部写已有：Admin 配置、用户目录与角色、激活审批、Admin 审计、TaskStore/evidence 持久化 | **被管运维目标写操作（E1）尚未实现**，也不在本计划开放 |
-| 发布 | W5 provider-off release：不可变 digest、字面关闭开关、部署前检查、发布预检、runbook 与四份清单 | W5-B 离线；W5-C 未执行 |
+| 发布 | W5 provider-off release：不可变 digest、字面关闭开关、部署前检查、发布预检、runbook 与四份清单 | W5-B 离线；W5-C 已取消（从未执行） |
 
 ## 2. 仍缺的配置与代码
 
@@ -86,7 +89,7 @@ W5-A/W5-B 已由 PR #84/#85 合入；W5-C 未获 GO；RI2、RI3 PR 3E、RI4、RI
 | GO | 触发的真实动作 | 前置 |
 | --- | --- | --- |
 | G0 本计划批准 | 无（只确认顺序） | — |
-| G1 W5-C GO | 在指定主机部署 provider-off 产品壳、canary、UAT | W5 Task 10 冻结输入 |
+| G1 W5-C GO（**已作废，不可执行**） | 原为在指定主机部署 provider-off 产品壳、canary、UAT；2026-09-26 随 W5-C 取消作废 | 不再适用 |
 | G2 “RI3 Gemini test-env GO” | worker 首次读取真实 Key 并调用 Gemini | RI3 PR 3E 现场条件 7 项 |
 | G3 “开始 M7 真实渠道验证”（RI2） | 注册/启用飞书应用、OAuth、长连接、发消息 | M7 §0.3.2 全部勾选 |
 | G4 RI4 现场 GO | 连接唯一 test StarRocks、执行两条只读 SQL | M6b §3.3 16 项 + 带外 digest 已批准 |
@@ -101,12 +104,12 @@ W5-A/W5-B 已由 PR #84/#85 合入；W5-C 未获 GO；RI2、RI3 PR 3E、RI4、RI
 
 ```text
 S0 首登体验修复(离线) ─┐
-S1 W5-C 产品壳部署(G1) ─┤
 S2 RI3 Gemini(G2)  ─────┤
 S3 RI2 飞书(G3) ────────┼─→ S6 release 真实能力准入 + provenance(离线, ADR) ─→ S7 RI6 部署/canary/UAT(G7–G9)
 S4 RI4 StarRocks(代码→G4)┤
 S5 Prometheus(ADR→代码→G5)┘
 S8 R1 结果预览、M8 受控写：独立门，不在本计划执行
+S1 W5-C 产品壳部署(G1)：2026-09-26 已作废，不可执行
 ```
 
 S2–S5 互不依赖，可按外部材料就绪顺序推进；S6 可在 S2 完成后先以 Gemini 为第一个 Provider 落地，其他 Provider
@@ -148,15 +151,16 @@ async def test_login_shell_hides_feishu_when_oauth_is_off(client_oauth_off) -> N
 - [ ] **Step 5:** 反证：撤掉 `/app` 重定向，首条测试转红；恢复。
 - [ ] **Step 6:** 提交 `fix(web): route first login to password change and add admin entry`，开 PR，等待复审。
 
-### Task S1：W5-C provider-off 产品壳部署（G1）
+### Task S1：W5-C provider-off 产品壳部署（G1）——已作废，不可执行
 
-完全按已合入的 [W5 runbook](../../runbooks/w5-product-deployment.md) 与 W5 计划 Task 10–12 执行，本计划不改写其步骤。
-建议在 S0 合入后以新 digest 执行，避免首登问题进入 canary。
+用户于 2026-09-26 取消 W5-C：provider-off 产品壳无真实能力，且按分容器 + edge 设计，与两容器方向冲突。
+本任务不再执行，任何人不得据本节或 [W5 runbook](../../runbooks/w5-product-deployment.md) 部署 provider-off 产品壳。
+原 W5-C 须在目标环境证明的五项事项转入 Task S7。原步骤仅存档如下，不是待办：
 
-- [ ] 负责人书面冻结 Task 10 输入（主机、窗口、digest、edge 与限流证据、验收人、备份位置、回滚 owner、首次数据处置）。
-- [ ] 按 runbook §2–§3 部署并回填 [部署证据清单](../../checklists/w5-deployment-evidence.md)。
-- [ ] 按 §4–§5 回滚演练与 canary，回填 [canary 清单](../../checklists/w5-canary-evidence.md)。
-- [ ] 按 [UAT 清单](../../checklists/w5-user-acceptance.md) 签字。
+- 原：负责人书面冻结 Task 10 输入（主机、窗口、digest、edge 与限流证据、验收人、备份位置、回滚 owner、首次数据处置）。
+- 原：按 runbook §2–§3 部署并回填部署证据清单。
+- 原：按 §4–§5 回滚演练与 canary，回填 canary 清单。
+- 原：按 UAT 清单签字。
 
 ### Task S2：RI3 Gemini test-env 验证（G2）
 
@@ -194,6 +198,8 @@ async def test_login_shell_hides_feishu_when_oauth_is_off(client_oauth_off) -> N
 
 ### Task S7：RI6 带真实能力的部署、canary、UAT（G7–G9）
 
+- [ ] 部署形态为两容器（`postgres` + 一个 `xiaowei`）：两容器详细计划先获批并完成本机验收，本任务在其形态上执行。
+- [ ] 承接原 W5-C 的五项目标环境证明：终态激活申请清理结果、每日清理调度与失败告警、限流（或公司网关的等价证据）、旧身份迁移计数、发布预检结论；缺任一项不得进入 canary。
 - [ ] 刷新 [RI6 计划](2026-09-10-compose-deployment-canary-uat.md)：以 W5 release 文件集为基础，删去 `0.0.0.0:8080` 与 `.env` Key 路径等过时内容，改为 S6 的逐 Provider override。
 - [ ] 按第 5 节部署前/中/后步骤执行并分层记录证据。
 
