@@ -2,6 +2,10 @@
 
 小维 Agent 2.0 是从 0 开始建设的策略治理型运维工作流 Agent：模型负责理解和解释，确定性系统负责规划、授权、执行、取证和恢复。
 
+> 产品北极星（最终目标，不代表当前状态）：**能力确定，组合智能；调查自主，执行受控。**
+
+当前边界：`ExecutionPlan` 绑定单一 capability，`Reflection` 不能追加步骤或选择工具；[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) 将多证据源自适应诊断列为 V1 非目标。跨 capability 组合与证据驱动的自主调查须另立 ADR 并获批准后才能实现。每个计划步骤都经过确定性的 `StepAdmission` / `ToolPolicy`（适用时还包括 `SQLGuard`）；`ApprovalGate` 只在副作用步骤前触发，不要求所有只读步骤人工审批。
+
 > 当前状态：请查 [当前状态](AGENT_HANDOFF.md#current-status)，其中记录精确基线、能力证据、有效授权、风险与下一步。
 > 开发与复审使用 [AGENTS.md](AGENTS.md#开发与评审流程)；本文件负责定位、导航和启动，不维护阶段进度副本。
 
@@ -15,6 +19,8 @@
 4. 本文件：人类开发者的启动和导航信息。
 5. [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：已获项目负责人批准（2026-09-01）的实施路线、决策门与退出标准。
 
+部署导航：[W5 离线部署资产说明](#w5-release-assets)。当前部署方向为“两容器（先本机）→ RI6”；两者均暂缓，分别需要详细计划与负责人 GO，状态见[当前交接](AGENT_HANDOFF.md#current-status)。
+
 授权边界的真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)，工程与测试工具链的真源是 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，`plan_hash` 规范形状与工具准入的真源是 [ADR-009](docs/adr/ADR-009-plan-hash-approval-binding-and-tool-admission.md)，多能力 binding 与固定 PromQL 准入见 [ADR-011](docs/adr/ADR-011-m6a-capability-binding-and-promql-template-admission.md)，M6b 精确目标绑定见 [ADR-012](docs/adr/ADR-012-m6b-target-bound-starrocks-readonly-adapter.md)，M7 Web/飞书薄渠道边界见 [ADR-013](docs/adr/ADR-013-m7-channel-boundary.md)，真实飞书 OAuth/Web 激活见 [ADR-014](docs/adr/ADR-014-real-feishu-oauth-and-web-activation.md)，已接受的 Gemini 窄端口与数据边界见 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md)。智能交互入口、澄清链、`ReadClass` 与执行披露屏障见 [ADR-017](docs/adr/ADR-017-intelligent-interaction-and-clarification.md)；它是 I1 的实施门，不是当前运行证据。
 
 已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
@@ -22,8 +28,9 @@
 交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
 各阶段进度见顶部交接入口；当前可照做的首启流程见下文：W4a 起 Provider 配置拆为 AI、飞书、
 resources 三个固定配置域并仍走 loopback 发布；W4b 起 resources 域可登记 StarRocks 与 Prometheus
-参数，但只登记、不接入。W5 provider-off release 的离线部署资产见下文「Release 部署资产（W5）」；
-它们存在不表示已部署，目标环境执行需要单独 GO。W4c 连接测试尚未实现，不能提前套用。
+参数，但只登记、不接入。W5-C 已于 2026-09-26 取消；W5 离线发布资产保留备用，不是当前部署入口。
+部署方向为“两容器（先本机）→ RI6”，两者均暂缓并需分别取得详细计划与负责人 GO；W5 资产说明见下文。
+W4c 连接测试尚未实现，不能提前套用。
 
 ## 目标能力
 
@@ -599,7 +606,11 @@ OAuth 路由为 404（合成飞书域里**有**凭据也不装配）；提交一
 [交接文档](AGENT_HANDOFF.md#current-status)。隔离 smoke 只证明对应 `tests`，不替代真实服务、
 部署、canary 或用户验收。
 
+<a id="w5-release-assets"></a>
+
 ### Release 部署资产（W5）
+
+> 状态（2026-09-26）：W5-C 已取消。W5-A/B 已交付的资产是保留备用的离线资产，不是当前部署入口；当前部署方向为“两容器（先本机）→ RI6”，两者均暂缓，且各自需要详细计划与负责人 GO。当前阶段与授权见[交接文档](AGENT_HANDOFF.md#current-status)。
 
 W5 provider-off 产品壳只用一个固定文件集合：`docker-compose.yml` + `docker-compose.release.yml`。
 release override 让六个 app service 都使用同一个不可变镜像 `name@sha256:<64 hex>`、清除 `build`；
