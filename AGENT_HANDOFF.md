@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@86263e90f9dbcca587a534b80a3cc2f42bee1c02`（2026-09-25，S0 首登与入口体验详细计划合入）。
+- **当前基线**：`main@905ba405a4e66d6dff5606618a015c241acdb852`（2026-09-26，PR #102 取消 W5-C 合入）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -59,7 +59,8 @@
   （PR #88）经独立复审批准，批准范围**仅为计划**：不授权任何切片实现、真实 Provider 调用、生产目标、RI6 部署、
   canary、UAT、R1 或 M8。每个切片须先写详细计划并经 exact-SHA 复审，真实调用另需各自 GO。
   [S0 首登与入口体验详细计划](docs/superpowers/plans/2026-09-25-s0-first-login-entry.md)（PR #89）已批准并合入；
-  S0 实现在分支 `claude/s0-first-login-implementation` 上离线完成、**待 exact-SHA 独立复审**，证据见下文「S0 离线证据」。
+  S0 实现经 exact-SHA 独立复审后由 PR #90 合入 `87497d8f4939a88b6f7d9dd8df809edc2fbb3194`，证据见下文「S0 离线证据」；
+  只是离线与本机证据，未部署、未 canary、未 UAT。
   PR #87 起，本机开发若需点击 Gemini/飞书连通性探针，可在基础 Compose 上叠加
   `docker-compose.local-test.yml`；该覆盖只打开 Web 探针，不改变 release 的固定关闭边界，也不构成真实调用或 W5-C 证据。
   本机完整体验另有 `docker-compose.local-full.yml`：打开 worker Gemini、Web 两个探针与飞书 OAuth，并带只绑 loopback 的
@@ -69,12 +70,24 @@
   `receive_id_type=open_id` 的私聊发送返回 `230101`，同一会话用 `chat_id` 发送成功。Web 发起任务的飞书私聊通知
   （`feishu_private_notice`）同理改发到该用户同 scope 内最近一次私聊小维的 p2p 会话
   （`ChannelStore.find_private_chat_ref`，不加表、不加迁移）；从没私聊过小维的用户不建飞书通知，只在 Web 看结果。
+- **2026-09-25～26 合入记录（PR #90–#102）**：
+  - #90 `87497d8` S0 首登与入口体验实现。
+  - #91 `5d28fcb` / #97 `85898df` 本机完整体验 `docker-compose.local-full.yml`，后者让飞书 listener / channel worker
+    在 `m7-channels` profile 后可启动，并给常驻服务加 `restart: unless-stopped`。
+  - #92 `07f65d5` Gemini 连通性探针输出上限改为 16；#93 `f190c91` Gemini 请求改走 `response_json_schema`。
+  - #94 `bdd0906` 飞书 app token 回包允许多带 `tenant_access_token`；#95 `ce6957b` 飞书消息 uuid 压到 50 字符内。
+  - #96 `209d37b` 私聊回复改按 p2p `chat_id`；#99 `1e961bf` Web 任务的飞书私聊通知同样改按 p2p 会话发送。
+  - #98 `28ff497` 记录两容器方向；#100 `79ae5dc` / #101 `70394e9` 记录新功能与对话能力方向；
+    #102 `905ba40` 取消 W5-C。以上 #98、#100–#102 只改文档与文档契约测试。
+  - #92–#96 的根因来自负责人本机完整体验中配置的真实 Gemini 与飞书应用调用；#99 的本机真实端到端尚未验证。
+    这些是负责人本机体验观察，**不是** RI2/RI3 的 `test-env verified` 证据，也不表示 RI2/RI3 现场 GO 已下达。
 - **通用开发流程 V1**：本任务用户在方案复审后于 2026-09-23 明确“那你实施吧”，授权 Codex 按
   [实施计划](docs/superpowers/plans/2026-09-23-unified-development-workflow.md) 完成本次治理调整。
   规则与测试候选 `2cd6eb61046c50a43fd80fa19610031a18d8d256` 已通过独立修复确认；两项文档迁移遗漏已闭合。
   PR #70 已合入当前 main，规则已成为后续开发的协作基线；已批准的在途计划保持有效，提效尚未测量。
   这次流程集成不是 W2 计划批准、源码开工、合并、部署或验收归档授权。
-- **真实边界**：没有真实 Gemini、飞书、StarRocks、Prometheus 或资产系统调用证据；没有部署、canary 或产品用户验收。
+- **真实边界**：除上条负责人本机体验中的 Gemini/飞书调用观察外，没有任何 RI 级真实调用证据；没有 StarRocks、
+  Prometheus 或资产系统调用；没有部署、canary 或产品用户验收。
   CI 与一次性 PostgreSQL/Compose 的运行只证明对应隔离 `tests`，不证明真实渠道激活。RI2、RI3 PR 3E、RI4、RI6/H 层与 E1 仍有独立门。
 
 ### 当前能力与证据入口
@@ -237,7 +250,7 @@ registry 容器清理（P2）。修复：`config.py` 抽出 `canonical_lan_ipv4`
 目标主机、edge、真实 registry 与部署均未执行。这些只是离线证据：没有部署、canary、真实调用或用户验收。
 
 <a id="s0-offline-evidence"></a>
-**S0 离线证据（分支 `claude/s0-first-login-implementation`，待 exact-SHA 复审）**（基线 `86263e9`）：
+**S0 离线证据（PR #90 合入 `87497d8`）**（基线 `86263e9`）：
 只改 `interfaces/web_app.py` 与 `web_static/index.html`、`app.js`。四项：`/app`、`/admin`、`/app/tasks/{id}` 对未改密会话由
 JSON 403 改为 302 回登录入口（登录入口原已渲染改密壳），非法 task_id 仍按基线返回 `password_change_required`、不进
 Location；新增 `GET /` → `302 /login?intent=workbench`，仍受可信 Host 约束；OAuth 未装配时登录页隐藏飞书入口并把引导文案
@@ -253,10 +266,10 @@ loopback `lan_http` 与合成凭据核对 1440/1280：`/` 落到登录页且无�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前开发分支 `claude/s0-first-login-implementation`（S0 实现）；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
-| 截止时间 | 2026-09-25（Asia/Shanghai） |
-| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划）；S0 详细计划已批准（PR #89），S0 实现离线完成待复审 |
-| 下一步 | S0 实现等待 exact-SHA 独立复审与负责人合入；之后的切片仍须先写详细计划并经复审、获开工口令再实现；W5-C 已取消（2026-09-26），部署路线改为两容器 → RI6，二者均暂缓且需各自计划与 GO；此前不做部署、canary、UAT，真实调用另有独立门 |
+| 项目目录 | 当前无已授权的在途实现分支；新工作从最新 main 建 `claude/<topic>`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 截止时间 | 2026-09-26（Asia/Shanghai） |
+| 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划）；S0 详细计划已批准（PR #89），S0 实现已由 PR #90 合入；W5-C 已取消（PR #102） |
+| 下一步 | 当前无已授权的在途切片；负责人按[新功能路线方向](docs/superpowers/specs/2026-09-26-feature-roadmap-direction.md)拍板与排期，每个切片仍须先写详细计划并经 exact-SHA 复审、获开工口令再实现；W5-C 已取消（2026-09-26），部署路线改为两容器 → RI6，二者均暂缓且需各自计划与 GO；此前不做部署、canary、UAT，真实调用另有独立门 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) Approved V2.6；W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |
@@ -348,7 +361,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
 2. W3 V1 已按精简范围离线收口；W4a/W4b 已分别由 PR #81/#82 合入，W5 详细计划、W5-A 与 W5-B 已由 PR #83/#84/#85 合入。
    W5-C 已于 2026-09-26 取消，部署改走“两容器 → RI6”；W5-A/B 合入不等于真实调用、真实环境配置迁移、
    部署、canary 或 UAT 已获授权。
-   S0 实现只改 Web 入口层与静态壳，待复审；合入后在本机体验需重建镜像，仍只算本地体验，不是 W5-C 证据。
+   S0 实现只改 Web 入口层与静态壳，已由 PR #90 合入；本机体验需重建镜像，仍只算本地体验。
 3. I3/I4 原定义不再推进（用户 2026-09-26 决定），转入对话能力方向；新路线须待 `DEVELOPMENT_PLAN.md` 与 ADR-017
    修订并批准后生效。未来重新设计资料查询时，仍需明确资料源形态（仓库内文档 / 独立 store / 外部系统），与 Web 产品线不并行修改同一真源。
 4. RI2/RI3/RI4/RI6、W4c、R1、M8/M9 等分别满足自己的进入门；流程实施不自动开放它们。
@@ -386,7 +399,7 @@ M7 的 Web/飞书薄渠道 PR 1–8、跨渠道一致性、离线验证证据与
   不改变 R1/M8/W4c/RI4 等独立门。用户额度恢复后先拍板该文第 4 节问题，再逐项写详细计划。
   同文第 1 节还记录“对话能力”横向方向：用户 2026-09-26 决定原 I3（资料查询）/I4（日志分析）不再按
   原定义推进，改由该方向重新设计；`DEVELOPMENT_PLAN.md` 与 ADR-017 尚未修订，开工前须先修订并获批。
-  多轮对话记忆未获批，须另立存储设计与 ADR。
+  多轮对话记忆未获批，须另立存储设计与 ADR；它与 F5“聊天记录”一并拍板，但不默认共用同一存储或权限模型。
 - 分支保护的可用条件与实施；当前不能将 CI 状态视为 GitHub 强制合并限制。
 - ADR-001 至 ADR-006 的待决项目按各自首次承重阶段处理；未来重新设计资料查询时，资料源形态仍待拍板。
 
