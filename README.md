@@ -25,12 +25,15 @@
 
 已批准的 Web 产品演进（运维工作台、身份激活与未来结果访问边界）见
 [总体设计](docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md)：
-交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`，`W4c` 与 `R1` 是独立阻塞门。
+交付序列为 `W0 → W1a → W1b → W2 → W3 → W4a → W4b → W5`；`W4c` 仍是独立阻塞门。R1 不再作为独立结果功能排期门，相关业务改由 W0–W5 之外的 F1–F3 路线承接；Web 规格 §11.2 六项前置条件仍须由 F1 详细计划逐项满足或说明变更理由。
 各阶段进度见顶部交接入口；当前可照做的首启流程见下文：W4a 起 Provider 配置拆为 AI、飞书、
 resources 三个固定配置域并仍走 loopback 发布；W4b 起 resources 域可登记 StarRocks 与 Prometheus
 参数，但只登记、不接入。W5-C 已于 2026-09-26 取消；W5 离线发布资产保留备用，不是当前部署入口。
 部署方向为“两容器（先本机）→ RI6”，两者均暂缓并需分别取得详细计划与负责人 GO；W5 资产说明见下文。
 W4c 连接测试尚未实现，不能提前套用。
+
+独立的新业务功能方向（StarRocks 查询与结果页 → 导出审批 → CSV；之后再单独评估 TiDB）见
+[新功能路线方向](docs/superpowers/specs/2026-09-26-feature-roadmap-direction.md)。它不属于 W0–W5，方向获批不等于实施授权。
 
 ## 目标能力
 
