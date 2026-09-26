@@ -1123,14 +1123,72 @@ def test_development_plan_orders_web_stages_and_keeps_gates_outside() -> None:
         assert at >= 0, f"DEVELOPMENT_PLAN.md 缺少 Web 产品阶段 {stage}"
         positions.append(at)
     assert positions == sorted(positions), "W0–W5 顺序不是文档中的实际先后"
-    # W4c 与 R1 是独立阻塞门，不得混进必经序列。
+    # W4c remains an independent gate; R1's standalone route is superseded by F1–F3.
     assert "**W4c " not in sequence and "**R1 " not in sequence
     gates = plan[plan.find("### 独立阻塞门（不在上述必经序列内）") :]
-    assert "W4c" in gates and "R1" in gates
-    assert "Approved V2.6" in plan
+    assert "W4c" in gates
+    assert "R1 不再作为独立功能门" in gates
+    assert "§11.2 的六项前置条件" in gates
+    assert "路线 V3.0" in plan
     assert _W0_OWNER_APPROVAL in plan
-    # I3 延期不等于取消。
-    assert "I3" in plan and "延期" in plan
+    assert "I3/I4 原定义不再推进" in plan
+    assert "对话能力方向" in plan
+
+
+def test_feature_roadmap_records_the_approved_minimal_query_route() -> None:
+    roadmap = _truth_doc_text(
+        "docs/superpowers/specs/2026-09-26-feature-roadmap-direction.md"
+    )
+    route_rows = [line for line in roadmap.splitlines() if line.startswith("| F")]
+    assert [line.split("|")[1].strip() for line in route_rows] == [
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "F5",
+    ]
+    for approval_row in route_rows[1:3]:
+        assert "该审批权限由 Admin 分配给具体用户，默认无人拥有" in approval_row
+        assert "申请人可以自审，但仅当本人也获配该审批权限" in approval_row
+
+    for decision in (
+        "全部数据库和表",
+        "单个已授权 StarRocks target",
+        "已激活、已认证且能提交只读任务的用户均可查询",
+        "不另设逐人查询许可",
+        "飞书卡片永不嵌入真实结果行",
+        "只发送受保护的 Web 结果链接",
+        "Web 详细结果默认锁定，需 F2 单独批准后查看",
+        "批准后申请人和该次查看审批人可在 Web 查看完整结果",
+        "F1 结果 artifact 保留 1 天",
+        "查询执行本身不需要审批",
+        "Web 详细结果查看与 CSV 下载分别审批；每项审批都是独立请求，互不授权",
+        "由一名具备相应审批权限的人批准即可",
+        "审批有效期各为 1 小时",
+        "下载另走独立飞书审批",
+        "申请人可以自审",
+        "CSV 是唯一导出格式",
+        "Web 结果页受控下载",
+        "CSV 文件保留 1 天",
+        "R1 不再作为独立功能门",
+        "F1 详细计划必须逐项满足 Web 规格 §11.2 的六项前置条件，或写明不满足项的变更及理由",
+        "StarRocks 路线验证后单独启动",
+        "聊天记录与多轮记忆暂缓",
+        "`max_rows`、`max_bytes`、`query_timeout`",
+        "达到任一资源上限时明确标记不完整",
+        "不接受用户或模型直接提供的可执行 SQL",
+        "真实 StarRocks 调用仍需独立现场 GO",
+    ):
+        assert decision in roadmap, f"新功能路线缺少已确认口径：{decision}"
+
+    web_spec = _truth_doc_text(
+        "docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md"
+    )
+    assert "飞书卡片和普通 `RenderPayload` 永不嵌入真实结果行" in web_spec
+    assert "requester 或该次 approver" in web_spec
+    assert "6. 独立里程碑、详细计划和真实调用/数据处置授权已经审核" in web_spec
+    assert "F1 详细计划必须逐项说明设计、负责阶段和可验收证据" in web_spec
+    assert "不能因 F1–F3 方向已确认而默认为豁免" in web_spec
 
 
 _W4A_DOMAIN_FILES: Final[tuple[str, ...]] = (
@@ -1293,14 +1351,15 @@ def test_handoff_baseline_declaration_guard_is_discriminating() -> None:
         _current_baseline(drifted)
 
 
-def test_handoff_retains_web_stages_and_i3_deferral() -> None:
+def test_handoff_retains_web_stages_and_retires_old_i3_i4_route() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     assert "W0" in handoff and "W1a" in handoff
-    assert "I3" in handoff and "延期" in handoff
+    assert "I3/I4 原定义不再推进" in handoff
+    assert "对话能力方向待重新设计" in handoff
 
 
 def test_w0_handoff_binding_is_discriminating() -> None:
-    """反例：加入任一越级声称、删除批准来源或恢复 I3 唯一下一步都必须转红。"""
+    """反例：加入越级声称、删除批准来源或恢复旧 I3/I4 路线都必须转红。"""
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
     for claim in _W0_FORBIDDEN_HANDOFF_CLAIMS:
         polluted = f"{handoff}\n- {claim}。\n"
@@ -1311,17 +1370,18 @@ def test_w0_handoff_binding_is_discriminating() -> None:
 
     # 反例必须走真正的解析器，而不是断言自己刚拼上去的字符串。
     # 本轮复审打回的就是这一点：旧断言只排除一句散文，换成表格字段就漏过去。
-    revived_i3 = _replace_once(
+    revived_legacy_route = _replace_once(
         handoff,
         _handoff_baseline_field(handoff, "下一步"),
-        "另起 I3 受治理资料查询计划，先拍板资料源形态",
+        "另起 I3 资料查询与 I4 日志分析独立路线",
     )
     reverted = [
         statement
-        for statement in _next_step_statements(revived_i3)
-        if "I3" in statement and "延期" not in statement and "未取消" not in statement
+        for statement in _next_step_statements(revived_legacy_route)
+        if ("I3" in statement or "I4" in statement)
+        and "原定义不再推进" not in statement
     ]
-    assert reverted, "把下一步表格字段改回 I3 之后，结构化解析必须能看见它"
+    assert reverted, "把下一步表格字段改回旧 I3/I4 之后，结构化解析必须能看见它"
 
     machine_path = _replace_once(
         handoff,
@@ -1706,9 +1766,9 @@ def test_handoff_closes_w3_v1_and_moves_deferred_items_out_of_the_w4_gate() -> N
     assert statements, "handoff 没有任何可解析的下一步声明"
     for statement in statements:
         assert "PR #78" not in statement, f"下一步仍指向已合入的 W3-lite 候选：{statement}"
-        if "I3" in statement:
-            assert "延期" in statement or "未取消" in statement, (
-                f"下一步仍把 I3 写成当前动作：{statement}"
+        if "I3" in statement or "I4" in statement:
+            assert "原定义不再推进" in statement or "对话能力方向待重新设计" in statement, (
+                f"下一步仍把旧 I3/I4 定义写成当前动作：{statement}"
             )
 
     next_step = _handoff_baseline_field(handoff, "下一步")
