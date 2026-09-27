@@ -1,6 +1,7 @@
 # ADR-013：M7 Web 与飞书薄渠道边界
 
 - 状态：Accepted
+- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-08
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §3/§4/§5.9、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[M7 实施计划](../plans/M7-web-feishu-channels.md)
@@ -177,3 +178,22 @@ TaskStore 与 Runtime 不变。默认不删除渠道表或改写已完成任务�
 下列变化必须先修订本 ADR：渠道进程取得完整 Runtime/Runner/Gateway、ChannelStore 新增任务事实、
 新增 webhook/其他入站传输、渠道调用改走 ToolGateway、扩展核心权限枚举、开放数据库真实结果
 artifact，或放宽真实应用、凭据、网络、部署与 canary 的独立授权门。
+
+## F1 修订（2026-09-27，Proposed）
+
+- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §9.3、§11
+- 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
+
+本修订是“未来 R1 的变更门”要求的修订，只做以下窄放开：
+
+- Web 显式 SQL 模式是 F1 唯一的 SQL 提交与确认入口；Web handler 只传认证上下文、`resource_id`、原始
+  SQL bytes 与幂等键，不构造 ResolvedTarget、不选择 adapter、不编译计划；
+- 飞书和 `RenderPayload` 可以投影服务端生成的受保护 `/results/{result_ref}` 深链与可信 Web SQL 页面
+  链接；不嵌入 SQL 原文、列名或结果行；
+- 普通聊天文本即使包含 SQL 代码块也不进入 SQL 提交服务；ChannelStore 不保存 SQL、列或行；
+- 未登录、未激活或 scope 不匹配时，深链在读取 artifact 前拒绝。
+
+仍不放开：渠道进程取得 Runner/Gateway/目标 adapter、ChannelStore 新增任务事实、结果行展示、导出、
+核心权限枚举扩展，以及任何真实调用、部署或 canary 授权。F1 `/results` 路由只有在 Web 规格 §11.2
+经 F1 设计 §11.3 窄化后的适用条件全部验收通过时才可开放。

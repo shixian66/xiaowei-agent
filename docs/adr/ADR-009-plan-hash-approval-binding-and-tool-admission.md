@@ -1,6 +1,7 @@
 # ADR-009：`plan_hash` 规范形状、审批绑定与工具准入
 
 - 状态：Accepted
+- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-02
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §6/§7/§15、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[M2 实施计划](../plans/M2-contracts-kernel.md)
@@ -93,3 +94,48 @@ Gateway 在每次 `invoke` 时重算 `tool_call_hash` 并比对。凭证证明�
 | D2 | 跨 capability 计划须递增 `PLAN_SCHEMA_VERSION` 并另立 ADR，同时定义 policy profile 合并规则。 |
 | D3 | 恢复为字段存储，必须同时给出「存储值与重算值不一致时以谁为准」的规则，并说明该规则为何不构成第二真源。 |
 | D4 | 解除 E1 硬闸只需把 `_E1_EXECUTION_ENABLED` 改为 `True`，但须经独立评审、ADR-007 完成例外记录或修订，并同步更新对应安全测试。 |
+
+## F1 修订（2026-09-27，Proposed）
+
+- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §5、§8.4、§10
+
+### F1-D1 query requirement 闭集
+
+`OperationSpec` 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`；
+它由 `CapabilitySnapshot` 派生，不能由 step、ToolCall 或用户自报。现有 `template_locked` 慢查询继续
+按原参数重编译和逐字节比对，不经 `confirmed_artifact` 分支。
+
+### F1-D2 标量 ToolCall 与进程内 HydratedQuery
+
+`ToolCall.typed_args` 继续只接受 JSON 标量，本修订不放宽 D4 的字段集合。`confirmed_artifact` 的
+ToolCall 只携带 `sql_ref`、`sql_hash`、`result_ref`、`resource_id`、`target_fingerprint`、
+`config_revision`、`confirmation_ref` 与三个有效预算值；`tool_call_hash` 覆盖以上全部字段，
+其中 `sql_hash` 以 SHA-256 绑定原始 bytes。
+
+SQL bytes 只在 Runner 从 SqlArtifactStore 水合出的不可变 `HydratedQuery` 中存在。它只作为
+StepAdmission 与 Gateway 的受信 keyword-only 参数，不进入 Plan、TaskStore、trace 或 audit。
+operation 声明需要 query 而 HydratedQuery 缺失、多余或 hash 不符时，Gateway 调用次数为 0。
+`ExecutionPlan` 只保存引用与预算，`PlanBudget` 固定 `max_steps=1`、`max_tool_calls=1`、
+`max_model_tokens=0`。
+
+### F1-D3 固定执行顺序
+
+1. `TaskStore.inspect_step_execution`：只读、fenced 恢复分类；committed 直接 adopt，未提交 started 返回
+   `PREVIOUS_ATTEMPT_UNCERTAIN` → `INDETERMINATE`，均不争抢 target slot；
+2. 仅 `ELIGIBLE_TO_START` 才水合 HydratedQuery 并执行 StepAdmission（ToolPolicy → SQLGuard）；
+3. `ensure_slot_wait_window` 在第一次争抢前持久化固定 300 秒 deadline；
+4. `check_slot_wait_deadline` 到期即失败，零连接；
+5. `TargetQueryLeaseStore.try_acquire`；BUSY 时 `schedule_deferral` 并抛出 `WorkflowDeferred`，不增加
+   task_failure_count、不创建 Step attempt、不消耗 `max_tool_calls`；
+6. `begin_step_attempt` 在同一锁内复用与 inspect 相同的判定函数，原子创建 started 并消耗预算；
+7. 只有 `PROCEED` 才以受信 keyword-only 参数传入 `TargetSlotGrant` 与 HydratedQuery 调用
+   `ToolGateway.invoke`；Gateway 重算 `tool_call_hash` 并复核 grant、target、config 与 bytes hash。
+
+`confirmed_artifact` 的未提交 started 永不再次得到 `PROCEED`；never-replay 语义从 query requirement
+派生，不按 operation 名称特判。结果只以 `result_ref` 进入 ToolResult/Evidence，见 ADR-018。
+
+### F1-D4 本修订不改变的部分
+
+D1 的 plan schema 规范输入集、D2 单 capability、D3 指纹不入 Plan、D4 的 `tool_call_hash` 覆盖面与
+`_E1_EXECUTION_ENABLED=False` 均不变。F1 为 READ + RESTRICTED、无副作用步骤，不调用 ApprovalGate。

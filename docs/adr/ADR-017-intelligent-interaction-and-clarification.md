@@ -3,6 +3,8 @@
 > 状态：已接受并作为 I1 实施门；I1/I2 已完成离线实现（不代表已运行或已连接任何真实服务，证据见
 > [AGENT_HANDOFF 当前状态](../../AGENT_HANDOFF.md#current-status)）。负责人于 2026-09-26 决定不再按原定义推进 I3/I4，
 > 并将其转为尚待设计的对话能力方向；本次只记录路线状态，不改变下文 I1/I2 决策契约，也不授权新能力实现。
+>
+> F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态。
 
 ## 路线修订（2026-09-26）
 
@@ -339,3 +341,22 @@ PostgreSQL 唯一约束测试。
 I0 合入后，I1 仍必须按独立 PR 顺序实现。任何想改变本 ADR 中的状态、字段名、reason code 归属、
 model trace、migration revision、`ReadClass` 语义、披露屏障位置或 TaskView invariant 的变更，都必须先
 修订本文，并重新跑相应契约/安全测试。
+
+## F1 修订（2026-09-27，Proposed）
+
+- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §5.2、§11.2
+
+`RESTRICTED` 不等于必须审批。只有获批 policy profile 显式声明的 `RESTRICTED` read 可以不经
+`ApprovalGate`，F1 的 `starrocks.readonly_query` 须同时满足：
+
+- CapabilitySnapshot 明确绑定 `confirmed_readonly` profile；
+- 当前 requester 具有 `submit_readonly_task`；
+- target、配置、预算与 SQL artifact 全部通过 StepAdmission；
+- operation 无副作用，`export_policy=disabled`；
+- 结果页仍受 requester ACL 锁定。
+
+本修订不改变“`RESTRICTED` 读取不能复用 `ApprovalGate` 做额外确认”的既有决定，也不让现有三个能力
+脱离 `BOUNDED`。F1 的显式 Web 路由由 XiaoweiRuntime 的窄方法接收 ArtifactSubmission 并生成确定性
+capability draft，不经 InteractionClassifierPort，也不属于 I0–I2 的对话入口。写操作与 F2/F3 审批不受
+本条影响。

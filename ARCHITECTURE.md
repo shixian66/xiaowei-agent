@@ -138,6 +138,24 @@ RequestEnvelope
   → RenderPayload (exactly once)
 ```
 
+**F1 显式 SQL artifact 入口（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
+它不是普通对话，不经 InteractionClassifierPort，也不接受聊天消息或模型产出的 SQL：
+
+```text
+Web SQL 草稿（application/sql 原始 body，≤ 1 MiB）
+  → QuerySubmissionService：解析 target、保存 SqlArtifact、返回确认页（零 task、零连接）
+  → 用户确认：重验 principal/target/config/hash/过期 → ArtifactSubmission + result_ref
+  → TaskStore.submit → Worker.begin_task_attempt
+       → XiaoweiRuntime 窄方法 → 确定性 capability draft → CapabilityResolver → PlanCompiler
+       → WorkflowRunner
+            → inspect_step_execution（恢复分类，先于任何水合与争抢）
+            → HydratedQuery 水合 → StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)
+            → ensure_slot_wait_window → try_acquire target slot（BUSY → schedule_deferral → WorkflowDeferred）
+            → begin_step_attempt → ToolGateway → target-bound streaming adapter → ResultChunkSink
+       → Evidence（只含 result_ref/hash/计数/指标）→ TaskOutcome
+  → 锁定结果页 /results/{result_ref}（不展示列与行）
+```
+
 ### 4.1 模型边界
 
 当前 I1-A 源码事实是：只有获授权的 durable Runtime path 可以调用
@@ -469,6 +487,20 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ClarificationPayload` | reason_code、missing_fields、prompt | 只从 `ClarificationRecord` 投影，不是 `RenderPayload` 分支 |
 | `ExecutionDisclosure` | capability、target summary、read disposition、projected slots、external_target_access | 首次 Gateway 前的可查询披露事实；表示计划语义，不表示渠道已送达或真实目标已联网 |
 
+**F1 目标契约（Proposed，F1-1 实现前不是源码事实；精确字段见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md) 与 ADR-009/ADR-012 的 F1 修订）：**
+
+| 契约 | 关键字段 | 约束 |
+| --- | --- | --- |
+| `TaskSubmission`（versioned union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为；后者只含 `input_kind=sql_artifact`、sql_ref、sql_hash、resource_id、result_ref、confirmation_ref，不含 SQL 原文；未知版本 fail-closed；同一 TaskStore |
+| `SqlArtifact` | sql_ref、原始 bytes、SHA-256、requester、tenant/environment、resource_id、target fingerprint、config revision、expires_at | SQL 原文唯一保存点；CSPRNG 引用；24 小时未确认过期；确认一次性 |
+| `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
+| `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
+| `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + gateway grace 确定 |
+| `ResultArtifact` | result_ref、ColumnSpec(ordinal,name,type)、chunks、saved rows/bytes、storage_state、completeness、fencing | staging → sealed → available；只有 available 可读；按 ordinal 保存同名列 |
+| `ResultChunkSink` / `ThreadsafeResultChunkWriter` | task、step、result_ref、task/result fencing | Gateway 创建；同步读取线程一次提交一个 chunk 并等待回执；abort 后迟到写被拒 |
+| `TargetQueryLeaseStore` / `TargetSlotGrant` | target_fingerprint、task、step、tool_call_hash、fencing、expires_at | persistence 的调度租约；单 target 并发 1；grant 只作为 Gateway 受信参数 |
+| 路由 body policy | path、method、media type、limit | 原 JSON 路由保持现有上限；`application/sql` 草稿路由固定 1 MiB 硬上限，Web 不可调高 |
+
 上表是按里程碑演进的稳定契约摘要：原始内核 DTO 的精确类型由 M2 审定，RI3 新增模型事实
 契约的精确字段与类型以已接受的 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 为准。
 契约的**名称与职责边界**在各自 ADR 获批后冻结，各模块不得另造同义 DTO。
@@ -594,6 +626,15 @@ fencing token 有两个推进点：成功取得 lease 时推进；`schedule_retr
 
 状态终态化、retry 调度与 step checkpoint 的对应审计和状态事实同事务提交。成功领取只改变可由 TTL 自愈的 lease/attempt，不强制事务审计。持久化写必须区分 confirmed rollback 与 not-confirmed，不能从异常类别猜测数据库是否已经提交。
 
+**F1 目标语义（Proposed，见 ADR-009 F1 修订）**：`confirmed_artifact` 步骤的顺序固定为
+`inspect_step_execution` → 水合/准入 → `ensure_slot_wait_window`（第一次争抢前持久化 300 秒 deadline）→
+`try_acquire` → `begin_step_attempt` → Gateway。`inspect_step_execution` 与 `begin_step_attempt` 复用同一个
+判定函数；前者只读分类，后者原子创建 started 并消耗工具预算。已有未提交 started 返回
+`PREVIOUS_ATTEMPT_UNCERTAIN` → `INDETERMINATE`，永不重放；committed 的 sealed result 只做幂等 activation。
+slot BUSY 时 `schedule_deferral` 轮换 fencing 并结束当前 lease，不增加 task_failure_count、不创建 Step
+attempt、不消耗 `max_tool_calls`；Runner 抛出 `WorkflowDeferred`，Runtime 透传，worker 在
+`RetryableTaskError` 之前单独捕获并继续同一轮的下一个候选。Task attempt 只记录调度领取，不等于 Step attempt。
+
 **stale recovery 拆成「发现」与「接管」两半，只有前一半在 TaskStore 里**（M4）：`list_stale_leases(*, limit)` 是只读方法，返回「曾被租出、租约已过期、未终态」的任务，按 `(lease_expires_at, task_id)` 稳定排序。它不 claim、不调度、不判断审批是否应当恢复、不改变任何状态；接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。把两半合成一个方法会让 TaskStore 长出调度能力，而调度属 Worker。
 
 **审计事件由 TaskStore 承接写入，消费路径不在 M4**：`record_audit_event(*, event)` 是 append-only 写入，按 `(task_id, seq)` 编号并返回本次分配到的 `seq`。**证据表替代不了审计**——证据回答「看到了什么」，审计回答「系统做了什么、准入判成了什么」，一次被策略拒绝的调用不产生任何证据但必须留下审计。载荷是 M2 的 `TraceEvent`，其 `detail` 已在契约层做过键值双向脱敏并限长，持久化层不再脱敏第二次。
@@ -648,7 +689,17 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 
 ## 9. SQL 与工具安全
 
-- 允许执行的 SQL 由确定性 compiler 生成；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
+- 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
+- F1 用户直接 SQL（`confirmed_readonly`，Proposed）：只能来自受保护 SQL artifact，经完整确认与原文 SHA-256 绑定；
+  SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、控制字符、INTO OUTFILE），再走两条互斥的只读证明
+  路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/`Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），
+  或 sqlglot 降级为 `Command`/ParseError 时的版本化 `ReadonlyStatementRegistry`。Registry 绑定已验证 StarRocks 小版本
+  区间与 digest，首批登记后可增量补充；未登记语句返回请求级 `READONLY_STATEMENT_NOT_SUPPORTED`、零 SQL 发送且
+  target 保持可用，只有实际版本越界或 digest 漂移才使 target fail-closed。两条路径都统一校验内部
+  `default_catalog`、`blocked_relation_names` 精确黑名单和副作用；拒绝外部 Catalog、table function、UNNEST、
+  qualified function/UDF 与任何 hint。adapter 永远执行确认过的原始 bytes，不改写、不补 LIMIT。
+- F1 关系黑名单只在 credential 权限面内额外拒绝，**不提供元数据保密**；StarRocks credential 的对象级 SELECT grants
+  是授权真源。视图 lineage 不递归展开，强隔离必须由 DBA 撤权。
 - SQLGuard 使用 `sqlglot` AST 解析，按方言和 policy profile 检查语句类型、表/列范围、子查询、锁、写入、注释和多语句边界。
 - PromQL 只允许 capability 注册的完整模板：参数经闭集 schema 与统一 escape 后编译，准入期从 `typed_arguments` 重新编译并逐字节比对；M6a 不接受任意 PromQL，不引入 parser，也不把固定模板安全外推为任意表达式安全。
 - AST 无法解析、方言不确定、目标不完整或权限无法确认时 fail-closed。
@@ -997,7 +1048,8 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-002：TaskStore 事实真源与 Runner checkpoint 的关系。
 - ADR-003：DeterministicRunner / LangGraphRunner 准入和切换条件。
 - ADR-004：Capability DSL 的最小契约与量化推广标准。
-- ADR-005：审批绑定、hash canonicalization 和目标漂移处理。
+- ADR-005：审批绑定、hash canonicalization 和目标漂移处理；F2 结果查看与 F3 导出的审批主体、状态、有效期、
+  拒绝/过期/冲突与审计语义也须在此冻结。F1 锁定结果页不写 approver grant、不展示结果，不依赖 ADR-005。
 - ADR-006：PostgreSQL 全文检索到 pgvector 的升级门槛。
 - ADR-007：首批能力、初始执行上下文与真实调用许可（已记录：[docs/adr/ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)）。
 - ADR-008：工程与测试基线，含 Python 3.11、pytest、security marker gate、Ruff 和 mypy（已记录：[docs/adr/ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）。
@@ -1013,5 +1065,6 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
   [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
   §RI5 Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
   固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
+- ADR-018：F1 SQL artifact、结果 artifact 与结果访问边界（**Proposed**：[docs/adr/ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

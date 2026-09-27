@@ -1,6 +1,7 @@
 # F1 StarRocks 受治理只读查询与锁定预览设计
 
-> 状态：Draft v7，按负责人确认的“目标版本区间内增量登记只读语句、未登记请求级拒绝”策略修订，等待独立复审。
+> 状态：Approved v7。独立复审 SHA `e2727cf117b62f9c9a23ec1ce37c046312475f5a` 通过，经 PR #108 合并（`91cadd43e13a4b1178fbddcbdfd4b41bf0decb36`）。
+> F1-0 真源修订与实施计划见 [F1 实施计划](../plans/2026-09-27-f1-starrocks-readonly-query.md)。
 > 日期：2026-09-27。
 > 设计基线：c69a09bd8595df9808754b5e4272b7c95ee78a43。
 > 审查修复基线：016eae3d4bb07c9cc592effd368929a112d83d3c。

@@ -2,6 +2,7 @@
 
 - 状态：Accepted Revision（2026-09-10）+ Accepted RI3 Amendment（2026-09-12；H 层仍未单独签认）
   + **Accepted RI5 Amendment（2026-09-14；不授予 PR 3E / RI2 现场 GO，H 层仍未单独签认）**
+- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-01；候选修订 2026-09-10、2026-09-12、2026-09-13（RI5 修订 2026-09-14 接受）
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
@@ -301,3 +302,40 @@ W4c（让运维目标进入 Web Admin 的测试范围）**必须另修 ADR-007**
 ## 回滚
 
 撤销本 ADR 即回到「首批能力与调用许可未拍板」状态，M3 不得立项。回滚必须以修订本 ADR 的方式显式记录，不通过修改代码默认值实现。
+
+## F1 修订（2026-09-27，Proposed）
+
+- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md)
+  （PR #108，合并提交 `91cadd43e13a4b1178fbddcbdfd4b41bf0decb36`）
+- 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
+
+### 登记第四个能力
+
+本修订在 D1 首批三个能力之外，登记一个独立的第四能力；D1 表中三个能力的边界不变，
+`starrocks.slow_query.diagnose` 仍“不接收用户或模型原始 SQL”。
+
+| capability_id | 版本 | 路线 | 边界 |
+| --- | --- | --- | --- |
+| `starrocks.readonly_query` | 1.0.0 | F1 | 唯一 operation `execute_readonly_query`，`READ` + `RESTRICTED`；输入只来自 Web 显式 SQL 模式的受保护 SQL artifact，经完整确认、原文 hash 绑定和 `confirmed_readonly` SQLGuard 后原样执行；模型、飞书消息和普通 `RequestEnvelope` 都不能提供可执行 SQL；结果只进入 ADR-018 的有界 artifact |
+
+非目标：写入、DDL、KILL、导出、外部 Catalog、UDF、table function、UNNEST、hint 和 E1 均不因本
+能力开放；自然语言生成 SQL 属 F1-NL，另需设计与批准。
+
+### F1 授权矩阵
+
+| 阶段 | 允许 | 仍不允许 |
+| --- | --- | --- |
+| F1-0 | 文档、ADR、详细实施计划 | 任何 F1 行为源码、migration、真实调用 |
+| F1-1 至 F1-3、F1-G | 各切片取得负责人开工口令后的离线实现：本地隔离 PostgreSQL（C 层）、fake/recording streaming adapter、正式 Web/worker 进程 | 连接任何真实 StarRocks；CI 持有 StarRocks 配置或 secret |
+| F1-H | D 层非生产真实只读：另写现场计划，逐项固定 exact SHA、StarRocks/PyMySQL 版本、target、专用 credential 与 grants、resource group、query queue、数据处置、时间窗与回退，并取得现场 GO | 生产目标；把 test-env 证据外推为部署、canary 或 UAT |
+| 生产 | 只能按 H 层逐项批准 | 由 F1-H 证据自动推导 |
+
+F1 专用 credential 只能是 DBA 批准的内部 Catalog 跨库只读账号，只授予预期对象 SELECT，
+无写、管理、UDF、外部 Catalog 和文件权限。E1、E2 与 D6 条件不因本修订改变；CI 的 E1 与
+StarRocks 调用次数继续恒为 0。
+
+### 与 D5 的关系
+
+本节就是 D5 要求的“更换首批能力前先修订本 ADR”。它不放宽 A、B2、D、F、G、H 任一层的现场
+GO，也不授予 W4c 或 Web 进程任何目标客户端。
