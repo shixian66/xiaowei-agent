@@ -1,9 +1,10 @@
 # F1 StarRocks 受治理只读查询与锁定预览设计
 
-> 状态：Draft v2，等待负责人书面审查。
+> 状态：Draft v4，按第二轮复审及修复后独立复核修订，等待负责人书面复审。
 > 日期：2026-09-27。
 > 设计基线：c69a09bd8595df9808754b5e4272b7c95ee78a43。
 > 审查修复基线：016eae3d4bb07c9cc592effd368929a112d83d3c。
+> 第二轮复审基线：3a48cbe36d40a9d4fcece7e68ad25e718f6a929c。
 > 本文只修订 F1 设计，不授权源码、migration、真实 StarRocks 调用、部署、canary、UAT、F2、F3、F1-NL 或 E1。
 
 相关真源：
@@ -27,8 +28,9 @@ F1 第一阶段只交付 Web 显式 SQL 模式下的直接 SQL 查询。用户�
 target 和本次预算；用户明确确认后才创建执行任务。系统执行原始 UTF-8 字节对应的同一 SQL，不格式化、
 不改写、不自动追加 LIMIT。
 
-自然语言生成 SQL 仍是已确认的产品方向，但拆成 F1-NL 单独设计、单独批准。F1-NL 未完成不改变
-“模型只产候选、完整展示、用户确认后才可执行”的既定边界；它也不能借本设计进入实现。
+自然语言生成 SQL 仍是已确认的产品方向，但拆成 F1-NL 单独设计、单独批准。“模型只产候选、完整
+展示、用户确认后才可执行”只是 F1-NL 待批准的设计方向，不代表 AGENTS.md 已允许模型产生可执行
+SQL；F1-NL 也不能借本设计进入实现。
 
 飞书和其他聊天入口在 F1 只返回可信 Web SQL 页面链接，不解析、不保存、不执行消息中的 SQL。F1 查询
 本身不走 ApprovalGate，但仍完整经过：
@@ -59,7 +61,7 @@ sql_select_limit 不影响 F3。
 | P1-4 通用消息信封会永久保存 SQL | 成立 | RequestEnvelope.text 上限为 8192，TaskSubmission 又把整个 envelope 持久化；飞书猜 SQL 还会扩大入口权力；见 §5.1 至 §5.3 |
 | P1-5 崩溃恢复可能重复执行查询 | 成立 | 当前未提交 step attempt 在新 fencing token 下可再次 PROCEED，max_tool_calls 耗尽又被映射为 FAILED；见 §10 |
 | P1-6 排队、超时和连接关闭不闭合 | 成立 | TaskStatus 没有 queued；asyncio.wait_for 取消不了 asyncio.to_thread 中的 PyMySQL；提前释放进程内锁会放大并发；见 §8 |
-| P1-7 AST、SHOW、DESC 和 hint 规则有缺口 | 成立 | sqlglot 30.8.0 实测不能可靠区分注释 hint，SHOW catalog 不一定成为 Table，EXPLAIN 与 DESC 共用 Describe 形状；见 §7 |
+| P1-7 AST、SHOW、DESC 和 hint 规则有缺口 | 成立 | 项目锁定 sqlglot 30.17.0 实测不能可靠区分注释 hint，SHOW catalog 不一定成为 Table，EXPLAIN 与 DESC 共用 Describe 形状；见 §7 |
 | P1-8 未逐项满足 Web §11.2 | 成立 | 原稿未处理 approver 真源、ADR-005 适用范围和独立数据处置授权；见 §11.3 |
 | P1-9 target 有多个真源 | 成立 | 当前 Resolver 使用代码内目录，真实 adapter 使用环境变量，Web resources 文件只报告 generation；见 §6 |
 | P1-10 自然语言 SQL 没有获批模型端口 | 成立 | 当前只有分类和终态 advisory 两个窄模型端口，且模型请求总上限为 512 KiB；见 §12.2 |
@@ -85,12 +87,37 @@ sql_select_limit 不影响 F3。
 数百至数千行 SQL，本稿暂保留 1 MiB 系统硬上限，并把“接近上限的 sqlglot 耗时、峰值内存和递归深度”
 列为 F1-0 必验项。若证据不达标，再以实测结果缩小上限，不凭经验数字直接改产品边界。
 
-### 2.3 五个共同根因
+### 2.3 第二轮复审意见
+
+| 意见 | 核对结论 | 证据与处理 |
+| --- | --- | --- |
+| 新 P1：等待 target slot 会卡住唯一 worker | 成立 | 当前 worker 对 candidates 串行 await，且 begin_step_attempt 在 Gateway 前消耗预算；按 §8.4 和 §10 改成非阻塞资源退让 |
+| P2-1：sqlglot 版本写错 | 成立 | uv.lock 与项目锁定环境都是 30.17.0；已修正文档和 probe 口径 |
+| P2-2：1 MiB SQL 过不了请求体门 | 成立，原意见措辞需收窄 | JsonBodyLimitMiddleware 全局挂载但只对登记路径生效；现有唯一 limit 默认 128 KiB 且配置上界小于 1 MiB。F1 改用 §5.1 的原始 SQL body 和路由级策略 |
+| P2-3：系统库未定义 | 成立 | information_schema 可含任务 SQL、日志和运行信息；§6、§7.3 改为业务库显式 allowlist，并固定拒绝系统库 |
+| P2-4：同步线程如何写异步 sink 未定义 | 成立 | 当前 StarRocks adapter 使用 asyncio.to_thread，而 PostgreSQL store 为 async；§5.5 冻结线程桥、背压和迟到写 fencing |
+| P2-5：契约测试绑定完整原句 | 成立但不阻断设计 | 测试改为按章节锚点检查关键语义；仍只是一层文档守卫，不冒充产品行为测试 |
+
+没有把第二轮 P2-3/P2-4 留到实施时临场决定：两者分别关系数据访问边界和超时后的写入隔离，属于本设计
+已有 SQLGuard 与 ResultChunkSink 主链，应在进入详细计划前闭合。真实 StarRocks 系统视图内容仍留给
+F1-H 验证，设计阶段采用 fail-closed allowlist，不依赖现场恰好没有敏感列。
+
+### 2.4 修复后独立复核
+
+| 意见 | 核对结论 | 共同根因与处理 |
+| --- | --- | --- |
+| 恢复分类晚于资源检查，deadline 可能在首次 BUSY 崩溃后重置 | 成立 | 调度恢复与资源争抢次序没有形成一份状态机；§8.4 改为 inspect → 新执行水合/准入 → 持久化 deadline → deadline check → try_acquire → begin，并在 lease 写事务内重验 deadline |
+| 原始 SQL bytes 放入 ToolCall.typed_args 不可实现 | 成立 | 把进程内敏感材料误塞进只接受 JSON 标量的公共契约；§5.4 拆成标量 ToolCall 与不可持久化 HydratedQuery，并用 sql_hash 绑定 |
+| SHOW DATABASES 绕过业务库 allowlist | 成立 | 只检查了有对象 target 的 SHOW；§7.3 直接拒绝无业务库 target 且无法原样过滤的 SHOW DATABASES |
+| 文档测试只看词存在可误绿 | 成立 | 旧守卫无法证明顺序和否定语义；契约测试改为检查规范顺序、决策表单元格及允许/拒绝分区 |
+
+### 2.5 五个共同根因
 
 1. 输入类型没有与普通对话分离，导致 SQL 可能进入模型、TaskSubmission 和聊天入口；
 2. Plan 中的引用没有一条受信的运行时水合链，导致 SQLGuard、hash 和 adapter 看见的内容可能不同；
 3. 现有 ToolResult/Evidence 面向小型诊断行，不适合大结果、重复列名和短期敏感数据；
-4. 当前 attempt、timeout 和进程内并发语义默认工具可重试、可及时取消，不适合昂贵查询；
+4. 当前把“等资源”和“已开始工具尝试”混在同一生命周期里，且 timeout/进程内并发语义默认工具可重试、
+   可及时取消，不适合昂贵查询；
 5. target、SQL 方言和 Web 前置条件分散在多个旧里程碑，未形成 F1 唯一真源。
 
 后续设计按这五个根因修正，不按十条评论分别增加 operation 名称特判。
@@ -104,7 +131,7 @@ sql_select_limit 不影响 F3。
 - 入口为已认证 Web 的显式 SQL 编辑和确认页面；
 - 单条、多行、最长 1 MiB UTF-8 SQL；
 - SELECT、CTE、JOIN、子查询、UNION、聚合、窗口函数和内建标量函数；
-- 闭集元数据查询：SHOW DATABASES、SHOW TABLES、SHOW COLUMNS、DESC、SHOW CREATE TABLE；
+- 闭集元数据查询：SHOW TABLES、SHOW COLUMNS、DESC、SHOW CREATE TABLE；
 - target 内部 catalog 的数据库和表；
 - 普通行注释和普通块注释；
 - 有界流式预览、锁定结果页、ACL、配额、24 小时保留和清理；
@@ -134,7 +161,7 @@ sql_select_limit 不影响 F3。
    ChannelStore 只保存引用、hash 或安全摘要；
 2. 确认页展示、SQLGuard 校验、ToolCall hash 和 adapter 执行绑定同一份原始 UTF-8 字节；
 3. 缺少、过期、越权、hash 不符或 target 不符的 SQL artifact 一律在 Gateway 前拒绝；
-4. operation 声明需要 SQL 时，缺少 QueryEnvelope 必须拒绝，不能沿用“没有 SQL key 就跳过”；
+4. operation 声明需要 SQL 时，缺少进程内 HydratedQuery 必须拒绝，不能沿用“没有 SQL key 就跳过”；
 5. 结果行不进入 AdapterResponse.payload、ToolResult.data_view、Evidence 或 TaskOutcome；
 6. 列按 ordinal 保存，不能用列名作 map key；同名列必须原样保留；
 7. F1 查询一旦开始尝试，未知结果不能自动重放；
@@ -151,6 +178,19 @@ Web handler 只把认证上下文和以下 DirectSqlDraft 交给 application 层
 - resource_id；
 - SQL 原始 UTF-8 bytes；
 - draft idempotency key。
+
+提交端点固定为 POST /app/api/sql-drafts。SQL 使用 Content-Type: application/sql; charset=utf-8 的原始
+请求体传输；resource_id 和 idempotency key 分别使用单值、长度受限的 X-Xiaowei-Resource-Id 与
+Idempotency-Key header，重复 header 一律拒绝，不把 SQL 放进 URL 或 JSON。
+路由在读取和解码前按原始请求体执行 1_048_576 bytes 硬上限，拒绝 BOM、非法 UTF-8、空 body 和多余
+content encoding。这样 SQL 上限就是用户确认并保存的 SQL bytes 上限，不会被 JSON 转义和 envelope
+字段额外放大。
+
+现有 api_request_body_limit_bytes 默认 128 KiB，且配置约束本身小于 1 MiB；它继续保护原有 JSON
+写入口，不能被整体调高来迁就 F1。F1-0 复用现有 body-limit 实现，把它收成一份按精确 path、method、
+media type 和 limit 匹配的路由策略表：原 JSON 路由保持原上限，SQL 草稿路由单独使用不可由 Web 调高的
+1 MiB 上限。该策略不替代现有 session、scope、Origin/CSRF 和激活状态校验。未知写路由仍由现有安全测试
+拒绝，不能再挂一个旁路中间件。
 
 入口只传 `resource_id`，不构造 ResolvedTarget，不计算 target_fingerprint，也不选择 adapter。请求体使用
 专用 SQL contract，受 1 MiB byte 上限约束，不复用 RequestEnvelope.text 的 8192 字符字段。
@@ -207,28 +247,40 @@ OperationSpec 增加受信 query requirement，闭集至少区分：
 - template_locked；
 - confirmed_artifact。
 
-该 requirement 由 CapabilitySnapshot 派生，不能由 step 或用户自报。confirmed_artifact 的通用 Runner
-水合流程是：
+该 requirement 由 CapabilitySnapshot 派生，不能由 step 或用户自报。现有 ToolCall.typed_args 使用
+FrozenMap，只接受 JSON 标量；原始 bytes 或嵌套 DTO 不能塞进去，也不能为了 F1 放宽这条公共契约。
+confirmed_artifact 的通用 Runner 水合流程是：
 
 1. 重新解析当前 target、policy 和 config revision；
 2. 从 SqlArtifactStore 读取 sql_ref 一次；
-3. 校验 task、actor、tenant、environment、target、confirmation_ref、expiry 和 SHA-256；
-4. 生成运行时 QueryEnvelope，包含原始 SQL、hash、引用、target/config 和有效预算；
-5. 把 QueryEnvelope 放入本次 ToolCall.typed_args；
-6. StepAdmission 先执行 ToolPolicy，再按 operation requirement 强制执行 confirmed_readonly SQLGuard；
-7. AdmissionCertificate 的 tool_call_hash 覆盖含原始 SQL 的完整 ToolCall；
-8. ToolGateway 重算 tool_call_hash 后，把同一个 ToolCall 交给 target-bound adapter；
-9. adapter 在发送前再次计算 SQL bytes 的 SHA-256；不重新读 artifact，也不接受另一份 SQL。
+3. 校验 task、actor、tenant、environment、target、confirmation_ref、expiry 和 SHA-256，创建不可变
+   HydratedQuery；
+4. 构造只含标量的 ToolCall，typed_args 保存 sql_ref、sql_hash、result_ref、resource_id、
+   target_fingerprint、config_revision、confirmation_ref 和三个有效预算值；
+5. StepAdmission 分别接收 ToolCall 与 HydratedQuery，先执行 ToolPolicy，再按 operation requirement 强制
+   执行 confirmed_readonly SQLGuard，并校验所有引用、预算及 bytes hash 一致；
+6. AdmissionCertificate 的 tool_call_hash 覆盖完整标量 ToolCall，其中 sql_hash 以 SHA-256 绑定原始 bytes；
+7. ToolGateway 重算 tool_call_hash，并再次校验 HydratedQuery 的引用、target/config、预算及 bytes hash；
+8. Gateway 创建私有、不可持久化的 StreamingAdapterRequest，把同一 SQL bytes 和 ResultChunkSink 交给
+   target-bound adapter；adapter 在发送前最后一次计算 SHA-256，不重新读 artifact，也不接受另一份 SQL。
 
-StepAdmission 接口必须校验已经水合的 ToolCall/QueryEnvelope，而不是只看 PlanStep。任何 required query
-缺失、字段多余、hash 不符或 artifact 无法读取都返回闭集拒绝，Gateway 调用次数为 0。现有
-template_locked 慢查询仍按原参数重编译和逐字节比对，不经 confirmed_artifact 分支。
+| 载体 | 可含 SQL bytes | 内容与约束 |
+| --- | --- | --- |
+| `ToolCall.typed_args` | 否，只允许 JSON 标量 | 引用、hash、target_fingerprint、config_revision 和预算标量 |
+| `HydratedQuery` | 是 | 仅进程内；bytes 的 SHA-256 必须等于 ToolCall.sql_hash |
+
+HydratedQuery 是 Runner 从受保护 artifact 水合出的运行时值，不是 Plan、ToolCall、TaskStore 或用户可构造的
+输入。它只能作为 StepAdmission 和 Gateway 的受信 keyword-only 参数传递；StreamingAdapterRequest 只在
+Gateway 内创建。任何 required query 缺失、字段多余、hash 不符或 artifact 无法读取都返回闭集拒绝，
+Gateway 调用次数为 0。现有 template_locked 慢查询仍按原参数重编译和逐字节比对，不经
+confirmed_artifact 分支。
 
 ToolCall.timeout_seconds 由有效 query timeout 和 §8.3 的 gateway grace 确定，不再固定为 30 秒。该
 水合规则属于 query requirement 的共享机制，不在 Runner 里判断 F1 operation 名称。
 
-含 QueryEnvelope 的 ToolCall 只在当前进程内存中存活；trace/audit 不得序列化 typed_args，只记录 sql_ref、
-SQL hash、tool_call_hash 和闭集决定。解析、driver 和 server error 也不能回显 SQL 片段。
+HydratedQuery 和 StreamingAdapterRequest 只在当前进程内存中存活；trace/audit 不得序列化它们，也不得
+展开 ToolCall.typed_args，只记录 sql_ref、SQL hash、tool_call_hash 和闭集决定。解析、driver 和 server
+error 也不能回显 SQL 片段。
 
 ### 5.5 结果只走 Gateway 管理的流式 sink
 
@@ -243,6 +295,26 @@ adapter 使用位置数据写入 sink：
 - 同名列由不同 ordinal 区分；
 - chunk 最多 100 行；
 - sink 自己执行行数、规范编码字节数、配额和 fencing 校验。
+
+ResultChunkSink 的持久化接口保持 async；运行在 asyncio.to_thread 中的同步 PyMySQL 读取循环只拿到
+Gateway 创建的 ThreadsafeResultChunkWriter，不直接持有 PostgreSQL store，也不在工作线程另起 event
+loop。writer 在创建它的主 event loop 上用 asyncio.run_coroutine_threadsafe 提交一个 chunk，并同步等到
+该 chunk 的持久化回执后才继续 fetchmany；Future.result 的等待上限取 sink write 上限与剩余 Gateway
+deadline 的较小值。任一时刻最多一个 chunk 在途，形成明确背压，不建无界队列。
+
+每次 write 都携带 task、step、result_ref、task fencing 和 result fencing。Gateway timeout 或取消时，
+async 侧必须先把 sink 原子标为 abort 并轮换/撤销 result fencing，再向调用方返回；此后仍在运行的同步
+线程产生的迟到写入、seal 或 activation 全部被 store 拒绝。writer 收到 closed/fenced 结果后令 adapter
+退出读取并在 finally 关闭独占 connection。无法确认线程和连接已经退出时不主动释放 target slot，只等
+§8.4 的 lease TTL；staging chunks 最终由 retention 清理。
+
+abort 持久化失败时，Gateway 不能返回成功、不能 seal/activate，也不能释放 slot；旧 fencing 下可能迟到的
+chunk 最多仍是不可见 staging 数据。恢复路径先幂等补写 abort/过期状态，再由 retention 清理，不能把存储
+故障吞成正常 timeout。
+
+正常路径只有在 to_thread 已返回“连接已关闭”的结构化回执后，Gateway 的 async 侧才可 seal；同步线程
+不能直接 seal 或 activate。相关测试必须证明慢 PostgreSQL 写会反压 fetch、Gateway 超时后迟到 chunk
+写不进去，以及移除 result fencing 后该反例会转红。
 
 adapter 返回的 AdapterResponse 只含有界执行元数据，例如 query id、耗时、扫描量、峰值内存和截断类型；
 payload 必须为空。Gateway 产生的 ToolResult.data_view 也必须为空，raw_ref 只引用 result_ref。
@@ -268,12 +340,14 @@ F1 把 task-worker 在启动时成功加载并校验的 ResourcesConfig generati
 
 - tenant_id；
 - F1 专用 credential reference；
+- default database 和大小写规范化后的 allowed_database_names 业务库闭集；
 - DBA 带外批准的 version、grants、identity 和必要 DDL digest 及 source_ref；
 - resource group 标识和审批引用；
 - F1 查询预算；
 - enabled 与 generation。
 
-host、port、database、username、TLS、secret ref、预算和 preflight digest 全部来自同一 snapshot。
+host、port、database、allowed_database_names、username、TLS、secret ref、预算和 preflight digest 全部来自
+同一 snapshot。default database 必须属于 allowed_database_names；系统库永远不能加入该列表。
 现有 XIAOWEI_STARROCKS_* 测试装配只保留给 M6b test_readonly profile，不能与 F1 ResourceSnapshot
 同时启用；F1 release 装配发现双真源直接启动失败。
 
@@ -330,23 +404,41 @@ AST 前增加一个 quote-aware lexer pass，仅识别语句边界和注释类�
 SQL 必须用项目锁定的 StarRocks 方言成功解析为恰好一条语句。允许：
 
 1. 根语句为 SELECT；
-2. SHOW DATABASES 且没有 catalog、db、LIKE、WHERE 或其他参数；
-3. SHOW TABLES、SHOW COLUMNS、SHOW CREATE TABLE 的数据库位置最多是一个单段内部 database
+2. SHOW TABLES、SHOW COLUMNS、SHOW CREATE TABLE 的数据库位置最多是一个单段内部 database
    identifier，不接受 catalog；
-4. DESC 的 this 必须是 Table，且没有 style、kind、partition、format、as_json 或嵌套 query。
+3. DESC 的 this 必须是 Table，且没有 style、kind、partition、format、as_json 或嵌套 query。
 
 拒绝：
 
 - 所有写入、锁、文件、事务、session、变量、动态 SQL、procedure 和 explain 节点；
+- SHOW DATABASES 及其别名；它没有业务库 target，原样执行会枚举 credential 可见的非 allowlist 或系统库，
+  而过滤结果又会改变用户 SQL 语义；
 - Describe 内含 Select、Insert 或其他语句的 EXPLAIN/EXPLAIN ANALYZE 形状；
 - 任意 AST 位置出现三段及以上表名，包括 default_catalog.db.table；
 - 任意 AST 位置出现非当前 target 内部 catalog；
+- 任意 SELECT 基础表、SHOW 目标或 DESC 目标解析到 information_schema、`sys`、`_statistics_`、
+  `statistics` 或其他 StarRocks 系统库；
 - table function、UNNEST、qualified function；
 - optimizer/resource/session/version comment hint。
 
-一段基础表名按 target 配置的 default database 确定性解析；两段 db.table 允许；CTE alias 和 derived
-table 不被误当基础表。所有数据库和表引用在当前 credential 权限面内再次 fail-closed。不存在的对象、
-类型错误或 StarRocks 执行错误结构化返回，不自动修改或重试。
+一段对象名按 target 配置的 default database 确定性解析；两段 db.table 允许；CTE alias 和 derived table
+不被误当基础表。SHOW TABLES 未显式给库时同样解析到 default database。SELECT、SHOW 和 DESC 解析出的
+每一个业务 database 都必须命中 ResourceSnapshot 的
+allowed_database_names 闭集；没有命中即在发送 SQL 前拒绝，因此仍支持跨多个获批业务库的 JOIN，并不
+退化成单库/单表限制。系统库名先按 F1-H 验证的 StarRocks identifier 规则规范化，并至少对上述保留名做
+大小写不敏感拒绝；无法证明 identifier 规则时关闭 target。credential 即使意外拥有系统库 SELECT 权限也
+不能绕过这层 Guard。
+
+[StarRocks Information Schema](https://docs.starrocks.io/docs/sql-reference/information_schema/) 明确列出
+任务定义、load 日志、变量、节点和运行指标等系统视图；
+[SHOW PROC 官方示例](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/nodes_processes/SHOW_PROC/)
+同时展示 information_schema、sys 和 _statistics_ 系统库；
+[数据导入排障文档](https://docs.starrocks.io/docs/loading/loading_introduction/troubleshooting_loading/) 还使用
+statistics 系统库保存历史。F1 初版不开放任一系统视图；将来若有运维查询需求，应新增模板化 capability，
+而不是放宽 confirmed_readonly。
+
+所有数据库和表引用还要在当前 credential 权限面内再次 fail-closed。不存在的对象、类型错误或 StarRocks
+执行错误结构化返回，不自动修改或重试。
 
 未限定名称的 scalar、aggregate 和 window function 可以使用；F1 不维护容易漂移且会误伤大数据 SQL 的
 内建函数白名单。UDF 边界由“拒绝 qualified/table function + F1 credential 无 UDF 权限”共同承重；
@@ -371,7 +463,7 @@ sql_select_limit 定义为最大返回行数，并把 query_timeout 定义为当
 | 保存预览行 | 1000 | 第 1001 行仅作 has_more 哨兵 |
 | 保存预览字节 | 20 MiB | 按规范编码后的完整行累计 |
 | server query timeout | 180 秒 | 不含等待 target slot |
-| target slot 等待 | 300 秒 | 超时后不建立连接 |
+| target slot 累计等待 | 300 秒 | 多次非阻塞退让共用同一 deadline；超时后不建立连接 |
 | 单 target 活跃查询 | 1 | 跨 task-worker |
 | SQL 语句数 | 1 | 不接受脚本 |
 | SQL 原文 | 1 MiB UTF-8 | 需通过近上限解析资源测试 |
@@ -398,7 +490,7 @@ group 表达式或 connector fallback。保存后必须重启 task-worker，见 
 - connect/write timeout：最多 10 秒，且不大于 read timeout；
 - StarRocks session query_timeout：Q，Q ≤ 180；
 - PyMySQL read_timeout：Q + 10 秒；
-- ToolGateway timeout：Q + 20 秒；
+- ToolGateway timeout：Q + 20 秒，从取得 slot 并写入 step started 后开始，不包含调度退让；
 - target slot lease TTL：Q + 30 秒；
 - ToolCall 仍满足现有 300 秒硬上限。
 
@@ -407,12 +499,58 @@ ADR-012 和 Settings 的当前 25/30 秒限制必须随 F1 profile 一起修订�
 
 ### 8.4 跨 worker slot
 
-TaskStatus 不新增 QUEUED。等待 slot 时任务保持 RUNNING，并写结构化 substage=waiting_target_slot；
-等待时间和查询执行时间分别观测。等待超过 300 秒结构化失败，且 StarRocks 连接数仍为 0。
+TaskStatus 不新增 QUEUED。slot 等待使用非阻塞争抢，不在 task-worker coroutine 里 sleep 或等待数据库资源。
+任务保持 RUNNING，并由 TaskStore 保存 defer_reason=target_slot_busy、substage=waiting_target_slot、首次
+wait_started_at、固定 wait_deadline 和 next_attempt_at；等待时间和查询执行时间分别观测。
 
-TargetQueryLeaseStore 以 target_fingerprint 为 key，使用数据库唯一约束、lease、fencing 和 expiry。
-取得 slot 后才创建 StarRocks 连接。正常路径必须等同步 worker thread 的 finally 已确认连接关闭，再
-主动释放 slot。
+等待窗口必须在第一次资源争抢前持久化，不能等看到 BUSY 后才开始计时。ensure_slot_wait_window 使用数据库
+时钟、当前 task fencing 和单次 CAS：没有窗口时原子写 wait_started_at=now、wait_deadline=now+300 秒；
+已有窗口时只返回原值。事务在提交前崩溃等于从未争抢 slot，恢复后重新建立一次；提交后崩溃则 deadline
+已经存在，redispatch、进程重启或 task lease 换 owner 都不能重置。
+
+TargetQueryLeaseStore 属于 persistence 的执行调度租约，不持有 StarRocks client、SQL 或 result rows，也
+不是第二个 ToolGateway。它以 target_fingerprint 为 key，使用数据库唯一约束、lease、fencing 和 expiry。
+WorkflowRunner 是唯一协调者，顺序固定为：
+
+1. 调用 TaskStore.inspect_step_execution，以当前 task grant 做只读、fenced 的恢复分类。已 committed 直接
+   adopt；已有未提交 started 直接 INDETERMINATE；drift、预算耗尽或不可运行按闭集处理。只有
+   ELIGIBLE_TO_START 才能继续，以上分支都不争抢 target slot；
+2. 仅在 ELIGIBLE_TO_START 分支水合 ToolCall/HydratedQuery 并完成 StepAdmission；artifact 过期、target/
+   policy/config 漂移只影响尚未 started 的新执行，不能遮蔽已 committed 或未提交 started 的恢复决定；
+3. 调用 TaskStore.ensure_slot_wait_window，原子建立或读取固定等待窗口；
+4. 调用 TaskStore.check_slot_wait_deadline。已到期直接
+   FAILED(target_slot_wait_timeout)，StarRocks 连接数和 target slot 获取数都为 0；
+5. 调用 TargetQueryLeaseStore.try_acquire(grant, not_after=wait_deadline) 做一次非阻塞争抢；该事务也用数据库
+   时钟重验 not_after，禁止在 deadline 到期后取得 slot；
+6. 返回 BUSY 时调用 TaskStore.schedule_deferral：把 next_attempt_at 设为
+   min(now + 5 秒, 当前 slot expires_at, wait_deadline)，轮换 task fencing 并结束当前 task lease；
+7. Runner 抛出内部控制信号 WorkflowDeferred，worker 收到后把本 candidate 视为已退让，并在同一轮继续
+   处理其他任务；
+8. 取得 slot 后，Runner 调用 TaskStore.begin_step_attempt。它在同一锁内重新执行与
+   inspect_step_execution 相同的恢复/预算判定，消除 inspect 与资源争抢之间的竞态；只有原子新建 started
+   的 PROCEED 才能调用 Gateway.invoke；
+9. 把不透明 TargetSlotGrant 作为 Gateway.invoke 的受信 keyword-only 参数传入，不放进 ToolCall.typed_args、
+   Plan 或用户输入；grant 自身绑定 tool_call_hash，Runner 不持有 StarRocks connection；
+10. Gateway 在建连前重新校验 TargetSlotGrant 的 target、task、step、tool_call_hash 和 fencing。任何漂移都
+    零连接拒绝；begin_step_attempt 未返回 PROCEED 时，只能在证明尚未建连后释放这个未使用 slot。
+
+| 路径 | task_failure_count | StepExecutionRecord | max_tool_calls | 当前 task lease |
+| --- | --- | --- | --- | --- |
+| BUSY schedule_deferral | 不变 | 不创建 | 不消耗 | 结束并轮换 fencing |
+
+inspect_step_execution 只分类、不写 started、不消费预算；begin_step_attempt 才是创建 started 与消费一次工具
+预算的唯一事务。两者复用 TaskStore 内同一个判定函数，不能各复制一套恢复语义。
+
+schedule_deferral 是通用的“资源忙退让”命令，但 F1-0 只为受信 operation requirement 明确声明的 target
+slot 启用，不按 operation 字符串特判。它必须像 schedule_retry 一样幂等和 fenced，却没有“执行失败”语义。
+Task attempt 可以因 worker 再领取而递增；它只记录调度领取，不等于 Step attempt，也不影响工具预算。
+现有 run_with_task_heartbeat 必须把已提交的 WorkflowDeferred 当作正常退让：即使旧 heartbeat 同时因 fencing
+轮换而续租失败，也不能覆盖存储 winner、改判基础设施失败或再安排 retry；收尾后 worker 继续下一 candidate。
+XiaoweiRuntime 必须像透传 WorkflowPaused 一样透传 WorkflowDeferred，worker 在 RetryableTaskError 之前
+单独捕获并返回“未执行”；不能进入 Evidence、Reflection、终态 finalize 或 task failure backoff。
+
+取得 slot 后才可创建 StarRocks 连接。正常路径必须等同步 worker thread 的 finally 已确认连接关闭，再由
+Gateway 主动释放 slot。
 
 asyncio timeout、取消、worker 崩溃或无法确认连接关闭时不得提前释放；停止续租并等待 TTL 到期。即使
 客户端已经返回超时，服务端查询仍可能残留到 Q，产品必须显示“终止未确认”，不能宣称取消成功。
@@ -519,18 +657,35 @@ PostgreSQL DELETE 不能证明磁盘页和旧备份立即物理擦除。上线�
 
 ## 10. 一次尝试、崩溃恢复和取消
 
-F1 依靠现有 PlanBudget.max_tool_calls=1 表达“不自动重放”，不新增 operation 名称特判。TaskStore 的
-step attempt 决策增加通用结果 PREVIOUS_ATTEMPT_UNCERTAIN：
+先严格区分两个事实：Task attempt 是 worker 对任务的一次 fenced 领取；Step attempt 才表示一次工具尝试。
+等 slot 时可以存在 Task attempt，但没有 started 的 StepExecutionRecord，因此不消耗 max_tool_calls，也不
+构成“SQL 可能已发送”。
 
-- 没有旧 attempt：允许第一次 PROCEED；
-- 已有 committed attempt：ADOPT_COMMITTED_RESULT，不调用 Gateway；
-- 已有未提交 attempt，且新的 fencing owner 无法证明工具未开始：返回
-  PREVIOUS_ATTEMPT_UNCERTAIN；
-- Runner 把该决定映射为 TaskStatus.INDETERMINATE，Gateway 调用次数为 0；
-- 普通 budget exhaustion 仍是确定性 FAILED，不能与“上次可能已经执行”混为一类。
+Runner 在重新读取 SQL artifact、水合或 Admission 前，先用 inspect_step_execution 分类已有执行事实；只有
+无 StepExecutionRecord 且预算仍可用的 ELIGIBLE_TO_START 才读取当前 artifact 并进入等待窗口。这样 artifact
+过期或 target/policy 漂移不会把既有 committed 错判为拒绝，也不会遮蔽未提交 started 的
+INDETERMINATE。取得 target slot 后、创建连接前，Runner 再调用 begin_step_attempt 原子重验并开始。该
+存储事务同时创建 StepExecutionRecord、写非空 started_at 并把工具预算加 1；三件事不可拆分。因此“有
+Step attempt 但没有 started”不是可持久化状态。migration/check constraint 发现这种旧数据或损坏数据必须
+fail-closed，不能靠恢复代码猜测。对于 confirmed_artifact，重复 begin 同一个未提交 started 也不能再次
+得到 PROCEED；never-replay 语义从受信 OperationSpec/query requirement 派生，不按 operation 名称特判。
 
-attempt 在取得 target slot 后、连接前写入 started 事实；因此即使崩溃发生在真正发送 SQL 前，恢复也
-保守地不重放。若 ToolResult 已提交但 result 仍 sealed，恢复只执行幂等 activation，不重新查询。
+恢复决策表固定为：
+
+| 持久事实 | 能证明什么 | 决定 |
+| --- | --- | --- |
+| 有 Task attempt，但没有 StepExecutionRecord | 工具未 started；可能正在退让或 worker 在写 started 前崩溃 | inspect 返回 ELIGIBLE_TO_START；建立/沿用 deadline 后才可非阻塞争抢 slot，不消耗 max_tool_calls |
+| 有 TargetSlotGrant，但没有 StepExecutionRecord | 仍能证明未建连；只是 slot 可能等 TTL 回收 | 不调用 Gateway；slot 可用后允许第一次 begin_step_attempt |
+| 本次 begin_step_attempt 原子新建 started | 当前 live caller 是唯一获准的首次执行者 | 仅这一条控制流可调用 Gateway 一次 |
+| 已有未提交 started，无论 task fencing 是否变化 | 无法证明 SQL 未发送或结果未产生 | inspect 在 slot 前返回 PREVIOUS_ATTEMPT_UNCERTAIN → TaskStatus.INDETERMINATE；Gateway 调用次数为 0 |
+| 已有 committed Step attempt | 结果已成为任务事实 | inspect 在 slot 前返回 ADOPT_COMMITTED_RESULT；sealed result 只做幂等 activation，不重新查询 |
+| 没有不确定 started，但预算因其他已提交步骤耗尽 | 确定性预算不足 | BUDGET_EXHAUSTED → FAILED，不能伪装成不确定 |
+
+等待窗口事务提交前崩溃时尚未争抢 slot；恢复后重新建立窗口是第一次有效计时，不会漏掉真实等待。窗口提交
+后崩溃、schedule_deferral 崩溃或 task 重新领取都沿用原 wait_deadline。每次 try_acquire 前和 lease 写事务内
+都重验 deadline，所以到期后即使 slot 已空闲也不能执行。取得 slot 后、begin_step_attempt 前崩溃仍没有
+started；恢复先由 inspect 判定 ELIGIBLE_TO_START，再等旧 slot lease 失效，但不得越过原 deadline。
+begin_step_attempt 一旦提交，哪怕真正发送 SQL 前就崩溃，也按表中不确定路径保守地不重放。
 
 用户点击“重新查询”会创建新的 sql_ref 确认或显式复用仍有效 SQL artifact，并始终创建新 task/new
 result_ref；它不是自动 retry。取消只关闭客户端连接并记录 close outcome；服务端终止无法证明时任务
@@ -610,22 +765,26 @@ F3 的文件大小、超时、CSV 注入、下载票据、完整性和中断恢�
 1. AGENTS.md：把“执行 SQL 必须确定性生成”修订为“模板 SQL 确定性生成；用户 SQL 必须来自受保护
    artifact、完整确认、原文 hash 和 AST Guard”，不放宽 LLM 无执行权；
 2. ARCHITECTURE.md §4：加入显式 artifact input，不把它伪装成普通对话；
-3. ARCHITECTURE.md §6：加入 versioned TaskSubmission、QueryEnvelope、ResultArtifact、
-   ResultChunkSink 和 target lease 契约；
-4. ARCHITECTURE.md §7/§7.3：加入 artifact/ToolCall hash、sealed result adoption 和
+3. ARCHITECTURE.md §6：加入 versioned TaskSubmission、原始 application/sql 路由策略、标量 ToolCall 与
+   进程内 HydratedQuery、ResultArtifact、ResultChunkSink/线程桥和 target lease 契约；
+4. ARCHITECTURE.md §7/§7.3：加入 artifact/ToolCall hash、inspect → 新执行水合/准入 → 持久化 deadline →
+   try_acquire → begin 顺序、非阻塞 schedule_deferral、Task/Step attempt 区分、sealed result adoption 和
    PREVIOUS_ATTEMPT_UNCERTAIN；
-5. ARCHITECTURE.md §9：加入 confirmed_readonly profile、token scan、元数据闭集和无 hint 决策；
+5. ARCHITECTURE.md §9：加入 confirmed_readonly profile、token scan、业务库 allowlist、系统库拒绝、
+   元数据闭集和无 hint 决策；
 6. DEVELOPMENT_PLAN.md、路线规格和 AGENT_HANDOFF.md：移除“只接受模板 SQL”的过期口径，同时保持
    “无源码授权、无真实调用授权”的当前状态；
 7. 未来 ADR-005/Web §11.2：批准锁定页不依赖 approver，但任何 view/export approver grant 仍受
    ADR-005；
 8. ADR-007：登记第四 capability、F1 test/release 授权矩阵和真实现场门；
-9. ADR-009：冻结 QueryEnvelope 水合、完整 ToolCall hash、result_ref 和 attempt unknown 语义；
-10. ADR-012：扩展独立 F1 adapter/profile、ResourceSnapshot、SSCursor 和 timeout 层次，不改变慢查询；
+9. ADR-009：冻结 HydratedQuery 水合、标量 ToolCall hash、inspect → 新执行水合/准入 → deadline → slot →
+   begin_step_attempt → Gateway 顺序、result_ref 和 attempt unknown 语义；
+10. ADR-012：扩展独立 F1 adapter/profile、ResourceSnapshot、SSCursor、同步线程/异步 sink 桥和 timeout
+    层次，不改变慢查询；
 11. ADR-013：允许只投影受保护 result deep link；
 12. ADR-017：冻结 RESTRICTED read 无审批的窄条件；
-13. 新 artifact ADR：冻结 SqlArtifact、ResultArtifact、ACL、配额、24 小时保留、staging/sealed/
-    available 和 F2/F3 消费契约。
+13. 新 artifact ADR：冻结 SqlArtifact、ResultArtifact、ACL、配额、24 小时保留、result fencing、
+    staging/sealed/available 和 F2/F3 消费契约。
 
 ADR-015 不因直接 SQL而放宽；只有 F1-NL 设计才可申请新增模型端口和出站数据边界。
 
@@ -633,28 +792,41 @@ ADR-015 不因直接 SQL而放宽；只有 F1-NL 设计才可申请新增模型�
 
 ### 14.1 本次设计修复证据
 
-- 设计契约测试必须先在旧稿上因缺少 QueryEnvelope、ResultChunkSink、恢复、target 和 Web 前置约束转红，
+- 设计契约测试必须先在旧稿上因缺少 HydratedQuery、ResultChunkSink、恢复、target 和 Web 前置约束转红，
   修订后转绿；
-- sqlglot probe 固定项目允许版本，覆盖 SHOW DATABASES FROM catalog、comment hint、version comment、
-  JOIN comment hint、DESC、EXPLAIN SELECT 和 EXPLAIN ANALYZE INSERT；
+- sqlglot probe 使用 uv.lock 的 30.17.0，覆盖 SHOW DATABASES/SHOW DATABASES FROM catalog 的拒绝、
+  comment hint、version comment、JOIN comment hint、DESC、EXPLAIN SELECT 和 EXPLAIN ANALYZE INSERT；
 - 源码检查确认当前 TaskSubmission、ToolCall、AdapterResponse/Evidence、attempt recovery、PyMySQL Cursor
-  和 config 真源的实际缺口；
+  和 config 真源的实际缺口；另确认 worker 串行 await、schedule_retry 会增加 task_failure_count、
+  api_request_body_limit_bytes 小于 1 MiB，以及 StarRocks adapter 在 asyncio.to_thread 中执行；
 - 本轮不新增产品实现测试，不把规格测试冒充 F1 功能已实现。
 
 ### 14.2 实施时先红后绿
 
 F1-0/F1-1 开工后，先补并确认以下行为测试在旧实现上因目标原因失败：
 
-- required query envelope 缺失时 Gateway 调用为 0；
+- required HydratedQuery 缺失时 Gateway 调用为 0；
 - SQL artifact 被替换、过期、跨 actor/target/config 时 Gateway 调用为 0；
 - adapter 收到的 bytes 与确认 hash 不同则零 SQL 发送；
+- ToolCall.typed_args 仍只接受 JSON 标量；HydratedQuery 不能进入 Plan、TaskStore、trace 或 audit；
 - duplicate column names 按 ordinal 往返；
 - 结果 rows 不进入 ToolResult.data_view、Evidence 和 TaskSubmission；
 - crash after started/before commit 恢复为 INDETERMINATE，Gateway 不重放；
 - committed sealed result 只 activation，不重放；
 - 两个 worker 同 target 只有一个取得 slot；
+- committed/未提交 started 的恢复分类发生在 slot 获取前，二者 target slot 获取数均为 0；
+- wait_deadline 在第一次 try_acquire 前持久化，崩溃、重新领取和 BUSY deferral 都不能重置；到期后即使
+  slot 空闲也不能获取；
+- 单 worker 中 F1 因 slot BUSY 退让时，同一轮的其他 capability 仍被执行；
+- 等 slot 或取得 slot 后、begin_step_attempt 前崩溃，恢复不误判 FAILED/INDETERMINATE，也不调用 Gateway；
+- schedule_deferral 不增加 task_failure_count、Step attempt 或 max_tool_calls，300 秒 deadline 跨领取保持；
+- schedule_deferral 与 heartbeat 续租同刻完成时，存储 winner 仍是正常退让且 worker 继续下一任务；
 - cancellation 时 slot 在连接关闭前不释放；
-- token scan、SHOW/DESC/catalog 恶意矩阵；
+- application/sql 的 1 MiB 原始 body 成功、1 MiB + 1 byte 拒绝；原 JSON 路由仍保持原上限；
+- 同步 reader 对 async sink 写入有背压，abort 后的迟到 chunk/seal 被 result fencing 拒绝；
+- abort 持久化失败时结果保持不可见、slot 不释放，恢复只补 abort 而不激活；
+- token scan、SHOW DATABASES、SHOW/DESC catalog、information_schema/sys/_statistics_/statistics 及非
+  allowlist database 的 SELECT/SHOW/DESC 恶意矩阵；
 - 慢查询 template_locked 全部原回归继续通过；
 - requester、Admin、其他用户、过期 ACL 正反例；
 - 去掉 hash、required query、token scan、ACL、fencing 或 no-replay 中任一保护时，对应测试转红。
@@ -682,20 +854,21 @@ resource group、query queue、数据处置、时间窗和回退方式，至少�
 3. 1000/1001 行、20 MiB 和 180 秒边界；
 4. 一个复杂 JOIN/CTE/window 成功对照；
 5. 一个高扫描低返回查询仍受 resource group 约束；
-6. 同 target 第二个 worker 等待 slot；
-7. StarRocks 内部 queue 等待也受 180 秒总发送后预算约束；
-8. 取消/driver timeout 后服务端残留查询的最长窗口；
-9. 外部 catalog、UDF、UNNEST、hint、写语句和 target drift 在 SQL 发送前拒绝；
-10. 最大列宽/单行结果不会把应用保存上限误报成 driver 或服务端内存上限；
-11. query id 与 Profile 指标可关联；
-12. 24 小时应用层删除，以及 StarRocks audit/query history 与部署环境的数据处置。
+6. 同 target 第二个任务非阻塞退让 slot，期间同一 worker 的其他能力仍可执行；
+7. 一条实际运行的 180 秒 F1 查询对同一串行 worker 上其他能力造成的端到端调度延迟；
+8. StarRocks 内部 queue 等待也受 180 秒总发送后预算约束；
+9. 取消/driver timeout 后服务端残留查询的最长窗口；
+10. 外部 catalog、UDF、UNNEST、hint、写语句和 target drift 在 SQL 发送前拒绝；
+11. 最大列宽/单行结果不会把应用保存上限误报成 driver 或服务端内存上限；
+12. query id 与 Profile 指标可关联；
+13. 24 小时应用层删除，以及 StarRocks audit/query history 与部署环境的数据处置。
 
 最高证据只能标记 tests + test-env verified；它不等于生产部署、canary 或 UAT。
 
 ## 15. 按业务闭环实施
 
-1. F1-0 规则与契约前置：完成 §13 文档/ADR、TaskSubmission/query/result/target lease 契约和
-   SQLGuard profile；慢查询回归保持通过；
+1. F1-0 规则与契约前置：完成 §13 文档/ADR、TaskSubmission/query/result/target lease、
+   schedule_deferral、路由 body policy、线程 sink bridge 契约和 SQLGuard profile；慢查询回归保持通过；
 2. F1-1 Web 直接 SQL 闭环：固定默认预算，完成 SQL 草稿/确认、Plan/Admission、fake streaming
    adapter、ResultArtifact、锁定页、no-replay、并发 slot 和 24 小时清理；
 3. F1-2 Admin 下调预算：扩展 StarRocksResource，保存后 restart_required，task-worker 启动加载回执；
@@ -714,6 +887,12 @@ F2/F3 只能在 F1 离线验收及各自设计获批后启动。
 - 初版不支持任何 hint、UNNEST、UDF 和三段表名，实用性受限；这是 parser/权限证据不足下的明确收窄；
 - 预览有界、导出未来重跑，F1/F3 数据可能不同；
 - 同 target 并发固定 1，峰值排队更长；
+- 当前 worker 对已领取任务串行 await；非阻塞 slot 退让解决了“排队占住 worker”，但真正执行中的 F1
+  查询仍可能让同一 worker 上其他任务延迟最多约 Q+20 秒。当前没有获批的跨任务延迟 SLO，本设计不顺带
+  引入 worker 并发；F1-G 前必须由负责人确定阈值并实测，若不满足则另行设计有界并发并复审，未闭合前
+  不进入真实 target 发布；
+- slot BUSY 会产生短周期 PostgreSQL 调度写入；初版固定 5 秒退让，只有实测出现调度压力才引入更复杂
+  backoff，不提前建设独立队列；
 - PostgreSQL 保存短期预览，物理擦除受 MVCC/备份约束；
 - 客户端超时不能证明服务端立即停止，最坏残留窗口必须现场测量；
 - F1-NL 拆出后，F1 第一阶段只满足直接 SQL，不宣称自然语言查询已经交付；
