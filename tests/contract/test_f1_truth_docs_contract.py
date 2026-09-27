@@ -249,3 +249,23 @@ def test_f1_guards_are_discriminating() -> None:
     renamed = dict(names)
     renamed[_PLAN] = names[_PLAN] + "\nsubmission_kind"
     assert _contract_name_drift(renamed) == [(_PLAN, "submission_kind")]
+
+
+# 负责人 2026-09-27：当前范围只叫 F1-Core；完整能力须再有 F1-NL，结果说明只在报错时做。
+_F1_CORE_DOCS: Final[tuple[str, ...]] = (
+    _SPEC,
+    _PLAN,
+    "DEVELOPMENT_PLAN.md",
+    _ROADMAP,
+    "AGENT_HANDOFF.md",
+)
+
+
+def test_f1_core_is_not_reported_as_the_full_agent_query_capability() -> None:
+    docs = _named_docs(_F1_CORE_DOCS)
+    assert [name for name, text in docs.items() if "F1-Core" not in text] == []
+    spec = docs[_SPEC]
+    assert "### 12.1 完成定义" in spec
+    assert "**F1-NL 完成**" in spec
+    assert "**只在报错时做**" in spec
+    assert "不需要模型、不需要 F2，也不修订 ADR-015" in spec
