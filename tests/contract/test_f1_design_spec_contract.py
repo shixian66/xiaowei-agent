@@ -177,7 +177,7 @@ def test_f1_spec_uses_the_locked_parser_and_a_raw_sql_transport() -> None:
 def test_f1_spec_allows_internal_read_sql_without_a_database_allowlist() -> None:
     text = _spec()
 
-    ast_section = _section(text, "### 7.3 AST 闭集")
+    ast_section = _section(text, "### 7.3 只读证明闭集")
     allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
     _assert_terms(
         allowed,
@@ -221,7 +221,7 @@ def test_f1_spec_defines_an_exact_relation_denylist_and_permission_boundary() ->
         "SELECT 权限",
     )
 
-    ast_section = _section(text, "### 7.3 AST 闭集")
+    ast_section = _section(text, "### 7.3 只读证明闭集")
     _assert_terms(
         ast_section,
         "精确命中",
@@ -248,6 +248,106 @@ def test_f1_spec_defines_an_exact_relation_denylist_and_permission_boundary() ->
         "restart_required",
         "删除条目",
         "二次确认",
+    )
+
+
+def test_f1_spec_does_not_treat_parser_coverage_as_the_readonly_product_boundary() -> None:
+    text = _spec()
+    ast_section = _section(text, "### 7.3 只读证明闭集")
+    allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
+
+    _assert_terms(
+        allowed,
+        "Union",
+        "Intersect",
+        "Except",
+        "ReadonlyStatementRegistry",
+        "sqlglot 30.17.0",
+        "Command",
+        "不得用“以 SHOW 开头”这类泛化正则",
+        "恰好一个 registry descriptor",
+        "SHOW CREATE MATERIALIZED VIEW",
+        "SHOW MATERIALIZED VIEWS",
+        "SHOW PARTITIONS",
+        "SHOW TABLET",
+        "SHOW DATA",
+        "SHOW LOAD",
+        "SHOW ROUTINE LOAD",
+        "SHOW FUNCTIONS",
+        "SHOW CATALOGS",
+        "SHOW FRONTENDS",
+        "SHOW BACKENDS",
+        "SHOW RESOURCE GROUPS",
+        "SHOW PROC",
+        "SHOW ALTER TABLE",
+        "SHOW PROFILELIST",
+        "ADMIN SHOW",
+        "ANALYZE PROFILE",
+        "EXPLAIN LOGICAL",
+        "EXPLAIN VERBOSE",
+        "EXPLAIN COSTS",
+        "原始 SQL",
+        "内层 query",
+    )
+    _assert_terms(
+        rejected,
+        "未登记",
+        "无法唯一提取",
+        "INTO OUTFILE",
+        "外部 Catalog",
+        "零 SQL 发送",
+    )
+    assert _table_row(ast_section, "SHOW CREATE MATERIALIZED VIEW") == (
+        "SHOW CREATE MATERIALIZED VIEW",
+        "唯一提取 relation 目标并检查内部 Catalog 与黑名单",
+    )
+
+    implementation = _section(text, "### 14.2 实施时先红后绿")
+    _assert_terms(
+        implementation,
+        "每一个 registry descriptor",
+        "正常对照",
+        "黑名单目标",
+        "未知只读前缀",
+        "移除目标提取",
+    )
+
+    snapshot = _section(text, "### 6.1 ResourceSnapshot")
+    _assert_terms(
+        snapshot,
+        "精确 StarRocks version",
+        "readonly registry profile/version/digest",
+    )
+    drift = _section(text, "### 6.2 确定性解析和漂移")
+    _assert_terms(drift, "回读实际 StarRocks version", "target fail-closed")
+    live_gate = _section(text, "### 14.4 真实 target 现场门")
+    _assert_terms(
+        live_gate,
+        "完整官方只读语句 inventory",
+        "AST 路径或唯一 registry descriptor",
+        "权限不足错误",
+    )
+
+
+def test_f1_spec_discloses_that_the_relation_denylist_is_not_metadata_secrecy() -> None:
+    text = _spec()
+    ast_section = _section(text, "### 7.3 只读证明闭集")
+
+    _assert_terms(
+        ast_section,
+        "不提供元数据保密",
+        "information_schema.columns",
+        "information_schema.views",
+        "view_definition",
+        "列名",
+        "查询文本",
+        "集群拓扑",
+    )
+    _assert_terms(
+        _section(text, "## 16. 已接受的权衡和残余风险"),
+        "元数据",
+        "information_schema",
+        "独立隐藏策略",
     )
 
 
