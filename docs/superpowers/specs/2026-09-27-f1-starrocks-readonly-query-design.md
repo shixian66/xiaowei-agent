@@ -2,6 +2,8 @@
 
 > 状态：Approved v7。独立复审 SHA `e2727cf117b62f9c9a23ec1ce37c046312475f5a` 通过，经 PR #108 合并（`91cadd43e13a4b1178fbddcbdfd4b41bf0decb36`）。
 > F1-0 真源修订与实施计划见 [F1 实施计划](../plans/2026-09-27-f1-starrocks-readonly-query.md)。
+> F1-0 同步修订（2026-09-27，随 PR #109 复审）：§5.2 写明 ArtifactSubmission 的公共 context/as_of 与原子确认；
+> §11.3 第 3 行按 §13 第 7 项定为“F1 锁定页不依赖 ADR-005”，消除与 Web 规格的相反口径。
 > 日期：2026-09-27。
 > 设计基线：c69a09bd8595df9808754b5e4272b7c95ee78a43。
 > 审查修复基线：016eae3d4bb07c9cc592effd368929a112d83d3c。
@@ -275,12 +277,13 @@ SQL 草稿创建后 24 小时未确认即过期。确认请求幂等：同一确
 discriminated union：
 
 - ConversationSubmission：保留现有 RequestEnvelope 行为；
-- ArtifactSubmission：只含 input_kind=sql_artifact、sql_ref、sql_hash、resource_id、result_ref 和
-  confirmation_ref，不含 SQL 原文或用户自然语言。
+- ArtifactSubmission：除与 ConversationSubmission 共有的 context、as_of 外，只含 input_kind=sql_artifact、
+  sql_ref、sql_hash、resource_id、result_ref 和 confirmation_ref，不含 SQL 原文或用户自然语言。
 
 存储仍使用同一个 TaskStore 和 task_submissions 表，不建第二套任务系统。旧记录按原 schema 读取；
 ArtifactSubmission 使用新版本并进入 request digest。未知版本 fail-closed。ARCHITECTURE §6 和迁移策略
-必须先修订。
+必须先修订；精确 schema、digest 与 downgrade 规则以 ADR-018 D2 为准。确认时“消费草稿、创建 task 与
+submission、创建 result_ref、写 requester grant、绑定确认幂等键”必须在同一 PostgreSQL 事务内完成。
 
 F1 的显式 Web 路由由 XiaoweiRuntime 的窄方法接收 ArtifactSubmission，生成确定性的 capability draft，
 再进入唯一 CapabilityResolver。它不调用 InteractionClassifierPort，也不让 Web handler 直接选择
@@ -864,7 +867,7 @@ ADR-017 必须明确：RESTRICTED 不等于必须审批；只有获批 policy pr
 | --- | --- | --- |
 | 1. 稳定 result_ref 和有界 artifact | CSPRNG result_ref、staging/sealed/available、1000 行/20 MiB | F1-1 契约、migration、故障集成测试通过前不注册结果路由 |
 | 2. requester、approver、状态、有效期、导出规则唯一真源 | ResultArtifactStore + result_access_grants；F1 只写 requester_owner，approver grant 留给 F2/F3；export disabled | F1-1 验收 store/ACL；F2/F3 分别验收 approver 写路径 |
-| 3. ADR-005 审批语义 | F1 锁定页不展示结果、无审批，申请把本条窄化为“任何 approver grant 或导出前必须满足 ADR-005” | 必须先修订 Web 规格、建立并批准 ADR-005；未批准时 F1 不开放 /results |
+| 3. ADR-005 审批语义 | F1 锁定页只向 requester 展示状态与其本人确认的 SQL，不写 approver grant、不展示列与行、不提供导出，因此不依赖 ADR-005；本条窄化为“任何 approver grant、结果行展示或导出前必须满足 ADR-005” | F1-0 修订 Web 规格 §11.2 第 3 项；F1 锁定页的开放只受本表其余适用行约束；F2/F3 开工前必须先建立并批准 ADR-005 |
 | 4. ADR-013 深链只投影引用 | 飞书/RenderPayload 只含 result_ref 深链，无 SQL/列/行 | F1-0 修订 ADR-013，安全测试通过后开放 |
 | 5. 保留、脱敏、分页、导出和失效 | F1 定义 24h、隐藏式拒绝、锁定页；分页归 F2，导出/下载票据归 F3 | 本文批准 F1 部分；F2/F3 未批准前保持锁定/disabled |
 | 6. 独立里程碑、计划及真实调用/数据处置授权 | F1 实施计划、F1-H 现场计划、数据处置 GO 分离 | 本文不授予其中任何一项；各自书面 GO 后才能进入对应阶段 |

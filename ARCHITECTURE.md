@@ -491,12 +491,13 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `TaskSubmission`（versioned union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为；后者只含 `input_kind=sql_artifact`、sql_ref、sql_hash、resource_id、result_ref、confirmation_ref，不含 SQL 原文；未知版本 fail-closed；同一 TaskStore |
+| `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash、resource_id、result_ref、confirmation_ref，不含 SQL 原文；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
+| `confirm_sql_artifact`（TaskStore 命令） | sql_ref、principal、确认幂等键、期望 hash/config revision | 同一 PostgreSQL 事务内消费草稿、建 task/submission、建 result_ref、写 requester grant、绑定幂等键；失败整体回滚（ADR-018 D2a） |
 | `SqlArtifact` | sql_ref、原始 bytes、SHA-256、requester、tenant/environment、resource_id、target fingerprint、config revision、expires_at | SQL 原文唯一保存点；CSPRNG 引用；24 小时未确认过期；确认一次性 |
 | `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
 | `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
 | `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + gateway grace 确定 |
-| `ResultArtifact` | result_ref、ColumnSpec(ordinal,name,type)、chunks、saved rows/bytes、storage_state、completeness、fencing | staging → sealed → available；只有 available 可读；按 ordinal 保存同名列 |
+| `ResultArtifact` | result_ref、ColumnSpec(ordinal, name, type)、chunks、saved rows/bytes、storage_state、completeness、fencing | staging → sealed → available；只有 available 可读；按 ordinal 保存同名列 |
 | `ResultChunkSink` / `ThreadsafeResultChunkWriter` | task、step、result_ref、task/result fencing | Gateway 创建；同步读取线程一次提交一个 chunk 并等待回执；abort 后迟到写被拒 |
 | `TargetQueryLeaseStore` / `TargetSlotGrant` | target_fingerprint、task、step、tool_call_hash、fencing、expires_at | persistence 的调度租约；单 target 并发 1；grant 只作为 Gateway 受信参数 |
 | 路由 body policy | path、method、media type、limit | 原 JSON 路由保持现有上限；`application/sql` 草稿路由固定 1 MiB 硬上限，Web 不可调高 |

@@ -2,7 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> 状态：Draft V0.1（F1-0，2026-09-27），待 exact-SHA 独立复审与负责人接受。
+> 状态：Draft V0.2（F1-0，2026-09-27）。V0.2 按 PR #109 复审（SHA `f5e4a99`）修订：ADR-005 口径统一、
+> TaskSubmission/迁移/原子确认写死、调度公平排序改用真实可迁移字段、B2 目标形状与权限说明。待 exact-SHA 复审与负责人接受。
 > 本计划获批**不**等于任何切片开工：F1-0b 与 F1-1 起每个切片都需负责人明确开工口令；真实 StarRocks
 > 调用只属 F1-H，另需现场计划与现场 GO。当前进度只看 [当前状态](../../../AGENT_HANDOFF.md#current-status)。
 
@@ -35,7 +36,7 @@
 | 切片 | 交付 | 进入条件 | 退出证据 |
 | --- | --- | --- | --- |
 | F1-0a（本 PR） | 设计 §13 的真源/ADR 修订、本计划、首批 registry 候选清单 | 设计已批准（PR #108） | 文档契约测试、四门、exact-SHA 复审；负责人接受 ADR-018 与各 F1 修订 |
-| F1-0b | 契约与内核前置（Task 1–10）：DTO、migration、store、调度租约、SQLGuard profile、registry、body policy、流式 sink、ResourceSnapshot | F1-0a 获批 + 负责人开工口令 | 各任务测试、四门、exact-SHA 复审；慢查询全部原回归通过 |
+| F1-0b | 契约与内核前置（Task 1–10，含 Task 2A）：DTO、migration、store、原子确认、调度租约、SQLGuard profile、registry、body policy、流式 sink、ResourceSnapshot | F1-0a 获批 + 负责人开工口令 | 各任务测试、四门、exact-SHA 复审；慢查询全部原回归通过 |
 | F1-1 | Web 直接 SQL 闭环（Task 11–16）：capability、Runner 流程、提交/确认、锁定页、retention、PyMySQL streaming adapter（离线） | F1-0b 合入 + 开工口令；`/results` 开放前满足 §3 对照 | 正式 Web 路径成功对照与关键拒绝、PostgreSQL 集成、故障注入、安全矩阵与变异 |
 | F1-2 | Admin 预算与关系黑名单 | F1-1 合入 + 开工口令 | Admin 保存/diff/二次确认、restart_required、loaded receipt、漂移拒绝 |
 | F1-3 | 飞书只投影可信链接 | F1-1 合入 + 开工口令 | 飞书消息中的 SQL 零进入、深链鉴权先于读取 |
@@ -75,7 +76,7 @@
 | # | 语句 | 用途 | 直接对象提取 |
 | --- | --- | --- | --- |
 | B1 | SHOW RUNNING QUERIES | 看当前运行查询 | 无 |
-| B2 | SHOW ANALYZE STATUS、SHOW STATS META | 统计信息排查 | 无 / database |
+| B2 | SHOW ANALYZE STATUS、SHOW STATS META | 统计信息排查 | 无直接目标；可选 WHERE 只接受登记列与字面量的比较及 AND 组合，数据库条件属于谓词过滤，不作为对象目标，也不按任意表达式执行 |
 | B3 | SHOW DYNAMIC PARTITION TABLES [FROM db] | 分区排查 | database |
 | B4 | SHOW DELETE [FROM db]、SHOW EXPORT [FROM db] | 任务 listing（只读） | database |
 | B5 | SHOW TRANSACTION [FROM db] WHERE id = <int> | 导入事务排查 | database；WHERE 只接受 `id = 整数` |
@@ -83,6 +84,13 @@
 | B7 | SHOW ROLES | 权限排查 | 无 |
 | B8 | SHOW CREATE ROUTINE LOAD [db.]job | 导入作业定义 | 作业名（非 relation） |
 | B9 | DESC db.tbl ALL | 多 index 结构（ParseError） | relation，必有 |
+
+独立复审建议 B1–B9 全部纳入首批；负责人在接受本 PR 时确认。
+
+**登记支持不等于给账号增权。** 部分语句需要只读 SELECT 之外的权限：SHOW COMPUTE NODES 需要 OPERATE / cluster_admin，
+SHOW ROLES 需要 user_admin，SHOW ROUTINE LOAD 通常需要目标表 INSERT 权限，ADMIN SHOW REPLICA 需要额外权限。
+F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权限错误是预期行为，按结构化执行错误返回；不得为了
+跑通而给 F1 账号增权。F1-H 第 10 项记录每条语句在专用账号下的实际结果。
 
 **建议暂不入选（上线后“暂未支持”，按需再登记）：** SHOW USERS、SHOW RESOURCES、SHOW STORAGE VOLUMES、SHOW WAREHOUSES、SHOW PIPES、SHOW STREAM LOAD、SHOW BROKER、SHOW REPOSITORIES、SHOW BACKUP、SHOW RESTORE、SHOW PROPERTY、SHOW HISTOGRAM META、SHOW VIEWS（目标版本是否支持待 F1-H 确认）。
 
@@ -92,7 +100,7 @@
 
 | P2 | 处理 |
 | --- | --- |
-| 已退让的 F1 任务按 `created_seq` 占满 `dispatch_batch_limit=10`，更新的其他能力任务可能长期拿不到批次 | Task 12 先写红测：10 个以上到期的 F1 退让任务 + 1 个更新的普通任务，普通任务必须在有限轮内被执行；再选最小修复（优先：`list_dispatchable_tasks` 按 `(COALESCE(next_attempt_at, created_at), created_seq)` 排序），并以 PostgreSQL 与内存实现共用判定 |
+| 已退让的 F1 任务按 `created_seq` 占满 `dispatch_batch_limit=10`，更新的其他能力任务可能长期拿不到批次 | Task 12 先写红测：10 个以上到期的 F1 退让任务 + 1 个更新的普通任务，普通任务必须在有限轮内被执行；修复写死为：Task 3 的 migration 给 `tasks` 新增 `created_at TIMESTAMPTZ NOT NULL`（加列时 `server_default=now()` 把全部旧行回填为同一迁移时刻，旧行之间仍按 `created_seq` 保持现有先后；保留该数据库时钟默认值给新行）；`list_dispatchable_tasks` 改为按 `COALESCE(next_attempt_at, created_at), created_seq, task_id` 排序；排序键由 `persistence/decisions.py` 的纯函数 `dispatch_order_key(record)` 唯一定义，内存实现直接使用、PostgreSQL 用同一表达式，并以共享 suite 断言两者顺序一致。每次退让把 `next_attempt_at` 推后，因此任一到期的新任务最多等待有界轮数；downgrade 删除该列与排序表达式 |
 | 每次退让后重新水合与准入会在 event loop 上重新解析最大 1 MiB SQL | Task 7 的解析门同时测 event-loop 阻塞时长；Task 12 让 SQLGuard 在 `asyncio.to_thread` 中执行，并加“解析期间 heartbeat 仍按时续租”的测试。顺序仍保持设计 §8.4：inspect → 水合/准入 → 窗口 → 争抢，不为省解析调换顺序 |
 
 ## 3. Web 规格 §11.2 六项对照
@@ -101,7 +109,7 @@
 | --- | --- | --- |
 | 1. 稳定 result_ref 与有界 artifact | Task 2、Task 9、Task 14 | CSPRNG 引用；staging/sealed/available 迁移与故障集成测试；1000/1001 行、20 MiB 边界 |
 | 2. requester/approver/状态/有效期/导出规则唯一真源 | Task 2、Task 14 | `result_access_grants` 只写 `requester_owner`；approver grant 写路径不存在；`export_policy=disabled` |
-| 3. ADR-005 | 本 PR 已窄化（Web 规格 §11.2 第 3 项注记） | 锁定页不写 approver grant、不返回列/行/导出；安全测试断言页面与 API 字段闭集 |
+| 3. ADR-005 | 本 PR 按设计 §13 第 7 项窄化，设计 §11.3 第 3 行、Web 规格 §11.2 第 3 项与 ADR-018 同一结论：F1 锁定页**不依赖 ADR-005**；approver grant、结果行展示与导出仍必须先满足 ADR-005 | 锁定页不写 approver grant、不返回列/行/导出；安全测试断言页面与 API 字段闭集 |
 | 4. ADR-013 深链只投影引用 | 本 PR（ADR-013 F1 修订）、Task 14、F1-3 | RenderPayload/ChannelStore 无 SQL、列、行；深链鉴权先于读取 |
 | 5. 保留、脱敏、分页、导出、失效 | Task 15；分页归 F2，导出归 F3 | 24 小时三类过期、隐藏式拒绝、retention 删除范围；数据处置现场证据归 F1-H |
 | 6. 独立里程碑、计划与真实调用/数据处置授权 | 本计划 §0 | 各切片开工口令与 F1-H 现场 GO 分离记录在 handoff |
@@ -116,12 +124,12 @@
 | `src/xiaowei_agent/contracts/sql_artifact.py`（新） | `SqlArtifact`、`DirectSqlDraft`、`HydratedQuery`、`ReadonlyQueryBudget` | 1 |
 | `src/xiaowei_agent/contracts/result_artifact.py`（新） | `ColumnSpec`、`ResultChunk`、`ResultArtifactMeta`、`StorageState`、`Completeness`、`ResultGrant` | 1 |
 | `src/xiaowei_agent/contracts/capability.py` | `QueryRequirement` 闭集与 `OperationSpec.query_requirement` | 1 |
-| `src/xiaowei_agent/persistence/migrations/versions/rev_0019_f1_artifacts.py`（新） | SQL/结果/ACL/slot lease/等待窗口列与约束 | 2、3 |
+| `src/xiaowei_agent/persistence/migrations/versions/rev_0019_f1_artifacts.py`（新） | `task_submissions.input_kind` 与形状约束、`tasks.created_at`、SQL/结果/ACL/slot lease/等待窗口列与约束（一个 migration，按任务分步补全，合入前只存在一个 head） | 2、2A、3 |
 | `src/xiaowei_agent/persistence/sql_artifacts.py`（新） | `SqlArtifactStore` Protocol + PostgreSQL + 内存实现 | 2 |
 | `src/xiaowei_agent/persistence/result_artifacts.py`（新） | `ResultArtifactStore` Protocol + 实现（chunks、fencing、seal、activation、grants） | 2 |
 | `src/xiaowei_agent/persistence/target_slots.py`（新） | `TargetQueryLeaseStore` + `TargetSlotGrant` | 3 |
 | `src/xiaowei_agent/persistence/decisions.py` | 共用 step 执行分类函数、deferral 判定 | 3 |
-| `src/xiaowei_agent/persistence/store.py`、`postgres.py`、`fake.py` | `inspect_step_execution`、`ensure_slot_wait_window`、`check_slot_wait_deadline`、`schedule_deferral` | 3 |
+| `src/xiaowei_agent/persistence/store.py`、`postgres.py`、`fake.py` | submission 按 `input_kind` 分派与 digest；`confirm_sql_artifact`；`inspect_step_execution`、`ensure_slot_wait_window`、`check_slot_wait_deadline`、`schedule_deferral`；dispatch 排序 | 2、2A、3 |
 | `src/xiaowei_agent/governance/sql_tokens.py`（新） | quote-aware lexer：语句边界、注释类别、token 字节区间 | 4 |
 | `src/xiaowei_agent/governance/sqlguard.py` | `confirmed_readonly` profile 入口与 `ReadonlyProof` 统一后置检查（`template_locked` 不变） | 5、6 |
 | `src/xiaowei_agent/governance/readonly_registry.py`（新） | `ReadonlyStatementRegistry`、descriptor、版本区间、digest | 7 |
@@ -154,14 +162,15 @@
 **Interfaces:**
 - Produces:
   - `class QueryRequirement(StrEnum): NONE="none"; TEMPLATE_LOCKED="template_locked"; CONFIRMED_ARTIFACT="confirmed_artifact"`；`OperationSpec.query_requirement: QueryRequirement = QueryRequirement.NONE`
-  - `class ConversationSubmission(Contract)`：现有四字段 + `submission_kind: Literal["conversation"] = "conversation"`
-  - `class ArtifactSubmission(Contract)`：`submission_kind: Literal["sql_artifact"]`、`context: RequestContext`、`as_of: AwareDatetime`、`sql_ref: StrictStr`、`sql_hash: Sha256Hex`、`resource_id: StrictStr`、`result_ref: StrictStr`、`confirmation_ref: StrictStr`
-  - `TaskSubmission = Annotated[ConversationSubmission | ArtifactSubmission, Field(discriminator="submission_kind")]`
+  - 字段名以 ADR-018 D2 为唯一真源，判别字段只叫 `input_kind`：
+  - `class ConversationSubmission(Contract)`：`input_kind: Literal["conversation"] = "conversation"` + 现有 `envelope`、`context`、`as_of`、`clarification_parent_task_id`
+  - `class ArtifactSubmission(Contract)`：`input_kind: Literal["sql_artifact"]`、`context: RequestContext`、`as_of: AwareDatetime`、`sql_ref: StrictStr`、`sql_hash: Sha256Hex`、`resource_id: StrictStr`、`result_ref: StrictStr`、`confirmation_ref: StrictStr`
+  - `TaskSubmission = Annotated[ConversationSubmission | ArtifactSubmission, Field(discriminator="input_kind")]`
   - `class ReadonlyQueryBudget(Contract)`：`preview_max_rows: int (1..1000)`、`preview_max_bytes: int (1_048_576..20_971_520)`、`query_timeout_seconds: int (1..180)`
   - `@dataclass(frozen=True, slots=True) class HydratedQuery`：`sql_ref`、`sql_hash`、`sql_bytes: bytes`、`result_ref`、`resource_id`、`target_fingerprint`、`config_revision`、`confirmation_ref`、`budget`；`__post_init__` 校验 `sha256(sql_bytes).hexdigest() == sql_hash`；`__repr__` 不含 bytes；`__reduce__` 抛错（不可 pickle）
-  - `ColumnSpec(ordinal: int ≥ 0, name: str, type_tag: str)`；`StorageState`、`Completeness`、`ResultGrantKind` 闭集（值与 ADR-018 D3/D5 一致）
+  - `ColumnSpec(ordinal, name, type)`：`ordinal: int ≥ 0`、`name: str`、`type: str`（ADR-018 D3 同名）；`StorageState`、`Completeness`、`ResultGrantKind` 闭集（值与 ADR-018 D3/D5 一致）
 
-- [ ] **Step 1: 写失败测试**：旧 `TaskSubmission(envelope=..., context=..., as_of=...)` 反序列化（无 `submission_kind`）仍得到 `ConversationSubmission`；`ArtifactSubmission` 无 SQL 原文字段且 `extra="forbid"`；`HydratedQuery` hash 不符构造失败、`repr` 与 `pickle.dumps` 不泄漏 bytes；`ToolCall(typed_args={"sql": b"..."})` 仍被拒绝；`OperationSpec` 缺省 `query_requirement` 为 `NONE`；`ReadonlyQueryBudget` 1001 行、180+1 秒、20 MiB+1 被拒。
+- [ ] **Step 1: 写失败测试**：旧 `TaskSubmission(envelope=..., context=..., as_of=...)` 反序列化（无 `input_kind`）仍得到 `ConversationSubmission`；conversation 的三个 digest 固定向量逐字节不变；`ArtifactSubmission` 无 SQL 原文字段且 `extra="forbid"`；`HydratedQuery` hash 不符构造失败、`repr` 与 `pickle.dumps` 不泄漏 bytes；`ToolCall(typed_args={"sql": b"..."})` 仍被拒绝；`OperationSpec` 缺省 `query_requirement` 为 `NONE`；`ReadonlyQueryBudget` 1001 行、180+1 秒、20 MiB+1 被拒。
 - [ ] **Step 2: 运行确认因缺失符号/断言失败**：`python -m pytest tests/unit/test_f1_contracts.py tests/security/test_f1_contract_boundaries.py -q`
 - [ ] **Step 3: 最小实现**上述 DTO；把旧 `TaskSubmission` 构造点改为 `ConversationSubmission`，保留模块级别名直到 Task 2 迁移完成。
 - [ ] **Step 4: 运行相关测试与 `tests/unit/test_hash_vectors.py`**，确认 request/plan 固定向量未变。
@@ -171,7 +180,7 @@
 
 **Files:**
 - Create: `src/xiaowei_agent/persistence/migrations/versions/rev_0019_f1_artifacts.py`、`src/xiaowei_agent/persistence/sql_artifacts.py`、`src/xiaowei_agent/persistence/result_artifacts.py`
-- Modify: `src/xiaowei_agent/persistence/schema.py`、`postgres.py`（submission 读写按 `submission_kind` 分派）
+- Modify: `src/xiaowei_agent/persistence/schema.py`、`store.py`（digest 按 `input_kind` 分派）、`postgres.py`、`fake.py`（submission 读写按 `input_kind` 分派）
 - Test: `tests/suites/sql_artifact_store.py`、`tests/suites/result_artifact_store.py`（内存与 PostgreSQL 共用）、`tests/integration/test_f1_artifacts_postgres.py`、`tests/integration/test_migration_paths.py`
 
 **Interfaces:**
@@ -183,11 +192,33 @@
   - `ResultArtifactStore.abort(...)`、`seal(...)`、`activate(*, result_ref, committed_step)`、`read_locked_view(*, result_ref, principal, now)`
   - 配额检查：requester ≤ 5、target ≤ 50 存活 query set
 
-- [ ] **Step 1: 写失败测试**：旧 task_submissions 行在迁移后按原 schema 读回且 digest 不变；未知 `submission_kind` fail-closed；草稿 24 小时过期；确认幂等两例；requester 第 6 个、target 第 51 个存活 set 被拒；chunk 在 abort 后以旧 result fencing 写入被拒；未 seal 不能 activate；未提交 step 不能 activate；同名列按 ordinal 往返；只有 `available` 可读。
+- [ ] **Step 1: 写失败测试**：按 ADR-018 D2 的 migration 规则逐条断言——旧行回填 `input_kind='conversation'` 后按原 schema 读回且三个 digest 不变；加列后默认值已移除；`ck_task_submissions_shape` 拒绝 conversation 行带 artifact 列、sql_artifact 行带 envelope 或 clarification parent、缺任一引用列；未知 `input_kind` fail-closed；存在 sql_artifact 行时 downgrade 报错、无此类行时 downgrade 恢复 `envelope NOT NULL`；确认幂等键与相同字面值的对话幂等键不冲突；草稿 24 小时过期；确认幂等两例；requester 第 6 个、target 第 51 个存活 set 被拒；chunk 在 abort 后以旧 result fencing 写入被拒；未 seal 不能 activate；未提交 step 不能 activate；同名列按 ordinal 往返；只有 `available` 可读。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_artifacts_postgres.py tests/integration/test_migration_paths.py -q`
 - [ ] **Step 3: 实现 migration 与两个 store**；表名 `sql_artifacts`、`result_artifacts`、`result_columns`、`result_chunks`、`result_access_grants`；`result_access_grants` 用 CHECK 约束保证只有 `requester_owner` 可空 `approval_ref`。
 - [ ] **Step 4: 运行共用 suite 的内存与 PostgreSQL 两个实现**，再跑 `tests/integration` 全部。
 - [ ] **Step 5: 提交** `feat(persistence): add F1 sql and result artifact stores`
+
+### Task 2A: 原子确认命令
+
+**Files:**
+- Modify: `src/xiaowei_agent/persistence/store.py`（Protocol）、`postgres.py`、`fake.py`、`decisions.py`
+- Test: `tests/suites/task_store.py`（新增用例）、`tests/integration/test_f1_confirmation_postgres.py`
+
+**Interfaces:**
+- Consumes: Task 1 DTO、Task 2 表
+- Produces:
+  - `TaskStore.confirm_sql_artifact(*, command: SqlConfirmationCommand) -> SqlConfirmationResult`
+  - `SqlConfirmationCommand(sql_ref, principal: RequestContext, confirmation_key, expected_sql_hash, expected_target_fingerprint, expected_config_revision, budget: ReadonlyQueryBudget, trace_id)`
+  - `SqlConfirmationResult(outcome: SqlConfirmationOutcome, task_id: str | None, result_ref: str | None)`；`SqlConfirmationOutcome` 闭集：`CREATED`、`REPLAYED`、`ALREADY_CONFIRMED_OTHER_KEY`、`EXPIRED`、`NOT_FOUND_OR_FORBIDDEN`、`DRIFTED`、`QUOTA_EXCEEDED`
+  - `decisions.classify_sql_confirmation(...)`：内存与 PostgreSQL 共用的纯判定
+  - 事务范围与步骤以 ADR-018 D2a 为准：锁草稿 → advisory lock 配额 → 幂等判定 → 建 task 与 submission → 建 `staging` 零 chunk 结果行 → 写 `requester_owner` grant → 标记草稿已消费并绑定确认键；任一步失败整体回滚
+
+- [ ] **Step 1: 写失败测试**：同一确认键重复调用得到同一 `task_id`/`result_ref`（`REPLAYED`）；两个不同确认键并发确认同一草稿只有一个 `CREATED`，另一个 `ALREADY_CONFIRMED_OTHER_KEY`；在第 4、5、6、7 步之后分别注入异常，事务回滚后草稿仍未消费、task/submission/结果行/grant 都不存在，重试可成功；提交结果未知时回读 winner 且不重复创建；requester 第 6 个、target 第 51 个存活 set 在并发下也只放行到上限；过期、hash/config/target 漂移、跨 principal 分别得到对应闭集结果且零写入。
+- [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_confirmation_postgres.py -q`
+- [ ] **Step 3: 实现**：只在现有 PostgreSQL TaskStore 事务内完成，不新增第二个任务系统或跨 Store 分步提交。
+- [ ] **Step 4: 运行共享 suite 的内存与 PostgreSQL 实现**。
+- [ ] **Step 5: 变异**：把第 7 步挪到独立事务，故障注入用例必须转红；还原。
+- [ ] **Step 6: 提交** `feat(persistence): confirm SQL artifacts in one transaction`
 
 ### Task 3: 恢复分类、等待窗口、非阻塞退让与 target slot 租约
 
@@ -206,10 +237,12 @@
   - `TaskStore.schedule_deferral(*, command: DeferralCommand) -> DeferralResult`（`next_attempt_at=min(now+5s, slot_expires_at, wait_deadline)`；轮换 fencing；结束 lease；不改 `task_failure_count`、不建 StepExecutionRecord）
   - `TargetQueryLeaseStore.try_acquire(*, grant, target_fingerprint, step_id, tool_call_hash, ttl_seconds, not_after) -> TargetSlotGrant | SlotBusy`；`release(*, slot_grant, connection_closed: Literal[True])`
   - `begin_step_attempt` 对 `never_replay=True` 的未提交 started 永不返回 `PROCEED`
+  - `tasks.created_at` 与 `decisions.dispatch_order_key(record) -> tuple[datetime, int, str]`，`list_dispatchable_tasks` 按其排序（§2）
 
 - [ ] **Step 1: 写失败测试**（设计 §14.2 对应条目）：两个 store 实例同 target 只有一个取得 slot；committed / 未提交 started 两种恢复在 slot 前分类且 slot 获取数为 0；wait_deadline 首次争抢前持久化，重领取与 BUSY 不重置；到期后 slot 空闲也不能获取（`not_after` 在锁事务内用数据库时钟重验）；deferral 不增加失败计数/Step attempt/预算；deferral 与 heartbeat 续租同刻完成时 winner 为退让；持久化“有 Step attempt 无 started”被 CHECK 约束拒绝。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_slot_scheduling_postgres.py tests/security/test_f1_no_replay.py -q`
 - [ ] **Step 3: 实现**；把 `begin_step_attempt` 现有判定抽到 `classify_step_execution`，行为对现有能力保持逐字不变。
+- [ ] **Step 3a: 调度公平**：先写 §2 的饥饿红测（12 个到期的退让 F1 任务 + 1 个更新的普通任务，普通任务在 2 轮 poll 内被领取），再按 §2 实现 `created_at` 与排序键；现有 dispatch 顺序测试保持通过。
 - [ ] **Step 4: 运行** `tests/suites` 两个实现、`tests/integration/test_dispatch_and_attempts_postgres.py`、`test_concurrency_and_recovery.py`。
 - [ ] **Step 5: 变异**：临时让 `begin_step_attempt` 忽略 `never_replay`，`test_f1_no_replay` 必须转红；还原。
 - [ ] **Step 6: 提交** `feat(persistence): add slot wait window, deferral and target query lease`
@@ -354,14 +387,14 @@
 ### Task 12: Runner confirmed_artifact 流程、WorkflowDeferred 与 worker
 
 **Files:**
-- Modify: `runners/runner.py`（`WorkflowDeferred`）、`runners/deterministic.py`、`application/runtime.py`、`application/worker.py`、`application/task_heartbeat.py`、`persistence/postgres.py`（dispatch 排序，如 §2 修复需要）
+- Modify: `runners/runner.py`（`WorkflowDeferred`）、`runners/deterministic.py`、`application/runtime.py`、`application/worker.py`、`application/task_heartbeat.py`
 - Test: `tests/integration/test_f1_runner_flow_postgres.py`、`tests/security/test_f1_runner_order.py`、`tests/unit/test_worker_deferral.py`
 
 **Interfaces:**
 - Consumes: Task 1–11 全部
 - Produces: `class WorkflowDeferred(Exception)`（控制信号，携带 `task_id`、`next_attempt_at`）；`XiaoweiRuntime.execute_artifact_submission(*, grant, submission: ArtifactSubmission, trace_id)`；worker 在 `RetryableTaskError` 之前捕获 `WorkflowDeferred` 并返回“未执行”
 
-- [ ] **Step 1: 失败测试**（顺序与计数）：inspect → 水合/准入 → 窗口 → 争抢 → begin → Gateway；committed/未提交 started 在 slot 前分类；BUSY 时同一轮其他 capability 仍执行；deferral 不进入 Evidence/Reflection/finalize/backoff；已提交 deferral 与 heartbeat 续租失败并发时仍视为正常退让；取得 slot 后 begin 前崩溃不误判且不调用 Gateway；SQLGuard 在线程中执行时 heartbeat 按时续租；§2 批次饥饿红测。
+- [ ] **Step 1: 失败测试**（顺序与计数）：inspect → 水合/准入 → 窗口 → 争抢 → begin → Gateway；committed/未提交 started 在 slot 前分类；BUSY 时同一轮其他 capability 仍执行；deferral 不进入 Evidence/Reflection/finalize/backoff；已提交 deferral 与 heartbeat 续租失败并发时仍视为正常退让；取得 slot 后 begin 前崩溃不误判且不调用 Gateway；SQLGuard 在线程中执行时 heartbeat 按时续租；worker 端到端验证 §2 的有界等待（排序本身由 Task 3 实现）。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_runner_flow_postgres.py tests/security/test_f1_runner_order.py tests/unit/test_worker_deferral.py -q`
 - [ ] **Step 3: 实现**：水合只按 `query_requirement` 分支，不按 operation 名称判断。
 - [ ] **Step 4: 通过 + 现有 Runner/worker 全部回归**：`python -m pytest tests -k "runner or worker or heartbeat" -q`
@@ -436,4 +469,5 @@
 
 - 设计 §13 十三项：本 PR 覆盖 1–13（ADR-005 按第 7 项窄化，不新建 ADR-005 文件）。
 - 设计 §14.2 行为测试：分布在 Task 1–16 的 Step 1；§14.3 在 Task 7 Step 5；§14.4 属 F1-H。
-- 设计 §15 F1-0 契约前置：Task 1–10；F1-1：Task 11–16。
+- 设计 §15 F1-0 契约前置：Task 1–10（含 2A）；F1-1：Task 11–16。
+- V0.2 复审修订：ADR-005 结论四处一致（设计 §11.3、Web 规格 §11.2、ADR-018、本计划 §3）；判别字段统一为 `input_kind`；`ColumnSpec(ordinal, name, type)` 统一；确认原子性见 Task 2A；公平排序字段见 §2 与 Task 3。

@@ -76,6 +76,19 @@ _STALE_F1_PHRASES: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+_SPEC = "docs/superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md"
+
+# ADR-005 对 F1 锁定页的结论必须在四个真源一致，且不能留下相反口径（PR #109 复审阻断项 1）。
+_ADR_005_CONCLUSION_DOCS: Final[tuple[str, ...]] = (_SPEC, _WEB_SPEC, _ADR_018, _PLAN)
+_ADR_005_CONCLUSION: Final = "不依赖 ADR-005"
+_ADR_005_CONTRADICTION: Final = "未批准时 F1 不开放 /results"
+
+# F1 契约字段名只有一个拼写（PR #109 复审阻断项 2）。
+_CONTRACT_NAME_DOCS: Final[tuple[str, ...]] = (_SPEC, _ADR_018, "ARCHITECTURE.md", _PLAN)
+_RETIRED_CONTRACT_NAMES: Final[tuple[str, ...]] = ("submission_kind", "type_tag")
+_COLUMN_SPEC: Final = "ColumnSpec(ordinal, name, type)"
+
+
 def _read(name: str) -> str:
     return (_ROOT / name).read_text(encoding="utf-8")
 
@@ -134,3 +147,68 @@ def test_f1_truth_bindings_are_discriminating() -> None:
     revived = dict(docs)
     revived["DEVELOPMENT_PLAN.md"] = docs["DEVELOPMENT_PLAN.md"] + "\n确定性 SQL + AST；\n"
     assert _stale_phrases(revived) == [("DEVELOPMENT_PLAN.md", "确定性 SQL + AST；")]
+
+
+def _adr_005_conflicts(docs: dict[str, str]) -> list[str]:
+    return [
+        name
+        for name in _ADR_005_CONCLUSION_DOCS
+        if _ADR_005_CONCLUSION not in docs[name] or _ADR_005_CONTRADICTION in docs[name]
+    ]
+
+
+def _contract_name_drift(docs: dict[str, str]) -> list[tuple[str, str]]:
+    drift = [
+        (name, retired)
+        for name in _CONTRACT_NAME_DOCS
+        for retired in _RETIRED_CONTRACT_NAMES
+        if retired in docs[name]
+    ]
+    drift += [(name, _COLUMN_SPEC) for name in _CONTRACT_NAME_DOCS if _COLUMN_SPEC not in docs[name]]
+    return drift
+
+
+def _named_docs(names: tuple[str, ...]) -> dict[str, str]:
+    return {name: _read(name) for name in names}
+
+
+def test_adr_005_conclusion_for_the_locked_page_is_single_and_consistent() -> None:
+    assert _adr_005_conflicts(_named_docs(_ADR_005_CONCLUSION_DOCS)) == []
+
+
+def test_f1_contract_names_have_one_spelling() -> None:
+    assert _contract_name_drift(_named_docs(_CONTRACT_NAME_DOCS)) == []
+    plan = _read(_PLAN)
+    assert 'discriminator="input_kind"' in plan
+
+
+def test_confirmation_is_one_transaction_in_adr_and_plan() -> None:
+    adr = _read(_ADR_018)
+    plan = _read(_PLAN)
+    for text in (adr, plan):
+        assert "confirm_sql_artifact" in text
+    assert "同一个 PostgreSQL 事务" in adr
+    assert "`staging`、零 chunk" in adr
+    assert "downgrade：存在任一 `sql_artifact` 行时拒绝执行" in adr
+    assert "逐字节不变" in adr
+
+
+def test_dispatch_fairness_uses_a_field_the_plan_migrates() -> None:
+    # tasks 当前没有 created_at；计划用它排序时必须同时写明迁移、回填与共享排序键。
+    schema = _read("src/xiaowei_agent/persistence/schema.py")
+    plan = _read(_PLAN)
+    if '"created_at"' not in schema.split("TASK_SUBMISSIONS")[0]:
+        assert "`created_at TIMESTAMPTZ NOT NULL`" in plan
+        assert "server_default=now()" in plan
+        assert "dispatch_order_key" in plan
+
+
+def test_f1_consistency_guards_are_discriminating() -> None:
+    docs = _named_docs(_ADR_005_CONCLUSION_DOCS)
+    reverted = dict(docs)
+    reverted[_SPEC] = docs[_SPEC] + "\n" + _ADR_005_CONTRADICTION
+    assert _adr_005_conflicts(reverted) == [_SPEC]
+    names = _named_docs(_CONTRACT_NAME_DOCS)
+    renamed = dict(names)
+    renamed[_PLAN] = names[_PLAN] + "\nsubmission_kind"
+    assert _contract_name_drift(renamed) == [(_PLAN, "submission_kind")]

@@ -34,11 +34,54 @@ TaskStore、Plan、Evidence 或 RenderPayload，会同时破坏“单一真源�
 
 ### D2 ArtifactSubmission 与现有 TaskSubmission 共用一个 TaskStore
 
-`TaskSubmission` 升级为严格 discriminated union：`ConversationSubmission` 保持现有
-`RequestEnvelope` 行为；`ArtifactSubmission` 只含 `input_kind=sql_artifact`、`sql_ref`、`sql_hash`、
-`resource_id`、`result_ref` 与 `confirmation_ref`。旧记录按原 schema 读取，未知版本 fail-closed；
-不建第二套任务系统或第二张提交表。精确 schema/digest 迁移策略写入 F1 实施计划，并由迁移测试证明
-旧行读取不变。
+`TaskSubmission` 升级为以 `input_kind` 为判别字段的严格 discriminated union，全项目只用这一个字段名：
+
+| 类型 | 字段 |
+| --- | --- |
+| `ConversationSubmission` | `input_kind: Literal["conversation"] = "conversation"`、`envelope`、`context`、`as_of`、`clarification_parent_task_id` |
+| `ArtifactSubmission` | `input_kind: Literal["sql_artifact"]`、`context`、`as_of`、`sql_ref`、`sql_hash`、`resource_id`、`result_ref`、`confirmation_ref` |
+
+`context` 与 `as_of` 是两类提交共有的执行上下文与提交时间；除此之外 `ArtifactSubmission` 不含 SQL 原文、
+用户自然语言或 envelope。不建第二套任务系统或第二张提交表。
+
+**存储与迁移（一个 migration，同一 `task_submissions` 表）：**
+
+1. 新增 `input_kind TEXT NOT NULL`：先以 `server_default='conversation'` 加列回填全部旧行，再移除默认值，
+   新写入必须显式给值；`CHECK (input_kind IN ('conversation','sql_artifact'))`；
+2. `envelope` 改为可空；新增可空列 `sql_ref`、`sql_hash CHAR(64)`、`resource_id`、`result_ref`、
+   `confirmation_ref`；
+3. 形状约束 `ck_task_submissions_shape`：`conversation` 行 `envelope` 非空且五个 artifact 列全空；
+   `sql_artifact` 行 `envelope` 与 `clarification_parent_task_id` 为空且五个 artifact 列全非空；
+   `result_ref`、`confirmation_ref` 各自唯一；
+4. 读取按 `input_kind` 分派；任何其他值或违反形状的行 fail-closed，不猜测、不补默认；
+5. downgrade：存在任一 `sql_artifact` 行时拒绝执行并报错，不静默删除；否则删除新增列与约束，并恢复
+   `envelope NOT NULL`。
+
+**digest 兼容：**
+
+- `conversation` 的 `submission_digest`、`request_dedup_digest` 与 `idempotency_scope_digest` 的规范输入
+  **逐字节不变**（不加入 `input_kind` 键），旧行无需重算，固定向量测试承重；
+- `sql_artifact` 的 `submission_digest` 覆盖 `input_kind`、`context`、`as_of` 与五个引用字段；
+  `request_dedup_digest` 覆盖 tenant、environment、actor、`input_kind`、`sql_ref`、`sql_hash`、`resource_id`
+  与确认幂等键；`idempotency_scope_digest` 在原三项外加入 `input_kind`，使确认幂等键与对话幂等键分属
+  不同作用域、不能互相命中。`tasks.idempotency_key` 保存确认幂等键明文，命中后仍回查三项明文。
+
+### D2a 确认是一个原子命令
+
+确认由 TaskStore 聚合端口的 `confirm_sql_artifact` 在**同一个 PostgreSQL 事务**内完成，不拆到多个
+Store 或 Service 分步提交：
+
+1. 以 `SELECT … FOR UPDATE` 锁定草稿行，重验 principal、tenant、environment、target fingerprint、config
+   revision、SHA-256、过期与消费状态；
+2. 以事务级 advisory lock 串行化同一 requester 与同一 target 的配额计数，重验 5 / 50 存活上限；
+3. 草稿已被同一确认幂等键消费时直接返回已有 winner（`task_id`、`result_ref`）；被其他键消费时拒绝；
+4. 创建 `tasks` 行与 `sql_artifact` 形状的 `task_submissions` 行；
+5. 创建 `result_ref` 对应的结果行（`staging`、零 chunk、对读取不可见）；
+6. 写 `requester_owner` grant；
+7. 把草稿标为已消费，并绑定确认幂等键、`task_id`、`result_ref`。
+
+任一步失败整体回滚；提交结果未知时按现有 not-confirmed 语义回读 winner，不重复创建。内存实现使用同一
+纯判定函数，并由共享 suite 与 PostgreSQL 并发/故障注入测试承重。
 
 ### D3 ResultArtifact 采用 staging → sealed → available
 
@@ -86,7 +129,8 @@ TaskStore、Plan、Evidence 或 RenderPayload，会同时破坏“单一真源�
 - SQL 原文与结果行各只有一个受保护存储，渠道、任务与证据层只能持有引用；
 - 结果写入需要 fencing、背压与 staging，换来“未提交的查询永不可见”和“迟到写不污染结果”；
 - 新表、迁移、retention worker 与配额检查增加实现量；这些在 F1-1 以真实 PostgreSQL 集成测试验收；
-- F1 锁定页不展示结果，因此可以先于 ADR-005 交付；展示与导出仍被 ADR-005 和 F2/F3 阻塞。
+- F1 锁定页不写 approver grant、不展示列与行、不提供导出，因此**不依赖 ADR-005**，可以先于 ADR-005 交付；
+  结果行展示、approver grant 与导出仍被 ADR-005 和 F2/F3 阻塞。
 
 ## 备选方案与否决理由
 
@@ -100,7 +144,7 @@ TaskStore、Plan、Evidence 或 RenderPayload，会同时破坏“单一真源�
 ## 变更门
 
 以下任一变化必须先修订本 ADR：SQL 或结果的保存位置、TaskSubmission union 形状、storage_state 或
-completeness 闭集、配额/保留数值、ACL grant 种类、锁定页可见字段、export_policy，或 F2/F3 消费契约。
+completeness 闭集、`input_kind` 字段名与存储形状、原子确认的事务范围、配额/保留数值、ACL grant 种类、锁定页可见字段、export_policy，或 F2/F3 消费契约。
 
 ## 回滚
 
