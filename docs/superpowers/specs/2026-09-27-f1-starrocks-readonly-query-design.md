@@ -1,10 +1,11 @@
 # F1 StarRocks 受治理只读查询与锁定预览设计
 
-> 状态：Draft v4，按第二轮复审及修复后独立复核修订，等待负责人书面复审。
+> 状态：Draft v5，按负责人确认的“内部只读尽量兼容 SQL 客户端、关系黑名单额外拒绝”策略修订，等待独立复审。
 > 日期：2026-09-27。
 > 设计基线：c69a09bd8595df9808754b5e4272b7c95ee78a43。
 > 审查修复基线：016eae3d4bb07c9cc592effd368929a112d83d3c。
 > 第二轮复审基线：3a48cbe36d40a9d4fcece7e68ad25e718f6a929c。
+> 本轮策略调整基线：8f721c1965a9b217cde1bb4787a12e7673ca4880。
 > 本文只修订 F1 设计，不授权源码、migration、真实 StarRocks 调用、部署、canary、UAT、F2、F3、F1-NL 或 E1。
 
 相关真源：
@@ -27,6 +28,11 @@
 F1 第一阶段只交付 Web 显式 SQL 模式下的直接 SQL 查询。用户先提交 SQL 草稿，Web 再完整展示原 SQL、
 target 和本次预算；用户明确确认后才创建执行任务。系统执行原始 UTF-8 字节对应的同一 SQL，不格式化、
 不改写、不自动追加 LIMIT。
+
+内部 Catalog 的只读 SQL 以“尽量保持 SQL 客户端可用性”为原则：包括 SHOW DATABASES、其他只读 SHOW、
+DESC/DESCRIBE、EXPLAIN 只读查询和普通 SELECT。F1 不再维护业务数据库白名单；StarRocks 专用 credential
+的对象级 SELECT 权限是授权真源，ResourceSnapshot 中默认空的关系黑名单只做额外拒绝。写入、DDL、锁、
+导出和 session 改写仍在发送前拒绝；DDL 等写能力留给未来独立设计。
 
 自然语言生成 SQL 仍是已确认的产品方向，但拆成 F1-NL 单独设计、单独批准。“模型只产候选、完整
 展示、用户确认后才可执行”只是 F1-NL 待批准的设计方向，不代表 AGENTS.md 已允许模型产生可执行
@@ -94,13 +100,14 @@ sql_select_limit 不影响 F3。
 | 新 P1：等待 target slot 会卡住唯一 worker | 成立 | 当前 worker 对 candidates 串行 await，且 begin_step_attempt 在 Gateway 前消耗预算；按 §8.4 和 §10 改成非阻塞资源退让 |
 | P2-1：sqlglot 版本写错 | 成立 | uv.lock 与项目锁定环境都是 30.17.0；已修正文档和 probe 口径 |
 | P2-2：1 MiB SQL 过不了请求体门 | 成立，原意见措辞需收窄 | JsonBodyLimitMiddleware 全局挂载但只对登记路径生效；现有唯一 limit 默认 128 KiB 且配置上界小于 1 MiB。F1 改用 §5.1 的原始 SQL body 和路由级策略 |
-| P2-3：系统库未定义 | 成立 | information_schema 可含任务 SQL、日志和运行信息；§6、§7.3 改为业务库显式 allowlist，并固定拒绝系统库 |
+| P2-3：系统库未定义 | 成立，后续产品策略已变更 | 旧稿没有说明系统库的数据面；v5 不再按库拒绝，information_schema 等内部系统库由 credential 权限控制，并可按 §6、§7.3 的关系黑名单额外拒绝 |
 | P2-4：同步线程如何写异步 sink 未定义 | 成立 | 当前 StarRocks adapter 使用 asyncio.to_thread，而 PostgreSQL store 为 async；§5.5 冻结线程桥、背压和迟到写 fencing |
 | P2-5：契约测试绑定完整原句 | 成立但不阻断设计 | 测试改为按章节锚点检查关键语义；仍只是一层文档守卫，不冒充产品行为测试 |
 
 没有把第二轮 P2-3/P2-4 留到实施时临场决定：两者分别关系数据访问边界和超时后的写入隔离，属于本设计
-已有 SQLGuard 与 ResultChunkSink 主链，应在进入详细计划前闭合。真实 StarRocks 系统视图内容仍留给
-F1-H 验证，设计阶段采用 fail-closed allowlist，不依赖现场恰好没有敏感列。
+已有 SQLGuard 与 ResultChunkSink 主链，应在进入详细计划前闭合。v5 根据负责人后续决策把数据库级
+allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用黑名单冒充权限系统，真实权限仍由 F1-H
+验证的 StarRocks grants 承重。
 
 ### 2.4 修复后独立复核
 
@@ -108,10 +115,25 @@ F1-H 验证，设计阶段采用 fail-closed allowlist，不依赖现场恰好�
 | --- | --- | --- |
 | 恢复分类晚于资源检查，deadline 可能在首次 BUSY 崩溃后重置 | 成立 | 调度恢复与资源争抢次序没有形成一份状态机；§8.4 改为 inspect → 新执行水合/准入 → 持久化 deadline → deadline check → try_acquire → begin，并在 lease 写事务内重验 deadline |
 | 原始 SQL bytes 放入 ToolCall.typed_args 不可实现 | 成立 | 把进程内敏感材料误塞进只接受 JSON 标量的公共契约；§5.4 拆成标量 ToolCall 与不可持久化 HydratedQuery，并用 sql_hash 绑定 |
-| SHOW DATABASES 绕过业务库 allowlist | 成立 | 只检查了有对象 target 的 SHOW；§7.3 直接拒绝无业务库 target 且无法原样过滤的 SHOW DATABASES |
+| SHOW DATABASES 绕过业务库 allowlist | 在 v4 的 allowlist 模型下成立；v5 已被产品决策取代 | v5 删除数据库 allowlist，原样允许 SHOW DATABASES；结果以 StarRocks 对专用 credential 的实际返回为准，不做过滤或改写 |
 | 文档测试只看词存在可误绿 | 成立 | 旧守卫无法证明顺序和否定语义；契约测试改为检查规范顺序、决策表单元格及允许/拒绝分区 |
 
-### 2.5 五个共同根因
+### 2.5 负责人确认的策略调整
+
+本轮不是给 SHOW DATABASES 增加一个名称特判，而是修正“发现能力、应用策略和数据库授权混在一起”的
+共同根因：
+
+1. 内部 Catalog 中能被当前 parser 证明为只读的 SQL 尽量按 SQL 客户端原语义执行；
+2. SHOW DATABASES、SHOW TABLES 和内部系统库不再因为数据库级 allowlist 被统一拒绝；
+3. ResourceSnapshot 改用默认空、精确到 database.object 的关系黑名单，只额外拒绝指定表、视图和物化视图；
+4. credential 的 SELECT grants 才是授权边界；黑名单不能授予权限，也不能替代 DBA 撤权；
+5. DML、DDL、锁、文件、导出、session 改写和其他副作用仍拒绝；未来 DDL 必须使用新 capability、policy
+   profile、审批和写操作 readback，不借 F1 放开。
+
+此前已经确认暂不设计的外部 Catalog、table function、UNNEST 和 UDF 继续不在 F1 范围；hint 也继续按
+§7.2 的 parser 证据拒绝。这些是明确的外部数据源/执行语义边界，不属于已删除的数据库白名单。
+
+### 2.6 五个共同根因
 
 1. 输入类型没有与普通对话分离，导致 SQL 可能进入模型、TaskSubmission 和聊天入口；
 2. Plan 中的引用没有一条受信的运行时水合链，导致 SQLGuard、hash 和 adapter 看见的内容可能不同；
@@ -127,15 +149,15 @@ F1-H 验证，设计阶段采用 fail-closed allowlist，不依赖现场恰好�
 ### 3.1 F1 范围
 
 - capability 为 starrocks.readonly_query@1.0.0；
-- capability 只有 execute_readonly_query 一个 operation；允许的 SELECT/SHOW/DESC 都走这一条；
+- capability 只有 execute_readonly_query 一个 operation；允许的 SELECT/SHOW/DESC/EXPLAIN 都走这一条；
 - 入口为已认证 Web 的显式 SQL 编辑和确认页面；
 - 单条、多行、最长 1 MiB UTF-8 SQL；
 - SELECT、CTE、JOIN、子查询、UNION、聚合、窗口函数和内建标量函数；
-- 闭集元数据查询：SHOW TABLES、SHOW COLUMNS、DESC、SHOW CREATE TABLE；
-- target 内部 catalog 的数据库和表；
+- 内部 Catalog 的只读 SHOW（包括 SHOW DATABASES）、DESC/DESCRIBE 和 EXPLAIN 只读查询；
+- target 内部 Catalog 的数据库、系统库、表、视图和物化视图；
 - 普通行注释和普通块注释；
 - 有界流式预览、锁定结果页、ACL、配额、24 小时保留和清理；
-- 每个 target 可由 Web Admin 调低预览行数、字节数和查询超时；
+- 每个 target 可由 Web Admin 调低预览行数、字节数和查询超时，并维护关系查询黑名单；
 - 查询、截断、超时、目标、资源和数据处置审计。
 
 ### 3.2 明确不做
@@ -168,6 +190,8 @@ F1-H 验证，设计阶段采用 fail-closed allowlist，不依赖现场恰好�
 8. 单 target 并发闸跨 worker 生效，且只有确认连接关闭后才能主动释放；
 9. Web 配置只有一个 task-worker 运行时真源，保存不等于加载，不热加载；
 10. F1 任何真实 target 调用仍需独立现场 GO。
+11. StarRocks credential 的对象权限是授权真源；应用关系黑名单只能缩小、不能扩大其权限面；
+12. 黑名单、credential、target 或 config revision 任一漂移都必须在 Gateway 前拒绝旧计划。
 
 ## 5. 输入、计划、准入和结果主链
 
@@ -340,19 +364,27 @@ F1 把 task-worker 在启动时成功加载并校验的 ResourcesConfig generati
 
 - tenant_id；
 - F1 专用 credential reference；
-- default database 和大小写规范化后的 allowed_database_names 业务库闭集；
+- default database 和规范化后的 blocked_relation_names 查询黑名单；
 - DBA 带外批准的 version、grants、identity 和必要 DDL digest 及 source_ref；
 - resource group 标识和审批引用；
 - F1 查询预算；
 - enabled 与 generation。
 
-host、port、database、allowed_database_names、username、TLS、secret ref、预算和 preflight digest 全部来自
-同一 snapshot。default database 必须属于 allowed_database_names；系统库永远不能加入该列表。
+blocked_relation_names 默认空，每项都是内部 Catalog 中精确的 database.object，不接受 catalog 前缀、
+通配符、正则或只写 object 的歧义形式；object 可以是表、视图和物化视图。名称按 F1-H 验证后的 StarRocks
+identifier 规则规范化，规范化冲突、非法名称或重复项使 target 启动失败。系统库对象与业务库对象使用同一
+规则，没有隐式系统库全拒绝。
+
+host、port、database、blocked_relation_names、username、TLS、secret ref、预算和 preflight digest 全部来自
+同一 snapshot。
 现有 XIAOWEI_STARROCKS_* 测试装配只保留给 M6b test_readonly profile，不能与 F1 ResourceSnapshot
 同时启用；F1 release 装配发现双真源直接启动失败。
 
-账号口径统一为：DBA 配置和批准的 F1 专用跨库只读账号，无写、管理、UDF、外部 Catalog 和文件权限。
-Web 一个 StarRocks resource 只引用这一套 F1 credential，不再同时假设另一套“DBA 账号”。
+账号口径统一为：DBA 配置和批准的 F1 专用内部 Catalog 跨库只读账号，只向预期对象授予 SELECT 权限，
+无写、管理、UDF、外部 Catalog 和文件权限。数据库 credential 的 SELECT 权限是实际安全授权边界；
+blocked_relation_names 只是在权限面内额外拒绝，不能让无权限对象变得可读。如果某对象必须作为强安全边界
+禁止访问，DBA 还必须撤销该表、视图和可能暴露它的其他视图权限，不能只依赖应用黑名单。Web 一个
+StarRocks resource 只引用这一套 F1 credential，不再同时假设另一套“DBA 账号”。
 
 ### 6.2 确定性解析和漂移
 
@@ -366,8 +398,9 @@ task-worker 启动时由有效 snapshot 构造 F1TargetDirectory。CapabilityRes
 canonical target 计算；adapter binding 还必须精确匹配 config revision。
 
 配置保存后 Web 只显示 saved generation 和 restart_required。管理员在宿主受控重启 task-worker；
-新进程校验成功后写 loaded receipt。旧进程不热加载。新 generation、host、credential、预算、enabled
-或 digest 任一变化都会使旧计划在 Admission 前因 config revision/target 漂移拒绝，Gateway 调用为 0。
+新进程校验成功后写 loaded receipt。旧进程不热加载。新 generation、host、credential、
+blocked_relation_names、预算、enabled 或 digest 任一变化都会使旧计划在 Admission 前因 config revision/
+target 漂移拒绝，Gateway 调用为 0。
 
 preflight expected digest 只能来自负责人/DBA 的带外批准输入，不能用首次连接结果自我签名。
 
@@ -401,44 +434,53 @@ AST 前增加一个 quote-aware lexer pass，仅识别语句边界和注释类�
 
 ### 7.3 AST 闭集
 
-SQL 必须用项目锁定的 StarRocks 方言成功解析为恰好一条语句。允许：
+SQL 必须用项目锁定的 StarRocks 方言成功解析为恰好一条语句。Guard 按“能证明是只读”分类，不再维护
+业务数据库或逐条 SHOW allowlist。允许：
 
-1. 根语句为 SELECT；
-2. SHOW TABLES、SHOW COLUMNS、SHOW CREATE TABLE 的数据库位置最多是一个单段内部 database
-   identifier，不接受 catalog；
-3. DESC 的 this 必须是 Table，且没有 style、kind、partition、format、as_json 或嵌套 query。
+1. 根语句为 SELECT 的查询，包括 CTE、JOIN、子查询、UNION、聚合和窗口函数；
+2. parser 能完整识别且没有写入或 session 副作用的 SHOW，包括 SHOW DATABASES、SHOW DATABASES FROM
+   default_catalog、SHOW TABLES、SHOW COLUMNS、SHOW CREATE 及其他内部元数据读取；
+3. DESC/DESCRIBE 内部对象；
+4. EXPLAIN 包装的语句递归通过本节同一只读、Catalog 和黑名单检查；EXPLAIN ANALYZE SELECT 虽会实际
+   执行查询，也必须使用同一查询预算、slot、流式结果和 timeout；
+5. 一段 object、两段 db.object，以及 catalog 明确为内部 default_catalog 的三段
+   default_catalog.db.table；
+6. information_schema、`sys`、`_statistics_`、`statistics` 等内部系统库读取，只要 credential 有权限且
+   目标没有命中 blocked_relation_names。
 
 拒绝：
 
-- 所有写入、锁、文件、事务、session、变量、动态 SQL、procedure 和 explain 节点；
-- SHOW DATABASES 及其别名；它没有业务库 target，原样执行会枚举 credential 可见的非 allowlist 或系统库，
-  而过滤结果又会改变用户 SQL 语义；
-- Describe 内含 Select、Insert 或其他语句的 EXPLAIN/EXPLAIN ANALYZE 形状；
-- 任意 AST 位置出现三段及以上表名，包括 default_catalog.db.table；
-- 任意 AST 位置出现非当前 target 内部 catalog；
-- 任意 SELECT 基础表、SHOW 目标或 DESC 目标解析到 information_schema、`sys`、`_statistics_`、
-  `statistics` 或其他 StarRocks 系统库；
+- 所有 DML、DDL、写入、锁、文件、导出、事务、session/变量改写、动态 SQL、procedure，以及其他有
+  副作用的 AST；
+- parser 只能降级为不透明 Command、不能识别包装语句，或无法证明为只读的语句；
+- 任意 AST 位置引用外部 Catalog，或 SHOW DATABASES FROM 等 SHOW 明确指向外部 Catalog；
+- SELECT、EXPLAIN 查询、DESC、SHOW CREATE、SHOW COLUMNS 或其他对象级元数据读取精确命中
+  blocked_relation_names；
 - table function、UNNEST、qualified function；
 - optimizer/resource/session/version comment hint。
 
-一段对象名按 target 配置的 default database 确定性解析；两段 db.table 允许；CTE alias 和 derived table
-不被误当基础表。SHOW TABLES 未显式给库时同样解析到 default database。SELECT、SHOW 和 DESC 解析出的
-每一个业务 database 都必须命中 ResourceSnapshot 的
-allowed_database_names 闭集；没有命中即在发送 SQL 前拒绝，因此仍支持跨多个获批业务库的 JOIN，并不
-退化成单库/单表限制。系统库名先按 F1-H 验证的 StarRocks identifier 规则规范化，并至少对上述保留名做
-大小写不敏感拒绝；无法证明 identifier 规则时关闭 target。credential 即使意外拥有系统库 SELECT 权限也
-不能绕过这层 Guard。
+一段对象名按 target 配置的 default database 确定性解析；两段 db.object 直接使用指定库；三段名只允许
+catalog 规范化后等于 default_catalog。CTE alias 和 derived table 不被误当基础关系。Guard 遍历 SELECT
+及 EXPLAIN 内层查询的每一个直接基础关系，并解析 DESC、SHOW CREATE、SHOW COLUMNS 等对象级元数据
+目标；规范化后的 database.object 与 blocked_relation_names 精确命中即在发送 SQL 前拒绝，不做前缀、
+通配符或正则匹配。
 
-[StarRocks Information Schema](https://docs.starrocks.io/docs/sql-reference/information_schema/) 明确列出
-任务定义、load 日志、变量、节点和运行指标等系统视图；
-[SHOW PROC 官方示例](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/nodes_processes/SHOW_PROC/)
-同时展示 information_schema、sys 和 _statistics_ 系统库；
-[数据导入排障文档](https://docs.starrocks.io/docs/loading/loading_introduction/troubleshooting_loading/) 还使用
-statistics 系统库保存历史。F1 初版不开放任一系统视图；将来若有运维查询需求，应新增模板化 capability，
-而不是放宽 confirmed_readonly。
+SHOW DATABASES 没有关系目标，直接放行；SHOW TABLES 只列名称，也允许显示黑名单对象的名称。黑名单的
+语义是“不准查询指定关系”，不是隐藏数据库或对象存在性。information_schema 等系统库不再特殊拒绝；
+如其中某张视图不应被读取，管理员把精确 database.object 加入黑名单，并同步收紧数据库权限。
 
-所有数据库和表引用还要在当前 credential 权限面内再次 fail-closed。不存在的对象、类型错误或 StarRocks
-执行错误结构化返回，不自动修改或重试。
+SQLGuard 不递归展开视图定义，也不声称能从查询文本发现视图背后的基础表。直接查询一个未列入黑名单、
+但底层引用黑名单表的视图仍可能被 StarRocks 执行。因此数据库 credential 的对象级 SELECT grants 才是
+强安全边界：敏感表及可能暴露它的视图必须由 DBA 撤权，或把表、视图和物化视图分别加入黑名单。重命名、
+新增视图或权限变化必须生成新 config/grants digest；未通过 preflight 的 target 不开放。
+
+[SHOW DATABASES](https://docs.starrocks.io/docs/sql-reference/sql-statements/Database/SHOW_DATABASES/) 明确支持
+当前内部 Catalog 和指定 Catalog；F1 只允许内部 default_catalog。
+[StarRocks Information Schema](https://docs.starrocks.io/docs/sql-reference/information_schema/) 将其定义为
+只读系统视图集合，因此它适用同一 credential 与关系黑名单规则，不再整库排除。
+[StarRocks 权限概览](https://docs.starrocks.io/docs/administration/user_privs/authorization/user_privs/) 将 TABLE、
+VIEW 等对象的 SELECT 权限作为授权项。不存在、无权限、类型错误或其他 StarRocks 执行错误结构化返回，
+不自动修改或重试。
 
 未限定名称的 scalar、aggregate 和 window function 可以使用；F1 不维护容易漂移且会误伤大数据 SQL 的
 内建函数白名单。UDF 边界由“拒绝 qualified/table function + F1 credential 无 UDF 权限”共同承重；
@@ -474,14 +516,19 @@ Web 不能调高硬上限。提高任何红线都要修改版本化 policy、补
 
 ### 8.2 Admin 可调值
 
-每个 target 可调低：
+每个 target 可调低预算：
 
 - preview_max_rows：1..1000，默认 1000；
 - preview_max_bytes：1 MiB..20 MiB，默认 20 MiB；
 - query_timeout_seconds：1..180，默认 180。
 
-并发、SQL 大小和 artifact 配额初版只读。Admin 不能输入任意 session variable、SQL 规则、resource
-group 表达式或 connector fallback。保存后必须重启 task-worker，见 §6。
+Web Admin 还可维护 blocked_relation_names：默认空；每项必须是精确 database.object，可指向表、视图或
+物化视图；不接受通配符、正则、catalog 前缀和单段名称。保存时规范化、去重并展示 diff，删除条目要明确
+二次确认，因为它会扩大应用层可查询面。保存产生新 generation 和 restart_required；task-worker 重启并写
+loaded receipt 后才生效，旧任务因 config revision 漂移拒绝。
+
+并发、SQL 大小和 artifact 配额初版只读。Admin 不能输入任意 session variable、AST 规则、函数规则、
+resource group 表达式或 connector fallback。保存后必须重启 task-worker，见 §6。
 
 ### 8.3 timeout 层次
 
@@ -770,8 +817,8 @@ F3 的文件大小、超时、CSV 注入、下载票据、完整性和中断恢�
 4. ARCHITECTURE.md §7/§7.3：加入 artifact/ToolCall hash、inspect → 新执行水合/准入 → 持久化 deadline →
    try_acquire → begin 顺序、非阻塞 schedule_deferral、Task/Step attempt 区分、sealed result adoption 和
    PREVIOUS_ATTEMPT_UNCERTAIN；
-5. ARCHITECTURE.md §9：加入 confirmed_readonly profile、token scan、业务库 allowlist、系统库拒绝、
-   元数据闭集和无 hint 决策；
+5. ARCHITECTURE.md §9：加入 confirmed_readonly profile、token scan、内部只读语句分类、
+   blocked_relation_names 精确拒绝、credential 授权边界和无 hint 决策；
 6. DEVELOPMENT_PLAN.md、路线规格和 AGENT_HANDOFF.md：移除“只接受模板 SQL”的过期口径，同时保持
    “无源码授权、无真实调用授权”的当前状态；
 7. 未来 ADR-005/Web §11.2：批准锁定页不依赖 approver，但任何 view/export approver grant 仍受
@@ -792,10 +839,11 @@ ADR-015 不因直接 SQL而放宽；只有 F1-NL 设计才可申请新增模型�
 
 ### 14.1 本次设计修复证据
 
-- 设计契约测试必须先在旧稿上因缺少 HydratedQuery、ResultChunkSink、恢复、target 和 Web 前置约束转红，
-  修订后转绿；
-- sqlglot probe 使用 uv.lock 的 30.17.0，覆盖 SHOW DATABASES/SHOW DATABASES FROM catalog 的拒绝、
-  comment hint、version comment、JOIN comment hint、DESC、EXPLAIN SELECT 和 EXPLAIN ANALYZE INSERT；
+- 本轮设计契约测试先在 v4 旧稿上因 SHOW DATABASES 仍被拒绝、旧数据库白名单字段仍存在且没有
+  blocked_relation_names 而转红；修订后必须转绿；
+- sqlglot probe 使用 uv.lock 的 30.17.0，覆盖 SHOW DATABASES 与 FROM default_catalog 的允许、外部
+  Catalog 的拒绝、内部三段名、comment hint、version comment、JOIN comment hint、DESC、
+  EXPLAIN SELECT、EXPLAIN ANALYZE SELECT 和 EXPLAIN ANALYZE INSERT；
 - 源码检查确认当前 TaskSubmission、ToolCall、AdapterResponse/Evidence、attempt recovery、PyMySQL Cursor
   和 config 真源的实际缺口；另确认 worker 串行 await、schedule_retry 会增加 task_failure_count、
   api_request_body_limit_bytes 小于 1 MiB，以及 StarRocks adapter 在 asyncio.to_thread 中执行；
@@ -825,11 +873,17 @@ F1-0/F1-1 开工后，先补并确认以下行为测试在旧实现上因目标�
 - application/sql 的 1 MiB 原始 body 成功、1 MiB + 1 byte 拒绝；原 JSON 路由仍保持原上限；
 - 同步 reader 对 async sink 写入有背压，abort 后的迟到 chunk/seal 被 result fencing 拒绝；
 - abort 持久化失败时结果保持不可见、slot 不释放，恢复只补 abort 而不激活；
-- token scan、SHOW DATABASES、SHOW/DESC catalog、information_schema/sys/_statistics_/statistics 及非
-  allowlist database 的 SELECT/SHOW/DESC 恶意矩阵；
+- SHOW DATABASES、SHOW TABLES、内部系统库、跨内部数据库 JOIN 和 default_catalog.db.table 成功对照；
+- 黑名单表、视图和物化视图通过 SELECT、CTE、JOIN、子查询、EXPLAIN、DESC、SHOW CREATE、
+  SHOW COLUMNS 访问时均在发送前拒绝，大小写/quoted identifier 按现场确认规则规范化；
+- SHOW TABLES 仍可只列黑名单对象名称；未列入黑名单但 credential 无 SELECT 权限的对象仍由 StarRocks
+  拒绝，黑名单不能扩大授权；
+- DML、DDL、锁、文件、导出、session 改写、外部 Catalog、table function、UNNEST、UDF、hint 和
+  parser 不透明 Command 的恶意矩阵；
 - 慢查询 template_locked 全部原回归继续通过；
 - requester、Admin、其他用户、过期 ACL 正反例；
-- 去掉 hash、required query、token scan、ACL、fencing 或 no-replay 中任一保护时，对应测试转红。
+- 去掉 hash、required query、token scan、blocked_relation_names、ACL、fencing 或 no-replay 中任一保护时，
+  对应测试转红。
 
 触及 governance、planning、tools 后执行：
 
@@ -858,10 +912,13 @@ resource group、query queue、数据处置、时间窗和回退方式，至少�
 7. 一条实际运行的 180 秒 F1 查询对同一串行 worker 上其他能力造成的端到端调度延迟；
 8. StarRocks 内部 queue 等待也受 180 秒总发送后预算约束；
 9. 取消/driver timeout 后服务端残留查询的最长窗口；
-10. 外部 catalog、UDF、UNNEST、hint、写语句和 target drift 在 SQL 发送前拒绝；
-11. 最大列宽/单行结果不会把应用保存上限误报成 driver 或服务端内存上限；
-12. query id 与 Profile 指标可关联；
-13. 24 小时应用层删除，以及 StarRocks audit/query history 与部署环境的数据处置。
+10. SHOW DATABASES、SHOW TABLES、内部系统库读取、内部三段名和 EXPLAIN SELECT 正常工作；
+11. 黑名单表/视图的直接查询和对象级元数据读取在 SQL 发送前拒绝，SHOW TABLES 仍只列名称；
+12. 外部 Catalog、UDF、UNNEST、hint、写语句、session 改写和 target drift 在 SQL 发送前拒绝；
+13. 专用 credential 对未授权对象的读取确实失败，且不存在写、管理、UDF、外部 Catalog 和文件权限；
+14. 最大列宽/单行结果不会把应用保存上限误报成 driver 或服务端内存上限；
+15. query id 与 Profile 指标可关联；
+16. 24 小时应用层删除，以及 StarRocks audit/query history 与部署环境的数据处置。
 
 最高证据只能标记 tests + test-env verified；它不等于生产部署、canary 或 UAT。
 
@@ -871,7 +928,8 @@ resource group、query queue、数据处置、时间窗和回退方式，至少�
    schedule_deferral、路由 body policy、线程 sink bridge 契约和 SQLGuard profile；慢查询回归保持通过；
 2. F1-1 Web 直接 SQL 闭环：固定默认预算，完成 SQL 草稿/确认、Plan/Admission、fake streaming
    adapter、ResultArtifact、锁定页、no-replay、并发 slot 和 24 小时清理；
-3. F1-2 Admin 下调预算：扩展 StarRocksResource，保存后 restart_required，task-worker 启动加载回执；
+3. F1-2 Admin 预算与黑名单：扩展 StarRocksResource，支持下调预算和维护精确关系黑名单，保存后
+   restart_required，task-worker 启动加载回执；
 4. F1-3 飞书入口：只投影可信 Web SQL 页面和受保护 result 链接，不接受消息 SQL；
 5. F1-NL：单独设计、单独批准；
 6. F1-G 离线总验收：正式 Web 路径、全量/安全/eval、exact-SHA 独立审查；
@@ -884,7 +942,10 @@ F2/F3 只能在 F1 离线验收及各自设计获批后启动。
 
 - 保留原 SQL避免改写语义；代价是依赖 session limit、resource group、确认和严格 Guard；
 - Web 两步确认比“编辑器直接执行”多一步，但能把 SQL、target 和预算绑定为可审计事实；
-- 初版不支持任何 hint、UNNEST、UDF 和三段表名，实用性受限；这是 parser/权限证据不足下的明确收窄；
+- 内部 default_catalog 的三段名已允许，但初版仍不支持任何 hint、UNNEST、UDF 和外部 Catalog；这是
+  parser、权限和外部数据源证据不足下的明确收窄，因此“接近 SQL 客户端”不等于完全等同客户端；
+- 关系黑名单是 fail-open 的额外策略，而且不递归展开视图 lineage；重命名或新增视图可能产生新入口。
+  强隔离必须由 StarRocks credential 撤销 SELECT，并在 config/grants 漂移后重新 preflight；
 - 预览有界、导出未来重跑，F1/F3 数据可能不同；
 - 同 target 并发固定 1，峰值排队更长；
 - 当前 worker 对已领取任务串行 await；非阻塞 slot 退让解决了“排队占住 worker”，但真正执行中的 F1

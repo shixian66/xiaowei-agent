@@ -174,23 +174,86 @@ def test_f1_spec_uses_the_locked_parser_and_a_raw_sql_transport() -> None:
     )
 
 
-def test_f1_spec_rejects_system_schemas_and_fences_late_chunk_writes() -> None:
+def test_f1_spec_allows_internal_read_sql_without_a_database_allowlist() -> None:
     text = _spec()
 
     ast_section = _section(text, "### 7.3 AST 闭集")
     allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
-    assert "SHOW DATABASES" not in allowed
-    assert "SHOW DATABASES" in rejected
+    _assert_terms(
+        allowed,
+        "SHOW DATABASES",
+        "SHOW",
+        "DESC",
+        "EXPLAIN",
+        "default_catalog.db.table",
+        "information_schema",
+    )
+    assert "SHOW DATABASES 及其别名" not in rejected
+    assert "allowed_database_names" not in text
+    _assert_terms(
+        rejected,
+        "DDL",
+        "写入",
+        "session",
+        "副作用",
+        "外部 Catalog",
+        "SHOW DATABASES FROM",
+    )
+    _assert_terms(
+        _section(text, "### 2.5 负责人确认的策略调整"),
+        "未来 DDL",
+        "新 capability",
+        "审批",
+        "readback",
+    )
+
+
+def test_f1_spec_defines_an_exact_relation_denylist_and_permission_boundary() -> None:
+    text = _spec()
+
+    snapshot = _section(text, "### 6.1 ResourceSnapshot")
+    _assert_terms(
+        snapshot,
+        "blocked_relation_names",
+        "默认空",
+        "database.object",
+        "表、视图和物化视图",
+        "SELECT 权限",
+    )
+
+    ast_section = _section(text, "### 7.3 AST 闭集")
     _assert_terms(
         ast_section,
-        "allowed_database_names",
-        "information_schema",
-        "`sys`",
-        "`_statistics_`",
-        "`statistics`",
-        "SHOW 目标",
-        "DESC 目标",
+        "精确命中",
+        "SELECT",
+        "EXPLAIN",
+        "DESC",
+        "SHOW CREATE",
+        "SHOW COLUMNS",
+        "SHOW TABLES",
+        "只列名称",
+        "不递归展开视图定义",
+        "数据库 credential",
     )
+
+    admin = _section(text, "### 8.2 Admin 可调值")
+    _assert_terms(
+        admin,
+        "Web Admin",
+        "blocked_relation_names",
+        "默认空",
+        "database.object",
+        "通配符",
+        "正则",
+        "restart_required",
+        "删除条目",
+        "二次确认",
+    )
+
+
+def test_f1_spec_fences_late_chunk_writes() -> None:
+    text = _spec()
+
     _assert_terms(
         _section(text, "### 5.5 结果只走 Gateway 管理的流式 sink"),
         "run_coroutine_threadsafe",
