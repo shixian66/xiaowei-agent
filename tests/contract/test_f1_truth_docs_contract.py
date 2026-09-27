@@ -164,7 +164,9 @@ def _contract_name_drift(docs: dict[str, str]) -> list[tuple[str, str]]:
         for retired in _RETIRED_CONTRACT_NAMES
         if retired in docs[name]
     ]
-    drift += [(name, _COLUMN_SPEC) for name in _CONTRACT_NAME_DOCS if _COLUMN_SPEC not in docs[name]]
+    drift += [
+        (name, _COLUMN_SPEC) for name in _CONTRACT_NAME_DOCS if _COLUMN_SPEC not in docs[name]
+    ]
     return drift
 
 
