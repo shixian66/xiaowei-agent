@@ -202,7 +202,25 @@ def test_dispatch_fairness_uses_a_field_the_plan_migrates() -> None:
     if '"created_at"' not in schema.split("TASK_SUBMISSIONS")[0]:
         assert "`created_at TIMESTAMPTZ NOT NULL`" in plan
         assert "server_default=now()" in plan
-        assert "dispatch_order_key" in plan
+        # 复用现有排序函数并接入 TaskRecord，不另造近义函数（PR #109 第二轮复审）。
+        assert "dispatch_sort_key" in plan
+        assert "`TaskRecord.created_at: AwareDatetime`" in plan
+        assert "dispatch_order_key" not in plan
+
+
+def test_confirmation_has_exactly_one_entry_point() -> None:
+    plan = _read(_PLAN)
+    assert "SqlArtifactStore.confirm(" not in plan
+    assert "唯一入口是 Task 2A 的 `TaskStore.confirm_sql_artifact`" in plan
+    assert "这是唯一的确认入口" in _read(_ADR_018)
+
+
+def test_submission_compatibility_uses_rename_and_migration_only() -> None:
+    plan = _read(_PLAN)
+    assert "**显式改名**为 `ConversationSubmission`" in plan
+    assert "`union_tag_not_found`" in plan
+    assert "保留模块级别名" not in plan
+    assert "旧数据兼容**只**靠下述 migration 回填" in _read(_ADR_018)
 
 
 def test_f1_consistency_guards_are_discriminating() -> None:

@@ -3,7 +3,9 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > 状态：Draft V0.2（F1-0，2026-09-27）。V0.2 按 PR #109 复审（SHA `f5e4a99`）修订：ADR-005 口径统一、
-> TaskSubmission/迁移/原子确认写死、调度公平排序改用真实可迁移字段、B2 目标形状与权限说明。待 exact-SHA 复审与负责人接受。
+> TaskSubmission/迁移/原子确认写死、调度公平排序改用真实可迁移字段、B2 目标形状与权限说明。
+> V0.3 按复审（SHA `970e6d6`）收敛：确认只有 `TaskStore.confirm_sql_artifact` 一个入口；`created_at` 接入
+> `TaskRecord` 与现有 `dispatch_sort_key`；旧提交兼容只靠显式改名与 migration 回填。待 exact-SHA 复审与负责人接受。
 > 本计划获批**不**等于任何切片开工：F1-0b 与 F1-1 起每个切片都需负责人明确开工口令；真实 StarRocks
 > 调用只属 F1-H，另需现场计划与现场 GO。当前进度只看 [当前状态](../../../AGENT_HANDOFF.md#current-status)。
 
@@ -100,7 +102,7 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
 
 | P2 | 处理 |
 | --- | --- |
-| 已退让的 F1 任务按 `created_seq` 占满 `dispatch_batch_limit=10`，更新的其他能力任务可能长期拿不到批次 | Task 12 先写红测：10 个以上到期的 F1 退让任务 + 1 个更新的普通任务，普通任务必须在有限轮内被执行；修复写死为：Task 3 的 migration 给 `tasks` 新增 `created_at TIMESTAMPTZ NOT NULL`（加列时 `server_default=now()` 把全部旧行回填为同一迁移时刻，旧行之间仍按 `created_seq` 保持现有先后；保留该数据库时钟默认值给新行）；`list_dispatchable_tasks` 改为按 `COALESCE(next_attempt_at, created_at), created_seq, task_id` 排序；排序键由 `persistence/decisions.py` 的纯函数 `dispatch_order_key(record)` 唯一定义，内存实现直接使用、PostgreSQL 用同一表达式，并以共享 suite 断言两者顺序一致。每次退让把 `next_attempt_at` 推后，因此任一到期的新任务最多等待有界轮数；downgrade 删除该列与排序表达式 |
+| 已退让的 F1 任务按 `created_seq` 占满 `dispatch_batch_limit=10`，更新的其他能力任务可能长期拿不到批次 | Task 12 先写红测：10 个以上到期的 F1 退让任务 + 1 个更新的普通任务，普通任务必须在有限轮内被执行；修复写死为：Task 3 的 migration 给 `tasks` 新增 `created_at TIMESTAMPTZ NOT NULL`（加列时 `server_default=now()` 把全部旧行回填为同一迁移时刻，旧行之间仍按 `created_seq` 保持现有先后；保留该数据库时钟默认值给新行）；`list_dispatchable_tasks` 改为按 `COALESCE(next_attempt_at, created_at), created_seq, task_id` 排序；字段同时接入 `TaskRecord`、`schema.py`、`rows.py` 的 row mapper、PostgreSQL 与内存 store；直接扩展现有 `persistence/decisions.py` 的 `dispatch_sort_key(record)` 为 `(COALESCE(next_attempt_at, created_at), created_seq, task_id)`，不新增第二个排序函数；PostgreSQL 写等价 SQL 排序表达式，共享 suite 断言两边顺序一致。每次退让把 `next_attempt_at` 推后，因此任一到期的新任务最多等待有界轮数；downgrade 删除该列与排序表达式 |
 | 每次退让后重新水合与准入会在 event loop 上重新解析最大 1 MiB SQL | Task 7 的解析门同时测 event-loop 阻塞时长；Task 12 让 SQLGuard 在 `asyncio.to_thread` 中执行，并加“解析期间 heartbeat 仍按时续租”的测试。顺序仍保持设计 §8.4：inspect → 水合/准入 → 窗口 → 争抢，不为省解析调换顺序 |
 
 ## 3. Web 规格 §11.2 六项对照
@@ -163,6 +165,7 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
 - Produces:
   - `class QueryRequirement(StrEnum): NONE="none"; TEMPLATE_LOCKED="template_locked"; CONFIRMED_ARTIFACT="confirmed_artifact"`；`OperationSpec.query_requirement: QueryRequirement = QueryRequirement.NONE`
   - 字段名以 ADR-018 D2 为唯一真源，判别字段只叫 `input_kind`：
+  - 现有 `TaskSubmission` 类**显式改名**为 `ConversationSubmission`，机械更新全部构造点（当前 25 处 `TaskSubmission(`），不保留同名别名或无标签兼容层
   - `class ConversationSubmission(Contract)`：`input_kind: Literal["conversation"] = "conversation"` + 现有 `envelope`、`context`、`as_of`、`clarification_parent_task_id`
   - `class ArtifactSubmission(Contract)`：`input_kind: Literal["sql_artifact"]`、`context: RequestContext`、`as_of: AwareDatetime`、`sql_ref: StrictStr`、`sql_hash: Sha256Hex`、`resource_id: StrictStr`、`result_ref: StrictStr`、`confirmation_ref: StrictStr`
   - `TaskSubmission = Annotated[ConversationSubmission | ArtifactSubmission, Field(discriminator="input_kind")]`
@@ -170,9 +173,9 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
   - `@dataclass(frozen=True, slots=True) class HydratedQuery`：`sql_ref`、`sql_hash`、`sql_bytes: bytes`、`result_ref`、`resource_id`、`target_fingerprint`、`config_revision`、`confirmation_ref`、`budget`；`__post_init__` 校验 `sha256(sql_bytes).hexdigest() == sql_hash`；`__repr__` 不含 bytes；`__reduce__` 抛错（不可 pickle）
   - `ColumnSpec(ordinal, name, type)`：`ordinal: int ≥ 0`、`name: str`、`type: str`（ADR-018 D3 同名）；`StorageState`、`Completeness`、`ResultGrantKind` 闭集（值与 ADR-018 D3/D5 一致）
 
-- [ ] **Step 1: 写失败测试**：旧 `TaskSubmission(envelope=..., context=..., as_of=...)` 反序列化（无 `input_kind`）仍得到 `ConversationSubmission`；conversation 的三个 digest 固定向量逐字节不变；`ArtifactSubmission` 无 SQL 原文字段且 `extra="forbid"`；`HydratedQuery` hash 不符构造失败、`repr` 与 `pickle.dumps` 不泄漏 bytes；`ToolCall(typed_args={"sql": b"..."})` 仍被拒绝；`OperationSpec` 缺省 `query_requirement` 为 `NONE`；`ReadonlyQueryBudget` 1001 行、180+1 秒、20 MiB+1 被拒。
+- [ ] **Step 1: 写失败测试**：`TaskSubmission` union 对缺少 `input_kind` 的输入按 Pydantic 2.13.5 行为拒绝（`union_tag_not_found`），旧数据只经 Task 2 的 migration 回填；直接构造 `ConversationSubmission(...)` 得到 `input_kind="conversation"`；conversation 的三个 digest 固定向量逐字节不变；`ArtifactSubmission` 无 SQL 原文字段且 `extra="forbid"`；`HydratedQuery` hash 不符构造失败、`repr` 与 `pickle.dumps` 不泄漏 bytes；`ToolCall(typed_args={"sql": b"..."})` 仍被拒绝；`OperationSpec` 缺省 `query_requirement` 为 `NONE`；`ReadonlyQueryBudget` 1001 行、180+1 秒、20 MiB+1 被拒。
 - [ ] **Step 2: 运行确认因缺失符号/断言失败**：`python -m pytest tests/unit/test_f1_contracts.py tests/security/test_f1_contract_boundaries.py -q`
-- [ ] **Step 3: 最小实现**上述 DTO；把旧 `TaskSubmission` 构造点改为 `ConversationSubmission`，保留模块级别名直到 Task 2 迁移完成。
+- [ ] **Step 3: 最小实现**上述 DTO；同一提交内把全部旧 `TaskSubmission(` 构造点改为 `ConversationSubmission(`，类型注解改用 `TaskSubmission` union。
 - [ ] **Step 4: 运行相关测试与 `tests/unit/test_hash_vectors.py`**，确认 request/plan 固定向量未变。
 - [ ] **Step 5: 提交** `feat(contracts): add F1 submission, query and result DTOs`
 
@@ -186,13 +189,13 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
 **Interfaces:**
 - Produces:
   - `SqlArtifactStore.create_draft(*, draft: DirectSqlDraft, target: ResolvedTarget, config_revision: str, now) -> SqlArtifactRef`
-  - `SqlArtifactStore.confirm(*, sql_ref, principal, confirmation_key, expected_hash, expected_config_revision, now) -> ConfirmationResult`（幂等：同 key 同 task；已消费草稿换 key 拒绝）
   - `SqlArtifactStore.load_for_execution(*, sql_ref, task_id, principal, tenant_id, environment_id, now) -> SqlArtifactRecord`
   - `ResultArtifactStore.write_chunk(*, result_ref, task_id, step_id, task_fencing, result_fencing, seq, rows) -> ChunkWriteResult`
   - `ResultArtifactStore.abort(...)`、`seal(...)`、`activate(*, result_ref, committed_step)`、`read_locked_view(*, result_ref, principal, now)`
-  - 配额检查：requester ≤ 5、target ≤ 50 存活 query set
+  - 草稿创建时的配额检查：requester ≤ 5、target ≤ 50 存活 query set
+  - 确认**没有**公开的 Store 方法：唯一入口是 Task 2A 的 `TaskStore.confirm_sql_artifact`；SQL、结果与 grant 表在确认中的写入只作为共享同一连接/事务的私有数据库 helper，不新增 UnitOfWork 或通用事务框架
 
-- [ ] **Step 1: 写失败测试**：按 ADR-018 D2 的 migration 规则逐条断言——旧行回填 `input_kind='conversation'` 后按原 schema 读回且三个 digest 不变；加列后默认值已移除；`ck_task_submissions_shape` 拒绝 conversation 行带 artifact 列、sql_artifact 行带 envelope 或 clarification parent、缺任一引用列；未知 `input_kind` fail-closed；存在 sql_artifact 行时 downgrade 报错、无此类行时 downgrade 恢复 `envelope NOT NULL`；确认幂等键与相同字面值的对话幂等键不冲突；草稿 24 小时过期；确认幂等两例；requester 第 6 个、target 第 51 个存活 set 被拒；chunk 在 abort 后以旧 result fencing 写入被拒；未 seal 不能 activate；未提交 step 不能 activate；同名列按 ordinal 往返；只有 `available` 可读。
+- [ ] **Step 1: 写失败测试**：按 ADR-018 D2 的 migration 规则逐条断言——旧行回填 `input_kind='conversation'` 后按原 schema 读回且三个 digest 不变；加列后默认值已移除；`ck_task_submissions_shape` 拒绝 conversation 行带 artifact 列、sql_artifact 行带 envelope 或 clarification parent、缺任一引用列；未知 `input_kind` fail-closed；存在 sql_artifact 行时 downgrade 报错、无此类行时 downgrade 恢复 `envelope NOT NULL`；草稿 24 小时过期；草稿创建时 requester 第 6 个、target 第 51 个存活 set 被拒；chunk 在 abort 后以旧 result fencing 写入被拒；未 seal 不能 activate；未提交 step 不能 activate；同名列按 ordinal 往返；只有 `available` 可读。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_artifacts_postgres.py tests/integration/test_migration_paths.py -q`
 - [ ] **Step 3: 实现 migration 与两个 store**；表名 `sql_artifacts`、`result_artifacts`、`result_columns`、`result_chunks`、`result_access_grants`；`result_access_grants` 用 CHECK 约束保证只有 `requester_owner` 可空 `approval_ref`。
 - [ ] **Step 4: 运行共用 suite 的内存与 PostgreSQL 两个实现**，再跑 `tests/integration` 全部。
@@ -213,7 +216,7 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
   - `decisions.classify_sql_confirmation(...)`：内存与 PostgreSQL 共用的纯判定
   - 事务范围与步骤以 ADR-018 D2a 为准：锁草稿 → advisory lock 配额 → 幂等判定 → 建 task 与 submission → 建 `staging` 零 chunk 结果行 → 写 `requester_owner` grant → 标记草稿已消费并绑定确认键；任一步失败整体回滚
 
-- [ ] **Step 1: 写失败测试**：同一确认键重复调用得到同一 `task_id`/`result_ref`（`REPLAYED`）；两个不同确认键并发确认同一草稿只有一个 `CREATED`，另一个 `ALREADY_CONFIRMED_OTHER_KEY`；在第 4、5、6、7 步之后分别注入异常，事务回滚后草稿仍未消费、task/submission/结果行/grant 都不存在，重试可成功；提交结果未知时回读 winner 且不重复创建；requester 第 6 个、target 第 51 个存活 set 在并发下也只放行到上限；过期、hash/config/target 漂移、跨 principal 分别得到对应闭集结果且零写入。
+- [ ] **Step 1: 写失败测试**：同一确认键重复调用得到同一 `task_id`/`result_ref`（`REPLAYED`）；两个不同确认键并发确认同一草稿只有一个 `CREATED`，另一个 `ALREADY_CONFIRMED_OTHER_KEY`；确认幂等键与相同字面值的对话幂等键不冲突；在第 4、5、6、7 步之后分别注入异常，事务回滚后草稿仍未消费、task/submission/结果行/grant 都不存在，重试可成功；提交结果未知时回读 winner 且不重复创建；requester 第 6 个、target 第 51 个存活 set 在并发下也只放行到上限；过期、hash/config/target 漂移、跨 principal 分别得到对应闭集结果且零写入。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_confirmation_postgres.py -q`
 - [ ] **Step 3: 实现**：只在现有 PostgreSQL TaskStore 事务内完成，不新增第二个任务系统或跨 Store 分步提交。
 - [ ] **Step 4: 运行共享 suite 的内存与 PostgreSQL 实现**。
@@ -224,7 +227,7 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
 
 **Files:**
 - Create: `src/xiaowei_agent/persistence/target_slots.py`
-- Modify: `persistence/decisions.py`、`store.py`、`postgres.py`、`fake.py`、`contracts/enums.py`、migration `rev_0019`
+- Modify: `persistence/decisions.py`、`store.py`、`postgres.py`、`fake.py`、`rows.py`、`schema.py`、`contracts/task.py`（`TaskRecord.created_at`）、`contracts/enums.py`、migration `rev_0019`
 - Test: `tests/suites/task_store.py`（新增用例）、`tests/integration/test_f1_slot_scheduling_postgres.py`、`tests/security/test_f1_no_replay.py`
 
 **Interfaces:**
@@ -237,12 +240,12 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
   - `TaskStore.schedule_deferral(*, command: DeferralCommand) -> DeferralResult`（`next_attempt_at=min(now+5s, slot_expires_at, wait_deadline)`；轮换 fencing；结束 lease；不改 `task_failure_count`、不建 StepExecutionRecord）
   - `TargetQueryLeaseStore.try_acquire(*, grant, target_fingerprint, step_id, tool_call_hash, ttl_seconds, not_after) -> TargetSlotGrant | SlotBusy`；`release(*, slot_grant, connection_closed: Literal[True])`
   - `begin_step_attempt` 对 `never_replay=True` 的未提交 started 永不返回 `PROCEED`
-  - `tasks.created_at` 与 `decisions.dispatch_order_key(record) -> tuple[datetime, int, str]`，`list_dispatchable_tasks` 按其排序（§2）
+  - `tasks.created_at` → `TaskRecord.created_at: AwareDatetime`（`schema.py`、`rows.py`、PostgreSQL、内存 store 同步）；现有 `decisions.dispatch_sort_key(record)` 扩展为 `-> tuple[datetime, int, str]`，`list_dispatchable_tasks` 两个实现都按它排序（§2）
 
 - [ ] **Step 1: 写失败测试**（设计 §14.2 对应条目）：两个 store 实例同 target 只有一个取得 slot；committed / 未提交 started 两种恢复在 slot 前分类且 slot 获取数为 0；wait_deadline 首次争抢前持久化，重领取与 BUSY 不重置；到期后 slot 空闲也不能获取（`not_after` 在锁事务内用数据库时钟重验）；deferral 不增加失败计数/Step attempt/预算；deferral 与 heartbeat 续租同刻完成时 winner 为退让；持久化“有 Step attempt 无 started”被 CHECK 约束拒绝。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/integration/test_f1_slot_scheduling_postgres.py tests/security/test_f1_no_replay.py -q`
 - [ ] **Step 3: 实现**；把 `begin_step_attempt` 现有判定抽到 `classify_step_execution`，行为对现有能力保持逐字不变。
-- [ ] **Step 3a: 调度公平**：先写 §2 的饥饿红测（12 个到期的退让 F1 任务 + 1 个更新的普通任务，普通任务在 2 轮 poll 内被领取），再按 §2 实现 `created_at` 与排序键；现有 dispatch 顺序测试保持通过。
+- [ ] **Step 3a: 调度公平**：先写 §2 的饥饿红测（12 个到期的退让 F1 任务 + 1 个更新的普通任务，普通任务在 2 轮 poll 内被领取），再按 §2 实现 `created_at` 并扩展 `dispatch_sort_key`；现有 dispatch 顺序测试保持通过。
 - [ ] **Step 4: 运行** `tests/suites` 两个实现、`tests/integration/test_dispatch_and_attempts_postgres.py`、`test_concurrency_and_recovery.py`。
 - [ ] **Step 5: 变异**：临时让 `begin_step_attempt` 忽略 `never_replay`，`test_f1_no_replay` 必须转红；还原。
 - [ ] **Step 6: 提交** `feat(persistence): add slot wait window, deferral and target query lease`
@@ -470,4 +473,4 @@ F1 可以识别并发送这些语法，但专用只读账号收到 StarRocks 权
 - 设计 §13 十三项：本 PR 覆盖 1–13（ADR-005 按第 7 项窄化，不新建 ADR-005 文件）。
 - 设计 §14.2 行为测试：分布在 Task 1–16 的 Step 1；§14.3 在 Task 7 Step 5；§14.4 属 F1-H。
 - 设计 §15 F1-0 契约前置：Task 1–10（含 2A）；F1-1：Task 11–16。
-- V0.2 复审修订：ADR-005 结论四处一致（设计 §11.3、Web 规格 §11.2、ADR-018、本计划 §3）；判别字段统一为 `input_kind`；`ColumnSpec(ordinal, name, type)` 统一；确认原子性见 Task 2A；公平排序字段见 §2 与 Task 3。
+- V0.3：确认唯一入口为 `TaskStore.confirm_sql_artifact`；排序复用 `dispatch_sort_key`；无无标签兼容层。V0.2 复审修订：ADR-005 结论四处一致（设计 §11.3、Web 规格 §11.2、ADR-018、本计划 §3）；判别字段统一为 `input_kind`；`ColumnSpec(ordinal, name, type)` 统一；确认原子性见 Task 2A；公平排序字段见 §2 与 Task 3。

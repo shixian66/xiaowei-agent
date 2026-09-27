@@ -41,6 +41,7 @@ TaskStore、Plan、Evidence 或 RenderPayload，会同时破坏“单一真源�
 | `ConversationSubmission` | `input_kind: Literal["conversation"] = "conversation"`、`envelope`、`context`、`as_of`、`clarification_parent_task_id` |
 | `ArtifactSubmission` | `input_kind: Literal["sql_artifact"]`、`context`、`as_of`、`sql_ref`、`sql_hash`、`resource_id`、`result_ref`、`confirmation_ref` |
 
+现有 `TaskSubmission` 类显式改名为 `ConversationSubmission` 并更新全部构造点；`TaskSubmission` 只作为两者的 union 类型名。缺少 `input_kind` 的输入被判别 union 拒绝，旧数据兼容**只**靠下述 migration 回填，不设无标签兼容层。
 `context` 与 `as_of` 是两类提交共有的执行上下文与提交时间；除此之外 `ArtifactSubmission` 不含 SQL 原文、
 用户自然语言或 envelope。不建第二套任务系统或第二张提交表。
 
@@ -68,8 +69,9 @@ TaskStore、Plan、Evidence 或 RenderPayload，会同时破坏“单一真源�
 
 ### D2a 确认是一个原子命令
 
-确认由 TaskStore 聚合端口的 `confirm_sql_artifact` 在**同一个 PostgreSQL 事务**内完成，不拆到多个
-Store 或 Service 分步提交：
+确认由 TaskStore 聚合端口的 `confirm_sql_artifact` 在**同一个 PostgreSQL 事务**内完成，这是唯一的确认入口；
+SqlArtifactStore 与 ResultArtifactStore 不提供公开的确认方法，确认中的表写入只是共享同一事务的私有 helper，
+不拆到多个 Store 或 Service 分步提交，也不引入通用事务框架：
 
 1. 以 `SELECT … FOR UPDATE` 锁定草稿行，重验 principal、tenant、environment、target fingerprint、config
    revision、SHA-256、过期与消费状态；
