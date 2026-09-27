@@ -1,12 +1,13 @@
 # F1 StarRocks 受治理只读查询与锁定预览设计
 
-> 状态：Draft v6，按负责人确认的“目标版本内部只读完整兼容 SQL 客户端、关系黑名单额外拒绝”策略修订，等待独立复审。
+> 状态：Draft v7，按负责人确认的“目标版本区间内增量登记只读语句、未登记请求级拒绝”策略修订，等待独立复审。
 > 日期：2026-09-27。
 > 设计基线：c69a09bd8595df9808754b5e4272b7c95ee78a43。
 > 审查修复基线：016eae3d4bb07c9cc592effd368929a112d83d3c。
 > 第二轮复审基线：3a48cbe36d40a9d4fcece7e68ad25e718f6a929c。
 > 本轮策略调整基线：8f721c1965a9b217cde1bb4787a12e7673ca4880。
 > 第三轮复审基线：08e6aafa9c664bd15fd232be3edb2129d4552210。
+> 增量登记决策基线：66bdd92eec082ac6b67f9a5a376317bdb7b6e8f1。
 > 本文只修订 F1 设计，不授权源码、migration、真实 StarRocks 调用、部署、canary、UAT、F2、F3、F1-NL 或 E1。
 
 相关真源：
@@ -30,13 +31,14 @@ F1 第一阶段只交付 Web 显式 SQL 模式下的直接 SQL 查询。用户�
 target 和本次预算；用户明确确认后才创建执行任务。系统执行原始 UTF-8 字节对应的同一 SQL，不格式化、
 不改写、不自动追加 LIMIT。
 
-F1 在已批准 StarRocks 目标版本和“内部数据源”范围内支持该版本的全部只读语句族，体验边界不由
-sqlglot 是否认识某条 StarRocks 方言决定。能被 AST 完整证明的语句走 AST 路径；sqlglot 覆盖缺口走与
-目标版本绑定的只读兼容登记表，但仍由同一个 SQLGuard 做单语句、语法形状、目标、Catalog、黑名单和
+F1 在已验证 StarRocks 小版本区间和“内部数据源”范围内，支持 sqlglot 能完整证明的只读 AST，以及
+`ReadonlyStatementRegistry` 首批登记的 §7.3 语句族和常用只读语句。Registry 不要求把目标版本全部只读
+语句登记完整才开放 target；未登记或尚不能证明的语句在发送前返回结构化“暂未支持”，不影响同一 target
+继续服务已支持语句。两条证明路径仍由同一个 SQLGuard 做单语句、语法形状、目标、Catalog、黑名单和
 副作用校验。F1 不再维护业务数据库白名单；StarRocks 专用 credential 的对象权限是授权真源，
 ResourceSnapshot 中默认空的关系黑名单只做额外拒绝。写入、DDL、锁、导出和 session 改写仍在发送前
 拒绝；DDL 等写能力留给未来独立设计。外部 Catalog、table function、UNNEST、UDF 和 hint 仍是本阶段
-明确不支持的边界，不因“全部只读”被顺带放开。
+明确不支持的边界。
 
 自然语言生成 SQL 仍是已确认的产品方向，但拆成 F1-NL 单独设计、单独批准。“模型只产候选、完整
 展示、用户确认后才可执行”只是 F1-NL 待批准的设计方向，不代表 AGENTS.md 已允许模型产生可执行
@@ -127,8 +129,8 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 本轮不是给 SHOW DATABASES 增加一个名称特判，而是修正“发现能力、应用策略和数据库授权混在一起”的
 共同根因：
 
-1. 已批准 StarRocks 目标版本中属于 F1 内部数据源范围的全部只读语句，都按 SQL 客户端原语义提交；
-   parser 覆盖率不能缩小产品边界，覆盖缺口由版本绑定的只读兼容登记表证明；
+1. 内部数据源只读语句按 AST 证明路径和增量 ReadonlyStatementRegistry 提交；parser 覆盖缺口不自动
+   变成永久产品限制，但未登记语句在补充 descriptor 前明确返回“暂未支持”；
 2. SHOW DATABASES、SHOW TABLES 和内部系统库不再因为数据库级 allowlist 被统一拒绝；
 3. ResourceSnapshot 改用默认空、精确到 database.object 的关系黑名单，只额外拒绝指定表、视图和物化视图；
 4. credential 的 SELECT grants 才是授权边界；黑名单不能授予权限，也不能替代 DBA 撤权；
@@ -142,15 +144,17 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 
 | 意见 | 核对结论 | 共同根因与处理 |
 | --- | --- | --- |
-| P1：规格承诺只读 SHOW，但 sqlglot 30.17.0 对大量 StarRocks SHOW 降级为 Command 或 ParseError | 成立 | 产品能力错误地绑定在第三方 parser 覆盖率上；负责人选择方案 A，按 §7.3 建立目标版本绑定的 ReadonlyStatementRegistry，而不是逐条特判或接受客户端能力缩水 |
+| P1：规格承诺只读 SHOW，但 sqlglot 30.17.0 对大量 StarRocks SHOW 降级为 Command 或 ParseError | 成立 | 产品能力错误地只绑定在第三方 parser 覆盖率上；按 §7.3 建立增量 ReadonlyStatementRegistry，首批覆盖已确认语句，不用泛化 SHOW 前缀放行 |
 | P2：关系黑名单挡不住 information_schema 间接元数据 | 成立，不阻断 | 黑名单语义是阻止直接读取指定关系，不是元数据保密；§7.3 和 §16 明示列名、视图定义、查询文本和集群拓扑仍可能可见 |
 | 同根因扩展：UNION/INTERSECT/EXCEPT 根节点不是 Select，EXPLAIN LOGICAL 也可能 ParseError | 成立 | AST 根类型与兼容登记表一起覆盖，不再用“根必须是 SELECT”或“parser 必须成功”代替只读证明 |
-| 同根因扩展：ADMIN SHOW、SHOW PROFILELIST、ANALYZE PROFILE 等只读管理查询也有 parser 缺口 | 成立 | 进入完整版本清单和现场权限验证；SQLGuard 支持语法不等于给 credential 增权，StarRocks 仍可按实际 grants 返回权限错误 |
+| 同根因扩展：ADMIN SHOW、SHOW PROFILELIST、ANALYZE PROFILE 等只读管理查询也有 parser 缺口 | 成立 | 纳入首批 registry 和现场权限验证；SQLGuard 支持语法不等于给 credential 增权，StarRocks 仍可按实际 grants 返回权限错误 |
 
-负责人确认的“只读都可以执行”解释为：F1 SQLGuard 不因 parser 能力而拒绝已批准目标版本的合法内部只读
-语句，并把原始 SQL 提交给 StarRocks；它不承诺绕过数据库权限。需要 OPERATE 或其他只读权限的语句，
-在专用 credential 没有该权限时，应像同一账号使用 SQL 客户端一样收到 StarRocks 权限错误，不为追求成功
-而授予管理权限。
+负责人后续决定覆盖“完整登记才开放 target”的旧门：ReadonlyStatementRegistry **不要求**目标版本的
+**全部只读语句**登记完整。首批登记 §7.3 表中各类和常用只读语句；未登记语句零发送并返回结构化
+“暂未支持”，不影响 target 开放。Registry 与连续的已验证**小版本区间**绑定；就版本兼容判断而言，只有
+实际版本超出区间才停用 target，既有的配置/digest 漂移保护不变。SQLGuard 支持语法仍不等于给
+credential 增权；需要 OPERATE 或其他只读权限的已登记语句，
+在专用 credential 没有该权限时，应像同一账号使用 SQL 客户端一样收到 StarRocks 权限错误。
 
 ### 2.7 六个共同根因
 
@@ -160,8 +164,8 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 4. 当前把“等资源”和“已开始工具尝试”混在同一生命周期里，且 timeout/进程内并发语义默认工具可重试、
    可及时取消，不适合昂贵查询；
 5. target、SQL 方言和 Web 前置条件分散在多个旧里程碑，未形成 F1 唯一真源。
-6. 把 sqlglot 的方言覆盖率误当产品只读边界，导致合法 StarRocks 只读语句被无意拒绝，也让 Union 等
-   已承诺查询与“根必须为 Select”的规则相互矛盾。
+6. 把 sqlglot 的方言覆盖率误当唯一能力边界，导致已决定支持的 StarRocks 只读语句被无意拒绝；修复后
+   AST 与增量 Registry 共同定义当前已支持集合，未登记项可独立演进而不拖垮整个 target。
 
 后续设计按这六个根因修正，不按评论位置或语句名称分别增加 operation 特判。
 
@@ -175,8 +179,8 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 - 入口为已认证 Web 的显式 SQL 编辑和确认页面；
 - 单条、多行、最长 1 MiB UTF-8 SQL；
 - SELECT、CTE、JOIN、子查询、UNION、INTERSECT、EXCEPT、聚合、窗口函数和内建标量函数；
-- 已批准目标版本在内部数据源范围内支持的全部只读语句族，包括只读 SHOW、DESC/DESCRIBE、
-  EXPLAIN、ADMIN SHOW 和 profile 查看；sqlglot 覆盖缺口不缩小这一产品范围；
+- Registry 首批覆盖 §7.3 表中各类和产品确认的常用只读语句，包括只读 SHOW、DESC/DESCRIBE、
+  EXPLAIN、ADMIN SHOW 和 profile 查看；后续语句可增量登记，未登记项返回“暂未支持”而不关闭 target；
 - target 内部 Catalog 的数据库、系统库、表、视图和物化视图；
 - 普通行注释和普通块注释；
 - 有界流式预览、锁定结果页、ACL、配额、24 小时保留和清理；
@@ -197,8 +201,9 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 - TiDB、跨 target 查询、定时查询、查询缓存和快照一致性承诺；
 - 让模型或入口 handler 决定最终 capability、target、预算、policy、SQL 或工具调用。
 
-“未知或未登记的新版本语法”不是一个永远不支持的产品类别。它表示目标版本与已批准兼容清单不一致，
-必须先停用该 target、补齐版本清单和测试再重新开放；不能用泛化 SHOW 前缀放行，也不能在运行时猜测。
+未登记语法只表示当前 F1 暂未支持该请求：零 SQL 发送并返回结构化错误，同一 target 继续服务已支持
+语句。新增支持必须先补 descriptor、正反例和 registry digest；不能用泛化 SHOW 前缀放行，也不能在
+运行时猜测。
 
 普通注释保留并随原 SQL 执行，但始终是 ExternalContent。由于当前 parser 证据不足，原稿允许的 JOIN hint
 全部移出 F1；未来如恢复，必须固定 StarRocks/sqlglot 版本、定义可解析 AST 形状并补安全变异测试。
@@ -218,8 +223,8 @@ allowlist 改为 credential 授权加关系级额外拒绝；这不是把应用�
 10. F1 任何真实 target 调用仍需独立现场 GO。
 11. StarRocks credential 的对象权限是授权真源；应用关系黑名单只能缩小、不能扩大其权限面；
 12. 黑名单、credential、target 或 config revision 任一漂移都必须在 Gateway 前拒绝旧计划。
-13. sqlglot 覆盖率不能缩小已批准目标版本的只读产品边界；ReadonlyStatementRegistry 与目标版本、
-    policy snapshot 和 digest 绑定，未知版本或登记漂移必须在 Gateway 前失败。
+13. ReadonlyStatementRegistry 与已验证小版本区间、policy snapshot 和 digest 绑定；未登记语句只拒绝
+    当前请求，实际版本超出区间或登记漂移才在 Gateway 前使 target fail-closed。
 14. AST 路径和兼容登记路径只分析原文及其精确字节切片；adapter 永远收到用户确认的原始 SQL，不能执行
     Guard 重建、格式化或改写的替代文本。
 
@@ -395,8 +400,9 @@ F1 把 task-worker 在启动时成功加载并校验的 ResourcesConfig generati
 - tenant_id；
 - F1 专用 credential reference；
 - default database 和规范化后的 blocked_relation_names 查询黑名单；
-- DBA 带外批准的精确 StarRocks version、grants、identity 和必要 DDL digest 及 source_ref；
-- 与该 version 对应的 readonly registry profile/version/digest；
+- DBA 带外批准的 StarRocks `verified_min_version`、`verified_max_version` 小版本区间、grants、identity、
+  必要 DDL digest 及 source_ref；
+- 与该小版本区间对应的 readonly registry profile/version/digest；
 - resource group 标识和审批引用；
 - F1 查询预算；
 - enabled 与 generation。
@@ -430,12 +436,15 @@ canonical target 计算；adapter binding 还必须精确匹配 config revision�
 
 配置保存后 Web 只显示 saved generation 和 restart_required。管理员在宿主受控重启 task-worker；
 新进程校验成功后写 loaded receipt。旧进程不热加载。新 generation、host、credential、
-blocked_relation_names、预算、enabled、StarRocks version、readonly registry profile/digest 或其他 digest
+blocked_relation_names、预算、enabled、已验证版本区间、preflight 实际版本、readonly registry
+profile/digest 或其他 digest
 任一变化都会使旧计划在 Admission 前因 config revision 或 target 漂移拒绝，Gateway 调用为 0。
 
 preflight expected digest 只能来自负责人/DBA 的带外批准输入，不能用首次连接结果自我签名。task-worker
-必须回读实际 StarRocks version；不在 registry 声明的精确版本或获批版本区间内时，整个 target fail-closed，
-不能带着旧语法清单开放。
+必须回读实际 StarRocks version；版本落在闭区间
+`verified_min_version <= actual_version <= verified_max_version` 内即可加载当前 registry。只有实际版本
+超出已验证小版本区间、区间本身非法或 registry digest 不匹配时，整个 target fail-closed。区间内遇到未登记
+语句只拒绝该请求，不改变 target enabled 状态。
 
 ## 7. SQLGuard 与 ToolPolicy
 
@@ -488,13 +497,13 @@ confirmed_readonly 只有一个 SQLGuard 和一个执行入口，但有两条互
 6. information_schema、`sys`、`_statistics_`、`statistics` 等内部系统库读取，只要 credential 有权限且
    直接目标没有命中 blocked_relation_names。
 
-**版本兼容证明路径：** sqlglot 30.17.0 把合法 StarRocks 只读语句降级为不透明 `Command` 或直接抛出
+**版本兼容证明路径：** sqlglot 30.17.0 把 StarRocks 只读语句降级为不透明 `Command` 或直接抛出
 ParseError 时，SQLGuard 查询版本化 `ReadonlyStatementRegistry`。Registry 是 confirmed_readonly policy
 snapshot 内的只读语法描述数据，不是第二套 parser、第二个 Guard 或第二条执行链。每个 descriptor 必须
-声明：适用的精确 StarRocks 版本或已验证版本区间、quote-aware token grammar、允许/禁止的 clause、目标
+继承 registry profile 的已验证小版本区间，并声明 quote-aware token grammar、允许/禁止的 clause、目标
 类型、所有直接对象的唯一提取规则、Catalog 规则和副作用排除规则；不得用“以 SHOW 开头”这类泛化正则
-放行。F1-0/F1-H 必须按批准版本完成官方只读语句清单；下面是 sqlglot probe 已确认的强制最低覆盖，
-不是最终清单上限：
+放行。首批登记下面 sqlglot probe 已确认的语句族，并在 F1-0 补入产品确认的常用只读语句。Registry
+**不要求**把目标版本的只读语句**完整**登记才开放 target；下表是首批最低范围，不是最终清单上限：
 
 | 只读语句族 | descriptor 必须证明的附加约束 |
 | --- | --- |
@@ -511,16 +520,17 @@ snapshot 内的只读语法描述数据，不是第二套 parser、第二个 Gua
 | EXPLAIN LOGICAL、EXPLAIN VERBOSE、EXPLAIN COSTS | lexer 只定位 mode 与内层 query 的精确 byte slice；内层必须由 AST 证明为上述只读查询并通过 Catalog/黑名单检查 |
 
 兼容路径只用切出的内层 query 做校验；确认页、hash、审计引用和 adapter 执行的始终是同一份**原始 SQL**
-bytes，不能执行 lexer/sqlglot 重建、格式化或改写后的文本。目标版本官方文档中的每个 F1 范围内只读
-语句，必须在 F1-H 被证明落入 AST 路径或恰好一个 registry descriptor，否则该版本的 target 不能开放。
-后续 StarRocks 新增语法时先更新版本清单、descriptor、正反例和 digest，再开放目标；运行时不猜测。
+bytes，不能执行 lexer/sqlglot 重建、格式化或改写后的文本。新增语句支持时先增加 descriptor、正反例和
+registry digest；不要求补齐同版本的其他只读语句，也不需要关闭区间内的 target。
 
 拒绝：
 
 - 所有 DML、DDL、写入、锁、文件、导出、事务、session/变量改写、动态 SQL、procedure，以及其他有
   副作用的 AST；
-- parser 降级为 Command/ParseError 后没有匹配当前版本已登记 descriptor 的语句，即未登记或未知只读
-  前缀；登记语法不完整、歧义匹配、目标缺失或无法唯一提取直接对象目标的语句；
+- parser 降级为 Command/ParseError 后没有匹配当前 registry descriptor 的语句，即未登记或未知只读
+  前缀；这类请求返回 `error_code=READONLY_STATEMENT_NOT_SUPPORTED`、用户文案“暂未支持”、
+  `retryable=false`，Gateway/adapter 零 SQL 发送，但 target 保持 enabled；
+- 已登记语法不完整、歧义匹配、目标缺失或无法唯一提取直接对象目标的语句；
 - 任何多语句、hint、INTO OUTFILE，或 descriptor 明确排除的可执行 clause；
 - 任意 AST 位置引用外部 Catalog，或 SHOW DATABASES FROM 等 SHOW 明确指向外部 Catalog；
 - SELECT、EXPLAIN 查询、DESC、SHOW CREATE、SHOW COLUMNS 或其他对象级元数据读取精确命中
@@ -529,7 +539,8 @@ bytes，不能执行 lexer/sqlglot 重建、格式化或改写后的文本。目
 - optimizer/resource/session/version comment hint。
 
 以上拒绝都发生在 adapter 前，保证 Gateway/adapter **零 SQL 发送**；不能把“交给数据库试一下”当作
-无法证明只读、无法唯一提取目标或版本漂移时的退路。
+无法证明只读或无法唯一提取目标时的退路。未登记是请求级不支持，不得写成 target 不可用；只有实际
+StarRocks 版本超出已验证小版本区间等 §6.2 漂移才关闭 target。
 
 一段对象名按 target 配置的 default database 确定性解析；两段 db.object 直接使用指定库；三段名只允许
 catalog 规范化后等于 default_catalog。CTE alias 和 derived table 不被误当基础关系。Guard 遍历 SELECT
@@ -903,8 +914,8 @@ F3 的文件大小、超时、CSV 注入、下载票据、完整性和中断恢�
    try_acquire → begin 顺序、非阻塞 schedule_deferral、Task/Step attempt 区分、sealed result adoption 和
    PREVIOUS_ATTEMPT_UNCERTAIN；
 5. ARCHITECTURE.md §9：加入 confirmed_readonly profile、token scan、AST/ReadonlyStatementRegistry 双证明路径、
-   目标版本兼容清单与 digest、blocked_relation_names 精确拒绝、元数据非保密边界、credential 授权边界和
-   无 hint 决策；
+   已验证小版本区间、增量 registry 与请求级暂未支持错误、blocked_relation_names 精确拒绝、元数据非保密
+   边界、credential 授权边界和无 hint 决策；
 6. DEVELOPMENT_PLAN.md、路线规格和 AGENT_HANDOFF.md：移除“只接受模板 SQL”的过期口径，同时保持
    “无源码授权、无真实调用授权”的当前状态；
 7. 未来 ADR-005/Web §11.2：批准锁定页不依赖 approver，但任何 view/export approver grant 仍受
@@ -929,6 +940,8 @@ ADR-015 不因直接 SQL而放宽；只有 F1-NL 设计才可申请新增模型�
   blocked_relation_names 而转红；修订后必须转绿；
 - 第三轮回归测试先在 v5 旧稿上得到 `2 failed, 9 passed`：一项因 §7.3 缺少 `Union` 和版本化兼容证明
   路径转红，另一项因没有明示黑名单“不提供元数据保密”而转红；不是导入、夹具或标题定位失败；
+- 增量登记决策契约先在 v6 旧稿上因缺少“首批登记”而 `1 failed`，证明旧稿仍把 registry 完整性与 target
+  开放错误绑定；
 - sqlglot probe 使用 uv.lock 的 30.17.0，覆盖 SHOW DATABASES 与 FROM default_catalog 的允许、外部
   Catalog 的拒绝、内部三段名、comment hint、version comment、JOIN comment hint、DESC、
   EXPLAIN SELECT、EXPLAIN ANALYZE SELECT 和 EXPLAIN ANALYZE INSERT；另确认 Union/Intersect/Except 的
@@ -971,7 +984,9 @@ F1-0/F1-1 开工后，先补并确认以下行为测试在旧实现上因目标�
 - 查询根节点 Select、Union、Intersect、Except 都有正常对照和写形状反例；
 - ReadonlyStatementRegistry 的每一个 registry descriptor 都有正常对照、大小写/空白/quoted identifier
   边界、缺失或重复 clause、多语句、hint、外部 Catalog、黑名单目标和歧义目标反例；未知只读前缀和
-  当前版本未登记语法必须零 SQL 发送；
+  当前版本未登记语法必须返回 READONLY_STATEMENT_NOT_SUPPORTED、零 SQL 发送且 target 继续可用；
+- 实际版本位于 verified_min_version、区间中部、verified_max_version 时 target 可加载；低于下界或高于
+  上界时 target fail-closed；
 - EXPLAIN LOGICAL/VERBOSE/COSTS 对 SELECT/Union 有正常对照，对 INSERT、INTO OUTFILE、外部 Catalog、
   table function 和黑名单关系有反例，并证明 adapter 仍收到完整原始 SQL；
 - SHOW CATALOGS、SHOW PROFILELIST、SHOW PROC、information_schema.columns 和
@@ -1011,9 +1026,9 @@ resource group、query queue、数据处置、时间窗和回退方式，至少�
 7. 一条实际运行的 180 秒 F1 查询对同一串行 worker 上其他能力造成的端到端调度延迟；
 8. StarRocks 内部 queue 等待也受 180 秒总发送后预算约束；
 9. 取消/driver timeout 后服务端残留查询的最长窗口；
-10. 对精确 StarRocks 版本建立完整官方只读语句 inventory；每项必须落入
-    AST 路径或唯一 registry descriptor，并实测其输出形状、所需权限和权限不足错误；最低覆盖 §7.3 全表、SHOW DATABASES、
-    SHOW TABLES、内部系统库读取、内部三段名和 EXPLAIN SELECT；
+10. 在已验证小版本区间的区间下界、区间上界和至少一个代表版本上，验证首批 registry（§7.3 表中各类及
+    常用只读语句）的输出形状、所需权限和权限不足错误；另用未登记语句确认返回
+    READONLY_STATEMENT_NOT_SUPPORTED、零 SQL 发送且 target 继续可用，区间外版本才 fail-closed；
 11. 黑名单表/视图的直接查询和对象级元数据读取在 SQL 发送前拒绝，SHOW TABLES 仍只列名称；
 12. 外部 Catalog、UDF、UNNEST、hint、写语句、session 改写和 target drift 在 SQL 发送前拒绝；
 13. 专用 credential 对未授权对象的读取确实失败，且不存在写、管理、UDF、外部 Catalog 和文件权限；
@@ -1027,9 +1042,9 @@ resource group、query queue、数据处置、时间窗和回退方式，至少�
 
 ## 15. 按业务闭环实施
 
-1. F1-0 规则与契约前置：完成 §13 文档/ADR、目标版本完整只读 inventory、版本化
-   ReadonlyStatementRegistry、TaskSubmission/query/result/target lease、schedule_deferral、路由 body
-   policy、线程 sink bridge 契约和 SQLGuard profile；慢查询回归保持通过；
+1. F1-0 规则与契约前置：完成 §13 文档/ADR、已验证小版本区间、§7.3 各类加常用只读语句的首批
+   ReadonlyStatementRegistry、请求级暂未支持错误、TaskSubmission/query/result/target lease、
+   schedule_deferral、路由 body policy、线程 sink bridge 契约和 SQLGuard profile；慢查询回归保持通过；
 2. F1-1 Web 直接 SQL 闭环：固定默认预算，完成 SQL 草稿/确认、Plan/Admission、fake streaming
    adapter、ResultArtifact、锁定页、no-replay、并发 slot 和 24 小时清理；
 3. F1-2 Admin 预算与黑名单：扩展 StarRocksResource，支持下调预算和维护精确关系黑名单，保存后
@@ -1046,8 +1061,10 @@ F2/F3 只能在 F1 离线验收及各自设计获批后启动。
 
 - 保留原 SQL避免改写语义；代价是依赖 session limit、resource group、确认和严格 Guard；
 - Web 两步确认比“编辑器直接执行”多一步，但能把 SQL、target 和预算绑定为可审计事实；
-- 已批准目标版本在 F1 内部数据源范围内的全部只读语句都必须有 AST 或 registry 证明；代价是每次支持
-  新 StarRocks 版本都要维护完整只读 inventory、正反例和 digest，版本未知时整个 target fail-closed；
+- Registry 采用增量覆盖：首批之外的合法只读语句可能暂未支持并返回请求级结构化错误，但不会关闭
+  target；代价是 SQL 客户端兼容度逐批提升，而不是首版承诺同版本全部语法；
+- Registry 绑定连续的已验证小版本区间；区间内未登记语句不关闭 target，只有实际版本越界、区间非法或
+  digest 漂移才 fail-closed；
 - 初版仍不支持任何 hint、UNNEST、UDF 和外部 Catalog；这是已确认的数据源/执行语义范围，不是 parser
   覆盖率造成的偶然限制；
 - 关系黑名单是 fail-open 的额外策略，而且不递归展开视图 lineage；重命名或新增视图可能产生新入口。

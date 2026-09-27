@@ -251,7 +251,7 @@ def test_f1_spec_defines_an_exact_relation_denylist_and_permission_boundary() ->
     )
 
 
-def test_f1_spec_does_not_treat_parser_coverage_as_the_readonly_product_boundary() -> None:
+def test_f1_spec_uses_an_incremental_registry_without_blocking_the_target() -> None:
     text = _spec()
     ast_section = _section(text, "### 7.3 只读证明闭集")
     allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
@@ -264,8 +264,8 @@ def test_f1_spec_does_not_treat_parser_coverage_as_the_readonly_product_boundary
         "ReadonlyStatementRegistry",
         "sqlglot 30.17.0",
         "Command",
+        "首批登记",
         "不得用“以 SHOW 开头”这类泛化正则",
-        "恰好一个 registry descriptor",
         "SHOW CREATE MATERIALIZED VIEW",
         "SHOW MATERIALIZED VIEWS",
         "SHOW PARTITIONS",
@@ -288,10 +288,14 @@ def test_f1_spec_does_not_treat_parser_coverage_as_the_readonly_product_boundary
         "EXPLAIN COSTS",
         "原始 SQL",
         "内层 query",
+        "**不要求**把目标版本的只读语句**完整**登记才开放 target",
     )
     _assert_terms(
         rejected,
         "未登记",
+        "READONLY_STATEMENT_NOT_SUPPORTED",
+        "暂未支持",
+        "target 保持 enabled",
         "无法唯一提取",
         "INTO OUTFILE",
         "外部 Catalog",
@@ -312,21 +316,61 @@ def test_f1_spec_does_not_treat_parser_coverage_as_the_readonly_product_boundary
         "移除目标提取",
     )
 
+    decision = _section(text, "### 2.6 第三轮复审与负责人决定")
+    _assert_terms(
+        decision,
+        "不要求",
+        "全部只读语句",
+        "首批",
+        "暂未支持",
+        "不影响 target 开放",
+        "小版本区间",
+    )
+    scope = _section(text, "### 3.1 F1 范围")
+    _assert_terms(scope, "首批", "常用只读语句", "暂未支持")
+
     snapshot = _section(text, "### 6.1 ResourceSnapshot")
     _assert_terms(
         snapshot,
-        "精确 StarRocks version",
+        "verified_min_version",
+        "verified_max_version",
+        "小版本区间",
         "readonly registry profile/version/digest",
     )
     drift = _section(text, "### 6.2 确定性解析和漂移")
-    _assert_terms(drift, "回读实际 StarRocks version", "target fail-closed")
+    _assert_terms(
+        drift,
+        "回读实际 StarRocks version",
+        "verified_min_version <= actual_version <= verified_max_version",
+        "区间内",
+        "超出已验证小版本区间",
+        "target fail-closed",
+    )
     live_gate = _section(text, "### 14.4 真实 target 现场门")
     _assert_terms(
         live_gate,
-        "完整官方只读语句 inventory",
-        "AST 路径或唯一 registry descriptor",
+        "首批 registry",
+        "区间下界",
+        "区间上界",
+        "未登记语句",
+        "READONLY_STATEMENT_NOT_SUPPORTED",
+        "target 继续可用",
         "权限不足错误",
     )
+    _assert_terms(
+        _section(text, "## 16. 已接受的权衡和残余风险"),
+        "增量",
+        "合法只读语句",
+        "暂未支持",
+        "不关闭 target",
+    )
+
+    for obsolete in (
+        "完整官方只读语句 inventory",
+        "目标版本完整只读 inventory",
+        "否则该版本的 target 不能开放",
+    ):
+        assert obsolete not in text, f"F1 规格仍保留过严完整性门：{obsolete}"
 
 
 def test_f1_spec_discloses_that_the_relation_denylist_is_not_metadata_secrecy() -> None:
