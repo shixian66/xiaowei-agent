@@ -1,4 +1,4 @@
-"""F1 设计 v8 的承重决定必须在规格里有单一闭环，且不复活 v8 已删除的机制。"""
+"""F1 设计 v9 的承重决定必须在规格里有单一闭环，且不复活 v8 已删除的机制。"""
 
 import re
 from pathlib import Path
@@ -43,23 +43,23 @@ def _table_row(section: str, marker: str) -> tuple[str, ...]:
 
 def _current_body(text: str) -> str:
     """去掉 §2 修订记录后的现行正文；修订记录会按名称引用 v7 机制。"""
-    start = text.index("## 2. v8 修订记录")
+    start = text.index("## 2. 修订记录")
     end = text.index("## 3. 产品范围")
     return text[:start] + text[end:]
 
 
 def test_f1_spec_records_the_owner_minimal_decisions() -> None:
-    record = _section(_spec(), "## 2. v8 修订记录")
-    for row, v8_value in (
-        ("target 排队", "全部取消"),
-        ("提交方式", "一步提交"),
-        ("SQL 上限", "65_536 bytes"),
-        ("结果写入", "一次读完"),
-        ("只读语句登记", "代码内只读语句清单"),
-        ("worker", "最多同时处理 4 个任务"),
-        ("连接前置校验", "F1 不做 digest 比对"),
+    record = _section(_spec(), "## 2. 修订记录")
+    for row, value in (
+        ("与 agent 的关系", "走统一对话主链"),
+        ("入口", "飞书群聊 @小维 直接发 SQL"),
+        ("识别方式", "确定性 SQL 识别，无前缀"),
+        ("目标选择", "无默认目标"),
+        ("配额", "取消"),
+        ("结果记录", "步骤成功提交时才建结果"),
+        ("连接前置校验", "不做权限校验码与版本区间检查"),
     ):
-        assert v8_value in _table_row(record, f"| {row} |")[2], row
+        assert value in _table_row(record, f"| {row} |")[2], row
 
 
 def test_f1_spec_does_not_revive_removed_v7_machinery() -> None:
@@ -75,7 +75,9 @@ def test_f1_spec_does_not_revive_removed_v7_machinery() -> None:
         "verified_min_version",
         "application/sql",
         "`staging`",
+        "`pending`",
         "1_048_576",
+        "存活 query set",
     ):
         assert retired not in body, f"F1 规格现行正文仍含 v8 已删除的机制：{retired}"
 
@@ -84,23 +86,26 @@ def test_f1_spec_defines_one_guarded_sql_and_result_path() -> None:
     text = _spec()
     _assert_ordered_terms(
         _section(text, "## 1. 结论"),
-        "TaskStore.submit_sql_query",
+        "统一对话入口",
+        "交互路由",
         "CapabilityResolver",
+        "SlotVerifier",
         "PlanCompiler",
+        "执行披露",
         "WorkflowRunner",
-        "StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)",
+        "StepAdmission",
         "ToolGateway",
-        "commit_step_result",
+        "Render",
     )
     _assert_terms(
-        _section(text, "### 5.4 从引用到唯一 ToolCall"),
+        _section(text, "### 5.6 从引用到唯一 ToolCall"),
         "`ToolCall.typed_args` 仍只接受 JSON 标量",
         "HydratedQuery",
         "Gateway 调用次数为 0",
         "`asyncio.to_thread`",
     )
     _assert_terms(
-        _section(text, "### 5.5 结果一次读完，随步骤结果同事务提交"),
+        _section(text, "### 5.7 结果一次读完，随步骤结果同事务提交"),
         "`QueryResultBuffer`",
         "ColumnSpec(ordinal, name, type)",
         "迟到写入被丢弃",
@@ -109,18 +114,32 @@ def test_f1_spec_defines_one_guarded_sql_and_result_path() -> None:
     )
 
 
-def test_f1_spec_submits_in_one_transaction() -> None:
-    submit = _section(_spec(), "### 5.1 Web 一步提交")
-    _assert_ordered_terms(
-        submit,
-        "advisory lock",
-        "同一幂等键已提交过相同内容",
-        "写 SqlArtifact",
-        "建 task",
-        "`pending` 状态的结果行",
-        "`requester_owner` grant",
+def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() -> None:
+    text = _spec()
+    _assert_terms(
+        _section(text, "### 5.1 统一入口与确定性 SQL 识别"),
+        "`recognize_sql_message(text)`",
+        "闭集 SQL 语句关键字",
+        "恰好是一条完整语句",
+        "不调用模型",
+        "**同一个 PostgreSQL 事务**",
     )
-    _assert_terms(submit, "**同一个 PostgreSQL 事务**", "任一步失败整体回滚", "1..65_536 bytes")
+    _assert_terms(
+        _section(text, "### 5.3 交互接受：规则来源，零模型调用"),
+        "`origin=rule`",
+        "不构造模型请求",
+        "`request_count=0`",
+    )
+    assert "SQL 原文永不进入模型端口" in _section(text, "## 4. 不可破坏的不变量")
+
+
+def test_f1_spec_asks_instead_of_guessing_the_target() -> None:
+    slots = _section(_spec(), "### 5.4 SlotVerifier 确定目标，不确定就追问")
+    assert "`SlotReady`，使用它" in _table_row(slots, "恰好 1 个")[1]
+    assert "`SlotInvalid`" in _table_row(slots, "| 0 个 |")[1]
+    assert "`CAPABILITY_TARGET_SELECTION_REQUIRED`" in _table_row(slots, "多个且没有澄清回答")[1]
+    assert "再次 `SlotIncomplete`" in _table_row(slots, "回答不完全一致")[1]
+    _assert_terms(slots, "**引用回复**", "提交人本人", "不调用模型")
 
 
 def test_f1_spec_keeps_no_replay_on_the_existing_step_journal() -> None:
@@ -181,8 +200,7 @@ def test_f1_spec_closes_channel_target_and_web_prerequisites() -> None:
     text = _spec()
     for required in (
         "F1-NL",
-        "Web 显式 SQL 页面是 F1 唯一提交入口",
-        "不构造 ResolvedTarget",
+        "网页聊天框、飞书单聊、飞书群聊（@小维）都可以提交 SQL",
         "不热加载",
         "Web §11.2 前置",
         "不依赖 ADR-005",
@@ -193,5 +211,6 @@ def test_f1_spec_closes_channel_target_and_web_prerequisites() -> None:
         "等待中的任务保留 queued 状态",
         "安全的 StarRocks JOIN 分布提示",
         "未批准时 F1 不开放 /results",
+        "默认 target",
     ):
         assert forbidden not in text, f"F1 规格仍保留未闭合设计：{forbidden}"

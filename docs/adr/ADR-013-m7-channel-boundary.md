@@ -182,18 +182,22 @@ artifact，或放宽真实应用、凭据、网络、部署与 canary 的独立�
 ## F1 修订（2026-09-27，Proposed）
 
 - 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
-- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §9.3、§11
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1、§5.4、§9.3、§11
 - 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
 
-本修订是“未来 R1 的变更门”要求的修订，只做以下窄放开：
+本修订是“未来 R1 的变更门”要求的修订，只做以下放开：
 
-- Web 显式 SQL 模式是 F1 唯一的 SQL 提交与确认入口；Web handler 只传认证上下文、`resource_id`、原始
-  SQL bytes 与幂等键，不构造 ResolvedTarget、不选择 adapter、不编译计划；
-- 飞书和 `RenderPayload` 可以投影服务端生成的受保护 `/results/{result_ref}` 深链与可信 Web SQL 页面
-  链接；不嵌入 SQL 原文、列名或结果行；
-- 普通聊天文本即使包含 SQL 代码块也不进入 SQL 提交服务；ChannelStore 不保存 SQL、列或行；
-- 未登录、未激活或 scope 不匹配时，深链在读取 artifact 前拒绝。
+- **网页聊天框、飞书单聊与飞书群聊（@小维）都可以直接提交 SQL。**渠道入口仍只做协议解析、鉴权与群聊 @ 校验，
+  把文本交给 application 层 ChannelSubmissionService；SQL 识别、目标确定与执行都在 application 以下完成，渠道进程
+  不取得 Runner、Gateway 或目标 adapter；
+- 渠道文本上限从 8192 字符放宽到 65_536 bytes，只为容纳 SQL；非 SQL 消息仍受 `RequestEnvelope.text` 8192 字符约束；
+- **飞书追问以引用回复作答**：飞书事件 DTO 新增父消息 id；ChannelSubmissionService 只在父消息是 ChannelStore 已记录
+  的小维消息、父任务处于 `CLARIFICATION_REQUIRED` 且作答人是父任务提交人时，才把该消息作为澄清子任务提交；
+  没有引用回复的消息按新消息处理。`ChannelSubmitCommand.clarification_parent_task_id` 因此不再只限网页；
+- 飞书、网页回复与 `RenderPayload` 可以投影服务端生成的受保护 `/results/{result_ref}` 深链；不嵌入 SQL 原文、列名或
+  结果行；ChannelStore 不保存 SQL、列或行；
+- 未登录、未激活、scope 不匹配或不是提交人时，深链在读取 artifact 前拒绝。
 
-仍不放开：渠道进程取得 Runner/Gateway/目标 adapter、ChannelStore 新增任务事实、结果行展示、导出、
-核心权限枚举扩展，以及任何真实调用、部署或 canary 授权。F1 `/results` 路由只有在 Web 规格 §11.2
-经 F1 设计 §11.3 窄化后的适用条件全部验收通过时才可开放。
+仍不放开：渠道进程取得 Runner/Gateway/目标 adapter、ChannelStore 新增任务事实、结果行展示、导出、核心权限枚举
+扩展、新增入站传输，以及任何真实调用、部署或 canary 授权。F1 `/results` 路由只有在 Web 规格 §11.2 经 F1 设计
+§11.3 窄化后的适用条件全部验收通过时才可开放。

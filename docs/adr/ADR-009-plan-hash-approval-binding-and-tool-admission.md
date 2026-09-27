@@ -98,7 +98,7 @@ Gateway 在每次 `invoke` 时重算 `tool_call_hash` 并比对。凭证证明�
 ## F1 修订（2026-09-27，Proposed）
 
 - 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
-- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v8 §5、§10
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.5–§5.7、§10
 
 ### F1-D1 query requirement 闭集
 
@@ -109,8 +109,7 @@ Gateway 在每次 `invoke` 时重算 `tool_call_hash` 并比对。凭证证明�
 ### F1-D2 标量 ToolCall 与进程内 HydratedQuery
 
 `ToolCall.typed_args` 继续只接受 JSON 标量，本修订不放宽 D4 的字段集合。`confirmed_artifact` 的
-ToolCall 只携带 `sql_ref`、`sql_hash`、`result_ref`、`resource_id`、`target_fingerprint`、`config_revision`
-与三个有效预算值；`tool_call_hash` 覆盖以上全部字段，其中 `sql_hash` 以 SHA-256 绑定原始 bytes。
+ToolCall 只携带 `sql_ref`、`sql_hash`、`resource_id`、`target_fingerprint`、`config_revision` 与三个有效预算值；`tool_call_hash` 覆盖以上全部字段，其中 `sql_hash` 以 SHA-256 绑定原始 bytes。
 
 SQL bytes 只在 Runner 从 SqlArtifactStore 水合出的不可变 `HydratedQuery` 中存在。它只作为
 StepAdmission 与 Gateway 的受信 keyword-only 参数，不进入 Plan、TaskStore、trace 或 audit。
@@ -122,13 +121,13 @@ operation 声明需要 query 而 HydratedQuery 缺失、多余或 hash 不符时
 Runner 复用现有顺序：`begin_step_attempt` 返回 `PROCEED` 后，水合 HydratedQuery、执行 StepAdmission
 （ToolPolicy → SQLGuard `confirmed_readonly`），再以受信 keyword-only 参数把 HydratedQuery 与进程内
 `QueryResultBuffer` 交给 `ToolGateway.invoke`。Gateway 重算 `tool_call_hash`，复核 target、config 与 bytes hash。
-结果行只进入 buffer，ToolResult 只以 `result_ref` 引用；步骤成功时 `commit_step_result` 在同一事务里写入
-结果行（见 ADR-018 D3）。F1 不新增 target 排队锁、等待窗口或调度退让。
+结果行只进入 buffer；步骤成功时 `commit_step_result` 在同一事务里写入结果行并生成 `result_ref`（见 ADR-018 D3），
+ToolResult 与 Evidence 只以该引用指向结果。F1 不新增 target 排队锁、等待窗口或调度退让。
 
 ### F1-D4 不重放
 
 `max_tool_calls=1` 使已开始但未提交的步骤再次领取时得到现有 `BUDGET_EXHAUSTED`，Gateway 调用次数为 0；
-任务以 FAILED（`budget.tool_calls_exhausted`）结束，结果保持不可读。已提交步骤按现有规则 adopt，不重新查询。
+任务以 FAILED（`budget.tool_calls_exhausted`）结束，不产生结果。已提交步骤按现有规则 adopt，不重新查询。
 
 ### F1-D5 本修订不改变的部分
 

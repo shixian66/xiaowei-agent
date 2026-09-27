@@ -138,22 +138,24 @@ RequestEnvelope
   → RenderPayload (exactly once)
 ```
 
-**F1 显式 SQL artifact 入口（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
-它不是普通对话，不经 InteractionClassifierPort，也不接受聊天消息或模型产出的 SQL：
+**F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
+SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL，SQL 原文不进入模型端口：
 
 ```text
-Web SQL 页面（展示完整 SQL、目标与上限；JSON，SQL ≤ 64 KiB）
-  → QuerySubmissionService：确定性解析 target
-  → TaskStore.submit_sql_query（一个事务：SqlArtifact、task、ArtifactSubmission、pending 结果、requester grant）
-  → Worker（最多同时 4 个任务）.begin_task_attempt
-       → XiaoweiRuntime 窄方法 → 确定性 capability draft → CapabilityResolver → PlanCompiler
-       → WorkflowRunner
+网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
+  → ChannelSubmissionService：recognize_sql_message（确定性；认不出按普通对话）
+  → TaskStore.submit_sql_query（一个事务：SqlArtifact + task + ArtifactSubmission）
+  → Worker（最多同时 4 个任务）→ XiaoweiRuntime
+       → load_or_accept_interaction：ArtifactSubmission → origin=rule 交互事实，模型调用 0 次
+       → route_interaction → CapabilityResolver → SlotVerifier
+            → 唯一 F1 target：继续；0 个：拒绝
+            → 多个：ClarificationRecord（选项）→ CLARIFICATION_REQUIRED → 本人精确作答（网页 / 飞书引用回复）
+       → PlanCompiler → ExecutionDisclosure → WorkflowRunner
             → begin_step_attempt（max_tool_calls=1，已开始未提交的步骤不重放）
             → HydratedQuery 水合 → StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)
             → ToolGateway → target-bound StarRocks adapter → 进程内 QueryResultBuffer
-            → commit_step_result（同一事务写步骤结果、Evidence 与结果行）
-       → Evidence（只含 result_ref/hash/计数/指标）→ TaskOutcome
-  → 锁定结果页 /results/{result_ref}（不展示列与行）
+            → commit_step_result（同一事务写步骤结果、Evidence、结果行与 requester grant）
+       → Reflection → RenderPayload（状态、行数、截断 + 锁定结果页链接，不含数据）
 ```
 
 ### 4.1 模型边界
@@ -491,14 +493,15 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash、resource_id、result_ref，不含 SQL 原文；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
-| `submit_sql_query`（TaskStore 命令） | principal、resource_id、SQL bytes、幂等键 | 唯一提交入口；同一 PostgreSQL 事务内写 SqlArtifact、task/submission、pending 结果、requester grant 并校验配额；失败整体回滚（ADR-018 D2a） |
-| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、resource_id、target fingerprint、config revision、expires_at | SQL 原文唯一保存点；CSPRNG 引用；任务终态后 24 小时删除 |
+| `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash，不含 SQL 原文、目标或结果引用；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
+| `submit_sql_query`（TaskStore 命令） | context、SQL bytes、幂等键 | SQL 消息唯一提交入口；同一 PostgreSQL 事务内写 SqlArtifact 与 task/ArtifactSubmission；失败整体回滚（ADR-018 D2a）；目标由后续 SlotVerifier 确定 |
+| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；最后一个引用它的任务终态后 24 小时删除 |
 | `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
 | `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
 | `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + Gateway 余量确定 |
+| `ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED` | sql_ref、sql_hash、目标选项（resource_id + 展示名） | F1 target 多于一个时追问；只接受提交人本人与展示名完全一致的回答；不设默认目标 |
 | `QueryResultBuffer` | ColumnSpec(ordinal, name, type)、行、has_more、completeness | 进程内；≤ 1000 行、≤ 20 MiB、不存半行；Gateway 超时后关闭并丢弃迟到写入 |
-| `ResultArtifact` | result_ref、ColumnSpec(ordinal, name, type)、行、saved rows/bytes、storage_state、completeness | `pending` → `available` / `failed` / `expired`；步骤结果提交的同一事务里变为 available；按 ordinal 保存同名列 |
+| `ResultArtifact` | result_ref、ColumnSpec(ordinal, name, type)、行、saved rows/bytes、completeness | 只在步骤成功提交的同一事务里创建并写 requester grant；存在即可读，24 小时后删除；按 ordinal 保存同名列 |
 
 上表是按里程碑演进的稳定契约摘要：原始内核 DTO 的精确类型由 M2 审定，RI3 新增模型事实
 契约的精确字段与类型以已接受的 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 为准。
@@ -686,8 +689,8 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 ## 9. SQL 与工具安全
 
 - 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
-- F1 用户直接 SQL（`confirmed_readonly`，Proposed）：只能来自 Web 显式 SQL 页面提交的受保护 SQL artifact（执行前页面
-  展示完整 SQL、目标与上限），与原文 SHA-256 绑定；SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
+- F1 用户直接 SQL（`confirmed_readonly`，Proposed）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
+  artifact，与原文 SHA-256 绑定，SQL 原文不进入模型端口；SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
   控制字符、INTO OUTFILE），再走两条互斥的只读证明路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/
   `Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），或 sqlglot 降级为 `Command`/ParseError 时的代码内只读语句清单。
   清单外语句返回 `READONLY_STATEMENT_NOT_SUPPORTED`、零 SQL 发送。两条路径都统一校验内部 `default_catalog`、

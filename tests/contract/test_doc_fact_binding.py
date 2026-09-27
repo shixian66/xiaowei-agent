@@ -1265,8 +1265,8 @@ def test_feature_roadmap_records_the_approved_minimal_query_route() -> None:
         "聊天记录与多轮记忆暂缓",
         "`max_rows`、`max_bytes`、`query_timeout`",
         "达到任一资源上限时明确标记不完整",
-        "不接受模型或聊天消息直接提供的可执行 SQL",
-        "Web 显式 SQL 模式下用户提交并完整确认的受保护 SQL artifact",
+        "不接受模型直接提供的可执行 SQL",
+        "目标不唯一时追问、不执行",
         "真实 StarRocks 调用仍需独立现场 GO",
     ):
         assert decision in roadmap, f"新功能路线缺少已确认口径：{decision}"

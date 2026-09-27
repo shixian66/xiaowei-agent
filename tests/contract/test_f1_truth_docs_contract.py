@@ -1,4 +1,4 @@
-"""F1-0：设计 v8 §13 要求的真源修订必须落在各自真源里，且不复活已删除的旧口径。"""
+"""F1-0：设计 v9 §13 要求的真源修订必须落在各自真源里，且不复活已删除的旧口径。"""
 
 from pathlib import Path
 from typing import Final
@@ -27,7 +27,9 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
         "执行 SQL 不来自模型原文",
     ),
     "ARCHITECTURE.md": (
-        "F1 显式 SQL artifact 入口",
+        "F1 SQL 查询能力",
+        "recognize_sql_message",
+        "CAPABILITY_TARGET_SELECTION_REQUIRED",
         "ArtifactSubmission",
         "submit_sql_query",
         "QueryResultBuffer",
@@ -45,21 +47,37 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
     ),
     _ADR_010: ("`worker_max_concurrent_tasks`，默认 4", "`run_with_task_heartbeat`"),
     _ADR_012: ("`read_timeout=Q+10`", "`SSCursor.close()`", "**不做** D5 的"),
-    _ADR_013: ("`/results/{result_ref}`", "不嵌入 SQL 原文、列名或结果行"),
-    _ADR_017: ("`RESTRICTED` 不等于必须审批", "`confirmed_readonly`"),
+    _ADR_013: (
+        "`/results/{result_ref}`",
+        "不嵌入 SQL 原文、列名或",
+        "**飞书追问以引用回复作答**",
+    ),
+    _ADR_017: (
+        "`RESTRICTED` 不等于必须审批",
+        "`confirmed_readonly`",
+        "SQL 原文不进入\nInteractionClassifierPort",
+        "ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED",
+        "不设默认目标",
+    ),
     _ADR_018: (
-        "`pending`、`available`、`failed`、`expired`",
+        "结果只在步骤成功时产生",
         "`requester_owner`",
         "`export_policy` 在 F1 固定为 `disabled`",
-        "`TaskStore.submit_sql_query` 是 F1 唯一的提交入口",
+        "`TaskStore.submit_sql_query` 是唯一的提交入口",
+        "### D4 保留（不设配额）",
     ),
-    _SPEC: ("Draft v8（精简版）", "65_536 bytes", "worker_max_concurrent_tasks"),
+    _SPEC: (
+        "Draft v9（Agent 主链集成版）",
+        "65_536 bytes",
+        "worker_max_concurrent_tasks",
+        "SQL 原文**不交给模型**",
+    ),
     _PLAN: ("F1-0a", "F1-0b", "首批只读语句清单", "Web 规格 §11.2 六项对照"),
-    _ROADMAP: ("Web 显式 SQL 模式下用户提交并完整确认的受保护 SQL artifact",),
+    _ROADMAP: ("用户在网页、飞书直接发送并经确定性识别保存的受保护 SQL artifact",),
     _WEB_SPEC: ("F1 锁定结果页不写 approver grant",),
 }
 
-# 已移除的旧口径：模板 SQL 唯一来源（设计 §13 第 3 项）与 v7 专属机制（负责人 v8 精简决定）。
+# 已移除的旧口径：模板 SQL 唯一来源、v7 专属机制、v8 的配额与 SQL 页面（负责人决定）。
 _V7_ONLY_TERMS: Final[tuple[str, ...]] = (
     "TargetQueryLeaseStore",
     "schedule_deferral",
@@ -71,6 +89,8 @@ _V7_ONLY_TERMS: Final[tuple[str, ...]] = (
     "verified_min_version",
     "application/sql",
     "inspect_step_execution",
+    "存活 query set",
+    "Web 显式 SQL",
 )
 # 只写现行口径的真源；设计 §2 修订记录与 ADR-018 备选方案会按名称引用 v7，不在此列。
 _CURRENT_ONLY_DOCS: Final[tuple[str, ...]] = (

@@ -345,10 +345,29 @@ model trace、migration revision、`ReadClass` 语义、披露屏障位置或 Ta
 ## F1 修订（2026-09-27，Proposed）
 
 - 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
-- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §5.2、§11.2
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1–§5.4、§11.2
 
-`RESTRICTED` 不等于必须审批。只有获批 policy profile 显式声明的 `RESTRICTED` read 可以不经
-`ApprovalGate`，F1 的 `starrocks.readonly_query` 须同时满足：
+### 确定性 SQL 识别与规则来源交互事实
+
+SQL 查询是普通 capability，走本 ADR 的同一交互主链。application 层在创建任务前用确定性纯函数识别“整条消息
+就是一条 SQL”（闭集语句关键字开头、通过 token 扫描、恰好一条完整语句）；识别为 SQL 的任务以
+`ArtifactSubmission` 提交，`load_or_accept_interaction` 不构造模型请求，直接保存 `origin=rule` 的
+`AcceptedInteractionArtifact`（`CAPABILITY_REQUEST` + `starrocks_readonly_query` 意图、空槽位），之后照常经
+`route_interaction`、CapabilityResolver、SlotVerifier、Plan、ExecutionDisclosure。SQL 原文不进入
+InteractionClassifierPort 或任何模型端口。认不出的消息保持现有流程，其中夹带的 SQL 不执行。
+
+### 目标选择追问
+
+新增 `ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED`。F1 的 SlotVerifier 在启用的 F1 target 多于一个时
+返回 `SlotIncomplete`，ClarificationRecord 保存 `sql_ref`、`sql_hash` 与目标选项（resource_id + 展示名）；提示从记录
+渲染选项。澄清子任务的回答由规则解释、不调用模型，只有与某个选项展示名完全一致才 `SlotReady`，否则再次追问；
+不设默认目标、不模糊匹配。子任务仍是普通 `ConversationSubmission`，SQL 通过父记录引用，不复制原文。现有 owner、
+一次性消费与终态约束不变；飞书以引用回复作答（ADR-013 F1 修订）。
+
+### RESTRICTED read
+
+`RESTRICTED` 不等于必须审批。只有获批 policy profile 显式声明的 `RESTRICTED` read 可以不经 `ApprovalGate`，
+F1 的 `starrocks.readonly_query` 须同时满足：
 
 - CapabilitySnapshot 明确绑定 `confirmed_readonly` profile；
 - 当前 requester 具有 `submit_readonly_task`；
@@ -356,7 +375,5 @@ model trace、migration revision、`ReadClass` 语义、披露屏障位置或 Ta
 - operation 无副作用，`export_policy=disabled`；
 - 结果页仍受 requester ACL 锁定。
 
-本修订不改变“`RESTRICTED` 读取不能复用 `ApprovalGate` 做额外确认”的既有决定，也不让现有三个能力
-脱离 `BOUNDED`。F1 的显式 Web 路由由 XiaoweiRuntime 的窄方法接收 ArtifactSubmission 并生成确定性
-capability draft，不经 InteractionClassifierPort，也不属于 I0–I2 的对话入口。写操作与 F2/F3 审批不受
-本条影响。
+本修订不改变“`RESTRICTED` 读取不能复用 `ApprovalGate` 做额外确认”的既有决定，也不让现有三个能力脱离
+`BOUNDED`。写操作与 F2/F3 审批不受本条影响。

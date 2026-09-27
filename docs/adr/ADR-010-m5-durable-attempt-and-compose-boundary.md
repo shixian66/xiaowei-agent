@@ -184,7 +184,7 @@ Worker 不发布宿主端口。secret 只经文件引用注入，不写入镜像
 ## F1 修订（2026-09-27，Proposed）
 
 - 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
-- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v8 §8.4
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §8.4
 
 ### Worker 有界并发
 
