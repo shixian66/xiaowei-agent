@@ -1,4 +1,4 @@
-"""F1-0：设计 §13 要求的真源修订必须落在各自真源里，且不复活“只接受模板 SQL”的旧口径。"""
+"""F1-0：设计 v8 §13 要求的真源修订必须落在各自真源里，且不复活已删除的旧口径。"""
 
 from pathlib import Path
 from typing import Final
@@ -9,15 +9,17 @@ _ROOT = Path(__file__).resolve().parents[2]
 _ADR = "docs/adr/"
 _ADR_007 = _ADR + "ADR-007-first-capabilities-execution-context-and-live-call-authorization.md"
 _ADR_009 = _ADR + "ADR-009-plan-hash-approval-binding-and-tool-admission.md"
+_ADR_010 = _ADR + "ADR-010-m5-durable-attempt-and-compose-boundary.md"
 _ADR_012 = _ADR + "ADR-012-m6b-target-bound-starrocks-readonly-adapter.md"
 _ADR_013 = _ADR + "ADR-013-m7-channel-boundary.md"
 _ADR_017 = _ADR + "ADR-017-intelligent-interaction-and-clarification.md"
 _ADR_018 = _ADR + "ADR-018-f1-sql-and-result-artifacts.md"
+_SPEC = "docs/superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md"
 _PLAN = "docs/superpowers/plans/2026-09-27-f1-starrocks-readonly-query.md"
 _ROADMAP = "docs/superpowers/specs/2026-09-26-feature-roadmap-direction.md"
 _WEB_SPEC = "docs/superpowers/specs/2026-09-19-web-operations-console-identity-activation-design.md"
 
-# 每个真源必须承载的 F1 决定；键是文件，值是该文件独有的承重术语。
+# 每个真源必须承载的 F1 决定；键是文件，值是该文件的承重术语。
 _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
     "AGENTS.md": (
         "模板 SQL 由确定性 compiler 生成",
@@ -27,12 +29,9 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
     "ARCHITECTURE.md": (
         "F1 显式 SQL artifact 入口",
         "ArtifactSubmission",
-        "TargetQueryLeaseStore",
-        "ThreadsafeResultChunkWriter",
-        "`application/sql` 草稿路由固定 1 MiB 硬上限",
-        "PREVIOUS_ATTEMPT_UNCERTAIN",
-        "schedule_deferral",
-        "ReadonlyStatementRegistry",
+        "submit_sql_query",
+        "QueryResultBuffer",
+        "worker_max_concurrent_tasks",
         "READONLY_STATEMENT_NOT_SUPPORTED",
         "**不提供元数据保密**",
         "ADR-018",
@@ -42,48 +41,62 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
         "`confirmed_artifact`",
         "HydratedQuery",
         "`ToolCall.typed_args` 继续只接受 JSON 标量",
-        "`begin_step_attempt`",
+        "`BUDGET_EXHAUSTED`",
     ),
-    _ADR_012: (
-        "ResourceSnapshot",
-        "`verified_min_version <= actual_version <= verified_max_version`",
-        "`read_timeout=Q+10`",
-        "`SSCursor.close()`",
-    ),
+    _ADR_010: ("`worker_max_concurrent_tasks`，默认 4", "`run_with_task_heartbeat`"),
+    _ADR_012: ("`read_timeout=Q+10`", "`SSCursor.close()`", "**不做** D5 的"),
     _ADR_013: ("`/results/{result_ref}`", "不嵌入 SQL 原文、列名或结果行"),
     _ADR_017: ("`RESTRICTED` 不等于必须审批", "`confirmed_readonly`"),
     _ADR_018: (
-        "`staging`、`sealed`、`available`、`failed`、`expired`",
+        "`pending`、`available`、`failed`、`expired`",
         "`requester_owner`",
         "`export_policy` 在 F1 固定为 `disabled`",
+        "`TaskStore.submit_sql_query` 是 F1 唯一的提交入口",
     ),
-    _PLAN: (
-        "F1-0a",
-        "F1-0b",
-        "首批 ReadonlyStatementRegistry 清单",
-        "Web 规格 §11.2 六项对照",
-    ),
+    _SPEC: ("Draft v8（精简版）", "65_536 bytes", "worker_max_concurrent_tasks"),
+    _PLAN: ("F1-0a", "F1-0b", "首批只读语句清单", "Web 规格 §11.2 六项对照"),
     _ROADMAP: ("Web 显式 SQL 模式下用户提交并完整确认的受保护 SQL artifact",),
     _WEB_SPEC: ("F1 锁定结果页不写 approver grant",),
 }
 
-# 设计 §13 第 6 项要求移除的过期口径。
+# 已移除的旧口径：模板 SQL 唯一来源（设计 §13 第 3 项）与 v7 专属机制（负责人 v8 精简决定）。
+_V7_ONLY_TERMS: Final[tuple[str, ...]] = (
+    "TargetQueryLeaseStore",
+    "schedule_deferral",
+    "WorkflowDeferred",
+    "ThreadsafeResultChunkWriter",
+    "ResultChunkSink",
+    "confirm_sql_artifact",
+    "ReadonlyStatementRegistry",
+    "verified_min_version",
+    "application/sql",
+    "inspect_step_execution",
+)
+# 只写现行口径的真源；设计 §2 修订记录与 ADR-018 备选方案会按名称引用 v7，不在此列。
+_CURRENT_ONLY_DOCS: Final[tuple[str, ...]] = (
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    _ADR_007,
+    _ADR_009,
+    _ADR_010,
+    _ADR_012,
+    _ADR_013,
+    _ADR_017,
+    _PLAN,
+)
 _STALE_F1_PHRASES: Final[dict[str, tuple[str, ...]]] = {
     "AGENTS.md": ("SQL 必须确定性生成并经 AST 校验",),
     "ARCHITECTURE.md": ("允许执行的 SQL 由确定性 compiler 生成；",),
     "DEVELOPMENT_PLAN.md": ("确定性 SQL + AST；",),
     _ROADMAP: ("确定性 SQL 模板与 AST 校验，不接受用户或模型直接提供的可执行 SQL",),
-}
+} | {name: _V7_ONLY_TERMS for name in _CURRENT_ONLY_DOCS if name != "AGENTS.md"}
 
-
-_SPEC = "docs/superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md"
-
-# ADR-005 对 F1 锁定页的结论必须在四个真源一致，且不能留下相反口径（PR #109 复审阻断项 1）。
+# ADR-005 对 F1 锁定页的结论必须在四个真源一致，且不能留下相反口径。
 _ADR_005_CONCLUSION_DOCS: Final[tuple[str, ...]] = (_SPEC, _WEB_SPEC, _ADR_018, _PLAN)
 _ADR_005_CONCLUSION: Final = "不依赖 ADR-005"
 _ADR_005_CONTRADICTION: Final = "未批准时 F1 不开放 /results"
 
-# F1 契约字段名只有一个拼写（PR #109 复审阻断项 2）。
+# F1 契约字段名只有一个拼写。
 _CONTRACT_NAME_DOCS: Final[tuple[str, ...]] = (_SPEC, _ADR_018, "ARCHITECTURE.md", _PLAN)
 _RETIRED_CONTRACT_NAMES: Final[tuple[str, ...]] = ("submission_kind", "type_tag")
 _COLUMN_SPEC: Final = "ColumnSpec(ordinal, name, type)"
@@ -91,6 +104,14 @@ _COLUMN_SPEC: Final = "ColumnSpec(ordinal, name, type)"
 
 def _read(name: str) -> str:
     return (_ROOT / name).read_text(encoding="utf-8")
+
+
+def _named_docs(names: tuple[str, ...]) -> dict[str, str]:
+    return {name: _read(name) for name in names}
+
+
+def _all_docs() -> dict[str, str]:
+    return _named_docs(tuple(set(_F1_TRUTH_TERMS) | set(_STALE_F1_PHRASES)))
 
 
 def _missing_terms(docs: dict[str, str]) -> list[tuple[str, str]]:
@@ -109,44 +130,6 @@ def _stale_phrases(docs: dict[str, str]) -> list[tuple[str, str]]:
         for phrase in phrases
         if phrase in docs[name]
     ]
-
-
-def _all_docs() -> dict[str, str]:
-    names = set(_F1_TRUTH_TERMS) | set(_STALE_F1_PHRASES)
-    return {name: _read(name) for name in names}
-
-
-def test_every_f1_truth_source_carries_its_decisions() -> None:
-    assert _missing_terms(_all_docs()) == []
-
-
-def test_no_truth_source_revives_template_only_sql_wording() -> None:
-    assert _stale_phrases(_all_docs()) == []
-
-
-@pytest.mark.parametrize(
-    "path",
-    [_ADR_007, _ADR_009, _ADR_012, _ADR_013, _ADR_017, _ADR_018],
-)
-def test_f1_adr_changes_stay_proposed_until_owner_acceptance(path: str) -> None:
-    # 负责人接受前，F1 修订只能是 Proposed，不能把文档改动写成已接受。
-    text = _read(path)
-    assert "Proposed" in text
-    assert "接受前不得写 F1 行为源码" in text
-
-
-def test_f1_truth_bindings_are_discriminating() -> None:
-    docs = _all_docs()
-    without_rule = dict(docs)
-    without_rule["AGENTS.md"] = docs["AGENTS.md"].replace(
-        "用户直接 SQL 只能来自受保护 SQL artifact", ""
-    )
-    assert ("AGENTS.md", "用户直接 SQL 只能来自受保护 SQL artifact") in _missing_terms(
-        without_rule
-    )
-    revived = dict(docs)
-    revived["DEVELOPMENT_PLAN.md"] = docs["DEVELOPMENT_PLAN.md"] + "\n确定性 SQL + AST；\n"
-    assert _stale_phrases(revived) == [("DEVELOPMENT_PLAN.md", "确定性 SQL + AST；")]
 
 
 def _adr_005_conflicts(docs: dict[str, str]) -> list[str]:
@@ -170,8 +153,23 @@ def _contract_name_drift(docs: dict[str, str]) -> list[tuple[str, str]]:
     return drift
 
 
-def _named_docs(names: tuple[str, ...]) -> dict[str, str]:
-    return {name: _read(name) for name in names}
+def test_every_f1_truth_source_carries_its_decisions() -> None:
+    assert _missing_terms(_all_docs()) == []
+
+
+def test_no_truth_source_revives_retired_wording_or_v7_machinery() -> None:
+    assert _stale_phrases(_all_docs()) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [_ADR_007, _ADR_009, _ADR_010, _ADR_012, _ADR_013, _ADR_017, _ADR_018],
+)
+def test_f1_adr_changes_stay_proposed_until_owner_acceptance(path: str) -> None:
+    # 负责人接受前，F1 修订只能是 Proposed，不能把文档改动写成已接受。
+    text = _read(path)
+    assert "Proposed" in text
+    assert "接受前不得写 F1 行为源码" in text
 
 
 def test_adr_005_conclusion_for_the_locked_page_is_single_and_consistent() -> None:
@@ -180,54 +178,53 @@ def test_adr_005_conclusion_for_the_locked_page_is_single_and_consistent() -> No
 
 def test_f1_contract_names_have_one_spelling() -> None:
     assert _contract_name_drift(_named_docs(_CONTRACT_NAME_DOCS)) == []
-    plan = _read(_PLAN)
-    assert 'discriminator="input_kind"' in plan
+    assert 'discriminator="input_kind"' in _read(_PLAN)
 
 
-def test_confirmation_is_one_transaction_in_adr_and_plan() -> None:
+def test_submission_is_one_transaction_with_one_entry_point() -> None:
     adr = _read(_ADR_018)
     plan = _read(_PLAN)
-    for text in (adr, plan):
-        assert "confirm_sql_artifact" in text
     assert "同一个 PostgreSQL 事务" in adr
-    assert "`staging`、零 chunk" in adr
     assert "downgrade：存在任一 `sql_artifact` 行时拒绝执行" in adr
     assert "逐字节不变" in adr
-
-
-def test_dispatch_fairness_uses_a_field_the_plan_migrates() -> None:
-    # tasks 当前没有 created_at；计划用它排序时必须同时写明迁移、回填与共享排序键。
-    schema = _read("src/xiaowei_agent/persistence/schema.py")
-    plan = _read(_PLAN)
-    if '"created_at"' not in schema.split("TASK_SUBMISSIONS")[0]:
-        assert "`created_at TIMESTAMPTZ NOT NULL`" in plan
-        assert "server_default=now()" in plan
-        # 复用现有排序函数并接入 TaskRecord，不另造近义函数（PR #109 第二轮复审）。
-        assert "dispatch_sort_key" in plan
-        assert "`TaskRecord.created_at: AwareDatetime`" in plan
-        assert "dispatch_order_key" not in plan
-
-
-def test_confirmation_has_exactly_one_entry_point() -> None:
-    plan = _read(_PLAN)
-    assert "SqlArtifactStore.confirm(" not in plan
-    assert "唯一入口是 Task 2A 的 `TaskStore.confirm_sql_artifact`" in plan
-    assert "这是唯一的确认入口" in _read(_ADR_018)
+    assert "**唯一提交入口**" in plan
+    assert "不新增公开的 Store 提交方法" in plan
 
 
 def test_submission_compatibility_uses_rename_and_migration_only() -> None:
     plan = _read(_PLAN)
     assert "**显式改名**为 `ConversationSubmission`" in plan
     assert "`union_tag_not_found`" in plan
-    assert "保留模块级别名" not in plan
+    assert "load_contract(TaskSubmission, ...)" in plan
     assert "旧数据兼容**只**靠下述 migration 回填" in _read(_ADR_018)
 
 
-def test_f1_consistency_guards_are_discriminating() -> None:
-    docs = _named_docs(_ADR_005_CONCLUSION_DOCS)
-    reverted = dict(docs)
-    reverted[_SPEC] = docs[_SPEC] + "\n" + _ADR_005_CONTRADICTION
+def test_dispatch_order_is_unchanged_without_deferral() -> None:
+    # v8 没有调度退让，因此不给 tasks 加 created_at，也不改 dispatch_sort_key。
+    plan = _read(_PLAN)
+    assert "dispatch 排序与 `dispatch_sort_key` 不变" in plan
+    assert "dispatch_order_key" not in plan
+    assert "dispatch 候选规则与 `dispatch_sort_key` 不变" in _read(_ADR_010)
+
+
+def test_f1_guards_are_discriminating() -> None:
+    docs = _all_docs()
+    without_rule = dict(docs)
+    without_rule["AGENTS.md"] = docs["AGENTS.md"].replace(
+        "用户直接 SQL 只能来自受保护 SQL artifact", ""
+    )
+    assert ("AGENTS.md", "用户直接 SQL 只能来自受保护 SQL artifact") in _missing_terms(
+        without_rule
+    )
+    revived = dict(docs)
+    revived[_ADR_009] = docs[_ADR_009] + "\nschedule_deferral\n"
+    assert _stale_phrases(revived) == [(_ADR_009, "schedule_deferral")]
+
+    conclusion_docs = _named_docs(_ADR_005_CONCLUSION_DOCS)
+    reverted = dict(conclusion_docs)
+    reverted[_SPEC] = conclusion_docs[_SPEC] + "\n" + _ADR_005_CONTRADICTION
     assert _adr_005_conflicts(reverted) == [_SPEC]
+
     names = _named_docs(_CONTRACT_NAME_DOCS)
     renamed = dict(names)
     renamed[_PLAN] = names[_PLAN] + "\nsubmission_kind"

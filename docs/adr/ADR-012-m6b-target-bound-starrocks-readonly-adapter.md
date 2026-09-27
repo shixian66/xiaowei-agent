@@ -137,39 +137,31 @@ hash canonicalization、Runner、Policy profile 或 `_E1_EXECUTION_ENABLED=False
 ## F1 修订（2026-09-27，Proposed）
 
 - 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
-- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) §5.5、§6、§8
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v8 §5.5、§6、§8
 
 ### F1-D1 独立 profile，不改变慢查询
 
-F1 新增独立的 target-bound streaming adapter 与 `confirmed_readonly` profile。M6b 的
-`list_slow_queries` / `count_queries_in_window`、D4 固定握手闭集、`template_locked` SQLGuard、
+F1 新增独立的 target-bound 查询 adapter 与 `confirmed_readonly` profile。M6b 的
+`list_slow_queries` / `count_queries_in_window`、D4 固定握手闭集、D5 preflight、`template_locked` SQLGuard、
 30 秒 ToolPolicy 上限与 recording 默认模式全部保持不变。D1 的 target-bound 注册、禁止 fallback 与
 Gateway 前复核同样适用于 F1 adapter。
 
-### F1-D2 ResourceSnapshot 是 F1 唯一 target 真源
+### F1-D2 target 配置
 
-task-worker 启动时把成功加载的 ResourcesConfig generation 冻结为 ResourceSnapshot；F1 的 host、port、
-database、username、TLS、credential ref、预算、`blocked_relation_names`、`verified_min_version` /
-`verified_max_version`、readonly registry profile/digest 与 preflight digest 全部来自同一 snapshot。
-现有 `XIAOWEI_STARROCKS_*` 进程级装配只保留给 M6b `test_readonly`，与 F1 snapshot 同时启用时
-release 装配启动失败。配置保存只产生新 generation 与 `restart_required`，不热加载。
+F1 复用 W4 的 `StarRocksResource`，task-worker 启动时加载，新增 `blocked_relation_names`、F1 查询上限与启用
+开关；保存后 `restart_required`，不热加载。host、账号、黑名单、上限或启用状态变化都改变 config revision，
+旧计划在 Admission 前拒绝。F1 **不做** D5 的 version/grants/DDL/identity digest 比对，也不绑定 StarRocks
+版本区间；只读权限由 DBA 配置的专用账号承重，并在 F1-H 人工核验。
 
-实际 StarRocks 版本必须回读并落在 `verified_min_version <= actual_version <= verified_max_version`
-闭区间内；越界、区间非法或 registry digest 漂移时整个 target fail-closed。区间内未登记语句只返回
-请求级 `READONLY_STATEMENT_NOT_SUPPORTED`，不改变 target enabled。expected digest 仍只来自带外批准。
+### F1-D3 会话、读取与 timeout
 
-### F1-D3 流式读取与 timeout 层次
+设有效 query timeout 为 Q（≤ 180 秒）：connect/write ≤ 10 秒且不大于 read；session `query_timeout=Q`；
+PyMySQL `read_timeout=Q+10`；Gateway timeout `Q+20`；ToolCall ≤ 300 秒。每次调用使用独占 connection，
+设置 `query_timeout` 与 `sql_select_limit=rows+1`，以 `SSCursor.fetchmany(≤100)` 读取到 EOF、第 1001 行或
+字节上限。提前截断、超时或取消时直接关闭 connection，不调用会耗尽未读结果的 `SSCursor.close()`。
 
-设有效 server query timeout 为 Q（≤ 180 秒）：connect/write ≤ 10 秒且不大于 read；session
-`query_timeout=Q`；PyMySQL `read_timeout=Q+10`；Gateway timeout `Q+20`（从取得 slot 并写入 started 起算）；
-target slot lease TTL `Q+30`；ToolCall 仍 ≤ 300 秒。F1 每次调用使用独占 connection，设置并回读
-`query_timeout` 与 `sql_select_limit=rows+1`，以 `SSCursor.fetchmany(≤100)` 读取。提前截断、超时或取消时
-直接关闭 connection，不调用会耗尽未读结果的 `SSCursor.close()`。
-
-同步读取在 `asyncio.to_thread` 中运行，只持有 Gateway 创建的 `ThreadsafeResultChunkWriter`；writer 在
-主 event loop 上用 `run_coroutine_threadsafe` 一次提交一个 chunk 并等待持久化回执，形成背压。
-连接关闭回执返回后，Gateway 的 async 侧才可 seal 并释放 slot；无法确认关闭时不主动释放，只等 TTL。
-AdapterResponse.payload 与 ToolResult.data_view 必须为空，结果只进 ADR-018 的 artifact。
+同步读取在 `asyncio.to_thread` 中运行，结果写入 Runner 创建的进程内 `QueryResultBuffer`；Gateway 超时或取消时
+关闭 buffer，迟到写入被丢弃。AdapterResponse.payload 与 ToolResult.data_view 必须为空。
 
 ### F1-D4 授权
 

@@ -1,6 +1,7 @@
 # ADR-010：M5 持久执行尝试与本地 Compose 边界
 
 - 状态：Accepted
+- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-05
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §5.6/§7.3/§11、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[M5 实施计划](../plans/M5-api-worker-compose.md)
@@ -179,3 +180,21 @@ Worker 不发布宿主端口。secret 只经文件引用注入，不写入镜像
 - 回退应用镜像与 schema revision 必须匹配；不得只回退其中一侧。
 - 本 ADR 若要改变 TaskStore 方法集、fencing 推进点、query scope、审计事务边界或真实调用
   权限，须另立 ADR，不以入口层兼容分支绕过。
+
+## F1 修订（2026-09-27，Proposed）
+
+- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v8 §8.4
+
+### Worker 有界并发
+
+现有 worker 对一轮取到的候选逐个 await，一条长查询会让其他任务等待。负责人决定 worker 改为有界并发：
+
+- 新配置 `worker_max_concurrent_tasks`，默认 4，范围 1..16；
+- 只在有空位时才调用 `begin_task_attempt` 领取任务，领取后作为独立 asyncio task 运行，不为等待空位持有 lease；
+- 每个在途任务沿用现有 `run_with_task_heartbeat` 各自续租；lease、fencing、失败计数、retry 与终态保护不变；
+- 停机时停止领取，等待在途任务在收尾宽限内结束，超时后取消，由现有 lease 过期恢复接管；
+- 启动校验 `db_pool_size + db_pool_max_overflow >= 2 × worker_max_concurrent_tasks + 1`，不足则启动失败。
+
+dispatch 候选规则与 `dispatch_sort_key` 不变。该改动惠及全部 capability，不为 F1 引入 target 排队锁。
+
