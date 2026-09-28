@@ -78,6 +78,19 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "SqlGuardRejection.WINDOW_MISMATCH",
         "SqlGuardRejection.WINDOW_TOO_WIDE",
         "SqlGuardRejection.WINDOW_UNBOUNDED",
+        # --- TokenScanReason 枚举成员：F1 原文扫描的闭集原因 ---
+        # 被扫描的是用户直接提交的 SQL，一律不进消息；由
+        # test_scan_error_message_is_only_the_reason_code 反向承重。
+        "TokenScanReason.AMBIGUOUS_PUNCTUATION",
+        "TokenScanReason.BOM",
+        "TokenScanReason.CONTROL_CHARACTER",
+        "TokenScanReason.EMPTY",
+        "TokenScanReason.HINT_COMMENT",
+        "TokenScanReason.INTO_OUTFILE",
+        "TokenScanReason.INVALID_UTF8",
+        "TokenScanReason.MULTI_STATEMENT",
+        "TokenScanReason.TOO_LONG",
+        "TokenScanReason.UNTERMINATED",
         # --- PromqlGuardRejection 枚举成员：同样只含代码定义的闭集拒绝码 ---
         # 被检 PromQL 与 typed arguments 均不进异常消息；运行时 canary 由
         # test_promql_guard.py 反向承重。
