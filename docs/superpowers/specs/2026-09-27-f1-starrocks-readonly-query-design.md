@@ -199,18 +199,23 @@ READ + RESTRICTED，无副作用步骤，不调用 ApprovalGate。执行前照�
 OperationSpec 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`，由 CapabilitySnapshot
 派生。`ToolCall.typed_args` 仍只接受 JSON 标量。`confirmed_artifact` 的 Runner 流程：
 
-0. 恢复判定先于 SQL 水合：该步骤在 step journal（Runner 已加载的 `load_step_executions`）中已有记录时，先调用现有
-   `begin_step_attempt` 由它权威判定——`ALREADY_COMMITTED` 采用已提交结果，`BUDGET_EXHAUSTED` 以
-   `budget.tool_calls_exhausted` FAILED——两者都不水合、不准入、Gateway 调用为 0；在 `max_tool_calls=1` 下其他判定
-   不应出现，出现即按现有 `RECOVERY_DRIFT_REASON` FAILED。只有 journal 中没有记录的新步骤才走下列顺序；
-1. 重新解析当前 target、policy 与 config revision；
-2. 在 StepAdmission 之前经 `load_sql_for_execution` 水合一次（SQLGuard 需要 bytes），构造不可变 HydratedQuery；失败时
+1. 漂移校验：沿用现有 `_verify_no_drift`（plan_hash、target_fingerprint、policy revision），并重新解析当前 target 与
+   config revision；漂移即按现有规则拒绝，早于 journal 判定与 SQL 水合；
+2. 恢复判定先于 SQL 水合：该步骤在 step journal（Runner 已加载的 `load_step_executions`）中已有记录时，先调用现有
+   `begin_step_attempt`，按 `StepAttemptDecision` 完整闭集处理：
+   - `ALREADY_COMMITTED` → 采用已提交结果；
+   - `BUDGET_EXHAUSTED` → `budget.tool_calls_exhausted` FAILED；
+   - `UNKNOWN_STEP` → `recovery_drift` FAILED；
+   - 已有 journal 却返回 `PROCEED` → `recovery_drift` FAILED（同一 grant 重入时可能出现；为防重放，不访问 SQL 与 Gateway）；
+   - `STALE_FENCING`、`NOT_RUNNABLE` → 保留现有 `LifecycleError(rejection=...)`，由 Worker 按 loser 安静退出，不写终态；
+   以上都不水合、不准入，Gateway 调用为 0。只有 journal 中没有记录的新步骤才进入第 3 步；
+3. 在 StepAdmission 之前经 `load_sql_for_execution` 水合一次（SQLGuard 需要 bytes），构造不可变 HydratedQuery；失败时
    不开始步骤，任务以 `sql_artifact.expired` / `sql_artifact.unavailable` FAILED（§9.4）；
-3. 构造只含标量的 ToolCall（引用、hash、target_fingerprint、config_revision 与三个预算值）；
-4. StepAdmission 先 ToolPolicy，再按 requirement 执行 `confirmed_readonly` SQLGuard（在 `asyncio.to_thread` 中运行），
+4. 构造只含标量的 ToolCall（引用、hash、target_fingerprint、config_revision 与三个预算值）；
+5. StepAdmission 先 ToolPolicy，再按 requirement 执行 `confirmed_readonly` SQLGuard（在 `asyncio.to_thread` 中运行），
    并校验引用、预算与 bytes hash 一致；
-5. `tool_call_hash` 覆盖完整标量 ToolCall；准入通过后才 `begin_step_attempt`（消耗唯一工具预算），与现有 Runner 顺序一致；
-6. Gateway 重算 hash，再次校验 HydratedQuery，把同一 bytes 交给 target-bound adapter；adapter 发送前最后一次计算 SHA-256。
+6. `tool_call_hash` 覆盖完整标量 ToolCall；准入通过后才 `begin_step_attempt`（消耗唯一工具预算），与现有 Runner 顺序一致；
+7. Gateway 重算 hash，再次校验 HydratedQuery，把同一 bytes 交给 target-bound adapter；adapter 发送前最后一次计算 SHA-256。
 
 | 载体 | 可含 SQL bytes | 约束 |
 | --- | --- | --- |
@@ -443,7 +448,7 @@ F1 不新增恢复状态机，沿用现有 step journal：`begin_step_attempt` �
 `max_tool_calls=1`，因此已开始但未提交的步骤再次领取时得到 `BUDGET_EXHAUSTED`，任务以 FAILED
 （`budget.tool_calls_exhausted`）结束，Gateway 调用次数为 0，不产生结果。回复把这种结局显示为“执行中断，结果未知，
 请重新发送 SQL”，不宣称查询已安全停止。已提交的步骤按现有规则 adopt，不重新查询。恢复判定先于 SQL 水合（§5.6
-第 0 步），因此恢复时 SQL 已过期或不可用也不会盖掉“结果未知”或已提交的结果。
+第 2 步），因此恢复时 SQL 已过期或不可用也不会盖掉“结果未知”或已提交的结果。
 
 用户再发一次同一条 SQL 就是一次新任务，不是自动 retry。取消只关闭客户端连接；服务端终止无法证明时不得伪装为
 已安全停止。

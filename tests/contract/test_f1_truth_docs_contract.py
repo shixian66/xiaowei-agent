@@ -494,7 +494,7 @@ def test_recovery_facts_win_over_sql_rehydration() -> None:
         "step journal 中已有记录的步骤先调用 `begin_step_attempt`",
         "已开始未提交 + SQL 过期或不可用",
         "已提交 + SQL 过期或不可用",
-        "把水合挪回 journal 判定之前，两个组合用例必须转红",
+        "把水合挪回 journal 判定之前，两个 SQL 组合用例必须转红",
     ):
         assert term in task_10, term
     for name in (_SPEC, _ADR_009, "ARCHITECTURE.md"):
@@ -521,3 +521,44 @@ def test_clarification_sql_errors_only_touch_reachable_entries() -> None:
         "tests/contract/test_web_static_assets.py",
     ):
         assert test_file in step_run[0], test_file
+
+
+# journal 恢复判定是 StepAttemptDecision 的完整闭集表；
+# fencing loser 必须保留现有 LifecycleError 语义，
+# 且漂移校验先于 journal 判定、journal 判定先于 SQL 水合。
+_JOURNAL_DECISION_ROWS: Final[tuple[str, ...]] = (
+    "`ALREADY_COMMITTED` → 采用已提交结果",
+    "`BUDGET_EXHAUSTED` → `budget.tool_calls_exhausted`",
+    "`UNKNOWN_STEP` → `recovery_drift`",
+    "已有 journal 却返回 `PROCEED` → `recovery_drift`",
+    "`STALE_FENCING`、`NOT_RUNNABLE` → 保留现有 `LifecycleError(rejection=...)`",
+)
+
+
+def test_journal_recovery_uses_the_full_decision_table_after_drift_checks() -> None:
+    plan = _read(_PLAN)
+    spec = _read(_SPEC)
+    task_10 = _task_block(plan, "### Task 10:")
+    for text in (spec, task_10):
+        for row in _JOURNAL_DECISION_ROWS:
+            assert row in text, row
+        assert "其他判定按 `RECOVERY_DRIFT_REASON` FAILED" not in text
+        assert "出现即按现有 `RECOVERY_DRIFT_REASON` FAILED" not in text
+    section = _section_of(spec, "### 5.6 从引用到唯一 ToolCall")
+    drift = section.index("漂移校验")
+    journal = section.index("`ALREADY_COMMITTED` → 采用已提交结果")
+    hydrate = section.index("`load_sql_for_execution` 水合一次")
+    assert drift < journal < hydrate
+    for term in (
+        "journal + `STALE_FENCING` 或 `NOT_RUNNABLE`",
+        "journal + `PROCEED` 或 `UNKNOWN_STEP`",
+        "journal + target、policy 或 config revision 漂移",
+    ):
+        assert term in task_10, term
+    task_11 = _task_block(plan, "### Task 11:")
+    assert "只可能是" not in task_11
+
+
+def _section_of(text: str, heading: str) -> str:
+    start = text.index(heading)
+    return text[start : text.index("\n### ", start + 1)]
