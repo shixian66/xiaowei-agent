@@ -43,6 +43,7 @@ from xiaowei_agent.persistence.store import (
     IdempotencyConflictError,
     SqlArtifactExpiredError,
     SqlArtifactUnavailableError,
+    SqlQuerySubmitCommand,
     TaskNotFoundError,
     TaskStore,
 )
@@ -135,6 +136,16 @@ class TaskViewRuntime:
         """只持久化提交事实并返回任务投影，不解释或执行。"""
         record = await self._tasks.create_task(submission=submission)
         return await self.project_task(record=record)
+
+    async def submit_sql_query(self, *, command: SqlQuerySubmitCommand) -> TaskView:
+        """同一事务保存 SqlArtifact 与任务事实并返回投影，不解释或执行。
+
+        :raises IdempotencyConflictError: 同一渠道幂等键已用于不同的 SQL。
+        """
+        result = await self._tasks.submit_sql_query(command=command)
+        if result.task is None:
+            raise IdempotencyConflictError("sql idempotency key conflict")
+        return await self.project_task(record=result.task)
 
     async def submit_clarification_child(
         self,
@@ -229,7 +240,9 @@ class TaskViewRuntime:
             stored = await self._plans.load(task_id=record.task_id)
         except PlanNotFoundError:
             if record.status is TaskStatus.REJECTED and not evidences:
-                return render_preplan_rejection(status=record.status)
+                return render_preplan_rejection(
+                    status=record.status, reason_code=record.terminal_reason
+                )
             if (
                 record.status is TaskStatus.SUCCEEDED
                 and record.terminal_reason == CONVERSATION_TERMINAL_REASON

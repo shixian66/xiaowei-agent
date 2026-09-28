@@ -22,6 +22,7 @@ from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE as SURFACE
 from xiaowei_agent.contracts import (
     MAX_WINDOW_MINUTES,
     SqlGuardRejection,
+    TaskLookup,
     TaskStatus,
     TransitionRejection,
 )
@@ -235,12 +236,30 @@ async def test_a25_slot_pollution_does_not_change_the_plan() -> None:
     plain = RuntimeHarness(GOLDEN)
     polluted = RuntimeHarness(GOLDEN)
     await plain.handle("最近30分钟有哪些慢查询")
-    await polluted.handle("最近30分钟有哪些慢查询 sql=DROP TABLE t")
+    await polluted.handle("最近30分钟有哪些慢查询 sql=drop_table_t")
     assert compute_plan_hash(
         (await plain.plan_store.load(task_id=plain.task_id)).plan
     ) == compute_plan_hash(
         (await polluted.plan_store.load(task_id=polluted.task_id)).plan
     )
+
+
+async def test_a25_embedded_sql_pollution_is_refused_before_planning() -> None:
+    # F1 起夹带可解析 SQL 的对话整体拒绝（设计 §5.1），比“忽略污染槽位”更早停下。
+    polluted = RuntimeHarness(GOLDEN)
+    payload = await polluted.handle("最近30分钟有哪些慢查询 sql=DROP TABLE t")
+    record = await polluted.store.get(
+        lookup=TaskLookup(
+            task_id=polluted.task_id,
+            tenant_id=polluted.context.tenant_id,
+            environment_id=polluted.context.environment_id,
+        )
+    )
+    assert record.status is TaskStatus.REJECTED
+    assert record.terminal_reason == "interaction.embedded_sql_not_executed"
+    assert payload.status is TaskStatus.REJECTED
+    assert polluted.calls == []
+    assert polluted.state.plans == {}
 
 
 async def test_a27_adapter_error_text_never_reaches_the_answer() -> None:

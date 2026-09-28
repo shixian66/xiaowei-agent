@@ -328,6 +328,7 @@ class InteractionRejectionReasonCode(StrEnum):
     )
     CAPABILITY_FIELDS_INVALID = "capability.fields_invalid"
     CAPABILITY_TARGET_UNAVAILABLE = "capability.target_unavailable"
+    EMBEDDED_SQL_NOT_EXECUTED = "interaction.embedded_sql_not_executed"
 
 
 class ModelErrorCode(StrEnum):

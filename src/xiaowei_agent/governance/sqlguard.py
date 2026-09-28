@@ -504,6 +504,24 @@ def _prove_ast(
     return None
 
 
+def parses_as_complete_statements(text: str) -> bool:
+    """sqlglot 能否把文本完整解析为一条或多条非 ``Command`` 语句。
+
+    只供 SQL 消息识别使用（设计 §5.1），**不是**只读证明；任何解析失败都返回 ``False``。
+    """
+    try:
+        parsed = sqlglot.parse(text, read=_READONLY_DIALECT)
+    except Exception:
+        return False
+    statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
+    return bool(statements) and not any(
+        isinstance(statement, exp.Command)
+        # 单独一个 SELECT 关键字会被解析成没有投影的 Select，它不是完整语句。
+        or (isinstance(statement, exp.Select) and not statement.expressions)
+        for statement in statements
+    )
+
+
 def _parse_statement(text: str) -> exp.Expr | None:
     """解析单条语句；parser 不认识（ParseError / TokenError）返回 ``None`` 交清单路径。"""
     try:

@@ -948,7 +948,11 @@ async def build_postgres_feishu_listener_stack(
             tenant_id=settings.tenant_id,
             environment_id=settings.environment_id,
         )
+        # 只有接收消息的进程装配 SQL 识别（设计 §5.1）；通知 worker 不加载它。
+        from xiaowei_agent.governance.sql_message import recognize_sql_message
+
         submission_service = ChannelSubmissionService(
+            recognize_sql=recognize_sql_message,
             runtime=runtime,
             channel_store=channel_store,
         )
@@ -1166,7 +1170,11 @@ async def build_postgres_web_stack(
             channel_store=channel_store,
             membership=membership,
         )
+        # 只有接收消息的进程装配 SQL 识别（设计 §5.1）；通知 worker 不加载它。
+        from xiaowei_agent.governance.sql_message import recognize_sql_message
+
         submission_service = ChannelSubmissionService(
+            recognize_sql=recognize_sql_message,
             runtime=runtime,
             channel_store=channel_store,
             web_parent_access=task_access_service,

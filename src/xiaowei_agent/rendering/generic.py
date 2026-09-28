@@ -10,6 +10,7 @@ from xiaowei_agent.contracts import (
     ClarificationReasonCode,
     ClarificationRecord,
     ConversationSubmission,
+    InteractionRejectionReasonCode,
     RenderPayload,
     RenderSection,
     TaskStatus,
@@ -17,6 +18,9 @@ from xiaowei_agent.contracts import (
 )
 
 _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何工具。"
+EMBEDDED_SQL_REJECTED: Final[str] = (
+    "检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。"
+)
 CONVERSATION_TERMINAL_REASON: Final[str] = "interaction.conversation_responded"
 _CONVERSATION_ANSWER: Final[str] = (
     "我能做的事就是下面这份能力清单，它直接来自当前能力快照，不是我总结出来的。"
@@ -42,12 +46,20 @@ def request_preview_text(submission: TaskSubmission) -> str:
     return _SQL_SUBMISSION_PREVIEW
 
 
-def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
-    """只投影确定性拒绝；没有计划时不得猜测领域事实。"""
+def render_preplan_rejection(
+    *, status: TaskStatus, reason_code: str | None = None
+) -> RenderPayload:
+    """只投影确定性拒绝；没有计划时不得猜测领域事实。
+
+    嵌入 SQL 拒绝有固定文案（设计 §5.1）；其他原因与 ``None`` 保持通用文案。
+    """
     if status is not TaskStatus.REJECTED:
         raise ValueError("generic pre-plan projection requires rejected status")
+    embedded = (
+        reason_code == InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+    )
     return RenderPayload(
-        answer=_PREPLAN_REJECTED,
+        answer=EMBEDDED_SQL_REJECTED if embedded else _PREPLAN_REJECTED,
         sections=(),
         next_steps=(),
         status=status,

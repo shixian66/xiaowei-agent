@@ -16,6 +16,7 @@ from xiaowei_agent.application.channel_submission import (
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import ChannelKind, ChannelPermission
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.persistence.channel import BindTaskCommand
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
@@ -128,6 +129,7 @@ async def test_view_only_user_gets_real_route_403_without_submission(
         rendering_bindings=object(),
     )
     submissions = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=runtime,
         channel_store=InMemoryChannelStore(clock=clock, state=memory_state),
     )
@@ -205,6 +207,7 @@ async def test_web_route_reuses_scoped_idempotency_and_conflict_semantics(
     )
     channel_store = InMemoryChannelStore(clock=clock, state=memory_state)
     submissions = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=runtime,
         channel_store=channel_store,
     )

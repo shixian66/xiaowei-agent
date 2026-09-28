@@ -1,8 +1,8 @@
 """Web/飞书共用的提交权限、服务端幂等与渠道绑定编排。"""
 
-from typing import NamedTuple, Protocol, Self
+from typing import Final, NamedTuple, Protocol, Self
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.contracts import (
@@ -31,8 +31,14 @@ from xiaowei_agent.persistence.channel import (
     CreateProjectionSubscriptionCommand,
     PrivateChatLookup,
 )
-from xiaowei_agent.persistence.store import TaskNotFoundError
+from xiaowei_agent.persistence.store import SqlQuerySubmitCommand, TaskNotFoundError
 from xiaowei_agent.planning import canonical_json
+
+MAX_CONVERSATION_CHARACTERS: Final[int] = 8192
+"""普通消息上限；只有识别为 SQL 的消息才可以更长（设计 §5.1）。"""
+
+MAX_CHANNEL_TEXT_BYTES: Final[int] = 65_536
+"""渠道文本 UTF-8 上限，等于 SQL 原文上限（设计 §8.1）。"""
 
 
 class ChannelSubmissionForbiddenError(PermissionError):
@@ -47,6 +53,29 @@ class ChannelParentNotFoundError(LookupError):
 
     def __init__(self) -> None:
         super().__init__("task not found")
+
+
+class ChannelMessageTooLongError(ValueError):
+    """不是 SQL 消息却超过普通消息上限；入口按“消息过长”拒绝。"""
+
+    def __init__(self) -> None:
+        super().__init__("message too long")
+
+
+class RecognizedSql(Protocol):
+    """识别出的纯 SQL 消息；只暴露要保存的 bytes。"""
+
+    @property
+    def sql_bytes(self) -> bytes: ...
+
+
+class SqlMessageRecognizer(Protocol):
+    """确定性 SQL 消息识别端口；由装配层注入 ``governance.sql_message`` 的纯函数。
+
+    渠道模块不直接依赖治理层：识别规则的唯一真源在治理层，这里只消费其结论。
+    """
+
+    def __call__(self, text: str) -> RecognizedSql | None: ...
 
 
 class WebParentAccessPort(Protocol):
@@ -67,7 +96,9 @@ class ChannelSubmitCommand(Contract):
     request_id: StrictStr
     trace_id: TraceId
     policy_revision: StrictStr
-    text: NonEmptyText = Field(max_length=8192)
+    # 渠道文本上限按 UTF-8 bytes 计（SQL 消息最多 65_536 bytes）；普通消息的 8192 字符
+    # 上限由提交服务在识别之后执行。
+    text: NonEmptyText
     client_submission_ref: StrictStr
     conversation_ref: StrictStr | None = None
     # 飞书私聊事件里的 p2p 会话 id。真实飞书拒绝以 open_id 为 receive_id 发私聊
@@ -79,6 +110,8 @@ class ChannelSubmitCommand(Contract):
 
     @model_validator(mode="after")
     def _shape_is_supported(self) -> Self:
+        if len(self.text.encode("utf-8")) > MAX_CHANNEL_TEXT_BYTES:
+            raise ValueError("channel text exceeds its byte limit")
         if self.channel is ChannelKind.FEISHU_GROUP and self.conversation_ref is None:
             raise ValueError("group submission requires conversation_ref")
         if self.channel is ChannelKind.FEISHU_PRIVATE:
@@ -173,10 +206,12 @@ class ChannelSubmissionService:
         *,
         runtime: TaskViewRuntime,
         channel_store: ChannelStore,
+        recognize_sql: SqlMessageRecognizer,
         web_parent_access: WebParentAccessPort | None = None,
     ) -> None:
         self._runtime = runtime
         self._channels = channel_store
+        self._recognize_sql = recognize_sql
         self._web_parent_access = web_parent_access
 
     async def submit(self, *, command: ChannelSubmitCommand) -> SubmittedTask:
@@ -192,6 +227,33 @@ class ChannelSubmissionService:
                 clarification_parent_task_id=command.clarification_parent_task_id,
             )
         references = derive_channel_submission_references(command)
+        context = RequestContext(
+            tenant_id=principal.tenant_id,
+            actor=principal.actor,
+            environment_id=principal.environment_id,
+            trace_id=command.trace_id,
+            policy_revision=command.policy_revision,
+        )
+        # 澄清回答只是补充信息（例如目标名称），永远不当作新的 SQL。
+        sql = (
+            self._recognize_sql(command.text)
+            if command.clarification_parent_task_id is None
+            else None
+        )
+        if sql is None and len(command.text) > MAX_CONVERSATION_CHARACTERS:
+            raise ChannelMessageTooLongError
+        if sql is not None:
+            task_view = await self._runtime.submit_sql_query(
+                command=SqlQuerySubmitCommand(
+                    context=context,
+                    sql_bytes=sql.sql_bytes,
+                    idempotency_key=references.idempotency_key,
+                    as_of=command.submitted_at,
+                )
+            )
+            return await self._bind(
+                command=command, references=references, task_view=task_view
+            )
         submission = ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id=command.request_id,
@@ -204,13 +266,7 @@ class ChannelSubmissionService:
                 idempotency_key=references.idempotency_key,
                 environment_id=principal.environment_id,
             ),
-            context=RequestContext(
-                tenant_id=principal.tenant_id,
-                actor=principal.actor,
-                environment_id=principal.environment_id,
-                trace_id=command.trace_id,
-                policy_revision=command.policy_revision,
-            ),
+            context=context,
             as_of=command.submitted_at,
             clarification_parent_task_id=command.clarification_parent_task_id,
         )
@@ -224,6 +280,19 @@ class ChannelSubmissionService:
                 )
         except TaskNotFoundError:
             raise ChannelParentNotFoundError from None
+        return await self._bind(
+            command=command, references=references, task_view=task_view
+        )
+
+    async def _bind(
+        self,
+        *,
+        command: ChannelSubmitCommand,
+        references: ChannelSubmissionReferences,
+        task_view: TaskView,
+    ) -> SubmittedTask:
+        """对话与 SQL 提交共用的渠道绑定与通知订阅；ChannelStore 不保存 SQL。"""
+        principal = command.principal
         web_notice_chat_ref = None
         if _wants_web_notice(command):
             web_notice_chat_ref = await self._channels.find_private_chat_ref(
@@ -258,11 +327,16 @@ class ChannelSubmissionService:
 
 
 __all__ = [
+    "MAX_CHANNEL_TEXT_BYTES",
+    "MAX_CONVERSATION_CHARACTERS",
+    "ChannelMessageTooLongError",
     "ChannelParentNotFoundError",
     "ChannelSubmissionForbiddenError",
     "ChannelSubmissionReferences",
     "ChannelSubmissionService",
     "ChannelSubmitCommand",
+    "RecognizedSql",
+    "SqlMessageRecognizer",
     "SubmittedTask",
     "WebParentAccessPort",
     "channel_idempotency_key",

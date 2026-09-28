@@ -41,6 +41,7 @@ from xiaowei_agent.application.channel_access import (
     TaskListQuery,
 )
 from xiaowei_agent.application.channel_submission import (
+    ChannelMessageTooLongError,
     ChannelParentNotFoundError,
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
@@ -590,6 +591,10 @@ async def _forbidden(_: Request, __: Exception) -> Response:
 
 async def _input_error(_: Request, __: Exception) -> Response:
     return _error(400, "invalid_request")
+
+
+async def _message_too_long(_: Request, __: Exception) -> Response:
+    return _error(413, "payload_too_large")
 
 
 async def _task_not_found(_: Request, __: Exception) -> Response:
@@ -1618,6 +1623,7 @@ def create_app(
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
     app.add_exception_handler(ChannelParentNotFoundError, _task_not_found)
+    app.add_exception_handler(ChannelMessageTooLongError, _message_too_long)
     app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
     app.add_exception_handler(TaskAccessNotFoundError, _task_not_found)
     app.add_exception_handler(

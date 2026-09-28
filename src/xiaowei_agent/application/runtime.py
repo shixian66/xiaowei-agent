@@ -50,7 +50,10 @@ from xiaowei_agent.application.interaction_router import (
     route_interaction,
 )
 from xiaowei_agent.application.model_advisory import load_or_accept_advisory
-from xiaowei_agent.application.model_interaction import load_or_accept_interaction
+from xiaowei_agent.application.model_interaction import (
+    load_or_accept_interaction,
+    load_or_accept_sql_artifact_interaction,
+)
 from xiaowei_agent.application.model_ports import (
     InteractionClassifierPort,
     SlowQueryAdvisoryPort,
@@ -67,6 +70,7 @@ from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityReso
 from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     AnswerabilityVerdict,
+    ArtifactSubmission,
     AttemptIntent,
     Candidate,
     CapabilitySnapshot,
@@ -105,6 +109,7 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
+from xiaowei_agent.governance.sql_message import contains_embedded_sql
 from xiaowei_agent.governance.sqlguard import SqlGuardError
 from xiaowei_agent.observability.sink import (
     Delivery,
@@ -352,28 +357,40 @@ class XiaoweiRuntime:
         recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
-            if not isinstance(submission, ConversationSubmission):
-                # SQL 提交的规则来源解释在 F1-1 接入（计划 Task 9）；此前确定性拒绝，
-                # 不构造模型请求、不调用任何工具。
-                raise RequestRejectedError(
-                    "sql artifact submissions are not routable yet",
-                    stage=PipelineStage.INTENT,
-                    reason_code=InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE.value,
+            clarification: ClarificationContext | None = None
+            sql_artifact: SqlArtifactRef | None = None
+            user_text = ""
+            embedded_sql = False
+            if isinstance(submission, ArtifactSubmission):
+                # 纯 SQL 消息：规则来源交互事实，不构造模型请求（设计 §5.3）。
+                sql_artifact = SqlArtifactRef(
+                    sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
                 )
-            clarification = await self._load_clarification_context(
-                submission=submission
-            )
-            accepted = await load_or_accept_interaction(
-                grant=grant,
-                envelope=submission.envelope,
-                context=context,
-                interpreter=self._interpreter,
-                model=self._interaction_classifier,
-                profile=self._model_profile,
-                artifacts=self._model_artifacts,
-                clarification=clarification,
-                monotonic=self._model_monotonic,
-            )
+                accepted = await load_or_accept_sql_artifact_interaction(
+                    grant=grant,
+                    sql=sql_artifact,
+                    profile=self._model_profile,
+                    artifacts=self._model_artifacts,
+                    monotonic=self._model_monotonic,
+                )
+            else:
+                user_text = submission.envelope.text
+                # 由原文确定性检测，不取自模型或草案（设计 §5.1）。
+                embedded_sql = contains_embedded_sql(user_text)
+                clarification = await self._load_clarification_context(
+                    submission=submission
+                )
+                accepted = await load_or_accept_interaction(
+                    grant=grant,
+                    envelope=submission.envelope,
+                    context=context,
+                    interpreter=self._interpreter,
+                    model=self._interaction_classifier,
+                    profile=self._model_profile,
+                    artifacts=self._model_artifacts,
+                    clarification=clarification,
+                    monotonic=self._model_monotonic,
+                )
             if (
                 accepted.observation is not None
                 and accepted.observation.fallback_code is not ModelFallbackCode.DISABLED
@@ -392,7 +409,11 @@ class XiaoweiRuntime:
                     model=accepted.observation,
                     delivery=Delivery.LOG_AND_DURABLE,
                 )
-            route = route_interaction(draft=accepted.artifact.draft, context=context)
+            route = route_interaction(
+                draft=accepted.artifact.draft,
+                context=context,
+                embedded_sql=embedded_sql,
+            )
             # 普通对话不能替澄清父链作答：父链是一次性终态，用固定回复把它收成
             # SUCCEEDED 会悄悄烧掉它。这个判定**只算一次**，由 INTENT 归因与下面的拒绝
             # 共用：算两次迟早漂移成"trace 记 ok、任务却是 rejected"，那条任务就没有
@@ -466,7 +487,8 @@ class XiaoweiRuntime:
                 as_of=submission.as_of,
                 grant=grant,
                 clarification=clarification,
-                user_text=submission.envelope.text,
+                user_text=user_text,
+                sql_artifact=sql_artifact,
                 task_id=grant.task_id,
                 attempt_number=grant.attempt_number,
             )

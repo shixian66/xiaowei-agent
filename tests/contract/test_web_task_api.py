@@ -45,6 +45,7 @@ from xiaowei_agent.contracts import (
     WebMode,
     task_query_path,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.interfaces.web_app import create_app, session_cookie_name
 from xiaowei_agent.interfaces.web_auth import (
     AuthenticatedWebSession,
@@ -660,6 +661,7 @@ async def _f1_web_stack(store: Any, memory_state: Any, clock: Any) -> Any:
         runtime=runtime, task_store=store, channel_store=channels, membership=None
     )
     submissions = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=runtime, channel_store=channels, web_parent_access=access
     )
     return channels, submissions
@@ -826,3 +828,40 @@ async def test_a_readable_sql_answer_creates_the_child(
     body = response.json()
     assert body["clarification_parent_task_id"] == parent.task_id
     assert body["task_id"] in memory_state.tasks
+
+
+# --- F1：聊天框文本上限（设计 §5.1） ---------------------------------------------
+
+
+async def test_web_chat_accepts_long_sql_but_not_long_conversation(
+    store, memory_state, clock
+) -> None:
+    _, submissions = await _f1_web_stack(store, memory_state, clock)
+    client, _, _ = _client(submissions=submissions)
+    long_sql = "SELECT '" + "x" * 20_000 + "' AS a"
+
+    async with client:
+        sql = await client.post(
+            "/app/api/tasks",
+            json={"text": long_sql, "client_submission_id": "browser-long-sql-0001"},
+            headers=_F1_HEADERS,
+        )
+        chat = await client.post(
+            "/app/api/tasks",
+            json={"text": "慢" * 8193, "client_submission_id": "browser-long-chat-0001"},
+            headers=_F1_HEADERS,
+        )
+        over = await client.post(
+            "/app/api/tasks",
+            json={"text": "中" * 21_846, "client_submission_id": "browser-over-byte-0001"},
+            headers=_F1_HEADERS,
+        )
+
+    assert sql.status_code == 202
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes == long_sql.encode()
+    assert chat.status_code == 413
+    assert chat.json() == {"error": {"code": "payload_too_large"}}
+    assert over.status_code == 400
+    assert over.json() == {"error": {"code": "invalid_request"}}
+    assert len(memory_state.tasks) == 1

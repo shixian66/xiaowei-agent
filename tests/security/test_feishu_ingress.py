@@ -145,6 +145,11 @@ assert "lark_oapi" not in sys.modules
         "xiaowei_agent.application.channel_submission",
         "xiaowei_agent.application.identity_activation",
         "xiaowei_agent.governance.product_roles",
+        # F1：接收消息的进程在提交前做确定性 SQL 识别；四个模块都是纯函数，不执行查询。
+        "xiaowei_agent.governance.readonly_statements",
+        "xiaowei_agent.governance.sql_message",
+        "xiaowei_agent.governance.sql_tokens",
+        "xiaowei_agent.governance.sqlguard",
         "xiaowei_agent.interfaces.directory_identity",
         "xiaowei_agent.interfaces.feishu_identity",
         "xiaowei_agent.interfaces.feishu_listener",

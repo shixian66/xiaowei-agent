@@ -306,3 +306,42 @@ def test_sql_artifact_failures_map_to_two_closed_codes() -> None:
         ) is ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE
     assert ApplicationFailure.SQL_ARTIFACT_EXPIRED.value == "sql_artifact.expired"
     assert ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE.value == "sql_artifact.unavailable"
+
+
+@pytest.mark.parametrize(
+    ("terminal_reason", "embedded"),
+    [
+        ("interaction.embedded_sql_not_executed", True),
+        ("interaction.route_not_available", False),
+        ("capability.fields_invalid", False),
+        (None, False),
+    ],
+)
+async def test_preplan_rejection_projection_uses_the_recorded_reason(
+    store, memory_state, context, terminal_reason: str | None, embedded: bool
+) -> None:
+    from tests.conftest import drive_to_terminal, lookup_for, make_submission
+
+    from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+    from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
+    from xiaowei_agent.persistence.plans import InMemoryPlanStore
+    from xiaowei_agent.rendering.generic import EMBEDDED_SQL_REJECTED
+
+    record = await store.create_task(submission=make_submission(context))
+    await drive_to_terminal(store, lookup_for(record), TaskStatus.REJECTED)
+    current = await store.get(lookup=lookup_for(record))
+    rejected = current.model_copy(update={"terminal_reason": terminal_reason})
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),  # type: ignore[arg-type]
+    )
+
+    payload = await runtime.project_recorded(record=rejected)
+
+    assert payload.status is TaskStatus.REJECTED
+    assert (payload.answer == EMBEDDED_SQL_REJECTED) is embedded
+    if not embedded:
+        assert payload.answer == "请求在执行前被拒绝，未调用任何工具。"

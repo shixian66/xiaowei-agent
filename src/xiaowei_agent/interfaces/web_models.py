@@ -69,15 +69,26 @@ class _WebModel(BaseModel):
 
 
 class WebTaskSubmitRequest(_WebModel):
-    """浏览器可提交正文、幂等引用和可选显式父任务。"""
+    """浏览器可提交正文、幂等引用和可选显式父任务。
 
-    text: NonEmptyText = Field(max_length=8192)
+    正文上限按 UTF-8 bytes 计：SQL 消息最多 65_536 bytes；普通消息的 8192 字符上限由
+    提交服务在识别之后执行（设计 §5.1）。
+    """
+
+    text: NonEmptyText = Field(max_length=65_536)
     client_submission_id: StrictStr = Field(
         min_length=16,
         max_length=200,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
     clarification_parent_task_id: TaskId | None = None
+
+    @field_validator("text", mode="after")
+    @classmethod
+    def _text_fits_the_byte_limit(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 65_536:
+            raise ValueError("text exceeds the byte limit")
+        return value
 
 
 class _WebReturnIntentRequest(_WebModel):

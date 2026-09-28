@@ -230,6 +230,8 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
         "create_task",
         "get",
         "get_submission",
+        # F1：纯 SQL 消息的唯一提交入口；只写提交事实，不解释或执行。
+        "submit_sql_query",
     }
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_plans") == {"load"}
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_ledger") == {"load"}

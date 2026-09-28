@@ -29,6 +29,7 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskStatus,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.persistence import IdempotencyConflictError
 from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
@@ -144,6 +145,7 @@ def service(store, channel_store, memory_state):
         membership=NeverMembership(),
     )
     return ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=runtime,
         channel_store=channel_store,
         web_parent_access=parent_access,
@@ -245,6 +247,7 @@ async def test_web_parent_fails_closed_when_authorizer_is_not_assembled(
 ) -> None:
     parent = await _terminal_web_parent(service, store, clock)
     unconfigured = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=service._runtime,
         channel_store=channel_store,
     )
@@ -700,6 +703,7 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
         rendering_bindings=object(),
     )
     service = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=runtime,
         channel_store=flaky,
     )
@@ -756,6 +760,7 @@ async def test_sql_artifact_failures_pass_through_before_binding(
 
     channels = RecordingChannels(channel_store)
     service = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
         runtime=FailingRuntime(),  # type: ignore[arg-type]
         channel_store=channels,  # type: ignore[arg-type]
         web_parent_access=AllowParent(),
@@ -773,3 +778,134 @@ async def test_sql_artifact_failures_pass_through_before_binding(
     assert caught.value is error
     assert channels.bind_calls == 0
     assert memory_state.channel_bindings == {}
+
+
+# --- F1：纯 SQL 消息分流提交（设计 §5.1） ----------------------------------------
+
+
+@pytest.mark.parametrize("channel", [ChannelKind.WEB, ChannelKind.FEISHU_GROUP])
+async def test_sql_message_creates_an_artifact_task_without_sql_in_channel_facts(
+    service, channel_store, memory_state, clock, channel: ChannelKind
+) -> None:
+    import json
+
+    from xiaowei_agent.contracts import ArtifactSubmission
+
+    sql = "SELECT secret_marker_column FROM orders"
+    command = _command(clock, channel=channel, client_key="sql-message", text=sql)
+
+    first = await service.submit(command=command)
+    replay = await service.submit(command=command.model_copy(update={"request_id": "r2"}))
+
+    assert replay == first
+    task_id = first.task_view.task_id
+    assert set(memory_state.tasks) == {task_id}
+    submission = memory_state.submissions[task_id]
+    assert isinstance(submission, ArtifactSubmission)
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes == sql.encode()
+    assert artifact.sql_ref == submission.sql_ref
+    assert first.binding.task_id == task_id
+    channel_facts = json.dumps(
+        [
+            [item.model_dump(mode="json") for item in memory_state.channel_bindings.values()],
+            [
+                item.model_dump(mode="json")
+                for item in memory_state.projection_subscriptions.values()
+            ],
+        ],
+        ensure_ascii=False,
+    )
+    assert "secret_marker_column" not in channel_facts
+    assert "secret_marker_column" not in submission.model_dump_json()
+
+
+async def test_same_key_with_different_sql_is_an_idempotency_conflict(
+    service, clock
+) -> None:
+    await service.submit(command=_command(clock, client_key="sql-conflict", text="SELECT 1"))
+    with pytest.raises(IdempotencyConflictError):
+        await service.submit(
+            command=_command(clock, client_key="sql-conflict", text="SELECT 2")
+        )
+
+
+async def test_conversation_text_keeps_the_8192_character_limit(service, clock) -> None:
+    from xiaowei_agent.application.channel_submission import ChannelMessageTooLongError
+
+    await service.submit(command=_command(clock, client_key="long-ok", text="慢" * 8192))
+    with pytest.raises(ChannelMessageTooLongError):
+        await service.submit(
+            command=_command(clock, client_key="long-no", text="慢" * 8193)
+        )
+
+
+async def test_sql_text_is_bounded_by_65536_utf8_bytes(service, memory_state, clock) -> None:
+    from pydantic import ValidationError
+
+    from xiaowei_agent.application.channel_submission import ChannelMessageTooLongError
+
+    prefix = "SELECT '"
+    filler = "x" * (65_536 - len(prefix) - 1)
+    at_limit = f"{prefix}{filler}'"
+    assert len(at_limit.encode()) == 65_536
+    await service.submit(command=_command(clock, client_key="sql-max", text=at_limit))
+    assert len(memory_state.sql_artifacts) == 1
+    # 渠道文本超过 64 KiB 在命令校验时即拒绝。
+    for over in (f"{prefix}{filler}x'", "中" * 21_846):
+        with pytest.raises(ValidationError):
+            _command(clock, client_key="bytes-over", text=over)
+    # 64 KiB 以内、但不是 SQL 的长文本仍按普通消息上限拒绝。
+    with pytest.raises(ChannelMessageTooLongError):
+        await service.submit(
+            command=_command(clock, client_key="not-sql", text="SELECT 一下" + "x" * 9000)
+        )
+    assert len(memory_state.sql_artifacts) == 1
+
+
+async def test_clarification_answer_is_never_treated_as_sql(
+    store, channel_store, memory_state, clock, context
+) -> None:
+    from tests.conftest import make_envelope, make_submission
+
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="sql-answer-parent", idempotency_key="sql-answer-parent"
+            ),
+        )
+    )
+    await drive_to_terminal(
+        store,
+        TaskLookup(task_id=parent.task_id, tenant_id="dev-local", environment_id="dev"),
+        TaskStatus.CLARIFICATION_REQUIRED,
+    )
+
+    class AllowParent:
+        async def require_web_parent_access(self, **_: Any) -> None:
+            return None
+
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
+    )
+    service = ChannelSubmissionService(
+        recognize_sql=recognize_sql_message,
+        runtime=runtime, channel_store=channel_store, web_parent_access=AllowParent()
+    )
+    submitted = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="sql-answer",
+            text="SELECT 1",
+            clarification_parent_task_id=parent.task_id,
+        )
+    )
+    assert memory_state.sql_artifacts == {}
+    child = memory_state.submissions[submitted.task_view.task_id]
+    assert child.clarification_parent_task_id == parent.task_id

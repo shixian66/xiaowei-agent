@@ -38,8 +38,9 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     content_digest,
 )
-from xiaowei_agent.contracts.intent import UNKNOWN_INTENT
+from xiaowei_agent.contracts.intent import READONLY_QUERY_INTENT, UNKNOWN_INTENT
 from xiaowei_agent.contracts.model import model_text_values
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.persistence.model_artifacts import (
     AcceptedInteractionArtifact,
     InteractionArtifactCandidate,
@@ -325,6 +326,95 @@ async def request_interaction_draft(
     )
 
 
+def clarification_is_rule_only(clarification: ClarificationContext | None) -> bool:
+    """澄清父链是 F1 目标选择时，回答只能由规则解释。"""
+    return (
+        clarification is not None
+        and isinstance(clarification.subject, CapabilitySubject)
+        and clarification.subject.target_selection is not None
+    )
+
+
+def sql_artifact_interaction_draft() -> InteractionDraft:
+    """纯 SQL 消息的规则来源交互候选：只读查询意图、空槽位（设计 §5.3）。"""
+    return InteractionDraft(
+        proposed_kind=InteractionKind.CAPABILITY_REQUEST,
+        capability_draft=IntentDraft(
+            intent=READONLY_QUERY_INTENT,
+            slots={},
+            missing=(),
+            confidence=1.0,
+            source=IntentSource.USER,
+        ),
+        confidence=1.0,
+        source=InteractionSource.RULE,
+    )
+
+
+def _sql_artifact_input_digest(sql: SqlArtifactRef) -> str:
+    return _digest(
+        {
+            "interaction_origin": "rule",
+            "sql_artifact": {"sql_ref": sql.sql_ref, "sql_hash": sql.sql_hash},
+        }
+    )
+
+
+async def load_or_accept_sql_artifact_interaction(
+    *,
+    grant: TaskAttemptGrant,
+    sql: SqlArtifactRef,
+    profile: ModelInvocationProfile,
+    artifacts: ModelArtifactStore,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> AcceptedInteractionResult:
+    """纯 SQL 消息不构造模型请求：直接保存或复验规则来源交互事实。
+
+    输入摘要只绑定 SQL 引用与 hash，不含 SQL 原文；``request_count`` 恒为 0。
+    """
+    draft = sql_artifact_interaction_draft()
+    input_digest = _sql_artifact_input_digest(sql)
+    existing = await artifacts.load_interaction(task_id=grant.task_id)
+    if existing is not None:
+        if (
+            existing.origin != "rule"
+            or not interaction_artifact_identity_matches(existing, profile=profile)
+            or existing.input_digest != input_digest
+            or existing.draft != draft
+            or existing.result_digest != interaction_result_digest(existing.draft)
+        ):
+            raise ModelArtifactConflictError(
+                "stored interaction artifact does not match the sql submission",
+                task_id=grant.task_id,
+            )
+        return AcceptedInteractionResult(artifact=existing, observation=None)
+    started = monotonic()
+    artifact = await artifacts.save_interaction(
+        grant=grant,
+        candidate=InteractionArtifactCandidate(
+            draft=draft,
+            origin="rule",
+            provider=None,
+            model=None,
+            provider_origin=None,
+            prompt_revision=RULE_INTERACTION_PROMPT_REVISION,
+            schema_revision=RULE_INTERACTION_SCHEMA_REVISION,
+            input_digest=input_digest,
+            result_digest=interaction_result_digest(draft),
+            usage=ModelUsage(),
+        ),
+    )
+    return AcceptedInteractionResult(
+        artifact=artifact,
+        observation=_observation(
+            started=started,
+            monotonic=monotonic,
+            request_count=0,
+            fallback_code=ModelFallbackCode.DISABLED,
+        ),
+    )
+
+
 async def load_or_accept_interaction(
     *,
     grant: TaskAttemptGrant,
@@ -379,6 +469,10 @@ async def load_or_accept_interaction(
             interpreter=interpreter,
             clarification=clarification,
         )
+
+    if clarification_is_rule_only(clarification):
+        # 目标选择回答只是目标名称，由规则解释；模型请求构造对它不可达（设计 §5.4）。
+        model = None
 
     if request is None:
         started = monotonic()
@@ -443,10 +537,13 @@ __all__ = [
     "InteractionStageResult",
     "ModelInputRejectedError",
     "build_interaction_classifier_request",
+    "clarification_is_rule_only",
     "interaction_artifact_identity_matches",
     "interaction_input_digest",
     "interaction_result_digest",
     "load_or_accept_interaction",
+    "load_or_accept_sql_artifact_interaction",
     "request_interaction_draft",
     "rule_interaction_fallback",
+    "sql_artifact_interaction_draft",
 ]
