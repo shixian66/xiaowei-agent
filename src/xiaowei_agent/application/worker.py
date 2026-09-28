@@ -1,10 +1,10 @@
-"""Worker 的确定性领取、执行、重试与进程级退避。"""
+"""Worker 的确定性领取、有界并发执行、重试与进程级退避。"""
 
 import asyncio
 import contextlib
 import datetime as dt
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine, Iterable
 from functools import partial
 from typing import Any, Protocol, TypeAlias
 
@@ -59,6 +59,7 @@ class WorkerSettings(Protocol):
     continuous_infrastructure_failure_window_seconds: float
     worker_poll_interval_seconds: float
     dispatch_batch_limit: int
+    worker_max_concurrent_tasks: int
 
 
 class WorkerInfrastructureExhaustedError(RuntimeError):
@@ -87,7 +88,11 @@ _LOSER_REJECTIONS = frozenset(
 
 
 class WorkerLoop:
-    """只负责任务调度；解释、规划、准入和执行均委托 Runtime。"""
+    """只负责任务调度；解释、规划、准入和执行均委托 Runtime。
+
+    最多同时处理 ``worker_max_concurrent_tasks`` 个任务：只在有空位时领取，
+    每个领到的尝试在自己的 heartbeat scope 里后台执行，长任务不阻塞其他任务。
+    """
 
     def __init__(
         self,
@@ -107,6 +112,8 @@ class WorkerLoop:
         self._sleep = sleep
         self.owner = f"worker-{uuid.uuid4().hex}"
         self._log = StructuredLogTraceSink(worker_instance=self.owner)
+        # 按领取顺序保存在跑的尝试；dict 保序，失败按最早登记者上抛。
+        self._in_flight: dict[asyncio.Task[bool], None] = {}
 
     async def _log_committed(self, events: tuple[TraceEvent, ...]) -> None:
         for event in events:
@@ -195,15 +202,44 @@ class WorkerLoop:
             )
         return True
 
-    async def _poll_once(self) -> int:
+    async def _run_attempt(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        submission: TaskSubmission,
+        trace_id: str,
+    ) -> bool:
+        """在一个 heartbeat scope 内执行已领取的尝试；失租按输家处理。"""
+        try:
+            return await run_with_task_heartbeat(
+                partial(
+                    self._execute_granted_attempt,
+                    grant=grant,
+                    submission=submission,
+                    trace_id=trace_id,
+                ),
+                grant=grant,
+                task_store=self._tasks,
+                lease_ttl_seconds=self._settings.lease_ttl_seconds,
+                heartbeat_interval_seconds=self._settings.heartbeat_interval_seconds,
+                sleep=self._sleep,
+            )
+        except LeaseLostError:
+            return False
+
+    async def _dispatch(self) -> list[asyncio.Task[bool]]:
+        """只在有空位时列出并领取任务；领到的尝试在后台并发执行。"""
+        free = self._settings.worker_max_concurrent_tasks - len(self._in_flight)
+        if free <= 0:
+            return []
         candidates = await self._tasks.list_dispatchable_tasks(
             query=DispatchQuery(
                 tenant_id=self._settings.tenant_id,
                 environment_id=self._settings.environment_id,
-                limit=self._settings.dispatch_batch_limit,
+                limit=min(self._settings.dispatch_batch_limit, free),
             )
         )
-        executed = 0
+        started: list[asyncio.Task[bool]] = []
         for candidate in candidates:
             trace_id = uuid.uuid4().hex
             attempt = await self._tasks.begin_task_attempt(
@@ -222,39 +258,69 @@ class WorkerLoop:
             submission = attempt.submission
             if grant is None or submission is None:
                 raise WorkerInvariantError("successful attempt result is incomplete")
-            try:
-                completed = await run_with_task_heartbeat(
-                    partial(
-                        self._execute_granted_attempt,
-                        grant=grant,
-                        submission=submission,
-                        trace_id=trace_id,
-                    ),
-                    grant=grant,
-                    task_store=self._tasks,
-                    lease_ttl_seconds=self._settings.lease_ttl_seconds,
-                    heartbeat_interval_seconds=(
-                        self._settings.heartbeat_interval_seconds
-                    ),
-                    sleep=self._sleep,
+            task = asyncio.create_task(
+                self._run_attempt(
+                    grant=grant, submission=submission, trace_id=trace_id
                 )
-            except LeaseLostError:
+            )
+            self._in_flight[task] = None
+            started.append(task)
+        return started
+
+    def _reap(self) -> list[bool]:
+        """收走已结束的尝试；有失败则在全部收走后抛出最早登记的那个。"""
+        results: list[bool] = []
+        failure: BaseException | None = None
+        for task in [task for task in self._in_flight if task.done()]:
+            del self._in_flight[task]
+            if task.cancelled():
                 continue
-            if completed:
-                executed += 1
-        return executed
+            error = task.exception()
+            if error is None:
+                results.append(task.result())
+            elif failure is None:
+                failure = error
+        if failure is not None:
+            raise failure
+        return results
+
+    async def _cancel(self, tasks: Iterable[asyncio.Task[bool]]) -> None:
+        """取消并等到尝试真正退出；续租子任务随 heartbeat scope 一起收净。"""
+        owned = list(tasks)
+        for task in owned:
+            task.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
+        for task in owned:
+            self._in_flight.pop(task, None)
 
     async def poll_once(self) -> int:
-        """完整执行一轮；任一基础设施异常向上抛，由进程循环统一计时。"""
+        """领取一轮并等本轮尝试全部结束；任一异常取消其余尝试后向上抛。"""
         with worker_log_context(self.owner):
-            return await self._poll_once()
+            started = await self._dispatch()
+            try:
+                if started:
+                    await asyncio.wait(started, return_when=asyncio.FIRST_EXCEPTION)
+                return sum(self._reap())
+            finally:
+                await self._cancel(started)
 
-    async def _wait_or_stop(self, seconds: float, stop: asyncio.Event) -> bool:
+    async def _dispatch_logged(self) -> None:
+        with worker_log_context(self.owner):
+            await self._dispatch()
+
+    async def _wait_or_stop(
+        self,
+        seconds: float,
+        stop: asyncio.Event,
+        *,
+        wake_on: Collection[asyncio.Task[bool]] = (),
+    ) -> bool:
+        """等满时长、停止信号，或任一在跑尝试结束（空出槽位）。"""
         sleeper = asyncio.create_task(self._sleep(seconds))
         stopper = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait(
-                {sleeper, stopper}, return_when=asyncio.FIRST_COMPLETED
+                {sleeper, stopper, *wake_on}, return_when=asyncio.FIRST_COMPLETED
             )
             if stopper in done:
                 sleeper.cancel()
@@ -264,41 +330,59 @@ class WorkerLoop:
             stopper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await stopper
-            await sleeper
+            if sleeper in done:
+                await sleeper
+            else:
+                sleeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeper
             return False
         finally:
             for task in (sleeper, stopper):
                 if not task.done():
                     task.cancel()
 
-    async def _poll_or_stop(self, stop: asyncio.Event) -> tuple[bool, int]:
-        poller = asyncio.create_task(self.poll_once())
+    async def _dispatch_or_stop(self, stop: asyncio.Event) -> bool:
+        dispatcher = asyncio.create_task(self._dispatch_logged())
         stopper = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait(
-                {poller, stopper}, return_when=asyncio.FIRST_COMPLETED
+                {dispatcher, stopper}, return_when=asyncio.FIRST_COMPLETED
             )
             if stopper in done:
-                poller.cancel()
+                dispatcher.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await poller
-                return True, 0
+                    await dispatcher
+                return True
             stopper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await stopper
-            return False, await poller
+            await dispatcher
+            return False
         finally:
-            for task in (poller, stopper):
+            for task in (dispatcher, stopper):
                 if not task.done():
                     task.cancel()
 
     async def run(self, stop: asyncio.Event) -> None:
-        """运行到停止信号，或连续基础设施故障达到 fail-stop 窗口。"""
+        """运行到停止信号，或连续基础设施故障达到 fail-stop 窗口。
+
+        任何退出路径都先取消并等到在跑尝试退出，再返回或上抛；
+        被取消的尝试由 lease 过期后的既有恢复路径接手。
+        """
+        try:
+            await self._run(stop)
+        finally:
+            await self._cancel(self._in_flight)
+
+    async def _run(self, stop: asyncio.Event) -> None:
         first_failure_at: float | None = None
         consecutive_failures = 0
         while not stop.is_set():
             try:
-                stopped, _ = await self._poll_or_stop(stop)
+                # 先收已结束的尝试：后台失败与领取失败走同一套退避与 fail-stop。
+                self._reap()
+                stopped = await self._dispatch_or_stop(stop)
             except PersistenceUnavailableError:
                 now = self._monotonic()
                 if first_failure_at is None:
@@ -329,6 +413,8 @@ class WorkerLoop:
             first_failure_at = None
             consecutive_failures = 0
             if await self._wait_or_stop(
-                self._settings.worker_poll_interval_seconds, stop
+                self._settings.worker_poll_interval_seconds,
+                stop,
+                wake_on=tuple(self._in_flight),
             ):
                 return

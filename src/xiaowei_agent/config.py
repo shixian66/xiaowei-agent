@@ -262,6 +262,7 @@ class Settings(BaseModel):
     continuous_infrastructure_failure_window_seconds: float = Field(default=900.0, gt=0)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
     dispatch_batch_limit: int = Field(default=10, gt=0, le=100)
+    worker_max_concurrent_tasks: int = Field(default=4, ge=1, le=16)
     api_request_body_limit_bytes: int = Field(default=131_072, gt=0, lt=1_048_576)
     postgres_host: StrictStr = "postgres"
     postgres_port: int = Field(default=5432, gt=0, le=65_535)
@@ -270,7 +271,7 @@ class Settings(BaseModel):
     postgres_password_file: StrictStr = _DEFAULT_POSTGRES_SECRET_PATH
     db_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     db_command_timeout_seconds: float = Field(default=15.0, gt=0)
-    db_pool_size: int = Field(default=5, gt=0)
+    db_pool_size: int = Field(default=9, gt=0)
     db_pool_max_overflow: int = Field(default=0, ge=0)
     api_bind_host: IpLiteral = "127.0.0.1"
     api_bind_port: int = Field(default=8000, gt=0, le=65_535)
@@ -348,6 +349,14 @@ class Settings(BaseModel):
             raise ValueError("database connect timeout must be below command timeout")
         if self.db_command_timeout_seconds >= self.lease_ttl_seconds:
             raise ValueError("database command timeout must be below lease ttl")
+        # 每个在跑任务最多同时占执行与续租两条连接，另留一条给领取。
+        if (
+            self.db_pool_size + self.db_pool_max_overflow
+            < 2 * self.worker_max_concurrent_tasks + 1
+        ):
+            raise ValueError(
+                "database pool must hold two connections per concurrent task plus one"
+            )
         return self
 
     @model_validator(mode="after")
@@ -607,6 +616,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     ),
     "worker_poll_interval_seconds": "XIAOWEI_WORKER_POLL_INTERVAL_SECONDS",
     "dispatch_batch_limit": "XIAOWEI_DISPATCH_BATCH_LIMIT",
+    "worker_max_concurrent_tasks": "XIAOWEI_WORKER_MAX_CONCURRENT_TASKS",
     "api_request_body_limit_bytes": "XIAOWEI_API_REQUEST_BODY_LIMIT_BYTES",
     "postgres_host": "XIAOWEI_POSTGRES_HOST",
     "postgres_port": "XIAOWEI_POSTGRES_PORT",
