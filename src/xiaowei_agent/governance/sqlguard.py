@@ -37,6 +37,7 @@ from sqlglot.errors import ParseError, TokenError
 
 from xiaowei_agent.contracts import SqlGuardRejection, SqlSurface
 from xiaowei_agent.contracts.sql_query import QualifiedRelation
+from xiaowei_agent.governance.readonly_statements import StatementMatch, match_statement
 from xiaowei_agent.governance.sql_tokens import (
     TokenScan,
     TokenScanError,
@@ -350,6 +351,7 @@ _SHOW_RELATION_READS: Final[frozenset[str]] = frozenset(
 """直接读取一个对象的 SHOW：对象按默认库解析后检查黑名单。"""
 
 _DESCRIBE_TABLE_ARGS: Final[frozenset[str]] = frozenset({"this", "as_json"})
+_DESCRIBE_KEYWORDS: Final[frozenset[str]] = frozenset({"DESC", "DESCRIBE"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,15 +466,21 @@ def _prove_show(
 
 
 def _prove_describe(
-    describe: exp.Describe, policy: ReadonlyPolicy
+    describe: exp.Describe, policy: ReadonlyPolicy, *, keyword: str
 ) -> tuple[str, list[QualifiedRelation]] | None:
+    """parser 把 DESC 与 EXPLAIN 都解析成 ``Describe``，并接受 MySQL 的互换写法。
+
+    这里按首个关键字收窄：``DESC``/``DESCRIBE`` 只描述一个对象，``EXPLAIN`` 只包装查询。
+    """
     style = describe.args.get("style")
     inner = describe.this
-    if isinstance(inner, exp.Table):
+    if keyword in _DESCRIBE_KEYWORDS and isinstance(inner, exp.Table):
         extras = {k for k, v in describe.args.items() if v and k not in _DESCRIBE_TABLE_ARGS}
         if style or extras:
             return None
         return "describe", _collect_relations(describe, policy)
+    if keyword != "EXPLAIN":
+        return None
     if isinstance(inner, _WRITE_NODES):
         raise _reject(SqlGuardRejection.NOT_READONLY)
     if isinstance(inner, _QUERY_ROOTS):
@@ -484,7 +492,7 @@ def _prove_describe(
 
 
 def _prove_ast(
-    root: exp.Expr, policy: ReadonlyPolicy
+    root: exp.Expr, policy: ReadonlyPolicy, *, keyword: str
 ) -> tuple[str, list[QualifiedRelation]] | None:
     """AST 路径。能证明则返回（语句族, 关系），形状不在允许集合内返回 ``None``。"""
     if isinstance(root, _QUERY_ROOTS):
@@ -492,7 +500,7 @@ def _prove_ast(
     if isinstance(root, exp.Show):
         return _prove_show(root, policy)
     if isinstance(root, exp.Describe):
-        return _prove_describe(root, policy)
+        return _prove_describe(root, policy, keyword=keyword)
     return None
 
 
@@ -526,14 +534,32 @@ def _statement_text(scan: TokenScan) -> str:
     return scan.raw[tokens[0].start_byte : tokens[-1].end_byte].decode()
 
 
+def _prove_statement_list(
+    matched: StatementMatch, scan: TokenScan, policy: ReadonlyPolicy
+) -> list[QualifiedRelation]:
+    """清单路径：解析清单项提取出的对象；带内层查询的项把内层字节交 AST 路径证明。"""
+    if matched.inner_query is not None:
+        start, end = matched.inner_query
+        inner = _parse_statement(scan.raw[start:end].decode())
+        if isinstance(inner, _WRITE_NODES):
+            raise _reject(SqlGuardRejection.NOT_READONLY)
+        if not isinstance(inner, _QUERY_ROOTS):
+            raise _reject(SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED)
+        return _collect_relations(inner, policy)
+    return [
+        _relation(catalog=ref.catalog, database=ref.database, name=ref.name, policy=policy)
+        for ref in matched.relations
+    ]
+
+
 def verify_confirmed_readonly(
     *, raw: bytes, expected_sha256: str, policy: ReadonlyPolicy
 ) -> ReadonlyProof:
     """证明一条用户提交的 SQL 只读，并返回它直接读取的对象。
 
-    顺序：原文 hash → token 扫描 → 单语句解析 → AST 路径（parser 完整识别时）→ 内部
-    Catalog 与黑名单。本函数不改写、不格式化 SQL，也不返回任何 SQL 文本；adapter 执行
-    的仍是 ``raw``。
+    顺序：原文 hash → token 扫描 → 单语句解析 → AST 路径（parser 完整识别时）或代码内
+    只读语句清单 → 内部 Catalog 与黑名单。本函数不改写、不格式化 SQL，也不返回任何 SQL
+    文本；adapter 执行的仍是 ``raw``。
 
     :raises SqlGuardError: 任一规则不通过；消息只含闭集拒绝码。
     """
@@ -541,19 +567,23 @@ def verify_confirmed_readonly(
         raise _reject(SqlGuardRejection.HASH_MISMATCH)
     scan = _scan(raw)
     root = _parse_statement(_statement_text(scan))
-    proven = _prove_ast(root, policy) if root is not None else None
+    keyword = scan.text(scan.statement_tokens[0]).upper()
+    proven = _prove_ast(root, policy, keyword=keyword) if root is not None else None
+    path: Literal["ast", "statement_list"] = "ast"
     if proven is None:
-        if root is not None and not isinstance(root, exp.Command) and isinstance(
-            root, _WRITE_NODES
-        ):
-            raise _reject(SqlGuardRejection.NOT_READONLY)
-        raise _reject(SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED)
+        matched = match_statement(scan)
+        if matched is None:
+            if isinstance(root, _WRITE_NODES) and not isinstance(root, exp.Command):
+                raise _reject(SqlGuardRejection.NOT_READONLY)
+            raise _reject(SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED)
+        path = "statement_list"
+        proven = matched.family, _prove_statement_list(matched, scan, policy)
     family, relations = proven
     for relation in relations:
         if relation in policy.blocked_relation_names:
             raise _reject(SqlGuardRejection.BLOCKED_RELATION)
     return ReadonlyProof(
-        path="ast",
+        path=path,
         statement_family=family,
         relations=tuple(dict.fromkeys(relations)),
     )
