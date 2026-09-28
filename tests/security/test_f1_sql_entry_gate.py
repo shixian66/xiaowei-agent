@@ -326,4 +326,3 @@ def test_cli_sql_shaped_text_is_rejected_by_the_api_before_any_task(text: str) -
     assert _MARKER not in stdout.getvalue() + stderr.getvalue()
     assert harness.state.tasks == {}
     assert model.interaction_requests == []
-
