@@ -3,6 +3,8 @@
 import pytest
 
 from xiaowei_agent.governance.sql_message import (
+    SQL_STATEMENT_FAMILIES,
+    SQL_STATEMENT_KEYWORDS,
     SqlMessage,
     contains_embedded_sql,
     recognize_sql_message,
@@ -46,7 +48,18 @@ _DEEP_SELECT = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
         ("SHOW RESOURCES", "SHOW RESOURCES"),
         ("SHOW BACKENDS; SHOW FRONTENDS", "SHOW BACKENDS; SHOW FRONTENDS"),
         (_HINTED_SHOW, _HINTED_SHOW),
-        ("show me the slow queries", "show me the slow queries"),
+        # 已知 StarRocks 语句族：sqlglot 解析不了也识别。
+        ("ADMIN SHOW FRONTEND CONFIG", "ADMIN SHOW FRONTEND CONFIG"),
+        ("ADMIN SHOW REPLICA STATUS FROM ops.t", "ADMIN SHOW REPLICA STATUS FROM ops.t"),
+        # 只读清单里的语句即使 sqlglot 解析不了、首词属于开放语句族，也识别。
+        ("DESC ops.t ALL", "DESC ops.t ALL"),
+        ("KILL QUERY 1", "KILL QUERY 1"),
+        ("ANALYZE TABLE t", "ANALYZE TABLE t"),
+        ("CREATE TABLE t (a int)", "CREATE TABLE t (a int)"),
+        ("GRANT SELECT ON db.t TO 'u'", "GRANT SELECT ON db.t TO 'u'"),
+        # 明确标记为 sql 的代码块：用户声明了这是 SQL，内容交 SQLGuard 判断。
+        ("```sql\nshow me the slow queries\n```", "show me the slow queries"),
+        ("```SQL\nSELECT 1\n```", "SELECT 1"),
         # 前置注释或 hint 不改变 SQL 形状。
         ("-- comment\nSELECT 1; DROP TABLE t", "-- comment\nSELECT 1; DROP TABLE t"),
         ("# 看看\nSHOW USERS", "# 看看\nSHOW USERS"),
@@ -81,6 +94,33 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
         "最近有哪些慢查询",
         "SELECT a FROM t 为什么慢",
         "SHOW USERS 是什么",
+        # 以 SQL 关键字开头的自然语言：不是已知语句族，也不是完整有效的 SQL（sqlglot 会把其中不少
+        # 降级为 Command 或宽松解析成语句，二者都不够）。
+        "show me the slow queries",
+        "create a dashboard",
+        "analyze this",
+        "analyze the logs",
+        "describe the problem",
+        "explain it",
+        "kill it",
+        "set up alerts",
+        "grant me access",
+        "revoke it",
+        "delete prod",
+        "insert coin",
+        "replace it",
+        "export it",
+        "cancel it",
+        "refresh it",
+        "lock it",
+        "truncate it",
+        "pause it",
+        "resume work",
+        "start over",
+        "call me",
+        "select the best option",
+        "SELECT a FROM t WHERE",
+        "```\nshow me the slow queries\n```",
         "-- 说明\n帮我看看慢查询",
         "select",
         "SELECT 'unterminated",
@@ -92,6 +132,11 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
 )
 def test_other_messages_are_conversation(text: str) -> None:
     assert recognize_sql_message(text) is None
+
+
+def test_statement_families_use_only_statement_keywords() -> None:
+    # 嵌入 SQL 检测按关键字闭集找候选；识别的语句族不能超出它。
+    assert set(SQL_STATEMENT_FAMILIES) <= SQL_STATEMENT_KEYWORDS
 
 
 def test_recognition_is_deterministic() -> None:

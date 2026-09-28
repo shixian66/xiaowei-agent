@@ -379,6 +379,25 @@ class XiaoweiRuntime:
                 )
             else:
                 user_text = submission.envelope.text
+                if recognize_sql_message(user_text) is not None:
+                    # 兼容保护：升级前按对话持久化、现在识别为 SQL 的任务（今天的入口在
+                    # 写任务前就会拒绝它）。在构造模型请求前拒绝，提示单独重新提交；不建
+                    # SqlArtifact，Gateway 调用为 0（设计 §5.1）。
+                    await self._emit(
+                        stage=PipelineStage.INTENT,
+                        outcome=StageOutcome.REJECTED,
+                        context=context,
+                        task_id=grant.task_id,
+                        attempt_number=grant.attempt_number,
+                        delivery=Delivery.LOG_AND_DURABLE,
+                    )
+                    raise RequestRejectedError(
+                        "sql message persisted as conversation",
+                        stage=PipelineStage.INTENT,
+                        reason_code=(
+                            InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+                        ),
+                    )
                 # 由原文确定性检测，不取自模型或草案（设计 §5.1）。
                 embedded_sql = contains_embedded_sql(user_text)
                 clarification = await self._load_clarification_context(

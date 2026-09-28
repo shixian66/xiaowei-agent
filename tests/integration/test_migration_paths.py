@@ -1888,3 +1888,78 @@ async def test_rev_0020_keeps_the_earliest_kind_when_legacy_tasks_hold_both(
         assert [tuple(row) for row in claims] == [("b" * 64, "conversation")]
     finally:
         await _restore_head(clean_database, run_upgrade)
+
+
+@pytest.mark.parametrize(
+    "earlier_kind", ["conversation", "sql_artifact"], ids=["conversation-first", "sql-first"]
+)
+async def test_rev_0020_earliest_task_wins_even_when_only_the_later_one_is_bound(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+    clock: Any,
+    earlier_kind: str,
+) -> None:
+    import datetime as dt
+
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import Channel, ChannelKind
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    ref = "d" * 64
+    key = f"channel:v1:{ref}"
+
+    async def conversation() -> str:
+        record = await store.create_task(
+            submission=make_submission(
+                context, envelope=make_envelope(idempotency_key=key, channel=Channel.FEISHU)
+            )
+        )
+        return str(record.task_id)
+
+    async def sql() -> str:
+        result = await store.submit_sql_query(
+            command=SqlQuerySubmitCommand(
+                context=context,
+                sql_bytes=b"SELECT 1",
+                idempotency_key=key,
+                as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+            )
+        )
+        assert result.task is not None
+        return str(result.task.task_id)
+
+    # 较早的任务未绑定，较晚的另一类型任务已绑定。
+    first, second = (conversation, sql) if earlier_kind == "conversation" else (sql, conversation)
+    await first()
+    later_task_id = await second()
+    await PostgresChannelStore(engine=clean_database, clock=clock).bind_task(
+        command=BindTaskCommand(
+            task_id=later_task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            channel=ChannelKind.FEISHU_PRIVATE,
+            initiator_subject_ref="subject-alice",
+            source_event_ref=ref,
+            created_at=clock(),
+        )
+    )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            claims = (
+                await connection.execute(
+                    sa.text("SELECT source_event_ref, input_kind FROM channel_source_claims")
+                )
+            ).all()
+        assert [tuple(row) for row in claims] == [(ref, earlier_kind)]
+    finally:
+        await _restore_head(clean_database, run_upgrade)

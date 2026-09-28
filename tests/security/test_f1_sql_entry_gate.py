@@ -1,7 +1,8 @@
 """SQL 形状的文本在每个文本入口都不进入模型，也不成为普通对话提交（设计 §4 第 3 条、§5.1）。
 
-识别只判断“是不是 SQL 形状”，不判断是否支持或安全：清单外语句、多语句、hint、前置注释与
-代码块形式都保存为 SqlArtifact，再由 SQLGuard 给出确定性拒绝。飞书与 Web 经渠道提交服务
+识别只判断“是不是 SQL”，不判断是否支持或安全：完整有效的 SQL、已知 StarRocks 语句族（含清单外
+语句、多语句、hint、前置注释）与明确标记为 sql 的代码块都保存为 SqlArtifact，再由 SQLGuard 给出
+确定性拒绝；以 SQL 关键字开头的自然语言继续走对话。飞书与 Web 经渠道提交服务
 进入 SqlArtifact；API/CLI 本阶段不支持 SQL 提交，在创建任务前确定性拒绝。
 """
 
@@ -56,6 +57,10 @@ SQL_SHAPED: tuple[str, ...] = (
     f"SHOW USERS -- {_MARKER}",
     # 多语句
     f"SHOW BACKENDS; SHOW FRONTENDS -- {_MARKER}",
+    # 已知 StarRocks 语句族、sqlglot 解析不了
+    f"ADMIN SHOW FRONTEND CONFIG -- {_MARKER}",
+    # 明确标记为 sql 的代码块
+    f"```sql\nshow me {_MARKER}\n```",
     # hint
     f"SHOW /*+ SET_VAR({_MARKER}=1) */ BACKENDS",
     # 前置注释 + 多语句
@@ -66,6 +71,14 @@ SQL_SHAPED: tuple[str, ...] = (
 )
 
 CONVERSATION = "show 一下最近30分钟的慢查询"
+
+# 以 SQL 关键字开头的自然语言：不是已知 StarRocks 语句族、也不是完整有效的 SQL，继续走对话。
+NATURAL_LANGUAGE: tuple[str, ...] = (
+    CONVERSATION,
+    "show me the slow queries",
+    "create a dashboard",
+    "analyze this",
+)
 
 
 def _model() -> ScriptedModelAdapter:
@@ -200,11 +213,12 @@ async def test_feishu_sql_shaped_text_becomes_an_artifact_and_never_reaches_the_
     assert _MARKER not in _non_sql_state(harness)
 
 
-async def test_feishu_conversation_control_still_reaches_the_model() -> None:
+@pytest.mark.parametrize("text", NATURAL_LANGUAGE)
+async def test_feishu_conversation_control_still_reaches_the_model(text: str) -> None:
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
 
-    assert await _feishu(harness).handle_event(event=_event(CONVERSATION)) is True
+    assert await _feishu(harness).handle_event(event=_event(text)) is True
 
     (task_id,) = harness.state.tasks
     submission = await harness.store.get_submission(lookup=_lookup(harness, task_id))
@@ -259,11 +273,12 @@ async def test_api_rejects_sql_shaped_text_before_any_task_exists(text: str) -> 
     assert _MARKER not in _non_sql_state(harness)
 
 
-async def test_api_conversation_control_is_accepted_and_reaches_the_model() -> None:
+@pytest.mark.parametrize("text", NATURAL_LANGUAGE)
+async def test_api_conversation_control_is_accepted_and_reaches_the_model(text: str) -> None:
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
 
-    response = await _post(_api(harness), CONVERSATION)
+    response = await _post(_api(harness), text)
 
     assert response.status_code == 202
     task_id = response.json()["task_id"]
@@ -326,3 +341,81 @@ def test_cli_sql_shaped_text_is_rejected_by_the_api_before_any_task(text: str) -
     assert _MARKER not in stdout.getvalue() + stderr.getvalue()
     assert harness.state.tasks == {}
     assert model.interaction_requests == []
+
+
+# --- 升级前已持久化的对话任务：worker 在构造模型请求前兼容保护 ------------------
+
+
+async def _legacy_conversation(harness: RuntimeHarness, text: str, *, bound: bool) -> str:
+    """直接写入升级前的 ConversationSubmission，绕过今天的入口识别。"""
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import Channel, ChannelKind
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+
+    record = await harness.store.create_task(
+        submission=make_submission(
+            harness.context,
+            envelope=make_envelope(
+                text=text,
+                channel=Channel.FEISHU,
+                tenant_id=harness.context.tenant_id,
+                environment_id=harness.context.environment_id,
+                actor=harness.context.actor,
+                idempotency_key=f"channel:v1:{'c' * 64}",
+            ),
+        )
+    )
+    if bound:
+        channels = InMemoryChannelStore(clock=harness.clock, state=harness.state)
+        await channels.bind_task(
+            command=BindTaskCommand(
+                task_id=record.task_id,
+                tenant_id=harness.context.tenant_id,
+                environment_id=harness.context.environment_id,
+                channel=ChannelKind.FEISHU_PRIVATE,
+                initiator_subject_ref="user-open-id",
+                source_event_ref="c" * 64,
+                created_at=_NOW,
+            )
+        )
+    return record.task_id
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "unbound"])
+@pytest.mark.parametrize("text", [f"SHOW USERS -- {_MARKER}", *SQL_SHAPED[1:]])
+async def test_legacy_sql_shaped_conversation_is_rejected_before_the_model(
+    text: str, bound: bool
+) -> None:
+    from xiaowei_agent.contracts import InteractionRejectionReasonCode
+    from xiaowei_agent.rendering.generic import EMBEDDED_SQL_REJECTED
+
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+    task_id = await _legacy_conversation(harness, text, bound=bound)
+
+    outcome = await _execute(harness, task_id)
+
+    assert outcome.status is TaskStatus.REJECTED
+    record = await harness.store.get(lookup=_lookup(harness, task_id))
+    assert record.terminal_reason == (
+        InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+    )
+    view = await harness.runtime.query_task(lookup=_lookup(harness, task_id))
+    assert view.render is not None and view.render.answer == EMBEDDED_SQL_REJECTED
+    assert model.interaction_requests == []
+    assert harness.calls == []
+    assert harness.state.sql_artifacts == {}
+
+
+@pytest.mark.parametrize("text", NATURAL_LANGUAGE)
+async def test_legacy_natural_language_conversation_still_reaches_the_model(
+    text: str,
+) -> None:
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+    task_id = await _legacy_conversation(harness, text, bound=True)
+
+    await _execute(harness, task_id)
+
+    assert len(model.interaction_requests) == 1

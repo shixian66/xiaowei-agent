@@ -317,7 +317,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 
 **Interfaces:**
 - Produces:
-  - `recognize_sql_message(text: str) -> SqlMessage | None`：纯函数；按设计 §5.1 三条规则（闭集语句关键字、token 扫描、语法上是 SQL；只判断 SQL 形状，清单外语句也识别后交 SQLGuard 回复“暂未支持”）；整条 fenced code block 解包；复用 Task 4–6 的扫描与清单
+  - `recognize_sql_message(text: str) -> SqlMessage | None`：纯函数；按设计 §5.1：明确标记为 sql 的代码块、已知 StarRocks 语句族（含只读清单；清单外已知语句也识别后交 SQLGuard 回复“暂未支持”）或开放语句族的完整有效 SQL；以 SQL 关键字开头的自然语言走对话；整条 fenced code block 解包；复用 Task 4–6 的扫描与清单
   - `contains_embedded_sql(text: str) -> bool`：纯函数；候选片段为每个 fenced code block 正文与正文外以闭集语句关键字开头、到段落末尾的文本；片段首 token 属闭集且 sqlglot 完整解析为非 `Command` 语句才命中；代码块本身不算
   - `InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED = "interaction.embedded_sql_not_executed"`
   - `route_interaction(*, draft, context, embedded_sql: bool = False)`：`embedded_sql=True` 时在读取草案前返回 `REFUSE` + 该码，不进入 Resolver；Runtime 用 `contains_embedded_sql(submission.envelope.text)` 传入，不取自模型；复用现有 `RequestRejectedError` 终态路径
