@@ -69,7 +69,7 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
         "### D4 保留（不设配额）",
     ),
     _SPEC: (
-        "Draft v9（Agent 主链集成版）",
+        "Accepted v9（Agent 主链集成版）",
         "65_536 bytes",
         "worker_max_concurrent_tasks",
         "这条 SQL **不交给模型**",
@@ -187,11 +187,13 @@ def test_no_truth_source_revives_retired_wording_or_v7_machinery() -> None:
     "path",
     [_ADR_007, _ADR_009, _ADR_010, _ADR_012, _ADR_013, _ADR_017, _ADR_018],
 )
-def test_f1_adr_changes_stay_proposed_until_owner_acceptance(path: str) -> None:
-    # 负责人接受前，F1 修订只能是 Proposed，不能把文档改动写成已接受。
+def test_f1_adr_changes_record_the_owner_acceptance(path: str) -> None:
+    # 负责人 2026-09-28 接受 PR #109 e9fdb30；接受不等于开工，F1-0b 起仍需开工口令。
     text = _read(path)
-    assert "Proposed" in text
-    assert "接受前不得写 F1 行为源码" in text
+    assert "负责人接受 PR #109 `e9fdb30`" in text
+    assert "F1-0b 起每个切片仍需负责人明确开工口令" in text
+    assert "Proposed（F1-0" not in text
+    assert "F1 修订（2026-09-27，Proposed）" not in text
 
 
 def test_adr_005_conclusion_for_the_locked_page_is_single_and_consistent() -> None:

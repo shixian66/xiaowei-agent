@@ -1,7 +1,7 @@
 # ADR-009：`plan_hash` 规范形状、审批绑定与工具准入
 
 - 状态：Accepted
-- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-02
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §6/§7/§15、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[M2 实施计划](../plans/M2-contracts-kernel.md)
@@ -95,9 +95,9 @@ Gateway 在每次 `invoke` 时重算 `tool_call_hash` 并比对。凭证证明�
 | D3 | 恢复为字段存储，必须同时给出「存储值与重算值不一致时以谁为准」的规则，并说明该规则为何不构成第二真源。 |
 | D4 | 解除 E1 硬闸只需把 `_E1_EXECUTION_ENABLED` 改为 `True`，但须经独立评审、ADR-007 完成例外记录或修订，并同步更新对应安全测试。 |
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.5–§5.7、§10
 
 ### F1-D1 query requirement 闭集

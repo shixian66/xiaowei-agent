@@ -1,6 +1,6 @@
 # ADR-018：F1 SQL artifact、结果 artifact 与结果访问边界
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 日期：2026-09-27
 - 决策人：项目负责人
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9（Agent 主链集成版）

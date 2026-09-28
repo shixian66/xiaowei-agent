@@ -1,7 +1,7 @@
 # ADR-010：M5 持久执行尝试与本地 Compose 边界
 
 - 状态：Accepted
-- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-05
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §5.6/§7.3/§11、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[M5 实施计划](../plans/M5-api-worker-compose.md)
@@ -181,9 +181,9 @@ Worker 不发布宿主端口。secret 只经文件引用注入，不写入镜像
 - 本 ADR 若要改变 TaskStore 方法集、fencing 推进点、query scope、审计事务边界或真实调用
   权限，须另立 ADR，不以入口层兼容分支绕过。
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §8.4
 
 ### Worker 有界并发

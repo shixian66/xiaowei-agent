@@ -2,7 +2,7 @@
 
 - 状态：Accepted Revision（2026-09-10）+ Accepted RI3 Amendment（2026-09-12；H 层仍未单独签认）
   + **Accepted RI5 Amendment（2026-09-14；不授予 PR 3E / RI2 现场 GO，H 层仍未单独签认）**
-- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-01；候选修订 2026-09-10、2026-09-12、2026-09-13（RI5 修订 2026-09-14 接受）
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md)、[DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md)、[ADR-008](ADR-008-engineering-and-test-baseline.md)、[ADR-014](ADR-014-real-feishu-oauth-and-web-activation.md)、[ADR-015](ADR-015-real-model-provider-boundary.md)、[RI5 简化设计](../plans/RI5-local-web-admin-simplified-design.md)
@@ -303,9 +303,9 @@ W4c（让运维目标进入 Web Admin 的测试范围）**必须另修 ADR-007**
 
 撤销本 ADR 即回到「首批能力与调用许可未拍板」状态，M3 不得立项。回滚必须以修订本 ADR 的方式显式记录，不通过修改代码默认值实现。
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9（Agent 主链集成版）
 - 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
 

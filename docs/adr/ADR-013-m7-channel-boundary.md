@@ -1,7 +1,7 @@
 # ADR-013：M7 Web 与飞书薄渠道边界
 
 - 状态：Accepted
-- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-08
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §3/§4/§5.9、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[M7 实施计划](../plans/M7-web-feishu-channels.md)
@@ -179,9 +179,9 @@ TaskStore 与 Runtime 不变。默认不删除渠道表或改写已完成任务�
 新增 webhook/其他入站传输、渠道调用改走 ToolGateway、扩展核心权限枚举、开放数据库真实结果
 artifact，或放宽真实应用、凭据、网络、部署与 canary 的独立授权门。
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1、§5.4、§9.3、§11
 - 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
 

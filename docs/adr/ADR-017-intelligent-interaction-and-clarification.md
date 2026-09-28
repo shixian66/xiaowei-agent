@@ -4,7 +4,7 @@
 > [AGENT_HANDOFF 当前状态](../../AGENT_HANDOFF.md#current-status)）。负责人于 2026-09-26 决定不再按原定义推进 I3/I4，
 > 并将其转为尚待设计的对话能力方向；本次只记录路线状态，不改变下文 I1/I2 决策契约，也不授权新能力实现。
 >
-> F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态。
+> F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态。
 
 ## 路线修订（2026-09-26）
 
@@ -342,9 +342,9 @@ I0 合入后，I1 仍必须按独立 PR 顺序实现。任何想改变本 ADR �
 model trace、migration revision、`ReadClass` 语义、披露屏障位置或 TaskView invariant 的变更，都必须先
 修订本文，并重新跑相应契约/安全测试。
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1–§5.4、§11.2
 
 ### 确定性 SQL 识别与规则来源交互事实

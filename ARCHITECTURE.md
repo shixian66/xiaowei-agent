@@ -138,7 +138,7 @@ RequestEnvelope
   → RenderPayload (exactly once)
 ```
 
-**F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
+**F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订已 Accepted；F1-1 实现前不是源码事实）。**
 SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中检测到嵌入 SQL 的消息以 `EMBEDDED_SQL_NOT_EXECUTED` 固定文案拒绝执行，Gateway 调用为 0：
 
 ```text
@@ -493,7 +493,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ClarificationPayload` | reason_code、missing_fields、prompt | 只从 `ClarificationRecord` 投影，不是 `RenderPayload` 分支 |
 | `ExecutionDisclosure` | capability、target summary、read disposition、projected slots、external_target_access | 首次 Gateway 前的可查询披露事实；表示计划语义，不表示渠道已送达或真实目标已联网 |
 
-**F1 目标契约（Proposed，F1-1 实现前不是源码事实；精确字段见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md) 与 ADR-009/ADR-010/ADR-012 的 F1 修订）：**
+**F1 目标契约（Accepted，F1-1 实现前不是源码事实；精确字段见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md) 与 ADR-009/ADR-010/ADR-012 的 F1 修订）：**
 
 | 契约 | 关键字段 | 约束 |
 | --- | --- | --- |
@@ -632,7 +632,7 @@ fencing token 有两个推进点：成功取得 lease 时推进；`schedule_retr
 
 状态终态化、retry 调度与 step checkpoint 的对应审计和状态事实同事务提交。成功领取只改变可由 TTL 自愈的 lease/attempt，不强制事务审计。持久化写必须区分 confirmed rollback 与 not-confirmed，不能从异常类别猜测数据库是否已经提交。
 
-**F1 目标语义（Proposed，见 ADR-009/ADR-010 F1 修订）**：`confirmed_artifact` 步骤沿用现有 step journal，
+**F1 目标语义（Accepted，见 ADR-009/ADR-010 F1 修订）**：`confirmed_artifact` 步骤沿用现有 step journal，
 `max_tool_calls=1`：已开始但未提交的步骤再次领取时得到 `BUDGET_EXHAUSTED`，任务以 FAILED 结束，Gateway 调用为 0，
 结果保持不可读；结果行只在 `commit_step_result` 的同一事务里写入并变为 available。F1 不新增 target 排队锁、等待
 窗口或调度退让。Worker 改为有界并发（`worker_max_concurrent_tasks` 默认 4）：只在有空位时领取任务，每个在途任务
@@ -693,7 +693,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 ## 9. SQL 与工具安全
 
 - 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
-- F1 用户直接 SQL（`confirmed_readonly`，Proposed）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
+- F1 用户直接 SQL（`confirmed_readonly`，Accepted）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
   artifact，与原文 SHA-256 绑定；纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
   控制字符、INTO OUTFILE），再走两条互斥的只读证明路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/
   `Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），或 sqlglot 降级为 `Command`/ParseError 时的代码内只读语句清单。
@@ -1065,6 +1065,6 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
   [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
   §RI5 Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
   固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
-- ADR-018：F1 SQL artifact、结果 artifact 与结果访问边界（**Proposed**：[docs/adr/ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。
+- ADR-018：F1 SQL artifact、结果 artifact 与结果访问边界（**Accepted**：[docs/adr/ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

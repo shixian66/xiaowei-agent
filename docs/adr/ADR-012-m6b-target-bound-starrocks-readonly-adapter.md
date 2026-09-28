@@ -1,7 +1,7 @@
 # ADR-012：M6b target-bound StarRocks 测试环境只读 adapter
 
 - 状态：Accepted
-- F1 修订：**Proposed**（2026-09-27，待负责人接受），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-07
 - 决策人：项目负责人
 - 相关：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[M6b 计划](../plans/M6b-starrocks-test-readonly.md)
@@ -134,9 +134,9 @@ hash canonicalization、Runner、Policy profile 或 `_E1_EXECUTION_ENABLED=False
 下列任一变化必须先修订本 ADR：target-bound 注册键或 fallback 语义、受信元数据来源、固定 SQL
 闭集、selector 迁移策略、真实 Evidence 处置，或 M6b 对 operation/环境/调用类别的授权范围。
 
-## F1 修订（2026-09-27，Proposed）
+## F1 修订（2026-09-27，Accepted 2026-09-28）
 
-- 状态：Proposed（F1-0，待项目负责人接受；接受前不得写 F1 行为源码）
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
 - 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.7、§6、§8
 
 ### F1-D1 独立 profile，不改变慢查询

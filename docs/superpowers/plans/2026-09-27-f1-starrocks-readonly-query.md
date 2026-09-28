@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> 状态：V2.0（Agent 主链集成版，2026-09-27），待 exact-SHA 独立复审与负责人接受。V2.0 随设计 v9 重写：SQL 查询作为
+> 状态：V2.0（Agent 主链集成版，2026-09-27），2026-09-28 负责人接受 PR #109 `e9fdb30`（F1-0a 批准）。V2.0 随设计 v9 重写：SQL 查询作为
 > 小维普通 capability 接入统一对话主链；网页与飞书直接发 SQL、确定性识别、SQL 消息不进模型（夹带 SQL 的对话可经模型但不能触发执行）；目标不唯一时追问；取消配额。
 > 本计划范围为 **F1-Core 查询执行内核**；完成后只标记“F1-Core 完成”，“小维 Agent 查询能力完成”另需 F1-NL（设计 §12.1）。
 > 历史版本见 git（V0.3 `73a61c5`，V1.0 `21d4e64`）。
