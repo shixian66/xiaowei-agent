@@ -32,8 +32,9 @@ agent 主链：统一对话入口 → 交互路由 → CapabilityResolver → Sl
 SQL 页面、没有绕过路由的窄方法、没有只属于 F1 的任务系统或回复通道。
 
 用户在网页聊天框、飞书单聊或飞书群聊（@小维）直接发一条 SQL，不需要前缀或命令。小维用确定性规则识别
-“这条消息就是一条 SQL”，把原文单独保存，并把识别结果作为规则来源的交互事实交给主链；SQL 原文**不交给模型**，
-既不让模型转述，也不让模型判断是否执行。认不出的消息按现有对话流程处理，其中即使夹带 SQL 也不执行。
+“这条消息就是一条 SQL”，把原文单独保存，并把识别结果作为规则来源的交互事实交给主链；这条 SQL **不交给模型**，
+既不让模型转述，也不让模型判断是否执行。认不出的消息（例如夹带 SQL 的中文提问）按现有对话流程处理，模型可以
+看到它，但不能让其中的 SQL 被保存为可执行 artifact 或被执行。
 
 目标 StarRocks 由 SlotVerifier 确定：租户与环境内只有一个可查询的 StarRocks 时直接使用；有多个时**不猜、不执行**，
 走现有追问机制列出选项，只有提交人本人回答完全一致的名称后才执行；一个都没有时明确拒绝。
@@ -95,7 +96,9 @@ v8 中保留的决定：不做 target 排队锁；SQL 上限 65_536 bytes；结�
 1. SQL 原文只在 SqlArtifactStore 保存一份；TaskStore、Plan、Evidence、RenderPayload、日志、trace、ChannelStore、
    交互事实与模型请求只保存 `sql_ref`、hash 或安全摘要；
 2. SQL 识别、SQLGuard、ToolCall hash 与 adapter 执行绑定同一份原始 UTF-8 bytes；
-3. SQL 原文永不进入模型端口；模型不能决定是否执行、在哪执行或执行什么；
+3. 识别为 SQL 消息的原文、SqlArtifact 与最终执行字节永不进入模型端口；夹带 SQL 的普通对话照常进入对话流程，但
+   模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行，Gateway 调用为 0；模型不能决定是否执行、
+   在哪执行或执行什么；
 4. 目标不唯一时不执行；只有提交人本人对追问给出与选项完全一致的回答才继续；
 5. 缺少、越权、hash 不符或 target 不符的 SQL 一律在 Gateway 前拒绝；operation 需要 SQL 时缺少 HydratedQuery 必须拒绝；
 6. 结果行不进入 AdapterResponse.payload、ToolResult.data_view、Evidence、RenderPayload 或 TaskOutcome；
@@ -125,7 +128,8 @@ ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_messag
 3. 通过 §7.2 token 扫描后恰好是一条完整语句：sqlglot 30.17.0 完整解析，或命中 §7.3 只读语句清单；
 
 三条同时满足才是 SQL 消息。写语句也会被识别，目的是明确回复“只允许只读查询”，而不是当成聊天。其他消息
-（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）一律走现有对话流程，不执行。识别是确定性
+（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）一律走现有对话流程，不执行；F1-Core 对这类
+消息最多提示“要执行请单独发送这条 SQL”。识别是确定性
 规则，不调用模型，同一输入永远得到同一结论。
 
 识别为 SQL 后，服务调用 `TaskStore.submit_sql_query`，在**同一个 PostgreSQL 事务**内写 SqlArtifact（原始 bytes、
@@ -430,7 +434,15 @@ F1 operation 是 READ + RESTRICTED。查询不经 ApprovalGate 的条件必须�
 - F3 审批绑定原 SQL hash、target fingerprint、requester 与有效 `sql_ref`，在新连接中重新执行原 SQL 流式写 CSV；
   不导出 F1 预览，也不继承 F1 的 `sql_select_limit`；F1 与 F3 的数据时间不同，UI 显示两次时间；
 - F1-NL 另行设计模型端口、元数据模板、COMMENT 注入防护与候选确认；候选 SQL 经用户确认后，作为一条新的 SQL 消息
-  进入本文同一能力与同一安全链，模型仍不决定执行。
+  进入本文同一能力与同一安全链，模型仍不决定执行。F1-NL 方向（负责人 2026-09-28 采纳，届时单独设计）：
+  - 纯 SQL 仍按本文确定性识别、零模型调用，直接进入 F1-Core；
+  - 夹带 SQL 的混合文本可进入 InteractionClassifier；模型可提出候选意图与候选 SQL，但不得创建可执行 SqlArtifact；
+    SQL 优先由确定性规则提取（如代码块），规则取不出时才用模型候选；
+  - F1-NL 区分“自然语言数据查询”与“混合文本中的 SQL 执行请求”，两者的候选 SQL 都必须完整展示给提交人，确认内容
+    按 hash 绑定展示的 SQL，确认后作为新的 SQL 消息进入 F1-Core；未经完整确认 Gateway 调用为 0；
+  - “解释这条 SQL”只做解释、不执行；“为什么慢”预留给 SQL 性能诊断，优先扩展现有慢查询诊断 capability；两者默认
+    都不重新执行用户粘贴的 SQL，也不自动 EXPLAIN；
+  - 混合文本中的 SQL 字面值随对话进入模型，属于现有对话出站边界；F1-NL 修订 ADR-015 时一并处理脱敏与提示。
 
 ### 12.1 完成定义
 
@@ -459,7 +471,7 @@ F1-0 文档 PR 获批前不写 F1 行为源码。须同步：
 10. ADR-017：确定性 SQL 识别与规则来源交互事实、目标选择追问、飞书澄清父链、RESTRICTED read 无审批的窄条件；
 11. ADR-018：SQL 与结果 artifact、提交事务、ACL 与保留。
 
-ADR-015 不因直接 SQL 放宽；SQL 原文不进入模型端口。
+ADR-015 不因直接 SQL 放宽；识别为 SQL 消息的原文、SqlArtifact 与最终执行字节不进入模型端口。
 
 ## 14. 验证与验收
 
@@ -468,6 +480,7 @@ ADR-015 不因直接 SQL 放宽；SQL 原文不进入模型端口。
 - SQL 识别：读/写关键字开头的完整语句识别为 SQL；“show 一下…”“帮我看看这条 SQL …”等识别为对话；整条代码块被解包；
   识别不调用模型；非 SQL 超过 8192 字符拒绝，SQL 超过 65_536 bytes 拒绝；
 - SQL 消息的交互事实为规则来源、模型调用 0 次；模型请求构造对 SQL 消息不可达；
+- 夹带 SQL 的对话即使模型返回 `starrocks_readonly_query` 意图，也被拒绝为不可执行：不建 SqlArtifact、Gateway 调用为 0；
 - 目标：1 个直接执行；0 个拒绝；多个进入 `CLARIFICATION_REQUIRED` 且记录选项；本人精确回答后执行；非精确、他人回答、
   过期回答均不执行；飞书未引用回复的消息不被当作回答；
 - required HydratedQuery 缺失、多余或 bytes hash 不符时 Gateway/adapter 调用为 0；
@@ -486,8 +499,8 @@ ADR-015 不因直接 SQL 放宽；SQL 原文不进入模型端口。
 - 回复：成功与各类失败的文案闭集；回复与卡片不含 SQL、列与行；
 - 慢查询 `template_locked` 与现有对话、澄清、披露全部原回归通过；
 - requester、Admin、群内其他用户与过期 ACL 正反例；锁定页响应字段集合精确等于 §9.3 闭集；
-- 变异：分别去掉 hash 校验、required query、token scan、黑名单、清单目标提取、ACL、同事务结果写入、SQL 不进模型的
-  保护，对应测试转红，且确认不是被更早规则遮蔽。
+- 变异：分别去掉 hash 校验、required query、token scan、黑名单、清单目标提取、ACL、同事务结果写入、SQL 消息不进模型、
+  模型来源意图不执行的保护，对应测试转红，且确认不是被更早规则遮蔽。
 
 触及 governance、planning、tools 后执行四门：
 

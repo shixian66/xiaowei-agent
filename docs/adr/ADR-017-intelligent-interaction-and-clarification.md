@@ -353,8 +353,10 @@ SQL 查询是普通 capability，走本 ADR 的同一交互主链。application 
 就是一条 SQL”（闭集语句关键字开头、通过 token 扫描、恰好一条完整语句）；识别为 SQL 的任务以
 `ArtifactSubmission` 提交，`load_or_accept_interaction` 不构造模型请求，直接保存 `origin=rule` 的
 `AcceptedInteractionArtifact`（`CAPABILITY_REQUEST` + `starrocks_readonly_query` 意图、空槽位），之后照常经
-`route_interaction`、CapabilityResolver、SlotVerifier、Plan、ExecutionDisclosure。SQL 原文不进入
-InteractionClassifierPort 或任何模型端口。认不出的消息保持现有流程，其中夹带的 SQL 不执行。
+`route_interaction`、CapabilityResolver、SlotVerifier、Plan、ExecutionDisclosure。识别为 SQL 消息的原文、
+SqlArtifact 与最终执行字节不进入 InteractionClassifierPort 或任何模型端口。认不出的消息保持现有流程，模型可以
+看到其中夹带的 SQL，但模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行；该意图只接受
+`origin=rule`。混合文本的候选 SQL 与确认属 F1-NL，另行设计。
 
 ### 目标选择追问
 

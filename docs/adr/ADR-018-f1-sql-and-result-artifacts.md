@@ -29,7 +29,9 @@ F1 让已认证用户在网页聊天框或飞书直接发送一条原始 SQL，�
   expires_at；目标由后续 SlotVerifier 确定，不在 SQL 保存时绑定；
 - `sql_ref` 由 CSPRNG 生成、不可枚举；
 - TaskStore、PlanStore、Evidence、RenderPayload、ChannelStore、trace、audit 与日志只保存 `sql_ref`、`sql_hash` 或
-  闭集决定，不保存 SQL 原文。
+  闭集决定，不保存 SQL 原文；
+- SqlArtifact 只由确定性识别或（F1-NL 起）用户完整确认创建，模型不能创建；SqlArtifact 与最终执行字节永不进入
+  模型端口。
 
 ### D2 TaskSubmission 以 `input_kind` 判别
 

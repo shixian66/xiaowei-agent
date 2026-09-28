@@ -139,7 +139,8 @@ RequestEnvelope
 ```
 
 **F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
-SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL，SQL 原文不进入模型端口：
+SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL，识别出的 SQL、SqlArtifact 与最终执行字节不进入模型端口；夹带 SQL 的
+普通对话照常经模型理解，但模型来源不得产生 `starrocks_readonly_query` 意图或执行：
 
 ```text
 网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
@@ -690,7 +691,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 
 - 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
 - F1 用户直接 SQL（`confirmed_readonly`，Proposed）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
-  artifact，与原文 SHA-256 绑定，SQL 原文不进入模型端口；SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
+  artifact，与原文 SHA-256 绑定，SqlArtifact 与最终执行字节不进入模型端口；SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
   控制字符、INTO OUTFILE），再走两条互斥的只读证明路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/
   `Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），或 sqlglot 降级为 `Command`/ParseError 时的代码内只读语句清单。
   清单外语句返回 `READONLY_STATEMENT_NOT_SUPPORTED`、零 SQL 发送。两条路径都统一校验内部 `default_catalog`、

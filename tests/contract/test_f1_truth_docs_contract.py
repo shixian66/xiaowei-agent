@@ -25,6 +25,7 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
         "模板 SQL 由确定性 compiler 生成",
         "用户直接 SQL 只能来自受保护 SQL artifact",
         "执行 SQL 不来自模型原文",
+        "模型不能创建 SQL artifact",
     ),
     "ARCHITECTURE.md": (
         "F1 SQL 查询能力",
@@ -55,11 +56,13 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
     _ADR_017: (
         "`RESTRICTED` 不等于必须审批",
         "`confirmed_readonly`",
-        "SQL 原文不进入\nInteractionClassifierPort",
+        "模型来源不得产生 `starrocks_readonly_query` 意图",
+        "该意图只接受\n`origin=rule`",
         "ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED",
         "不设默认目标",
     ),
     _ADR_018: (
+        "模型不能创建",
         "结果只在步骤成功时产生",
         "`requester_owner`",
         "`export_policy` 在 F1 固定为 `disabled`",
@@ -70,7 +73,7 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
         "Draft v9（Agent 主链集成版）",
         "65_536 bytes",
         "worker_max_concurrent_tasks",
-        "SQL 原文**不交给模型**",
+        "这条 SQL **不交给模型**",
     ),
     _PLAN: ("F1-0a", "F1-0b", "首批只读语句清单", "Web 规格 §11.2 六项对照"),
     _ROADMAP: ("用户在网页、飞书直接发送并经确定性识别保存的受保护 SQL artifact",),

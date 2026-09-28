@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > 状态：V2.0（Agent 主链集成版，2026-09-27），待 exact-SHA 独立复审与负责人接受。V2.0 随设计 v9 重写：SQL 查询作为
-> 小维普通 capability 接入统一对话主链；网页与飞书直接发 SQL、确定性识别、SQL 不进模型；目标不唯一时追问；取消配额。
+> 小维普通 capability 接入统一对话主链；网页与飞书直接发 SQL、确定性识别、SQL 消息不进模型（夹带 SQL 的对话可经模型但不能触发执行）；目标不唯一时追问；取消配额。
 > 本计划范围为 **F1-Core 查询执行内核**；完成后只标记“F1-Core 完成”，“小维 Agent 查询能力完成”另需 F1-NL（设计 §12.1）。
 > 历史版本见 git（V0.3 `73a61c5`，V1.0 `21d4e64`）。
 > 本计划获批**不**等于任何切片开工：F1-0b 与 F1-1 起每个切片都需负责人明确开工口令；真实 StarRocks 调用只属 F1-H，
@@ -11,7 +11,7 @@
 
 **Goal:** 让已认证用户在网页聊天框或飞书直接发送一条 SQL，由小维作为普通 capability 在唯一确定的 StarRocks 上只读执行，保存最多 1000 行预览，并回复状态与锁定结果页链接。
 
-**Architecture:** 复用现有 ChannelSubmissionService、交互接受与路由、CapabilityResolver、SlotVerifier 与澄清链、PlanCompiler、ExecutionDisclosure、WorkflowRunner、StepAdmission、ToolGateway、Reflection 与 Render。新增：确定性 SQL 识别、SQL artifact 与提交事务、规则来源交互事实、F1 SlotVerifier 与目标选择追问、`confirmed_readonly` SQLGuard 与代码内只读语句清单、进程内结果 buffer 与同事务结果写入、worker 有界并发、飞书引用回复作答。SQL 原文只在 SqlArtifactStore 与进程内 HydratedQuery 中出现，永不进入模型端口。
+**Architecture:** 复用现有 ChannelSubmissionService、交互接受与路由、CapabilityResolver、SlotVerifier 与澄清链、PlanCompiler、ExecutionDisclosure、WorkflowRunner、StepAdmission、ToolGateway、Reflection 与 Render。新增：确定性 SQL 识别、SQL artifact 与提交事务、规则来源交互事实、F1 SlotVerifier 与目标选择追问、`confirmed_readonly` SQLGuard 与代码内只读语句清单、进程内结果 buffer 与同事务结果写入、worker 有界并发、飞书引用回复作答。SQL 原文只在 SqlArtifactStore 与进程内 HydratedQuery 中出现；识别为 SQL 消息的原文、SqlArtifact 与最终执行字节永不进入模型端口，夹带 SQL 的普通对话照常经模型但不能触发执行。
 
 **Tech Stack:** Python 3.11、Pydantic 2.13.5、SQLAlchemy async + PostgreSQL、migration（`persistence/migrations/versions/rev_00NN_*.py`）、sqlglot 30.17.0、PyMySQL 1.2.0（SSCursor）、Starlette/ASGI、飞书 SDK 长连接、pytest（`security` marker）、Ruff、mypy。
 
@@ -312,9 +312,9 @@ SHOW HISTOGRAM META、SHOW VIEWS。
   - `ChannelSubmissionService.submit`：识别为 SQL → `TaskStore.submit_sql_query`；否则走现有 `ConversationSubmission`，普通消息超过 8192 字符拒绝；`ChannelSubmitCommand.text` 上限放宽到 65_536 bytes
   - `load_or_accept_interaction`：`ArtifactSubmission` 直接保存 `origin=rule` 的 `AcceptedInteractionArtifact`（`CAPABILITY_REQUEST` + `starrocks_readonly_query`、空槽位），不构造模型请求，`ModelCallObservation.request_count=0`；目标选择追问的澄清子任务同样由规则解释
 
-- [ ] **Step 1: 失败测试**：读/写关键字开头的完整语句识别为 SQL；“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”“explain why …”识别为对话；整条代码块解包；多语句、hint 仍识别为 SQL 以便明确拒绝；同一输入永远同一结论；SQL 消息与目标选择回答的模型调用次数为 0，且模型请求构造对它们不可达；SQL 原文不出现在 envelope、交互事实、trace、审计与 ChannelStore；非 SQL 超 8192 字符拒绝、SQL 超 65_536 bytes 拒绝；现有对话、澄清与慢查询路由回归不变。
+- [ ] **Step 1: 失败测试**：读/写关键字开头的完整语句识别为 SQL；“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”“explain why …”识别为对话；整条代码块解包；多语句、hint 仍识别为 SQL 以便明确拒绝；同一输入永远同一结论；SQL 消息与目标选择回答的模型调用次数为 0，且模型请求构造对它们不可达；SQL 原文不出现在 envelope、交互事实、trace、审计与 ChannelStore；非 SQL 超 8192 字符拒绝、SQL 超 65_536 bytes 拒绝；现有对话、澄清与慢查询路由回归不变；夹带 SQL 的对话中 fake 模型返回 `starrocks_readonly_query` 意图时被拒绝为不可执行，不建 SqlArtifact、Gateway 调用为 0。
 - [ ] **Step 2–4: 失败 → 实现 → 通过**：`python -m pytest tests/unit/test_sql_message_recognition.py tests/security/test_f1_sql_never_reaches_model.py tests/integration/test_f1_channel_submit_postgres.py -q && python -m pytest tests -k "interaction or channel or clarification" -q`
-- [ ] **Step 5: 变异**：让 ArtifactSubmission 走模型分类，`test_f1_sql_never_reaches_model` 必须转红；还原。
+- [ ] **Step 5: 变异**：让 ArtifactSubmission 走模型分类，`test_f1_sql_never_reaches_model` 必须转红；放开模型来源的 `starrocks_readonly_query` 意图，`test_f1_model_origin_query_intent_never_executes` 必须转红；还原。
 - [ ] **Step 6: 四门后提交** `feat(application): route SQL messages into the capability pipeline without the model`
 
 ## F1-1 / PR-E：执行、结果与回复
