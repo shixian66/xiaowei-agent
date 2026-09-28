@@ -33,6 +33,8 @@ class ErrorItem(BaseModel):
         # F1：目标选择作答时 SQL 已过期或不可读；后者不区分内部原因。
         "sql_artifact.expired",
         "sql_artifact.unavailable",
+        # F1：纯 SQL 不能作为普通对话或澄清回答提交（API/CLI 本阶段不支持 SQL 提交）。
+        "sql_message.not_accepted",
         # W4b：服务端生成的资源 ID 撞上已有 ID；不是幂等重放，单独一个闭集码。
         "conflict",
         "payload_too_large",

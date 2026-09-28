@@ -18,8 +18,10 @@ from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ChannelBindingLookup,
     ChannelBindingNotFoundError,
+    ChannelSourceKindConflictError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
+    ClaimSourceEventCommand,
     CompleteProjectionCommand,
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
@@ -912,6 +914,53 @@ async def test_dead_letter_projection_is_terminal_against_reclaim(
     assert reclaimed.winner == dead.winner
 
 
+def _source_claim(
+    kind: str,
+    at: dt.datetime,
+    *,
+    ref: str = "event-kind",
+    channel: ChannelKind = ChannelKind.WEB,
+    environment_id: str = "dev",
+) -> ClaimSourceEventCommand:
+    return ClaimSourceEventCommand(
+        tenant_id="dev-local",
+        environment_id=environment_id,
+        channel=channel,
+        source_event_ref=ref,
+        input_kind=kind,  # type: ignore[arg-type]
+        created_at=at,
+    )
+
+
+async def test_source_event_keeps_the_first_submission_kind(
+    channel_store: Any, clock: Any
+) -> None:
+    await channel_store.claim_source_event(command=_source_claim("sql_artifact", clock()))
+    # 同类型重放幂等（包括时间戳不同的重试）。
+    clock.advance(seconds=5)
+    await channel_store.claim_source_event(command=_source_claim("sql_artifact", clock()))
+
+    with pytest.raises(ChannelSourceKindConflictError):
+        await channel_store.claim_source_event(command=_source_claim("conversation", clock()))
+
+
+async def test_source_claims_are_scoped_like_bindings(
+    channel_store: Any, clock: Any
+) -> None:
+    await channel_store.claim_source_event(command=_source_claim("conversation", clock()))
+
+    # 另一渠道、另一环境或另一来源事件各自独立选定类型。
+    await channel_store.claim_source_event(
+        command=_source_claim("sql_artifact", clock(), channel=ChannelKind.FEISHU_PRIVATE)
+    )
+    await channel_store.claim_source_event(
+        command=_source_claim("sql_artifact", clock(), environment_id="test")
+    )
+    await channel_store.claim_source_event(
+        command=_source_claim("sql_artifact", clock(), ref="event-other")
+    )
+
+
 CHANNEL_STORE_CASES = (
     test_binding_is_idempotent_and_atomically_recovers_its_subscription,
     test_same_source_event_cannot_be_rebound_to_a_different_task,
@@ -933,6 +982,8 @@ CHANNEL_STORE_CASES = (
     test_initial_projection_and_provider_retry_follow_separate_paths,
     test_completed_projection_is_terminal_against_claims_and_late_updates,
     test_dead_letter_projection_is_terminal_against_reclaim,
+    test_source_event_keeps_the_first_submission_kind,
+    test_source_claims_are_scoped_like_bindings,
 )
 
 ALL_GROUPS = {"channel_store": CHANNEL_STORE_CASES}

@@ -29,6 +29,7 @@ import logging
 import unicodedata
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final, Literal
 
 import sqlglot
@@ -504,22 +505,42 @@ def _prove_ast(
     return None
 
 
-def parses_as_complete_statements(text: str) -> bool:
-    """sqlglot 能否把文本完整解析为一条或多条非 ``Command`` 语句。
+class SqlParseShape(StrEnum):
+    """sqlglot 对一段文本的解析形状；只供 SQL 消息识别（设计 §5.1），**不是**只读证明。"""
 
-    只供 SQL 消息识别使用（设计 §5.1），**不是**只读证明；任何解析失败都返回 ``False``。
-    """
+    STATEMENTS = "statements"
+    """一条或多条完整的非 ``Command`` 语句。"""
+    COMMAND = "command"
+    """至少一条被 sqlglot 降级为 ``Command``：认得语句关键字，但不建模其语法。"""
+    TOO_COMPLEX = "too_complex"
+    """嵌套过深等非语法原因导致解析器放弃。"""
+    INVALID = "invalid"
+    """语法或词法错误、没有语句，或只有关键字的 SELECT。"""
+
+
+def sql_parse_shape(text: str) -> SqlParseShape:
+    """按 sqlglot 的结论给文本分类；任何异常都不外泄原文。"""
     try:
         parsed = sqlglot.parse(text, read=_READONLY_DIALECT)
+    except (ParseError, TokenError):
+        return SqlParseShape.INVALID
     except Exception:
-        return False
+        return SqlParseShape.TOO_COMPLEX
     statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
-    return bool(statements) and not any(
-        isinstance(statement, exp.Command)
-        # 单独一个 SELECT 关键字会被解析成没有投影的 Select，它不是完整语句。
-        or (isinstance(statement, exp.Select) and not statement.expressions)
+    # 单独一个 SELECT 关键字会被解析成没有投影的 Select，它不是完整语句。
+    if not statements or any(
+        isinstance(statement, exp.Select) and not statement.expressions
         for statement in statements
-    )
+    ):
+        return SqlParseShape.INVALID
+    if any(isinstance(statement, exp.Command) for statement in statements):
+        return SqlParseShape.COMMAND
+    return SqlParseShape.STATEMENTS
+
+
+def parses_as_complete_statements(text: str) -> bool:
+    """sqlglot 能否把文本完整解析为一条或多条非 ``Command`` 语句（嵌入 SQL 检测用）。"""
+    return sql_parse_shape(text) is SqlParseShape.STATEMENTS
 
 
 def _parse_statement(text: str) -> exp.Expr | None:

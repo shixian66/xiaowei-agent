@@ -121,8 +121,10 @@ from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ChannelBindingLookup,
     ChannelBindingNotFoundError,
+    ChannelSourceKindConflictError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
+    ClaimSourceEventCommand,
     CompleteProjectionCommand,
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
@@ -311,6 +313,20 @@ class InMemoryChannelStore:
             subscription.subscription_id
         )
         return subscription
+
+    async def claim_source_event(self, *, command: ClaimSourceEventCommand) -> None:
+        async with self._lock:
+            source_key = (
+                command.tenant_id,
+                command.environment_id,
+                command.channel.value,
+                command.source_event_ref,
+            )
+            chosen = self._state.channel_source_kinds.setdefault(
+                source_key, command.input_kind
+            )
+            if chosen != command.input_kind:
+                raise ChannelSourceKindConflictError
 
     async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:
         async with self._lock:

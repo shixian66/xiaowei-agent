@@ -1587,3 +1587,69 @@ async def test_rev_0019_downgrade_refuses_while_sql_facts_exist(
             ) == 1
     finally:
         await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0020_backfills_one_claim_per_existing_binding_with_its_kind(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+    clock: Any,
+) -> None:
+    import datetime as dt
+
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import ChannelKind
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    channels = PostgresChannelStore(engine=clean_database, clock=clock)
+    conversation = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="c-1"))
+    )
+    sql = await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=context,
+            sql_bytes=b"SELECT 1",
+            idempotency_key="s-1",
+            as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+        )
+    )
+    assert sql.task is not None
+    for task_id, ref in ((conversation.task_id, "event-c"), (sql.task.task_id, "event-s")):
+        await channels.bind_task(
+            command=BindTaskCommand(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                channel=ChannelKind.WEB,
+                initiator_subject_ref="subject-alice",
+                source_event_ref=ref,
+                created_at=clock(),
+            )
+        )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        assert "channel_source_claims" not in await _table_names(clean_database)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            claims = (
+                await connection.execute(
+                    sa.text(
+                        "SELECT source_event_ref, input_kind, channel "
+                        "FROM channel_source_claims ORDER BY source_event_ref"
+                    )
+                )
+            ).all()
+        assert [tuple(row) for row in claims] == [
+            ("event-c", "conversation", "web"),
+            ("event-s", "sql_artifact", "web"),
+        ]
+    finally:
+        await _restore_head(clean_database, run_upgrade)

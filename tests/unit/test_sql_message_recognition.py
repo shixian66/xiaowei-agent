@@ -8,6 +8,9 @@ from xiaowei_agent.governance.sql_message import (
     recognize_sql_message,
 )
 
+_HINTED_SHOW = "SHOW /*+ SET_VAR(query_timeout=1) */ BACKENDS"
+_DEEP_SELECT = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
+
 
 @pytest.mark.parametrize(
     ("text", "sql"),
@@ -37,6 +40,27 @@ from xiaowei_agent.governance.sql_message import (
         # 整条消息恰好是一个代码块时只取块内正文。
         ("```sql\nSELECT a FROM t\n```", "SELECT a FROM t"),
         ("  ```\nshow tables\n```  ", "show tables"),
+        # SQL 形状与“是否支持、是否安全”分开：以下都不进模型，由 SQLGuard 给确定性拒绝。
+        # sqlglot 降级为 Command 的语句（清单外即“暂未支持”）。
+        ("SHOW USERS", "SHOW USERS"),
+        ("SHOW RESOURCES", "SHOW RESOURCES"),
+        ("SHOW BACKENDS; SHOW FRONTENDS", "SHOW BACKENDS; SHOW FRONTENDS"),
+        (_HINTED_SHOW, _HINTED_SHOW),
+        ("show me the slow queries", "show me the slow queries"),
+        # 前置注释或 hint 不改变 SQL 形状。
+        ("-- comment\nSELECT 1; DROP TABLE t", "-- comment\nSELECT 1; DROP TABLE t"),
+        ("# 看看\nSHOW USERS", "# 看看\nSHOW USERS"),
+        ("/*+ SET_VAR(query_timeout=1) */ SELECT 1", "/*+ SET_VAR(query_timeout=1) */ SELECT 1"),
+        ("```sql\n-- 注释\nSELECT 1; DROP TABLE t\n```", "-- 注释\nSELECT 1; DROP TABLE t"),
+        ("```sql\n/*+ SET_VAR(a=1) */ SELECT 1\n```", "/*+ SET_VAR(a=1) */ SELECT 1"),
+        # 复制粘贴带进来的智能引号、全角标点与不可见字符：保存原文，由 SQLGuard 拒绝。
+        ("SELECT ‘a’", "SELECT ‘a’"),
+        ("SELECT ‘中文’ FROM t", "SELECT ‘中文’ FROM t"),
+        ("SELECT a，b FROM t", "SELECT a，b FROM t"),
+        ("SELECT 1\u200b", "SELECT 1\u200b"),
+        ("SELECT\u00a01", "SELECT\u00a01"),
+        # 嵌套过深、解析器放弃的语句仍是 SQL 形状。
+        (_DEEP_SELECT, _DEEP_SELECT),
     ],
 )
 def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
@@ -50,19 +74,20 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
         "show 一下昨天的慢查询",
         "select 一下昨天的慢查询",
         "帮我看看这条 SQL 为什么慢：SELECT a FROM t",
+        # 计划 Task 9 的对照：解析器不认识的英文句子仍是对话。
         "explain why the query is slow",
-        "show me the slow queries",
+        "update me when done",
+        "stop the job",
         "最近有哪些慢查询",
         "SELECT a FROM t 为什么慢",
-        "SELECT ‘a’",
+        "SHOW USERS 是什么",
+        "-- 说明\n帮我看看慢查询",
         "select",
+        "SELECT 'unterminated",
         "",
         "   ",
-        # sqlglot 降级为 Command 且不在清单中的语句不满足“完整语句”。
-        "SHOW USERS",
         "```python\nprint(1)\n```",
         "```sql\nSELECT 1\n```\n还有这个",
-        "SELECT " + "(" * 20_000 + "1" + ")" * 20_000,
     ],
 )
 def test_other_messages_are_conversation(text: str) -> None:

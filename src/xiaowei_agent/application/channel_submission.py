@@ -4,7 +4,11 @@ from typing import Final, NamedTuple, Protocol, Self
 
 from pydantic import model_validator
 
-from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.application.task_view_runtime import (
+    RecognizedSql,
+    SqlMessageRecognizer,
+    TaskViewRuntime,
+)
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
     AwareDatetime,
@@ -27,11 +31,18 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.channel import (
     BindTaskCommand,
     ChannelBinding,
+    ChannelSourceKindConflictError,
     ChannelStore,
+    ClaimSourceEventCommand,
     CreateProjectionSubscriptionCommand,
     PrivateChatLookup,
+    SourceSubmissionKind,
 )
-from xiaowei_agent.persistence.store import SqlQuerySubmitCommand, TaskNotFoundError
+from xiaowei_agent.persistence.store import (
+    IdempotencyConflictError,
+    SqlQuerySubmitCommand,
+    TaskNotFoundError,
+)
 from xiaowei_agent.planning import canonical_json
 
 MAX_CONVERSATION_CHARACTERS: Final[int] = 8192
@@ -60,22 +71,6 @@ class ChannelMessageTooLongError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("message too long")
-
-
-class RecognizedSql(Protocol):
-    """识别出的纯 SQL 消息；只暴露要保存的 bytes。"""
-
-    @property
-    def sql_bytes(self) -> bytes: ...
-
-
-class SqlMessageRecognizer(Protocol):
-    """确定性 SQL 消息识别端口；由装配层注入 ``governance.sql_message`` 的纯函数。
-
-    渠道模块不直接依赖治理层：识别规则的唯一真源在治理层，这里只消费其结论。
-    """
-
-    def __call__(self, text: str) -> RecognizedSql | None: ...
 
 
 class WebParentAccessPort(Protocol):
@@ -206,12 +201,10 @@ class ChannelSubmissionService:
         *,
         runtime: TaskViewRuntime,
         channel_store: ChannelStore,
-        recognize_sql: SqlMessageRecognizer,
         web_parent_access: WebParentAccessPort | None = None,
     ) -> None:
         self._runtime = runtime
         self._channels = channel_store
-        self._recognize_sql = recognize_sql
         self._web_parent_access = web_parent_access
 
     async def submit(self, *, command: ChannelSubmitCommand) -> SubmittedTask:
@@ -234,14 +227,20 @@ class ChannelSubmissionService:
             trace_id=command.trace_id,
             policy_revision=command.policy_revision,
         )
-        # 澄清回答只是补充信息（例如目标名称），永远不当作新的 SQL。
+        # 澄清回答只是补充信息（例如目标名称），永远不当作新的 SQL；是 SQL 形状的回答由
+        # Runtime 的同一分类点拒绝，不进入模型。
         sql = (
-            self._recognize_sql(command.text)
+            self._runtime.recognize_sql(command.text)
             if command.clarification_parent_task_id is None
             else None
         )
         if sql is None and len(command.text) > MAX_CONVERSATION_CHARACTERS:
             raise ChannelMessageTooLongError
+        await self._claim_source(
+            command=command,
+            references=references,
+            input_kind="conversation" if sql is None else "sql_artifact",
+        )
         if sql is not None:
             task_view = await self._runtime.submit_sql_query(
                 command=SqlQuerySubmitCommand(
@@ -283,6 +282,38 @@ class ChannelSubmissionService:
         return await self._bind(
             command=command, references=references, task_view=task_view
         )
+
+    async def _claim_source(
+        self,
+        *,
+        command: ChannelSubmitCommand,
+        references: ChannelSubmissionReferences,
+        input_kind: SourceSubmissionKind,
+    ) -> None:
+        """创建任务之前为来源事件原子选定提交类型。
+
+        TaskStore 让对话与 SQL 的幂等键分属不同作用域（ADR-018 D2），同一来源事件的另一
+        种类型会在那里成功建出第二个任务，再在绑定时失败，留下未绑定却可调度的任务。
+        占位先于任何任务事实写入，所以另一种类型在这里就被拒绝。
+
+        :raises IdempotencyConflictError: 该来源事件已选定另一种提交类型。
+        """
+        principal = command.principal
+        try:
+            await self._channels.claim_source_event(
+                command=ClaimSourceEventCommand(
+                    tenant_id=principal.tenant_id,
+                    environment_id=principal.environment_id,
+                    channel=command.channel,
+                    source_event_ref=references.source_event_ref,
+                    input_kind=input_kind,
+                    created_at=command.submitted_at,
+                )
+            )
+        except ChannelSourceKindConflictError:
+            raise IdempotencyConflictError(
+                "channel source event already chose another kind"
+            ) from None
 
     async def _bind(
         self,

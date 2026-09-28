@@ -655,13 +655,13 @@ async def _f1_web_stack(store: Any, memory_state: Any, clock: Any) -> Any:
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),  # type: ignore[arg-type]
+        recognize_sql=recognize_sql_message,
     )
     channels = InMemoryChannelStore(clock=clock, state=memory_state)
     access = TaskAccessService(
         runtime=runtime, task_store=store, channel_store=channels, membership=None
     )
     submissions = ChannelSubmissionService(
-        recognize_sql=recognize_sql_message,
         runtime=runtime, channel_store=channels, web_parent_access=access
     )
     return channels, submissions
@@ -865,3 +865,82 @@ async def test_web_chat_accepts_long_sql_but_not_long_conversation(
     assert over.status_code == 400
     assert over.json() == {"error": {"code": "invalid_request"}}
     assert len(memory_state.tasks) == 1
+
+
+# --- F1：SQL 形状即 SQL 消息，不进入普通对话（审查 P1-1） ------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SHOW USERS",
+        "SHOW BACKENDS; SHOW FRONTENDS",
+        "SHOW /*+ SET_VAR(query_timeout=1) */ BACKENDS",
+        "-- comment\nSELECT 1; DROP TABLE t",
+        "```sql\n/*+ SET_VAR(a=1) */ SELECT 1\n```",
+    ],
+)
+async def test_web_chat_stores_sql_shaped_text_only_as_an_artifact(
+    store, memory_state, clock, text: str
+) -> None:
+    _, submissions = await _f1_web_stack(store, memory_state, clock)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await client.post(
+            "/app/api/tasks",
+            json={"text": text, "client_submission_id": "browser-sql-shape-0001"},
+            headers=_F1_HEADERS,
+        )
+
+    assert response.status_code == 202
+    (submission,) = memory_state.submissions.values()
+    assert submission.input_kind == "sql_artifact"
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes.decode().strip() in text
+
+
+async def test_web_chat_conversation_control_stays_a_conversation(
+    store, memory_state, clock
+) -> None:
+    _, submissions = await _f1_web_stack(store, memory_state, clock)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await client.post(
+            "/app/api/tasks",
+            json={"text": "show 一下慢查询", "client_submission_id": "browser-chat-shape-0001"},
+            headers=_F1_HEADERS,
+        )
+
+    assert response.status_code == 202
+    (submission,) = memory_state.submissions.values()
+    assert submission.input_kind == "conversation"
+    assert memory_state.sql_artifacts == {}
+
+
+async def test_web_sql_shaped_answer_is_422_without_consuming_the_parent(
+    store, memory_state, clock, context, clarification_record_store
+) -> None:
+    channels, submissions = await _f1_web_stack(store, memory_state, clock)
+    parent, _ = await _f1_web_parent(
+        store, clarification_record_store, channels, context, key="f1-sql-answer"
+    )
+    tasks_before = set(memory_state.tasks)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await client.post(
+            "/app/api/tasks",
+            json={
+                "text": "SHOW USERS",
+                "client_submission_id": "browser-sql-answer-0001",
+                "clarification_parent_task_id": parent.task_id,
+            },
+            headers=_F1_HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "sql_message.not_accepted"}}
+    assert memory_state.tasks[parent.task_id].status is TaskStatus.CLARIFICATION_REQUIRED
+    assert set(memory_state.tasks) == tasks_before

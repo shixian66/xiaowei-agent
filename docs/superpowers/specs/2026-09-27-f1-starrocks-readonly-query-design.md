@@ -124,7 +124,15 @@ ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_messag
 2. 首个 token 属于闭集 SQL 语句关键字（读：SELECT、WITH、SHOW、DESC、DESCRIBE、EXPLAIN、ADMIN、ANALYZE；写与会话：
    INSERT、UPDATE、DELETE、MERGE、REPLACE、CREATE、DROP、ALTER、TRUNCATE、GRANT、REVOKE、SET、USE、KILL、LOAD、
    EXPORT、SUBMIT、CANCEL、BEGIN、COMMIT、ROLLBACK 等，精确闭集写在代码中）；
-3. 通过 §7.2 token 扫描后恰好是一条完整语句：sqlglot 30.17.0 完整解析，或命中 §7.3 只读语句清单；
+3. 语法上是 SQL：通过 §7.2 token 扫描后恰好是一条完整语句——sqlglot 30.17.0 解析为语句（含降级为 `Command`
+   的清单外语句，例如 SHOW USERS）、因嵌套过深放弃解析，或命中 §7.3 只读语句清单；多语句、hint 与
+   INTO OUTFILE 虽不能通过扫描，同样算 SQL；
+
+识别只判断 **SQL 形状**，不判断是否支持、是否安全：清单外语句、多语句、hint 等都保存为 SqlArtifact，由 SQLGuard
+给出“暂未支持”等确定性拒绝，永不进入模型。第 2 条跳过前置普通注释与 hint 注释；判定在一份判定副本上进行，
+复制粘贴带进来的智能引号、全角字符（NFKC）与不可见的控制/格式字符先归一化或去掉，保存与执行的仍是原文，
+SQLGuard 照样按原文拒绝这些字符。字符串、quoted identifier 与注释之外出现中文等自然语言文字的消息不是 SQL 消息。
+sqlglot 解析失败（ParseError）且未命中清单的文本（例如“explain why …”）不是 SQL 消息。
 
 三条同时满足才是 SQL 消息。写语句也会被识别，目的是明确回复“只允许只读查询”，而不是当成聊天。其他消息
 （例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）都不是 SQL 消息，不会被当作 SQL 执行。识别是
@@ -145,6 +153,13 @@ SQL 只有作为纯 SQL 消息被识别后才可能执行”这一保证由 §5.
 
 识别为 SQL 后，服务调用 `TaskStore.submit_sql_query`，在**同一个 PostgreSQL 事务**内写 SqlArtifact（原始 bytes、
 SHA-256、requester、tenant、environment、created_at）并创建 task 与 `ArtifactSubmission`；幂等键沿用渠道现有派生规则。
+TaskStore 让对话与 SQL 的幂等键分属不同作用域（ADR-018 D2），渠道来源事件却只有一个：服务在创建任务**之前**
+原子写入来源占位（`channel_source_claims`，与渠道绑定同一唯一键，只记录提交类型），第一次写入的类型胜出，同一
+来源事件的另一种类型按幂等冲突拒绝，不留下未绑定的任务或 SqlArtifact。
+
+**同一个分类点。**识别端口由 `TaskViewRuntime` 持有，所有文本入口共用：渠道提交据此分流；`submit_task` 与
+`submit_clarification_child` 据此拒绝纯 SQL 的普通对话与澄清回答（`sql_message.not_accepted`，HTTP 422），在写入
+任何任务事实之前。API/CLI 本阶段不支持 SQL 提交，纯 SQL 在这里被确定性拒绝，不进模型。
 之后的渠道绑定、投影与回复与其他任务完全相同，ChannelStore 不保存 SQL。
 
 ### 5.2 TaskSubmission 不保存 SQL

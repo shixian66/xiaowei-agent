@@ -31,6 +31,7 @@ from xiaowei_agent.contracts import (
     TaskRecord,
     TaskStatus,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.persistence.plans import PlanNotFoundError
 from xiaowei_agent.persistence.store import TransitionCommand
 
@@ -42,6 +43,7 @@ def _task_views(harness: RuntimeHarness) -> TaskViewRuntime:
         ledger=harness.ledger,
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=harness.runtime._rendering_bindings,
+        recognize_sql=recognize_sql_message,
         model_artifacts=harness.model_artifacts,
         model_profile=ModelInvocationProfile(),
     )
@@ -337,6 +339,7 @@ async def test_preplan_rejection_projection_uses_the_recorded_reason(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),  # type: ignore[arg-type]
+        recognize_sql=recognize_sql_message,
     )
 
     payload = await runtime.project_recorded(record=rejected)

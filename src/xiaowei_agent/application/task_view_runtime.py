@@ -1,6 +1,7 @@
 """无执行权的任务提交、查询与终态投影应用服务。"""
 
 from enum import StrEnum
+from typing import Protocol
 
 from xiaowei_agent.application.capability_runtime import (
     CapabilityBindingError,
@@ -60,6 +61,32 @@ from xiaowei_agent.rendering.generic import (
 from xiaowei_agent.rendering.model_advisory import append_model_advisory
 
 
+class RecognizedSql(Protocol):
+    """识别出的纯 SQL 消息；只暴露要保存的 bytes。"""
+
+    @property
+    def sql_bytes(self) -> bytes: ...
+
+
+class SqlMessageRecognizer(Protocol):
+    """确定性 SQL 消息识别端口；由装配层注入 ``governance.sql_message`` 的纯函数。
+
+    本模块不直接依赖治理层：识别规则的唯一真源在治理层，这里只消费其结论。
+    """
+
+    def __call__(self, text: str) -> RecognizedSql | None: ...
+
+
+class SqlMessageNotAcceptedError(ValueError):
+    """SQL 形状的文本不能作为普通对话提交（设计 §4 第 3 条）。
+
+    纯 SQL 只能经渠道提交保存为 SqlArtifact；其他入口在创建任务前以此拒绝，不进模型。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("sql message not accepted")
+
+
 class ApplicationFailure(StrEnum):
     """入口层可安全映射的应用异常闭集。"""
 
@@ -69,6 +96,7 @@ class ApplicationFailure(StrEnum):
     UNAVAILABLE = "unavailable"
     SQL_ARTIFACT_EXPIRED = "sql_artifact.expired"
     SQL_ARTIFACT_UNAVAILABLE = "sql_artifact.unavailable"
+    SQL_MESSAGE_NOT_ACCEPTED = "sql_message.not_accepted"
     INTERNAL = "internal"
 
 
@@ -92,6 +120,8 @@ def classify_application_exception(exc: Exception) -> ApplicationFailure:
         return ApplicationFailure.SQL_ARTIFACT_EXPIRED
     if isinstance(exc, SqlArtifactUnavailableError):
         return ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE
+    if isinstance(exc, SqlMessageNotAcceptedError):
+        return ApplicationFailure.SQL_MESSAGE_NOT_ACCEPTED
     if isinstance(exc, PersistenceUnavailableError):
         return ApplicationFailure.UNAVAILABLE
     return ApplicationFailure.INTERNAL
@@ -108,6 +138,7 @@ class TaskViewRuntime:
         ledger: EvidenceLedger,
         conversation_snapshot: CapabilitySnapshot,
         rendering_bindings: CapabilityBindingRegistry,
+        recognize_sql: SqlMessageRecognizer | None,
         clarification_records: ClarificationRecordStore | None = None,
         model_artifacts: ModelArtifactStore | None = None,
         model_profile: ModelInvocationProfile | None = None,
@@ -128,12 +159,32 @@ class TaskViewRuntime:
         # 一条"装配漏了快照 → 对话任务投影不出内容"的静默路径。
         self._conversation_snapshot = conversation_snapshot
         self._rendering_bindings = rendering_bindings
+        # 所有文本入口共用的唯一 SQL 分类点：渠道据此分流，普通对话提交据此拒绝。
+        # 必须显式传入；只做投影的进程（通知 worker）传 ``None``，任何提交都 fail-closed。
+        self._recognize_sql = recognize_sql
         self._clarification_records = clarification_records
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
 
+    def recognize_sql(self, text: str) -> RecognizedSql | None:
+        """确定性判断文本是否是纯 SQL 消息；不调用模型、不做 I/O。
+
+        :raises RuntimeError: 本进程没有装配识别端口（只做投影，不接受提交）。
+        """
+        if self._recognize_sql is None:
+            raise RuntimeError("sql recognition is not assembled in this process")
+        return self._recognize_sql(text)
+
+    def _reject_sql_conversation(self, submission: ConversationSubmission) -> None:
+        if self.recognize_sql(submission.envelope.text) is not None:
+            raise SqlMessageNotAcceptedError
+
     async def submit_task(self, *, submission: ConversationSubmission) -> TaskView:
-        """只持久化提交事实并返回任务投影，不解释或执行。"""
+        """只持久化提交事实并返回任务投影，不解释或执行。
+
+        :raises SqlMessageNotAcceptedError: 文本是纯 SQL；在写任何事实之前拒绝。
+        """
+        self._reject_sql_conversation(submission)
         record = await self._tasks.create_task(submission=submission)
         return await self.project_task(record=record)
 
@@ -153,7 +204,11 @@ class TaskViewRuntime:
         submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskView:
-        """一次性消费澄清父任务并返回子任务投影，不解释或执行。"""
+        """一次性消费澄清父任务并返回子任务投影，不解释或执行。
+
+        :raises SqlMessageNotAcceptedError: 回答是纯 SQL；父任务不被消费。
+        """
+        self._reject_sql_conversation(submission)
         record = await self._tasks.create_clarification_child(
             submission=submission,
             authenticated_channel_owner=authenticated_channel_owner,

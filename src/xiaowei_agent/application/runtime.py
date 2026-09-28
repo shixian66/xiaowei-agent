@@ -109,7 +109,10 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
-from xiaowei_agent.governance.sql_message import contains_embedded_sql
+from xiaowei_agent.governance.sql_message import (
+    contains_embedded_sql,
+    recognize_sql_message,
+)
 from xiaowei_agent.governance.sqlguard import SqlGuardError
 from xiaowei_agent.observability.sink import (
     Delivery,
@@ -271,6 +274,7 @@ class XiaoweiRuntime:
             ledger=ledger,
             conversation_snapshot=snapshot,
             rendering_bindings=rendering_bindings,
+            recognize_sql=recognize_sql_message,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
             model_profile=model_profile,

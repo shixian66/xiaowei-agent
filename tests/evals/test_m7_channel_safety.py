@@ -42,6 +42,7 @@ from xiaowei_agent.contracts import (
     content_digest,
     task_query_path,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.interfaces.feishu_identity import StaticFeishuIdentityDirectory
 from xiaowei_agent.interfaces.feishu_listener import FeishuListener
 from xiaowei_agent.interfaces.feishu_sdk import FeishuMessageEvent
@@ -283,6 +284,7 @@ async def test_unauthorized_task_reads_are_indistinguishable(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
     access = TaskAccessService(
         runtime=runtime,

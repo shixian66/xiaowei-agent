@@ -61,6 +61,11 @@ union 类型名。缺少 `input_kind` 的输入被判别 union 拒绝，旧数�
 SQL SHA-256 与幂等键；`idempotency_scope_digest` 在原三项外加入 `input_kind`，使 SQL 提交与对话提交的幂等键
 分属不同作用域。
 
+**渠道侧约束：**渠道来源事件（tenant、environment、channel、`source_event_ref`）只有一个，而 TaskStore 的两类作用域
+彼此独立。渠道提交服务在创建任务**之前**原子写入 `channel_source_claims`（主键即绑定的来源唯一键，只记录
+`input_kind`），第一次写入的类型胜出；同一来源事件的另一种类型按幂等冲突拒绝，不创建任务或 SqlArtifact。
+TaskStore 自身的跨类型语义不变。migration `0020_channel_source_claims` 以现有绑定及其提交类型回填占位。
+
 ### D2a SQL 消息的提交是一个事务
 
 application 层识别出 SQL 消息后，`TaskStore.submit_sql_query` 是唯一的提交入口，在**同一个 PostgreSQL 事务**内完成；

@@ -34,6 +34,7 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskStatus,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.interfaces.local_stack import build_in_memory_local_stack
 from xiaowei_agent.persistence.plans import PlanNotFoundError
 from xiaowei_agent.rendering.generic import CONVERSATION_TERMINAL_REASON
@@ -191,6 +192,7 @@ async def test_conversation_projects_the_current_snapshot_not_the_rendering_regi
         ledger=harness.ledger,
         conversation_snapshot=_provider_off_snapshot(),
         rendering_bindings=harness.runtime._rendering_bindings,
+        recognize_sql=recognize_sql_message,
         model_artifacts=harness.model_artifacts,
         model_profile=ModelInvocationProfile(),
     )

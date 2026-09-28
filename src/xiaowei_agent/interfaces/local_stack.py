@@ -546,9 +546,19 @@ def _task_view_runtime(
     ledger: EvidenceLedger,
     clarification_records: ClarificationRecordStore,
     model_artifacts: ModelArtifactStore,
+    accepts_submissions: bool,
 ) -> TaskViewRuntime:
-    """无执行权进程的投影 Runtime：当前准入快照与完整渲染注册表分开传入。"""
+    """无执行权进程的投影 Runtime：当前准入快照与完整渲染注册表分开传入。
+
+    ``accepts_submissions`` 为真时装配 SQL 识别（设计 §5.1）：API、Web 与飞书监听共用这一个
+    分类点；只做投影的通知 worker 不加载它，任何提交都 fail-closed。
+    """
     full_snapshot, rendering_bindings = _build_capability_bindings()
+    recognize_sql = None
+    if accepts_submissions:
+        from xiaowei_agent.governance.sql_message import recognize_sql_message
+
+        recognize_sql = recognize_sql_message
     return TaskViewRuntime(
         task_store=task_store,
         plan_store=plan_store,
@@ -557,6 +567,7 @@ def _task_view_runtime(
             settings, full_snapshot=full_snapshot
         ),
         rendering_bindings=rendering_bindings,
+        recognize_sql=recognize_sql,
         clarification_records=clarification_records,
         model_artifacts=model_artifacts,
         model_profile=ModelInvocationProfile(),
@@ -863,6 +874,7 @@ async def build_postgres_task_view_stack(
                 ledger=ledger,
                 clarification_records=clarification_records,
                 model_artifacts=model_artifacts,
+                accepts_submissions=True,
             ),
             task_store=task_store,
             plan_store=plan_store,
@@ -935,6 +947,7 @@ async def build_postgres_feishu_listener_stack(
             ledger=ledger,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
+            accepts_submissions=True,
         )
         identity_directory = DirectoryFeishuIdentityDirectory(
             directory=directory_store,
@@ -948,11 +961,7 @@ async def build_postgres_feishu_listener_stack(
             tenant_id=settings.tenant_id,
             environment_id=settings.environment_id,
         )
-        # 只有接收消息的进程装配 SQL 识别（设计 §5.1）；通知 worker 不加载它。
-        from xiaowei_agent.governance.sql_message import recognize_sql_message
-
         submission_service = ChannelSubmissionService(
-            recognize_sql=recognize_sql_message,
             runtime=runtime,
             channel_store=channel_store,
         )
@@ -1046,6 +1055,7 @@ async def build_postgres_channel_worker_stack(
             ledger=ledger,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
+            accepts_submissions=False,
         )
         messages = message_port
         if messages is None:
@@ -1163,6 +1173,7 @@ async def build_postgres_web_stack(
             ledger=ledger,
             clarification_records=clarification_records,
             model_artifacts=model_artifacts,
+            accepts_submissions=True,
         )
         task_access_service = TaskAccessService(
             runtime=runtime,
@@ -1170,11 +1181,7 @@ async def build_postgres_web_stack(
             channel_store=channel_store,
             membership=membership,
         )
-        # 只有接收消息的进程装配 SQL 识别（设计 §5.1）；通知 worker 不加载它。
-        from xiaowei_agent.governance.sql_message import recognize_sql_message
-
         submission_service = ChannelSubmissionService(
-            recognize_sql=recognize_sql_message,
             runtime=runtime,
             channel_store=channel_store,
             web_parent_access=task_access_service,

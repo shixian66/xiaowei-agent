@@ -1,14 +1,19 @@
 """确定性 SQL 消息识别与嵌入 SQL 检测（设计 §5.1）。
 
-``recognize_sql_message`` 决定一条渠道消息是否是“纯 SQL 消息”：只有它识别出的 SQL 才会被
-保存为 SqlArtifact、进而可能执行。三条规则同时满足才算：
+``recognize_sql_message`` 决定一条消息是否是“纯 SQL 消息”：识别出的 SQL 保存为 SqlArtifact，
+永不进入模型；其余消息才可能按普通对话进入模型。它只判断 **SQL 形状**，不判断是否支持、
+是否安全——那是 SQLGuard 的事。三条规则同时满足才算：
 
 1. 去掉首尾空白；整条消息恰好是一个 fenced code block 时只取块内正文；
-2. 首个语句 token 属于闭集 SQL 语句关键字（读、写与会话语句都在内——写语句也要被识别，
-   以便明确回复“只允许只读查询”，而不是当成聊天）；
-3. 恰好一条完整语句：sqlglot 完整解析为非 ``Command`` 语句，或命中代码内只读语句清单。
-   多语句、hint 与 ``INTO OUTFILE`` 虽不能通过 token 扫描，但语法上仍是 SQL，照样识别，
-   由 SQLGuard 给出明确拒绝。
+2. 跳过前置注释后，首个语句 token 属于闭集 SQL 语句关键字（读、写与会话语句都在内——写
+   语句也要被识别，以便明确回复“只允许只读查询”，而不是当成聊天）；
+3. 语法上是 SQL：sqlglot 解析为语句（含降级为 ``Command`` 的清单外语句，由 SQLGuard 回复
+   “暂未支持”）、因嵌套过深放弃解析，或命中代码内只读语句清单。多语句、hint 与
+   ``INTO OUTFILE`` 虽不能通过 token 扫描，语法上仍是 SQL，照样识别，由 SQLGuard 明确拒绝。
+
+判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）与不可见的
+控制/格式字符先归一化或去掉。保存与执行的永远是原文，SQLGuard 仍按原文拒绝这些字符。
+字符串、quoted identifier 与注释之外出现中文等自然语言文字的消息不是 SQL 消息。
 
 ``contains_embedded_sql`` 是产品护栏，不是安全边界：它让“夹带 SQL 的对话”以固定文案拒绝，
 不执行任何 capability。漏判时消息按现有流程处理，现有能力只执行自己的模板 SQL。
@@ -17,18 +22,22 @@
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
 from xiaowei_agent.governance.readonly_statements import match_statement
 from xiaowei_agent.governance.sql_tokens import (
     SQL_MAX_BYTES,
-    TokenKind,
     TokenScanError,
     TokenScanReason,
     scan_sql,
 )
-from xiaowei_agent.governance.sqlguard import parses_as_complete_statements
+from xiaowei_agent.governance.sqlguard import (
+    SqlParseShape,
+    parses_as_complete_statements,
+    sql_parse_shape,
+)
 
 __all__ = [
     "SQL_STATEMENT_KEYWORDS",
@@ -98,6 +107,16 @@ _SQL_SHAPED_SCAN_FAILURES: Final[frozenset[TokenScanReason]] = frozenset(
 )
 """扫描拒绝但语法上仍是 SQL 的原因：识别为 SQL，交 SQLGuard 明确拒绝。"""
 
+_SQL_PARSE_SHAPES: Final[frozenset[SqlParseShape]] = frozenset(
+    {SqlParseShape.STATEMENTS, SqlParseShape.COMMAND, SqlParseShape.TOO_COMPLEX}
+)
+"""sqlglot 认得的语句形状；只有语法/词法错误（``INVALID``）不算 SQL 形状。"""
+
+_LOOKALIKE_QUOTES: Final[dict[int, str]] = {
+    ord(char): "'" for char in "\u2018\u2019\u201a\u201b"
+} | {ord(char): '"' for char in "\u201c\u201d\u201e\u201f"}
+_LEADING_COMMENT: Final = re.compile(r"\A\s*(?:(?:--|#)[^\r\n]*|/\*.*?\*/)", re.DOTALL)
+
 _WHOLE_FENCE: Final = re.compile(r"\A```[^\n`]*\n(?P<body>.*?)\n?```\Z", re.DOTALL)
 _FENCE_BLOCK: Final = re.compile(r"^```[^\n`]*\n(?P<body>.*?)^```", re.DOTALL | re.MULTILINE)
 _PARAGRAPH_BREAK: Final = re.compile(r"\n[ \t]*\n")
@@ -140,29 +159,48 @@ def _leading_keyword(text: str) -> bool:
     return match is not None and match.group(1).upper() in SQL_STATEMENT_KEYWORDS
 
 
-def recognize_sql_message(text: str) -> SqlMessage | None:
-    """按三条规则识别纯 SQL 消息；不是 SQL 时返回 ``None``（按普通对话处理）。"""
-    body = _unwrap(text.strip())
-    raw = body.encode("utf-8")
-    if not body or len(raw) > SQL_MAX_BYTES:
-        return None
+def _without_leading_comments(text: str) -> str:
+    while (comment := _LEADING_COMMENT.match(text)) is not None:
+        text = text[comment.end() :]
+    return text
+
+
+def _judgement_copy(body: str) -> str:
+    """判定副本：智能引号换成 ASCII 引号，NFKC 折叠全角字符，去掉控制与格式字符。
+
+    只用于判断 SQL 形状；中文等自然语言文字在 NFKC 后仍不是 ASCII，扫描照样拒绝。
+    """
+    folded = unicodedata.normalize("NFKC", body.translate(_LOOKALIKE_QUOTES))
+    return "".join(
+        char
+        for char in folded
+        if char in "\t\r\n"
+        or unicodedata.category(char) not in {"Cc", "Cf", "Zl", "Zp"}
+    )
+
+
+def _is_sql_shaped(probe: str) -> bool:
+    if not _leading_keyword(_without_leading_comments(probe)):
+        return False
     try:
-        scan = scan_sql(raw)
+        scan = scan_sql(probe.encode("utf-8"))
     except TokenScanError as exc:
-        if exc.reason not in _SQL_SHAPED_SCAN_FAILURES or not _leading_keyword(body):
-            return None
-        # sqlglot 不认识 INTO OUTFILE；扫描器已在语句 token 中看到它，这本身就是 SQL 形状。
-        if exc.reason is TokenScanReason.INTO_OUTFILE or parses_as_complete_statements(body):
-            return SqlMessage(sql=body)
+        return exc.reason in _SQL_SHAPED_SCAN_FAILURES
+    return (
+        sql_parse_shape(probe) in _SQL_PARSE_SHAPES
+        or match_statement(scan) is not None
+    )
+
+
+def recognize_sql_message(text: str) -> SqlMessage | None:
+    """按三条规则识别纯 SQL 消息；不是 SQL 时返回 ``None``（按普通对话处理）。
+
+    返回的 ``SqlMessage`` 保存原文正文，不是判定副本。
+    """
+    body = _unwrap(text.strip())
+    if not body or len(body.encode("utf-8")) > SQL_MAX_BYTES:
         return None
-    first = scan.statement_tokens[0]
-    if first.kind is not TokenKind.WORD or scan.text(first).upper() not in (
-        SQL_STATEMENT_KEYWORDS
-    ):
-        return None
-    if parses_as_complete_statements(body) or match_statement(scan) is not None:
-        return SqlMessage(sql=body)
-    return None
+    return SqlMessage(sql=body) if _is_sql_shaped(_judgement_copy(body)) else None
 
 
 def _ascii_prefix(fragment: str) -> str:

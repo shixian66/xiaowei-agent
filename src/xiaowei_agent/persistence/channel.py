@@ -1,7 +1,7 @@
 """渠道绑定与可靠投影订阅的存储契约和共享状态判定。"""
 
 import datetime as dt
-from typing import Protocol, Self
+from typing import Literal, Protocol, Self, TypeAlias
 
 from pydantic import Field, model_validator
 
@@ -36,6 +36,13 @@ class ChannelBindingConflictError(ChannelStoreError):
 
     def __init__(self) -> None:
         super().__init__("channel binding conflict")
+
+
+class ChannelSourceKindConflictError(ChannelStoreError):
+    """同一渠道来源事件已选定另一种提交类型。"""
+
+    def __init__(self) -> None:
+        super().__init__("channel source kind conflict")
 
 
 class ProjectionSubscriptionNotFoundError(ChannelStoreError, LookupError):
@@ -159,6 +166,26 @@ class BindTaskCommand(Contract):
         if self.channel is ChannelKind.FEISHU_GROUP and self.conversation_ref is None:
             raise ValueError("group binding requires conversation_ref")
         return self
+
+
+SourceSubmissionKind: TypeAlias = Literal["conversation", "sql_artifact"]
+"""来源事件选定的提交类型；取值与 ``TaskSubmission.input_kind`` 一致。"""
+
+
+class ClaimSourceEventCommand(Contract):
+    """在创建任务之前为渠道来源事件选定提交类型（ADR-018 D2 的渠道侧约束）。
+
+    TaskStore 让对话与 SQL 的幂等键分属不同作用域；渠道来源引用只有一个。占位按绑定的
+    同一唯一键（tenant、environment、channel、source_event_ref）原子写入，第一次写入的类型
+    胜出，之后同类型重放通过、另一类型冲突。占位不保存消息文本或 SQL。
+    """
+
+    tenant_id: StrictStr
+    environment_id: StrictStr
+    channel: ChannelKind
+    source_event_ref: StrictStr
+    input_kind: SourceSubmissionKind
+    created_at: AwareDatetime
 
 
 class GroupBindingLookup(Contract):
@@ -525,6 +552,12 @@ def dead_letter_projection(
 class ChannelStore(Protocol):
     """渠道绑定与可靠投影订阅的唯一持久化端口。"""
 
+    async def claim_source_event(self, *, command: ClaimSourceEventCommand) -> None:
+        """原子地为来源事件选定提交类型；同类型重放幂等。
+
+        :raises ChannelSourceKindConflictError: 该来源事件已选定另一种类型。
+        """
+
     async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:
         """幂等绑定来源；嵌套 projection 必须在同一事务内创建或恢复。"""
 
@@ -594,9 +627,11 @@ __all__ = [
     "ChannelBindingConflictError",
     "ChannelBindingLookup",
     "ChannelBindingNotFoundError",
+    "ChannelSourceKindConflictError",
     "ChannelStore",
     "ChannelStoreError",
     "ClaimProjectionCommand",
+    "ClaimSourceEventCommand",
     "ClaimedTaskLookup",
     "CompleteProjectionCommand",
     "CreateProjectionSubscriptionCommand",
@@ -614,6 +649,7 @@ __all__ = [
     "RenewProjectionClaimCommand",
     "ScheduleProviderRetryCommand",
     "ScheduleTaskRecheckCommand",
+    "SourceSubmissionKind",
     "authorize_claimed_task_lookup",
     "renew_projection_claim",
 ]

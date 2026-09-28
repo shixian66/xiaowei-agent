@@ -133,8 +133,10 @@ from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ChannelBindingLookup,
     ChannelBindingNotFoundError,
+    ChannelSourceKindConflictError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
+    ClaimSourceEventCommand,
     CompleteProjectionCommand,
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
@@ -258,6 +260,7 @@ from xiaowei_agent.persistence.schema import (
     ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     CHANNEL_BINDINGS,
+    CHANNEL_SOURCE_CLAIMS,
     CREATED_SEQUENCE,
     EXTERNAL_IDENTITIES,
     FENCING_SEQUENCE,
@@ -707,6 +710,36 @@ class PostgresChannelStore:
         if not subscription_matches_command(winner, command):
             raise ProjectionSubscriptionConflictError
         return winner
+
+    @_persistence_boundary(write=True)
+    async def claim_source_event(self, *, command: ClaimSourceEventCommand) -> None:
+        async with _write_transaction(self._engine) as connection:
+            await connection.execute(
+                sa.dialects.postgresql.insert(CHANNEL_SOURCE_CLAIMS)
+                .values(
+                    tenant_id=command.tenant_id,
+                    environment_id=command.environment_id,
+                    channel=command.channel.value,
+                    source_event_ref=command.source_event_ref,
+                    input_kind=command.input_kind,
+                    created_at=command.created_at,
+                )
+                .on_conflict_do_nothing()
+            )
+            # 并发插入时 ON CONFLICT 等待先到事务提交，之后读到的就是胜出的类型。
+            chosen = (
+                await connection.execute(
+                    sa.select(CHANNEL_SOURCE_CLAIMS.c.input_kind).where(
+                        CHANNEL_SOURCE_CLAIMS.c.tenant_id == command.tenant_id,
+                        CHANNEL_SOURCE_CLAIMS.c.environment_id == command.environment_id,
+                        CHANNEL_SOURCE_CLAIMS.c.channel == command.channel.value,
+                        CHANNEL_SOURCE_CLAIMS.c.source_event_ref
+                        == command.source_event_ref,
+                    )
+                )
+            ).scalar_one()
+        if chosen != command.input_kind:
+            raise ChannelSourceKindConflictError
 
     @_persistence_boundary(write=True)
     async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:

@@ -643,6 +643,9 @@ async def _application_error(_: Request, exc: Exception) -> Response:
         return _error(409, "sql_artifact.expired")
     if failure is ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE:
         return _error(409, "sql_artifact.unavailable")
+    if failure is ApplicationFailure.SQL_MESSAGE_NOT_ACCEPTED:
+        # 纯 SQL 不能作为普通对话或澄清回答提交；确定性拒绝，不进模型。
+        return _error(422, "sql_message.not_accepted")
     return _error(500, "internal_error")
 
 

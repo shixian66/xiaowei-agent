@@ -268,10 +268,10 @@ def test_rev_0017_has_the_expected_revision_chain() -> None:
 
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0019_f1_sql_results as revision,
+        rev_0020_channel_source_claims as revision,
     )
 
-    assert revision.down_revision == "0018_w4a_config_domains"
+    assert revision.down_revision == "0019_f1_sql_results"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )
