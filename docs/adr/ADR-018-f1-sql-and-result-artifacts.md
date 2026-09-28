@@ -30,8 +30,7 @@ F1 让已认证用户在网页聊天框或飞书直接发送一条原始 SQL，�
 - `sql_ref` 由 CSPRNG 生成、不可枚举；
 - TaskStore、PlanStore、Evidence、RenderPayload、ChannelStore、trace、audit 与日志只保存 `sql_ref`、`sql_hash` 或
   闭集决定，不保存 SQL 原文；
-- SqlArtifact 只由确定性识别或（F1-NL 起）用户完整确认创建，模型不能创建；SqlArtifact 与最终执行字节永不进入
-  模型端口。
+- SqlArtifact 只由确定性识别或（F1-NL 起）用户完整确认创建，模型不能创建。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。
 
 ### D2 TaskSubmission 以 `input_kind` 判别
 
@@ -76,20 +75,24 @@ SqlArtifactStore 不提供公开的提交方法，事务内的表写入只是共
 
 ### D3 结果一次读完，随步骤结果同事务可读
 
-- 结果只在步骤成功时产生；`result_ref` 由 CSPRNG 生成、不可枚举，在结果写入的同一事务里创建；
+- 结果只在步骤成功时产生；`result_ref` 由 CSPRNG 生成、不可枚举；Runner 在构造 Evidence 前生成它，同一个值写入
+  Evidence 与 `StepCommitCommand`，Store 在同一事务里以它落结果与授权；
 - 列按 ordinal 保存为 `ColumnSpec(ordinal, name, type)`，同名列不得合并；行按 ordinal 对齐，使用带类型标签的
   规范编码，Decimal/日期时间/大整数不经 float；
 - 结果记录存在即可读，过期即删除，不设封存或占位状态；`completeness` 闭集为 `complete`、`truncated_rows`、
   `truncated_bytes`；
 - adapter 把结果写入 Runner 创建的进程内 `QueryResultBuffer`（≤ 1000 行、≤ 20 MiB，不存半行）；Gateway 超时或
   取消时关闭 buffer，迟到写入被丢弃；
-- 步骤成功时 `commit_step_result` 在提交步骤结果、Evidence 与审计的同一事务里写入列、行与 `requester_owner` grant；
+- 步骤成功时 `commit_step_result` 在提交步骤结果、Evidence 与审计的同一事务里，以命令携带的 `result_ref` 写入列、行与
+  `requester_owner` grant；
   失败、超时或提交前崩溃时不产生结果记录。
 
 ### D4 保留（不设配额）
 
-- 结果在任务终态后 24 小时过期；SQL 在最后一个引用它的任务终态后 24 小时过期，等待追问的 SQL 在父任务进入
-  `CLARIFICATION_REQUIRED` 后 24 小时未作答即过期；
+- 结果在任务终态后 24 小时过期；
+- SQL 创建时即写 `expires_at = created_at + 24h`；新任务引用它或引用它的任务进入终态时延到“该时刻 + 24h”，
+  只延不缩；因此非终态任务也不会让 SQL 永久保存；
+- 执行前水合时 SQL 已过期，步骤以 `sql_artifact.expired` 失败、Gateway 调用为 0，任务 FAILED；过期后的澄清回答同样拒绝；
 - 过期即拒绝读取，retention 删除 bytes、列、行、grant 与活动索引；不设数量配额；
 - 长期只保留 hash、actor、target、时间、上限、Guard/Policy 决定、query id 与资源指标；
 - PostgreSQL DELETE 不证明物理擦除；数据处置证据属于 F1-H。

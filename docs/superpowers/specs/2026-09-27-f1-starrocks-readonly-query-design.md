@@ -96,9 +96,8 @@ v8 中保留的决定：不做 target 排队锁；SQL 上限 65_536 bytes；结�
 1. SQL 原文只在 SqlArtifactStore 保存一份；TaskStore、Plan、Evidence、RenderPayload、日志、trace、ChannelStore、
    交互事实与模型请求只保存 `sql_ref`、hash 或安全摘要；
 2. SQL 识别、SQLGuard、ToolCall hash 与 adapter 执行绑定同一份原始 UTF-8 bytes；
-3. 识别为 SQL 消息的原文、SqlArtifact 与最终执行字节永不进入模型端口；夹带 SQL 的普通对话照常进入对话流程，但
-   模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行，Gateway 调用为 0；模型不能决定是否执行、
-   在哪执行或执行什么；
+3. 纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中模型来源不得产生 `starrocks_readonly_query` 意图、
+   SqlArtifact 或执行，Gateway 调用为 0；夹带 SQL 的混合消息只做解释（§5.1）；模型不能决定是否执行、在哪执行或执行什么；
 4. 目标不唯一时不执行；只有提交人本人对追问给出与选项完全一致的回答才继续；
 5. 缺少、越权、hash 不符或 target 不符的 SQL 一律在 Gateway 前拒绝；operation 需要 SQL 时缺少 HydratedQuery 必须拒绝；
 6. 结果行不进入 AdapterResponse.payload、ToolResult.data_view、Evidence、RenderPayload 或 TaskOutcome；
@@ -128,8 +127,13 @@ ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_messag
 3. 通过 §7.2 token 扫描后恰好是一条完整语句：sqlglot 30.17.0 完整解析，或命中 §7.3 只读语句清单；
 
 三条同时满足才是 SQL 消息。写语句也会被识别，目的是明确回复“只允许只读查询”，而不是当成聊天。其他消息
-（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）一律走现有对话流程，不执行；F1-Core 对这类
-消息最多提示“要执行请单独发送这条 SQL”。识别是确定性
+（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）一律走现有对话流程，不执行。
+
+**混合 SQL 只解释。**不是 SQL 消息、但 `contains_embedded_sql(text)` 为真的消息（文本中任一 fenced code block，或以
+闭集 SQL 语句关键字开头的片段，能被 sqlglot 完整解析为非 `Command` 语句）标记为 advisory-only：`route_interaction`
+对它的任何 `CAPABILITY_REQUEST`——无论来自模型还是现有关键词规则（例如含“慢SQL”被规则识别为慢查询诊断）——都
+改为对话回复，不进入 CapabilityResolver，Gateway 调用为 0。模型可以解释这段 SQL，回复最多提示“要执行请单独发送
+这条 SQL”。检测漏判时消息按现有流程处理：现有 capability 只执行自身模板 SQL，不执行用户粘贴的 SQL。识别是确定性
 规则，不调用模型，同一输入永远得到同一结论。
 
 识别为 SQL 后，服务调用 `TaskStore.submit_sql_query`，在**同一个 PostgreSQL 事务**内写 SqlArtifact（原始 bytes、
@@ -174,7 +178,7 @@ F1 target 目录和可选的澄清上下文：
   ChannelStore 已记录的小维消息 id 找到父任务，再走同一 owner 与状态校验。没有引用回复的消息按新消息处理，
   不会被当作回答。
 
-父任务处于 `CLARIFICATION_REQUIRED` 后 24 小时内未作答，SQL 过期，回答时提示“已过期，请重新发送 SQL”。
+SQL 创建后 24 小时内未作答即过期（§9.4），回答时提示“已过期，请重新发送 SQL”。
 
 ### 5.5 Plan 只保存引用
 
@@ -213,8 +217,9 @@ Runner 为 `confirmed_artifact` 步骤创建进程内 `QueryResultBuffer`，作�
 - Gateway 超时或取消时关闭 buffer，之后迟到写入被丢弃；
 - AdapterResponse.payload 与 ToolResult.data_view 必须为空。
 
-步骤成功时 Runner 把冻结后的 buffer 交给 `TaskStore.commit_step_result`，在提交步骤结果、Evidence 与审计的**同一事务**
-里写入结果行、生成 CSPRNG `result_ref` 并写 `requester_owner` 授权。步骤失败、超时或提交前崩溃时不产生结果记录。
+步骤成功时 Runner 先生成 CSPRNG `result_ref`，把同一个值写入 Evidence 与 `StepCommitCommand`，再把冻结后的 buffer
+交给 `TaskStore.commit_step_result`；Store 在提交步骤结果、Evidence 与审计的**同一事务**里以该 `result_ref` 写入结果行与
+`requester_owner` 授权（`result_ref` 唯一约束冲突则整个事务失败）。步骤失败、超时或提交前崩溃时不产生结果记录。
 Evidence 只记录 `result_ref`、hash、行/字节计数、完整性与资源指标。
 
 ### 5.8 Reflection 与回复
@@ -340,6 +345,7 @@ Web 不能调高硬上限。
 - 每个在途任务沿用现有 `run_with_task_heartbeat`，各自续租；lease、fencing 与终态保护不变；
 - 停机时停止领取，等待在途任务在收尾宽限内结束，超时后取消，由现有 lease 过期恢复接管；
 - 启动校验数据库连接池容量足够（`db_pool_size + db_pool_max_overflow >= 2 × 并发数 + 1`），不足则启动失败；
+  `db_pool_size` 默认值同步由 5 调为 9，默认配置直接满足并发 4；
 - 同步 StarRocks 读取仍在 `asyncio.to_thread` 中运行，默认线程池容量大于并发上限。
 
 这是 worker 级改动，所有 capability 受益；它不改变 dispatch 候选规则、`dispatch_sort_key`、失败计数或基础设施
@@ -382,7 +388,10 @@ approval_ref、created_at、expires_at，只有 `requester_owner` 的 approval_r
 ### 9.4 24 小时保留
 
 - 结果：任务终态后 24 小时过期；
-- SQL：最后一个引用它的任务终态后 24 小时过期；等待追问时，父任务进入 `CLARIFICATION_REQUIRED` 后 24 小时未作答即过期；
+- SQL：创建时写 `expires_at = created_at + 24h`；每当有新任务引用它（澄清回答创建子任务）或引用它的任务进入终态时，
+  延到“该时刻 + 24h”，只延不缩；因此未作答、长期排队、卡住或恢复失败的任务都不会让 SQL 永久保存；
+- 执行前 Runner 水合 HydratedQuery 时校验 SQL 未过期；已过期则步骤以 `sql_artifact.expired` 失败、Gateway 调用为 0，
+  任务进入 FAILED，回复“SQL 已过期，请重新发送”；澄清回答同样在 SQL 已过期时拒绝并给出同一提示；
 - 过期后读取立即拒绝；retention 删除 SQL bytes、列、行、grant 与活动索引；
 - 长期只保留 hash、actor、target、时间、上限、Guard/Policy 决定、query id 与资源指标；
 - 日志、trace、TaskStore、Evidence、ChannelStore 不新增 SQL 或结果副本。
@@ -440,8 +449,8 @@ F1 operation 是 READ + RESTRICTED。查询不经 ApprovalGate 的条件必须�
     SQL 优先由确定性规则提取（如代码块），规则取不出时才用模型候选；
   - F1-NL 区分“自然语言数据查询”与“混合文本中的 SQL 执行请求”，两者的候选 SQL 都必须完整展示给提交人，确认内容
     按 hash 绑定展示的 SQL，确认后作为新的 SQL 消息进入 F1-Core；未经完整确认 Gateway 调用为 0；
-  - “解释这条 SQL”只做解释、不执行；“为什么慢”预留给 SQL 性能诊断，优先扩展现有慢查询诊断 capability；两者默认
-    都不重新执行用户粘贴的 SQL，也不自动 EXPLAIN；
+  - “解释这条 SQL”只做解释、不执行；“为什么慢”预留给 SQL 性能诊断，由 F1-NL 单独决定升级现有慢查询能力还是新建
+    能力；两者默认都不重新执行用户粘贴的 SQL，也不自动 EXPLAIN；
   - 混合文本中的 SQL 字面值随对话进入模型，属于现有对话出站边界；F1-NL 修订 ADR-015 时一并处理脱敏与提示。
 
 ### 12.1 完成定义
@@ -471,7 +480,7 @@ F1-0 文档 PR 获批前不写 F1 行为源码。须同步：
 10. ADR-017：确定性 SQL 识别与规则来源交互事实、目标选择追问、飞书澄清父链、RESTRICTED read 无审批的窄条件；
 11. ADR-018：SQL 与结果 artifact、提交事务、ACL 与保留。
 
-ADR-015 不因直接 SQL 放宽；识别为 SQL 消息的原文、SqlArtifact 与最终执行字节不进入模型端口。
+ADR-015 不因直接 SQL 放宽；纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。
 
 ## 14. 验证与验收
 

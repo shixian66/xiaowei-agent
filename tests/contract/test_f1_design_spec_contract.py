@@ -131,8 +131,8 @@ def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() 
         "`request_count=0`",
     )
     invariants = _section(text, "## 4. 不可破坏的不变量")
-    assert "SqlArtifact 与最终执行字节永不进入模型端口" in invariants
-    assert "模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行" in invariants
+    assert "纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型" in invariants
+    assert "模型来源不得产生 `starrocks_readonly_query` 意图、\n   SqlArtifact 或执行" in invariants
     assert "SQL 原文永不进入模型端口" not in text
     nl = _section(text, "## 12. 与 F2、F3、F1-NL 的边界")
     _assert_terms(

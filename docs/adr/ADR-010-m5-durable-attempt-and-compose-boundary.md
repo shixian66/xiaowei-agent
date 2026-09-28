@@ -194,7 +194,7 @@ Worker 不发布宿主端口。secret 只经文件引用注入，不写入镜像
 - 只在有空位时才调用 `begin_task_attempt` 领取任务，领取后作为独立 asyncio task 运行，不为等待空位持有 lease；
 - 每个在途任务沿用现有 `run_with_task_heartbeat` 各自续租；lease、fencing、失败计数、retry 与终态保护不变；
 - 停机时停止领取，等待在途任务在收尾宽限内结束，超时后取消，由现有 lease 过期恢复接管；
-- 启动校验 `db_pool_size + db_pool_max_overflow >= 2 × worker_max_concurrent_tasks + 1`，不足则启动失败。
+- 启动校验 `db_pool_size + db_pool_max_overflow >= 2 × worker_max_concurrent_tasks + 1`，不足则启动失败；
+  `db_pool_size` 默认值由 5 调为 9，默认 Settings 直接通过校验。
 
 dispatch 候选规则与 `dispatch_sort_key` 不变。该改动惠及全部 capability，不为 F1 引入 target 排队锁。
-

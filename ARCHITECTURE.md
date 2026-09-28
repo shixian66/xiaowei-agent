@@ -139,8 +139,7 @@ RequestEnvelope
 ```
 
 **F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
-SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL，识别出的 SQL、SqlArtifact 与最终执行字节不进入模型端口；夹带 SQL 的
-普通对话照常经模型理解，但模型来源不得产生 `starrocks_readonly_query` 意图或执行：
+SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中夹带 SQL 的混合消息只做解释，任何 capability 都不调用 Gateway：
 
 ```text
 网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
@@ -496,7 +495,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | --- | --- | --- |
 | `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash，不含 SQL 原文、目标或结果引用；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
 | `submit_sql_query`（TaskStore 命令） | context、SQL bytes、幂等键 | SQL 消息唯一提交入口；同一 PostgreSQL 事务内写 SqlArtifact 与 task/ArtifactSubmission；失败整体回滚（ADR-018 D2a）；目标由后续 SlotVerifier 确定 |
-| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；最后一个引用它的任务终态后 24 小时删除 |
+| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；创建即 `created_at + 24h` 过期，新引用或任务终态时延到该时刻 + 24h、只延不缩；执行前已过期则 `sql_artifact.expired`、Gateway 0 次 |
 | `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
 | `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
 | `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + Gateway 余量确定 |
@@ -691,7 +690,7 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 
 - 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
 - F1 用户直接 SQL（`confirmed_readonly`，Proposed）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
-  artifact，与原文 SHA-256 绑定，SqlArtifact 与最终执行字节不进入模型端口；SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
+  artifact，与原文 SHA-256 绑定；纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
   控制字符、INTO OUTFILE），再走两条互斥的只读证明路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/
   `Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），或 sqlglot 降级为 `Command`/ParseError 时的代码内只读语句清单。
   清单外语句返回 `READONLY_STATEMENT_NOT_SUPPORTED`、零 SQL 发送。两条路径都统一校验内部 `default_catalog`、

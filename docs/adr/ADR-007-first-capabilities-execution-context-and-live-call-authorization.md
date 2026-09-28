@@ -316,7 +316,7 @@ W4c（让运维目标进入 Web Admin 的测试范围）**必须另修 ADR-007**
 
 | capability_id | 版本 | 路线 | 边界 |
 | --- | --- | --- | --- |
-| `starrocks.readonly_query` | 1.0.0 | F1 | 唯一 operation `execute_readonly_query`，`READ` + `RESTRICTED`；作为普通 capability 走统一对话主链；用户在网页或飞书直接发送的 SQL 由确定性规则识别并保存为受保护 SQL artifact，经原文 hash 绑定和 `confirmed_readonly` SQLGuard 后原样执行；模型不能识别、改写或选择可执行 SQL，SQL 原文也不进入模型端口；目标不唯一时追问、不执行；结果只进入 ADR-018 的有界 artifact |
+| `starrocks.readonly_query` | 1.0.0 | F1 | 唯一 operation `execute_readonly_query`，`READ` + `RESTRICTED`；作为普通 capability 走统一对话主链；用户在网页或飞书直接发送的 SQL 由确定性规则识别并保存为受保护 SQL artifact，经原文 hash 绑定和 `confirmed_readonly` SQLGuard 后原样执行；模型不能识别、改写或选择可执行 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中混合 SQL 只解释；目标不唯一时追问、不执行；结果只进入 ADR-018 的有界 artifact |
 
 非目标：写入、DDL、KILL、导出、外部 Catalog、UDF、table function、UNNEST、hint 和 E1 均不因本
 能力开放；自然语言生成 SQL 属 F1-NL，另需设计与批准。

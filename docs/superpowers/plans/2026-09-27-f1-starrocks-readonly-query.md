@@ -23,7 +23,7 @@
 - Admin 可调低：`preview_max_rows` 1..1000（默认 1000）；`preview_max_bytes` 1 MiB..20 MiB（默认 20 MiB）；`query_timeout_seconds` 1..180（默认 180）。
 - timeout：connect/write ≤ 10 秒且 ≤ read；session `query_timeout=Q`；PyMySQL `read_timeout=Q+10`；Gateway `Q+20`；ToolCall ≤ 300 秒。
 - worker：`worker_max_concurrent_tasks` 默认 4，范围 1..16；启动校验 `db_pool_size + db_pool_max_overflow >= 2 × 并发数 + 1`。
-- `ToolCall.typed_args` 只允许 JSON 标量；SQL 原文不进入任何模型请求、交互事实、trace 或审计。
+- `ToolCall.typed_args` 只允许 JSON 标量；SQL 原文不进入交互事实、trace 或审计。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。
 - 目标：唯一则用，0 个拒绝，多个追问；只接受提交人本人与展示名完全一致的回答；无默认目标、无模糊匹配。
 - 清单外只读语句：`error_code=READONLY_STATEMENT_NOT_SUPPORTED`、用户文案“暂未支持”、`retryable=false`、零 SQL 发送。
 - 不支持：外部 Catalog、table function、UNNEST、UDF/qualified function、任何 hint、多语句、INTO OUTFILE、写/DDL/锁/事务/session 改写。
@@ -154,13 +154,13 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 ### Task 1: worker 最多同时处理 N 个任务
 
 **Files:**
-- Modify: `src/xiaowei_agent/application/worker.py`、`src/xiaowei_agent/config.py`
+- Modify: `src/xiaowei_agent/application/worker.py`、`src/xiaowei_agent/config.py`、`tests/unit/test_config_happy.py`
 - Test: `tests/unit/test_worker_concurrency.py`、`tests/integration/test_worker_concurrency_postgres.py`
 
 **Interfaces:**
-- Produces: `Settings.worker_max_concurrent_tasks: int = Field(default=4, ge=1, le=16)`；Settings 校验 `db_pool_size + db_pool_max_overflow >= 2 * worker_max_concurrent_tasks + 1`；worker 在 `run(stop)` 中维护在途 asyncio task 集合，只在有空位时调用 `begin_task_attempt`；每个在途任务仍经 `run_with_task_heartbeat`。
+- Produces: `Settings.worker_max_concurrent_tasks: int = Field(default=4, ge=1, le=16)`；`Settings.db_pool_size` 默认值由 5 改为 9（同步更新 `tests/unit/test_config_happy.py` 的默认断言）；Settings 校验 `db_pool_size + db_pool_max_overflow >= 2 * worker_max_concurrent_tasks + 1`；worker 在 `run(stop)` 中维护在途 asyncio task 集合，只在有空位时调用 `begin_task_attempt`；每个在途任务仍经 `run_with_task_heartbeat`。
 
-- [ ] **Step 1: 写失败测试**：一个任务在 fake gateway 中阻塞时，另一个任务在同一 worker 内完成；在途数永不超过上限；两个 worker 实例并发领取时同一任务只执行一次；停机时停止领取并等待在途任务结束，超出宽限后取消且任务由 lease 过期恢复；连接池容量不足时 Settings 构造失败；上限为 1 时行为与当前逐个执行一致。
+- [ ] **Step 1: 写失败测试**：一个任务在 fake gateway 中阻塞时，另一个任务在同一 worker 内完成；在途数永不超过上限；两个 worker 实例并发领取时同一任务只执行一次；停机时停止领取并等待在途任务结束，超出宽限后取消且任务由 lease 过期恢复；连接池容量不足时 Settings 构造失败；不带任何环境变量的默认 `Settings()` 构造成功且满足校验；上限为 1 时行为与当前逐个执行一致。
 - [ ] **Step 2: 运行确认失败**：`python -m pytest tests/unit/test_worker_concurrency.py tests/integration/test_worker_concurrency_postgres.py -q`
 - [ ] **Step 3: 最小实现**：不改 TaskStore、dispatch 规则、失败计数或基础设施故障窗口语义。
 - [ ] **Step 4: 运行通过 + 现有 worker/heartbeat 回归**：`python -m pytest tests -k "worker or heartbeat" -q`
@@ -309,12 +309,14 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 **Interfaces:**
 - Produces:
   - `recognize_sql_message(text: str) -> SqlMessage | None`：纯函数；按设计 §5.1 三条规则（闭集语句关键字、token 扫描、恰好一条完整语句）；整条 fenced code block 解包；复用 Task 4–6 的扫描与清单
+  - `contains_embedded_sql(text: str) -> bool`：纯函数；文本中任一 fenced code block，或以闭集语句关键字开头、可被 sqlglot 完整解析为非 `Command` 语句的片段
+  - `route_interaction(*, draft, context, embedded_sql: bool = False)`：`embedded_sql=True` 时任何 `CAPABILITY_REQUEST` 返回 RESPOND（advisory-only），不进入 Resolver；Runtime 由确定性检测传入，不取自模型
   - `ChannelSubmissionService.submit`：识别为 SQL → `TaskStore.submit_sql_query`；否则走现有 `ConversationSubmission`，普通消息超过 8192 字符拒绝；`ChannelSubmitCommand.text` 上限放宽到 65_536 bytes
   - `load_or_accept_interaction`：`ArtifactSubmission` 直接保存 `origin=rule` 的 `AcceptedInteractionArtifact`（`CAPABILITY_REQUEST` + `starrocks_readonly_query`、空槽位），不构造模型请求，`ModelCallObservation.request_count=0`；目标选择追问的澄清子任务同样由规则解释
 
-- [ ] **Step 1: 失败测试**：读/写关键字开头的完整语句识别为 SQL；“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”“explain why …”识别为对话；整条代码块解包；多语句、hint 仍识别为 SQL 以便明确拒绝；同一输入永远同一结论；SQL 消息与目标选择回答的模型调用次数为 0，且模型请求构造对它们不可达；SQL 原文不出现在 envelope、交互事实、trace、审计与 ChannelStore；非 SQL 超 8192 字符拒绝、SQL 超 65_536 bytes 拒绝；现有对话、澄清与慢查询路由回归不变；夹带 SQL 的对话中 fake 模型返回 `starrocks_readonly_query` 意图时被拒绝为不可执行，不建 SqlArtifact、Gateway 调用为 0。
+- [ ] **Step 1: 失败测试**：读/写关键字开头的完整语句识别为 SQL；“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”“explain why …”识别为对话；整条代码块解包；多语句、hint 仍识别为 SQL 以便明确拒绝；同一输入永远同一结论；SQL 消息与目标选择回答的模型调用次数为 0，且模型请求构造对它们不可达；SQL 原文不出现在 envelope、交互事实、trace、审计与 ChannelStore；非 SQL 超 8192 字符拒绝、SQL 超 65_536 bytes 拒绝；现有对话、澄清与慢查询路由回归不变；夹带 SQL 的对话中 fake 模型返回 `starrocks_readonly_query` 意图时被拒绝为不可执行，不建 SqlArtifact、Gateway 调用为 0；“帮我分析这条慢SQL：SELECT …”在现有关键词规则会识别为慢查询诊断的情况下仍为 advisory-only、Gateway 调用为 0，模型路由同理；不含嵌入 SQL 的“最近有哪些慢查询”仍正常走慢查询诊断。
 - [ ] **Step 2–4: 失败 → 实现 → 通过**：`python -m pytest tests/unit/test_sql_message_recognition.py tests/security/test_f1_sql_never_reaches_model.py tests/integration/test_f1_channel_submit_postgres.py -q && python -m pytest tests -k "interaction or channel or clarification" -q`
-- [ ] **Step 5: 变异**：让 ArtifactSubmission 走模型分类，`test_f1_sql_never_reaches_model` 必须转红；放开模型来源的 `starrocks_readonly_query` 意图，`test_f1_model_origin_query_intent_never_executes` 必须转红；还原。
+- [ ] **Step 5: 变异**：让 ArtifactSubmission 走模型分类，`test_f1_sql_never_reaches_model` 必须转红；放开模型来源的 `starrocks_readonly_query` 意图，`test_f1_model_origin_query_intent_never_executes` 必须转红；去掉 `embedded_sql` 分支，`test_f1_embedded_sql_is_advisory_only` 必须转红；还原。
 - [ ] **Step 6: 四门后提交** `feat(application): route SQL messages into the capability pipeline without the model`
 
 ## F1-1 / PR-E：执行、结果与回复
@@ -331,10 +333,10 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 - Produces:
   - `QueryResultBuffer(max_rows, max_bytes)`：`set_columns(tuple[ColumnSpec, ...])`、`append_row(tuple[object, ...]) -> BufferState`、`close()`、`freeze() -> BufferedQueryResult`；关闭后写入被丢弃
   - `ToolGateway.invoke(call, *, context, admission, hydrated_query: HydratedQuery | None = None, result_buffer: QueryResultBuffer | None = None)`；`AdapterResponse.payload` 与 `ToolResult.data_view` 必须为空
-  - `StepCommitCommand` 增加可选 `query_result: BufferedQueryResult | None`；`commit_step_result` 在同一事务写结果行、生成 CSPRNG `result_ref` 并写 `requester_owner` grant；失败或超时不写结果
+  - `StepCommitCommand` 增加可选 `query_result: BufferedQueryResult | None` 与 `result_ref: str | None`（二者同有同无）；Runner 在 `_build_evidence` 前用 `secrets.token_urlsafe(32)` 生成 `result_ref`，同一个值写入 Evidence 与命令；`commit_step_result` 在同一事务以它写结果行与 `requester_owner` grant；失败或超时不写结果
   - 水合只按 `query_requirement` 分支，不按 operation 名称判断
 
-- [ ] **Step 1: 失败测试**：HydratedQuery 缺失或 bytes hash 不符时 adapter 调用 0；payload/data_view 非空时 Gateway 拒绝；1000/1001 行得到 `truncated_rows`、超字节得到 `truncated_bytes`、不存半行；Gateway 超时后迟到写入被丢弃且不产生结果；结果、grant 与步骤提交同事务，在两者之间注入故障时都不生效；提交前崩溃不产生结果；已开始未提交的步骤再次领取得到 `BUDGET_EXHAUSTED`、Gateway 调用 0；SQLGuard 在线程中执行时 heartbeat 按时续租；结果行不进入 Evidence、trace、audit；ExecutionDisclosure 在首次 Gateway 前写入。
+- [ ] **Step 1: 失败测试**：HydratedQuery 缺失或 bytes hash 不符时 adapter 调用 0；payload/data_view 非空时 Gateway 拒绝；1000/1001 行得到 `truncated_rows`、超字节得到 `truncated_bytes`、不存半行；Gateway 超时后迟到写入被丢弃且不产生结果；Evidence 中的 `result_ref` 与结果表、grant 中的完全相同；结果、grant 与步骤提交同事务，在两者之间注入故障时都不生效；提交前崩溃不产生结果；已开始未提交的步骤再次领取得到 `BUDGET_EXHAUSTED`、Gateway 调用 0；SQLGuard 在线程中执行时 heartbeat 按时续租；结果行不进入 Evidence、trace、audit；ExecutionDisclosure 在首次 Gateway 前写入。
 - [ ] **Step 2–4: 失败 → 实现 → 通过 + Runner/worker 回归**：`python -m pytest tests/unit/test_query_result_buffer.py tests/security/test_f1_gateway_query.py tests/integration/test_f1_runner_flow_postgres.py -q && python -m pytest tests -k "runner or worker" -q`
 - [ ] **Step 5: 变异**：把结果写入挪出 `commit_step_result` 事务，同事务用例转红；还原。
 - [ ] **Step 6: 提交** `feat(runners): execute SQL artifacts with an in-memory result buffer`
@@ -363,7 +365,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 - Modify: worker 装配
 - Test: `tests/integration/test_f1_retention_postgres.py`
 
-- [ ] **Step 1: 失败测试**：结果在任务终态后 24 小时过期；SQL 在最后一个引用它的任务终态后 24 小时过期；等待追问的 SQL 在父任务进入 `CLARIFICATION_REQUIRED` 后 24 小时未作答过期，过期后作答提示重新发送；过期后立即拒绝读取；删除 SQL bytes、列、行、grant 与活动索引，只保留 hash、actor、target、时间、上限、决定、query id 与指标；日志、trace、Evidence 无 SQL/结果副本。
+- [ ] **Step 1: 失败测试**：结果在任务终态后 24 小时过期；SQL 创建即写 `created_at + 24h`，新引用或任务终态时延到该时刻 + 24h、只延不缩；未作答、长期排队或卡住的任务不阻止 SQL 过期；执行前 SQL 已过期时步骤以 `sql_artifact.expired` 失败、Gateway 调用为 0、任务 FAILED；过期后作答提示重新发送；过期后立即拒绝读取；删除 SQL bytes、列、行、grant 与活动索引，只保留 hash、actor、target、时间、上限、决定、query id 与指标；日志、trace、Evidence 无 SQL/结果副本。
 - [ ] **Step 2–4: 失败 → 实现 → 通过**：`python -m pytest tests/integration/test_f1_retention_postgres.py -q`
 - [ ] **Step 5: 提交** `feat(persistence): add 24h F1 retention`
 

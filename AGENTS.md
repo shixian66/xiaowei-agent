@@ -45,7 +45,7 @@
    `ApprovalGate` 由 Runner 在具体副作用步骤前调用；具体领域可以有额外的确定性 precheck，但不得跳过这条安全链。
 3. **入口层必须薄。** Web、飞书、CLI 和 API handler 只负责协议解析、鉴权上下文传递和 `RenderPayload` 渲染；不放业务路由、SQL 合成、巡检评分、审批判断或工具执行。
 4. **工具只能经 `ToolGateway` 进入。** 领域层不能直接持有 MySQL、StarRocks、Prometheus、Kafka、Kubernetes 或其他基础设施客户端。
-5. **SQL 来源受控并经 AST 校验。** 模板 SQL 由确定性 compiler 生成；用户直接 SQL 只能来自受保护 SQL artifact：由确定性规则识别、原文 hash 绑定，经 SQLGuard 只读证明后原样执行，不改写、不补 LIMIT；SQL artifact 与最终执行字节不进入模型端口，模型不能创建 SQL artifact（F1，见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。执行 SQL 不来自模型原文；SQL 形状校验使用 `sqlglot` AST 和策略规则，不能把正则作为唯一安全边界。
+5. **SQL 来源受控并经 AST 校验。** 模板 SQL 由确定性 compiler 生成；用户直接 SQL 只能来自受保护 SQL artifact：由确定性规则识别、原文 hash 绑定，经 SQLGuard 只读证明后原样执行，不改写、不补 LIMIT（F1，见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。模型输出本身永远不是可执行 SQL；SQL 形状校验使用 `sqlglot` AST 和策略规则，不能把正则作为唯一安全边界。
 6. **审批是执行中断点，不是入口总开关。** `WorkflowRunner` 执行到具体副作用步骤前调用 Runtime 的 `ApprovalGate`；未审批就持久化暂停。恢复时必须重新解析身份、目标、策略和当前状态，并重新计算 `plan_hash` 与 `target_fingerprint`，不匹配则拒绝继续。
 7. **只有一个候选生成真源。** `CapabilityResolver` 负责产生 `CandidateSet`；`route_shadow` 只能消费相同的候选输出做 record-only 对比，不能自行 build candidates，也不能反向影响执行路由。
 8. **外部文本不可信。** 工具返回的错误、日志、SQL 注释、知识文档、网页和用户粘贴内容都按 `ExternalContent` 处理。它们可以成为证据或展示内容，但不能改变 system policy、目标、权限、审批状态或执行计划。

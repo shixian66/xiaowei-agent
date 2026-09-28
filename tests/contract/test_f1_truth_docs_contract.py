@@ -24,8 +24,7 @@ _F1_TRUTH_TERMS: Final[dict[str, tuple[str, ...]]] = {
     "AGENTS.md": (
         "模板 SQL 由确定性 compiler 生成",
         "用户直接 SQL 只能来自受保护 SQL artifact",
-        "执行 SQL 不来自模型原文",
-        "模型不能创建 SQL artifact",
+        "模型输出本身永远不是可执行 SQL",
     ),
     "ARCHITECTURE.md": (
         "F1 SQL 查询能力",
@@ -230,15 +229,104 @@ def test_dispatch_order_is_unchanged_without_deferral() -> None:
     assert "dispatch 候选规则与 `dispatch_sort_key` 不变" in _read(_ADR_010)
 
 
+# 模型边界只有一种说法；所有承载 F1 SQL 规则的真源都写同一句，且不留旧说法。
+_MODEL_BOUNDARY: Final = (
+    "纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。"
+    "模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。"
+)
+_MODEL_BOUNDARY_DOCS: Final[tuple[str, ...]] = (
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    _ADR_007,
+    _ADR_017,
+    _ADR_018,
+    _SPEC,
+    _PLAN,
+)
+_RETIRED_MODEL_WORDING: Final[tuple[str, ...]] = (
+    "SQL 原文不进入模型",
+    "SQL 原文不进入任何模型",
+    "SQL 原文也不进入模型",
+    "SQL 原文永不进入模型",
+    "执行 SQL 不来自模型原文",
+    "优先扩展现有慢查询",
+)
+_RETIRED_MODEL_WORDING_DOCS: Final[tuple[str, ...]] = (
+    *_MODEL_BOUNDARY_DOCS,
+    "DEVELOPMENT_PLAN.md",
+    "AGENT_HANDOFF.md",
+    _ROADMAP,
+)
+
+
+def _model_boundary_drift(docs: dict[str, str]) -> list[tuple[str, str]]:
+    drift = [
+        (name, "missing") for name in _MODEL_BOUNDARY_DOCS if _MODEL_BOUNDARY not in docs[name]
+    ]
+    drift += [
+        (name, retired)
+        for name in _RETIRED_MODEL_WORDING_DOCS
+        for retired in _RETIRED_MODEL_WORDING
+        if retired in docs[name]
+    ]
+    return drift
+
+
+def test_model_boundary_has_one_wording_across_truth_sources() -> None:
+    assert _model_boundary_drift(_named_docs(_RETIRED_MODEL_WORDING_DOCS)) == []
+
+
+def test_embedded_sql_is_advisory_only_for_every_route() -> None:
+    # 含“慢SQL”的混合消息会被现有关键词规则路由到慢查询诊断，
+    # 所以 advisory-only 必须覆盖规则与模型两条路由。
+    for name in (_SPEC, _ADR_017, _PLAN):
+        text = _read(name)
+        assert "contains_embedded_sql" in text, name
+        assert "advisory-only" in text, name
+    spec = _read(_SPEC)
+    assert "无论来自模型还是现有关键词规则" in spec
+    assert "Gateway 调用为 0" in spec
+    assert "`test_f1_embedded_sql_is_advisory_only` 必须转红" in _read(_PLAN)
+
+
+def test_result_ref_exists_before_evidence() -> None:
+    # 现有 Runner 先构造 Evidence 再提交，result_ref 必须由 Runner 先生成，Store 只落库。
+    assert (
+        "Runner 先生成 CSPRNG `result_ref`，把同一个值写入 Evidence 与 `StepCommitCommand`"
+        in _read(_SPEC)
+    )
+    assert "Runner 在构造 Evidence 前生成它" in _read(_ADR_018)
+    assert "在 `_build_evidence` 前用 `secrets.token_urlsafe(32)` 生成 `result_ref`" in _read(_PLAN)
+    for name in (_SPEC, _ADR_018, _ADR_009, _PLAN):
+        assert "在结果写入的同一事务里创建" not in _read(name), name
+        assert "写结果行、生成 CSPRNG" not in _read(name), name
+
+
+def test_default_pool_fits_default_worker_concurrency() -> None:
+    concurrency, pool = 4, 9
+    assert pool >= 2 * concurrency + 1
+    for name in (_SPEC, _ADR_010, _PLAN):
+        assert "由 5 调为 9" in _read(name) or "由 5 改为 9" in _read(name), name
+    assert "默认 `Settings()` 构造成功且满足校验" in _read(_PLAN)
+
+
+def test_sql_artifact_expires_even_if_its_task_never_ends() -> None:
+    for name in (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md"):
+        text = _read(name)
+        assert "created_at + 24h" in text, name
+        assert "只延不缩" in text, name
+        assert "`sql_artifact.expired`" in text, name
+    for name in (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md"):
+        assert "最后一个引用它的任务终态后 24" not in _read(name), name
+
+
 def test_f1_guards_are_discriminating() -> None:
     docs = _all_docs()
     without_rule = dict(docs)
     without_rule["AGENTS.md"] = docs["AGENTS.md"].replace(
         "用户直接 SQL 只能来自受保护 SQL artifact", ""
     )
-    assert ("AGENTS.md", "用户直接 SQL 只能来自受保护 SQL artifact") in _missing_terms(
-        without_rule
-    )
+    assert ("AGENTS.md", "用户直接 SQL 只能来自受保护 SQL artifact") in _missing_terms(without_rule)
     revived = dict(docs)
     revived[_ADR_009] = docs[_ADR_009] + "\nschedule_deferral\n"
     assert _stale_phrases(revived) == [(_ADR_009, "schedule_deferral")]
@@ -252,6 +340,14 @@ def test_f1_guards_are_discriminating() -> None:
     renamed = dict(names)
     renamed[_PLAN] = names[_PLAN] + "\nsubmission_kind"
     assert _contract_name_drift(renamed) == [(_PLAN, "submission_kind")]
+
+    boundary = _named_docs(_RETIRED_MODEL_WORDING_DOCS)
+    old_adr = dict(boundary)
+    old_adr[_ADR_007] = boundary[_ADR_007].replace(_MODEL_BOUNDARY, "SQL 原文也不进入模型端口。")
+    assert _model_boundary_drift(old_adr) == [
+        (_ADR_007, "missing"),
+        (_ADR_007, "SQL 原文也不进入模型"),
+    ]
 
 
 # 负责人 2026-09-27：当前范围只叫 F1-Core；完整能力须再有 F1-NL，结果说明只在报错时做。
