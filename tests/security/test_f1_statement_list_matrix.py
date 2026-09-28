@@ -261,3 +261,12 @@ def test_unlisted_or_unsafe_statements_are_rejected(
     sql: str, rejection: SqlGuardRejection
 ) -> None:
     assert _rejection(sql) is rejection
+
+
+def test_a_long_registered_where_chain_is_matched_without_recursion() -> None:
+    # 64 KiB 内可以拼出几千个 AND；匹配必须给出闭集结果，不能抛 RecursionError。
+    predicate = " AND `Table` = 'a'"
+    sql = "SHOW STATS META WHERE `Table` = 'a'" + predicate * 3000
+    assert len(sql.encode()) < 65_536
+    assert _prove(sql).statement_family == "show.stats_meta"
+    assert _rejection(sql + " AND Properties = 'x'") is NOT_SUPPORTED

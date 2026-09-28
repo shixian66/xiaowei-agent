@@ -5,6 +5,7 @@ import pytest
 from xiaowei_agent.governance.readonly_statements import (
     READONLY_STATEMENTS,
     Kw,
+    Many,
     Name,
     Opt,
     ReadonlyStatement,
@@ -89,3 +90,8 @@ def test_listed_families_are_unique_and_rules_hold() -> None:
     assert len(families) == len(set(families))
     for statement in READONLY_STATEMENTS:
         _check_target_rule(statement)
+
+
+def test_repetition_cannot_capture() -> None:
+    with pytest.raises(RuntimeError):
+        Many(Kw("AND"), Name("relation"))

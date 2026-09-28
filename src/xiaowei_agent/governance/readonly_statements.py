@@ -220,22 +220,29 @@ class OneOf(_Element):
 
 @dataclass(frozen=True, slots=True)
 class Many(_Element):
-    """零次或多次；不允许捕获（重复捕获无法唯一提取）。"""
+    """零次或多次。
+
+    不允许捕获：重复捕获无法唯一提取对象。展开是迭代的——64 KiB 内可以重复几千次，
+    递归展开会耗尽调用栈。
+    """
 
     elements: tuple[_Element, ...]
 
     def __init__(self, *elements: _Element) -> None:
+        if any(True for element in elements for _ in element.capture_names()):
+            raise RuntimeError("Many must not capture")
         object.__setattr__(self, "elements", elements)
 
     def match(self, source: _Input, pos: int, captures: _Captures) -> _Matches:
-        yield pos, captures
-        for next_pos, next_captures in _match_sequence(self.elements, source, pos, captures):
-            if next_pos > pos:
-                yield from self.match(source, next_pos, next_captures)
-
-    def capture_names(self) -> Iterator[tuple[str, bool]]:
-        for element in self.elements:
-            yield from element.capture_names()
+        pending = [pos]
+        seen = {pos}
+        while pending:
+            current = pending.pop()
+            yield current, captures
+            for next_pos, _ in _match_sequence(self.elements, source, current, captures):
+                if next_pos > current and next_pos not in seen:
+                    seen.add(next_pos)
+                    pending.append(next_pos)
 
 
 class TargetRule(StrEnum):

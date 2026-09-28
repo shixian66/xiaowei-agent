@@ -195,3 +195,12 @@ def test_blocked_names_are_still_listable() -> None:
     # 黑名单不提供元数据保密：列举库与表名照常放行。
     assert _prove("SHOW TABLES FROM app").relations == ()
     assert _prove("SHOW TABLES LIKE 'secret'").relations == ()
+
+
+def test_deep_nesting_is_a_closed_rejection_not_a_crash() -> None:
+    # 解析器递归溢出必须落到闭集拒绝码上，而不是让 RecursionError 冒出准入边界。
+    sql = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
+    assert len(sql.encode()) < 65_536
+    with pytest.raises(SqlGuardError) as caught:
+        _prove(sql)
+    assert caught.value.rejection is R.UNPARSABLE
