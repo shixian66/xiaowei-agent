@@ -2055,6 +2055,188 @@ async def test_timeout_is_a_distinct_persisted_step_outcome(
 # 重叠，并集必须覆盖本模块定义的全部用例——两条都由 test_task_store_bindings.py
 # 承重，因为"漏进分组"的用例在所有绑定里都收不到，看起来像写了测试，实际一次没跑。
 
+# --- F1：SQL 提交与水合（ADR-018 D2a/D4） ------------------------------------
+
+_F1_SQL = b"SELECT id FROM orders"
+
+
+def _sql_command(context: Any, *, sql: bytes = _F1_SQL, key: str = "sql-1") -> Any:
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    return SqlQuerySubmitCommand(
+        context=context,
+        sql_bytes=sql,
+        idempotency_key=key,
+        as_of=_dt.datetime(2026, 9, 28, 12, 0, tzinfo=_dt.UTC),
+    )
+
+
+async def _sql_task_grant(store: Any, context: Any, *, key: str, sql: bytes = _F1_SQL) -> Any:
+    result = await store.submit_sql_query(command=_sql_command(context, sql=sql, key=key))
+    attempt = await store.begin_task_attempt(
+        command=TaskAttemptCommand(
+            task_id=result.task.task_id,
+            intent=AttemptIntent.DISPATCH,
+            owner="worker-f1",
+            ttl_seconds=60,
+            trace_id="0" * 32,
+        )
+    )
+    assert attempt.applied
+    return result, attempt
+
+
+async def test_sql_submit_creates_one_task_with_an_artifact_submission(store, context) -> None:
+    import hashlib
+
+    from xiaowei_agent.contracts import ArtifactSubmission
+    from xiaowei_agent.persistence.store import SqlSubmitOutcome
+
+    command = _sql_command(context)
+    result = await store.submit_sql_query(command=command)
+
+    assert result.outcome is SqlSubmitOutcome.CREATED
+    task = result.task
+    assert task.status is TaskStatus.CREATED
+    assert (task.tenant_id, task.environment_id, task.actor) == (
+        context.tenant_id,
+        context.environment_id,
+        context.actor,
+    )
+    assert task.idempotency_key == command.idempotency_key
+    submission = await store.get_submission(lookup=lookup_for(task))
+    assert isinstance(submission, ArtifactSubmission)
+    assert submission.context == context
+    assert submission.as_of == command.as_of
+    assert submission.sql_hash == hashlib.sha256(_F1_SQL).hexdigest()
+    # CSPRNG 引用：不是任务号、hash 或可枚举序号。
+    assert len(submission.sql_ref) >= 43
+    assert submission.sql_ref not in {task.task_id, submission.sql_hash}
+
+
+async def test_sql_submit_replays_the_same_key_and_sql(store, context) -> None:
+    from xiaowei_agent.persistence.store import SqlSubmitOutcome
+
+    first = await store.submit_sql_query(command=_sql_command(context))
+    retry = await store.submit_sql_query(
+        command=_sql_command(context.model_copy(update={"trace_id": "1" * 32}))
+    )
+
+    assert retry.outcome is SqlSubmitOutcome.REPLAYED
+    assert retry.task.task_id == first.task.task_id
+    first_submission = await store.get_submission(lookup=lookup_for(first.task))
+    assert await store.get_submission(lookup=lookup_for(retry.task)) == first_submission
+    page = await store.list_tasks_for_actor(
+        query=ActorTaskPageQuery(
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            actor=context.actor,
+            limit=10,
+        )
+    )
+    assert [item.record.task_id for item in page.items] == [first.task.task_id]
+
+
+async def test_sql_submit_rejects_the_same_key_with_different_sql(store, context) -> None:
+    from xiaowei_agent.persistence.store import SqlSubmitOutcome
+
+    await store.submit_sql_query(command=_sql_command(context))
+    conflict = await store.submit_sql_query(
+        command=_sql_command(context, sql=b"SELECT 2")
+    )
+
+    assert conflict.outcome is SqlSubmitOutcome.IDEMPOTENCY_CONFLICT
+    assert conflict.task is None
+
+
+async def test_sql_and_conversation_keys_with_the_same_text_do_not_collide(
+    store, context
+) -> None:
+    from xiaowei_agent.persistence.store import SqlSubmitOutcome
+
+    conversation = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="shared"))
+    )
+    sql = await store.submit_sql_query(command=_sql_command(context, key="shared"))
+
+    assert sql.outcome is SqlSubmitOutcome.CREATED
+    assert sql.task.task_id != conversation.task_id
+    # 反向也不冲突：对话的同键重试仍回到原对话任务。
+    replay = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="shared"))
+    )
+    assert replay.task_id == conversation.task_id
+
+
+async def test_sql_task_dispatches_with_its_artifact_submission(store, context) -> None:
+    from xiaowei_agent.contracts import ArtifactSubmission
+
+    result, attempt = await _sql_task_grant(store, context, key="sql-dispatch")
+
+    assert isinstance(attempt.submission, ArtifactSubmission)
+    assert attempt.submission == await store.get_submission(lookup=lookup_for(result.task))
+
+
+async def test_load_sql_returns_bytes_and_extends_expiry(store, clock, context) -> None:
+    from xiaowei_agent.persistence.store import SQL_ARTIFACT_TTL
+
+    submitted_at = clock()
+    _, attempt = await _sql_task_grant(store, context, key="sql-load")
+    submission = attempt.submission
+    clock.advance(seconds=3600)
+
+    loaded = await store.load_sql_for_execution(
+        grant=attempt.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+    )
+
+    assert loaded.sql_bytes == _F1_SQL
+    assert (loaded.sql_ref, loaded.sql_hash) == (submission.sql_ref, submission.sql_hash)
+    assert loaded.created_at == submitted_at
+    # 创建时 now+24h，水合时再延到新的 now+24h。
+    assert loaded.expires_at == clock() + SQL_ARTIFACT_TTL
+    assert loaded.purged_at is None
+
+
+async def test_load_sql_classifies_every_read_failure(store, clock, context) -> None:
+    from xiaowei_agent.persistence.store import (
+        SqlArtifactExpiredError,
+        SqlArtifactUnavailableError,
+        SqlArtifactUnavailableReason,
+    )
+
+    _, alice = await _sql_task_grant(store, context, key="sql-alice")
+    bob_context = context.model_copy(update={"actor": "bob"})
+    _, bob = await _sql_task_grant(store, bob_context, key="sql-bob", sql=b"SELECT 3")
+    alice_sql = alice.submission
+
+    async def reason(grant: Any, sql_ref: str, sql_hash: str) -> Any:
+        with pytest.raises(SqlArtifactUnavailableError) as caught:
+            await store.load_sql_for_execution(
+                grant=grant, sql_ref=sql_ref, sql_hash=sql_hash
+            )
+        return caught.value.reason
+
+    assert await reason(alice.grant, "missing-ref", alice_sql.sql_hash) is (
+        SqlArtifactUnavailableReason.NOT_FOUND
+    )
+    assert await reason(bob.grant, alice_sql.sql_ref, alice_sql.sql_hash) is (
+        SqlArtifactUnavailableReason.SCOPE_MISMATCH
+    )
+    assert await reason(alice.grant, alice_sql.sql_ref, "0" * 64) is (
+        SqlArtifactUnavailableReason.HASH_MISMATCH
+    )
+
+    clock.advance(seconds=24 * 3600)
+    with pytest.raises(SqlArtifactExpiredError):
+        await store.load_sql_for_execution(
+            grant=alice.grant, sql_ref=alice_sql.sql_ref, sql_hash=alice_sql.sql_hash
+        )
+    # 他人的已过期 SQL 仍是归属不符，不暴露“已过期”。
+    assert await reason(bob.grant, alice_sql.sql_ref, alice_sql.sql_hash) is (
+        SqlArtifactUnavailableReason.SCOPE_MISMATCH
+    )
+
+
 CONTRACT_CASES = (
     test_create_is_idempotent_by_key,
     test_new_task_has_initial_execution_accounting,
@@ -2165,6 +2347,16 @@ STEP_EXECUTION_CASES = (
     test_timeout_is_a_distinct_persisted_step_outcome,
 )
 
+F1_SQL_CASES = (
+    test_sql_submit_creates_one_task_with_an_artifact_submission,
+    test_sql_submit_replays_the_same_key_and_sql,
+    test_sql_submit_rejects_the_same_key_with_different_sql,
+    test_sql_and_conversation_keys_with_the_same_text_do_not_collide,
+    test_sql_task_dispatches_with_its_artifact_submission,
+    test_load_sql_returns_bytes_and_extends_expiry,
+    test_load_sql_classifies_every_read_failure,
+)
+
 ALL_GROUPS = {
     "contract": CONTRACT_CASES,
     "read": READ_CASES,
@@ -2172,4 +2364,5 @@ ALL_GROUPS = {
     "terminal_protection": TERMINAL_PROTECTION_CASES,
     "dispatch_attempt": DISPATCH_ATTEMPT_CASES,
     "step_execution": STEP_EXECUTION_CASES,
+    "f1_sql": F1_SQL_CASES,
 }

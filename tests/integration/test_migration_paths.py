@@ -1479,3 +1479,111 @@ async def test_w4a_config_actions_write_exactly_one_started_row_per_operation(
             sa.text("SELECT count(*) FROM admin_audit_events WHERE outcome = 'started'")
         )
     assert started == len(STARTABLE_ACTIONS)
+
+
+async def _submission_facts(engine: AsyncEngine, task_id: str) -> tuple[Any, ...]:
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                sa.text(
+                    "SELECT s.submission_digest, t.request_digest, "
+                    "t.idempotency_scope_digest FROM task_submissions s "
+                    "JOIN tasks t ON t.task_id = s.task_id WHERE s.task_id = :task_id"
+                ),
+                {"task_id": task_id},
+            )
+        ).one()
+    return tuple(row)
+
+
+async def _column(engine: AsyncEngine, table: str, column: str) -> tuple[Any, ...] | None:
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                sa.text(
+                    "SELECT is_nullable, column_default FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = :table "
+                    "AND column_name = :column"
+                ),
+                {"table": table, "column": column},
+            )
+        ).first()
+    return None if row is None else tuple(row)
+
+
+async def test_rev_0019_backfills_conversation_rows_without_touching_digests(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import lookup_for, make_submission
+
+    run_upgrade, run_downgrade = alembic_runners
+    submission = make_submission(context)
+    task = await store.create_task(submission=submission)
+    before = await _submission_facts(clean_database, task.task_id)
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0018_w4a_config_domains")
+        assert await _column(clean_database, "task_submissions", "input_kind") is None
+        assert await _column(clean_database, "task_submissions", "envelope") == ("NO", None)
+        assert "sql_artifacts" not in await _table_names(clean_database)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            kinds = (
+                await connection.execute(sa.text("SELECT input_kind FROM task_submissions"))
+            ).scalars().all()
+        assert kinds == ["conversation"]
+        # 回填用的默认值随后移除：新行必须显式写 input_kind。
+        assert await _column(clean_database, "task_submissions", "input_kind") == (
+            "NO",
+            None,
+        )
+        assert await _column(clean_database, "task_submissions", "envelope") == ("YES", None)
+        assert await _submission_facts(clean_database, task.task_id) == before
+        assert await store.get_submission(lookup=lookup_for(task)) == submission
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0019_downgrade_refuses_while_sql_facts_exist(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    import datetime as dt
+
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=context,
+            sql_bytes=b"SELECT 1",
+            idempotency_key="sql-downgrade",
+            as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+        )
+    )
+    try:
+        # 没有破坏性授权开关：旧 schema 无法表达 SQL 提交，一律拒绝。
+        for destructive in (False, True):
+            with pytest.raises(MigrationPreconditionError) as exc_info:
+                async with clean_database.begin() as connection:
+                    await connection.run_sync(
+                        run_downgrade, "0018_w4a_config_domains", destructive
+                    )
+            assert ("sql_artifact_submissions", 1) in exc_info.value.counts
+            assert ("sql_artifacts", 1) in exc_info.value.counts
+        async with clean_database.connect() as connection:
+            assert await connection.scalar(
+                sa.text("SELECT version_num FROM alembic_version")
+            ) == _head_revision()
+            assert await connection.scalar(
+                sa.text("SELECT count(*) FROM sql_artifacts")
+            ) == 1
+    finally:
+        await _restore_head(clean_database, run_upgrade)

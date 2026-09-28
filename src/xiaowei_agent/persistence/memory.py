@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from xiaowei_agent.contracts.web_navigation import WebReturnIntent
     from xiaowei_agent.persistence.admin_audit import AuditStage
     from xiaowei_agent.persistence.channel import ChannelBinding, ProjectionSubscription
+    from xiaowei_agent.persistence.store import SqlArtifactRecord
     from xiaowei_agent.persistence.web_session import OAuthState, WebSession
 
 
@@ -41,7 +42,9 @@ class InMemoryPersistenceState:
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self.tasks: dict[str, TaskRecord] = {}
-        self.task_ids_by_key: dict[tuple[str, str, str], str] = {}
+        # 对话键为 (tenant, environment, key)；SQL 键在末尾加 input_kind，两者分属不同作用域。
+        self.task_ids_by_key: dict[tuple[str, ...], str] = {}
+        self.sql_artifacts: dict[str, SqlArtifactRecord] = {}
         self.submissions: dict[str, TaskSubmission] = {}
         self.submission_digests: dict[str, str] = {}
         self.plans: dict[str, Any] = {}

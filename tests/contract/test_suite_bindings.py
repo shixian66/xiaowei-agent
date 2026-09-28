@@ -134,6 +134,8 @@ _BINDINGS: dict[str, tuple[str, str, str]] = {
         "step_execution",
         "memory",
     ),
+    "tests.contract.test_f1_sql_store": ("task_store", "f1_sql", "memory"),
+    "tests.integration.test_f1_submit_postgres": ("task_store", "f1_sql", "postgres"),
     "tests.integration.test_step_execution_postgres": (
         "task_store",
         "step_execution",

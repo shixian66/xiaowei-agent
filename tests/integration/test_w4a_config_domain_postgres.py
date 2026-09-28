@@ -47,7 +47,17 @@ from xiaowei_agent.persistence.web_session import (
 )
 
 _PREVIOUS = "0017_w3_admin_query_indexes"
-_HEAD = "0018_w4a_config_domains"
+
+
+def _head() -> str:
+    """拒绝降级后版本必须停在当前 head；head 随后续 revision 前移，不写死。"""
+    from alembic.script import ScriptDirectory
+
+    from xiaowei_agent.persistence.migrations.runner import alembic_config
+
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head is not None
+    return head
 _NOW = dt.datetime(2026, 9, 24, 9, 0, tzinfo=dt.UTC)
 
 
@@ -438,7 +448,7 @@ async def test_downgrade_refuses_w4a_facts_before_any_ddl(
         async with clean_database.begin() as connection:
             await connection.run_sync(run_downgrade, _PREVIOUS, allow_destructive)
     assert dict(caught.value.counts)[category] == 1
-    assert await _revision(clean_database) == _HEAD
+    assert await _revision(clean_database) == _head()
     async with clean_database.connect() as connection:
         columns = set(
             (

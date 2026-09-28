@@ -29,6 +29,7 @@ from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationReasonCode,
     ClarificationRecord,
+    ColumnSpec,
     ConfirmedSlot,
     ConfirmedTextValue,
     Contract,
@@ -194,6 +195,12 @@ _JSONB_PLAIN_PAYLOADS: dict[tuple[str, str], object] = {
     ("task_clarification_records", "confirmed_slots"): [
         dump_contract(_CONFIRMED_SLOT)
     ],
+    ("query_results", "columns"): [
+        dump_contract(ColumnSpec(ordinal=0, name="id", type="BIGINT")),
+        dump_contract(ColumnSpec(ordinal=1, name="id", type="VARCHAR")),
+    ],
+    # 行的带类型标签编码随唯一写入方 commit_step_result（计划 Task 10）落地，届时补样本。
+    ("query_results", "rows"): [],
 }
 
 _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {

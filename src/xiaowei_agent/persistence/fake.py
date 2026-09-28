@@ -16,6 +16,7 @@
 渠道绑定和投影状态同样只复用 ``persistence/channel.py`` 的纯判定。
 """
 
+import dataclasses
 import datetime as _dt
 import uuid
 from collections.abc import Mapping
@@ -25,6 +26,7 @@ from xiaowei_agent.contracts import (
     TERMINAL_STATUSES,
     ActorTaskPageQuery,
     ApprovalRequest,
+    ArtifactSubmission,
     ChannelKind,
     ConversationSubmission,
     DestinationKind,
@@ -150,10 +152,13 @@ from xiaowei_agent.persistence.channel import (
 )
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
+    classify_sql_artifact_read,
+    classify_sql_submit,
     classify_task_attempt,
     classify_transition,
     context_matches_envelope,
     dispatch_sort_key,
+    extended_sql_expiry,
     grant_is_current,
     is_dispatchable,
     is_stale_lease,
@@ -187,6 +192,7 @@ from xiaowei_agent.persistence.provider_state import (
     closed_receipts,
 )
 from xiaowei_agent.persistence.store import (
+    SQL_ARTIFACT_TTL,
     ClarificationParentRequiredError,
     Clock,
     ContextMismatchError,
@@ -195,6 +201,10 @@ from xiaowei_agent.persistence.store import (
     LeaseCommand,
     RetryCommand,
     RetryResult,
+    SqlArtifactRecord,
+    SqlQuerySubmitCommand,
+    SqlQuerySubmitResult,
+    SqlSubmitOutcome,
     StaleLeaseQuery,
     StepAttemptCommand,
     StepAttemptResult,
@@ -209,9 +219,12 @@ from xiaowei_agent.persistence.store import (
     UnscopedAuditEventError,
     attempt_terminal_event,
     clarification_parent_is_usable,
+    new_sql_ref,
+    raise_for_sql_artifact_read,
     reject_clarification_parent_on_plain_create,
     request_dedup_digest,
     retry_command_digest,
+    sql_request_dedup_digest,
     step_commit_digest,
     submission_digest,
     submission_matches_record,
@@ -2015,12 +2028,28 @@ class InMemoryTaskStore:
     ) -> TaskRecord:
         envelope = submission.envelope
         context = submission.context
+        return self._insert_task_locked(
+            submission=submission,
+            digest=digest,
+            idempotency_key=envelope.idempotency_key,
+            scope=(context.tenant_id, context.environment_id, envelope.idempotency_key),
+        )
+
+    def _insert_task_locked(
+        self,
+        *,
+        submission: TaskSubmission,
+        digest: str,
+        idempotency_key: str,
+        scope: tuple[str, ...],
+    ) -> TaskRecord:
+        context = submission.context
         record = TaskRecord(
             task_id=str(uuid.uuid4()),
             tenant_id=context.tenant_id,
             environment_id=context.environment_id,
             actor=context.actor,
-            idempotency_key=envelope.idempotency_key,
+            idempotency_key=idempotency_key,
             request_digest=digest,
             status=TaskStatus.CREATED,
             version=0,
@@ -2033,9 +2062,7 @@ class InMemoryTaskStore:
         self._records[record.task_id] = record
         self._state.submissions[record.task_id] = submission
         self._state.submission_digests[record.task_id] = submission_digest(submission)
-        self._by_key[
-            (context.tenant_id, context.environment_id, envelope.idempotency_key)
-        ] = record.task_id
+        self._by_key[scope] = record.task_id
         return record
 
     def _existing_task_for_submission_locked(
@@ -2119,6 +2146,84 @@ class InMemoryTaskStore:
             ):
                 raise TaskNotFoundError(task_id=clarification_parent_id)
             return self._create_task_locked(submission=submission, digest=digest)
+
+    async def submit_sql_query(
+        self, *, command: SqlQuerySubmitCommand
+    ) -> SqlQuerySubmitResult:
+        context = command.context
+        sql_hash = command.sql_hash
+        digest = sql_request_dedup_digest(
+            context, sql_hash=sql_hash, idempotency_key=command.idempotency_key
+        )
+        scope = (
+            context.tenant_id,
+            context.environment_id,
+            command.idempotency_key,
+            "sql_artifact",
+        )
+        async with self._lock:
+            existing_id = self._by_key.get(scope)
+            existing = None if existing_id is None else self._records[existing_id]
+            outcome = classify_sql_submit(
+                existing,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                idempotency_key=command.idempotency_key,
+                request_digest=digest,
+            )
+            if outcome is SqlSubmitOutcome.IDEMPOTENCY_CONFLICT:
+                return SqlQuerySubmitResult(outcome=outcome, task=None)
+            if outcome is SqlSubmitOutcome.REPLAYED:
+                return SqlQuerySubmitResult(outcome=outcome, task=existing)
+            now = self._clock()
+            sql_ref = new_sql_ref()
+            self._state.sql_artifacts[sql_ref] = SqlArtifactRecord(
+                sql_ref=sql_ref,
+                sql_hash=sql_hash,
+                sql_bytes=command.sql_bytes,
+                requester=context.actor,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                created_at=now,
+                expires_at=now + SQL_ARTIFACT_TTL,
+                purged_at=None,
+            )
+            record = self._insert_task_locked(
+                submission=ArtifactSubmission(
+                    input_kind="sql_artifact",
+                    context=context,
+                    as_of=command.as_of,
+                    sql_ref=sql_ref,
+                    sql_hash=sql_hash,
+                ),
+                digest=digest,
+                idempotency_key=command.idempotency_key,
+                scope=scope,
+            )
+            return SqlQuerySubmitResult(outcome=outcome, task=record)
+
+    async def load_sql_for_execution(
+        self, *, grant: TaskAttemptGrant, sql_ref: str, sql_hash: str
+    ) -> SqlArtifactRecord:
+        async with self._lock:
+            record = self._require(grant.task_id)
+            row = self._state.sql_artifacts.get(sql_ref)
+            now = self._clock()
+            decision = classify_sql_artifact_read(
+                row,
+                now=now,
+                requester=record.actor,
+                tenant_id=record.tenant_id,
+                environment_id=record.environment_id,
+                sql_hash=sql_hash,
+            )
+            available = raise_for_sql_artifact_read(row, decision)
+            extended = dataclasses.replace(
+                available,
+                expires_at=extended_sql_expiry(available.expires_at, now=now),
+            )
+            self._state.sql_artifacts[sql_ref] = extended
+            return extended
 
     async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         current = self._require(lookup.task_id)
