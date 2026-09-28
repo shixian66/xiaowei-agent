@@ -120,7 +120,9 @@ operation 声明需要 query 而 HydratedQuery 缺失、多余或 hash 不符时
 
 Runner 复用现有顺序（准入在 `begin_step_attempt` 之前）：水合 HydratedQuery → StepAdmission（ToolPolicy → SQLGuard
 `confirmed_readonly`）→ `begin_step_attempt` → 以受信 keyword-only 参数把 HydratedQuery 与进程内 `QueryResultBuffer`
-交给 `ToolGateway.invoke`。水合失败时不开始步骤、不消耗工具预算，任务以 `sql_artifact.expired` 或
+交给 `ToolGateway.invoke`。恢复判定先于 SQL 水合：step journal 中已有记录的步骤先由 `begin_step_attempt` 判定
+`ALREADY_COMMITTED`（采用旧结果）或 `BUDGET_EXHAUSTED`（`budget.tool_calls_exhausted`），不水合、Gateway 调用为 0；
+只有新步骤才按上述顺序执行。水合失败时不开始步骤、不消耗工具预算，任务以 `sql_artifact.expired` 或
 `sql_artifact.unavailable` FAILED（ADR-018 D4）。Gateway 重算 `tool_call_hash`，复核 target、config 与 bytes hash。
 结果行只进入 buffer；步骤成功时 Runner 先生成 `result_ref` 并写入 Evidence，`commit_step_result` 在同一事务里以它写入结果行（见 ADR-018 D3），
 ToolResult 与 Evidence 只以该引用指向结果。F1 不新增 target 排队锁、等待窗口或调度退让。

@@ -199,6 +199,10 @@ READ + RESTRICTED，无副作用步骤，不调用 ApprovalGate。执行前照�
 OperationSpec 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`，由 CapabilitySnapshot
 派生。`ToolCall.typed_args` 仍只接受 JSON 标量。`confirmed_artifact` 的 Runner 流程：
 
+0. 恢复判定先于 SQL 水合：该步骤在 step journal（Runner 已加载的 `load_step_executions`）中已有记录时，先调用现有
+   `begin_step_attempt` 由它权威判定——`ALREADY_COMMITTED` 采用已提交结果，`BUDGET_EXHAUSTED` 以
+   `budget.tool_calls_exhausted` FAILED——两者都不水合、不准入、Gateway 调用为 0；在 `max_tool_calls=1` 下其他判定
+   不应出现，出现即按现有 `RECOVERY_DRIFT_REASON` FAILED。只有 journal 中没有记录的新步骤才走下列顺序；
 1. 重新解析当前 target、policy 与 config revision；
 2. 在 StepAdmission 之前经 `load_sql_for_execution` 水合一次（SQLGuard 需要 bytes），构造不可变 HydratedQuery；失败时
    不开始步骤，任务以 `sql_artifact.expired` / `sql_artifact.unavailable` FAILED（§9.4）；
@@ -412,8 +416,8 @@ approval_ref、created_at、expires_at，只有 `requester_owner` 的 approval_r
   “已过期”；
 - 两类失败传到用户的路径（不新建失败任务、状态机、Store 或渲染框架）：
   - 追问作答：Store 异常经 `ChannelSubmissionService.submit` 原样透传（此时尚未 `bind_task`），由应用边界现有闭集
-    `classify_application_exception` 映射为 `ApplicationFailure.SQL_ARTIFACT_EXPIRED` / `SQL_ARTIFACT_UNAVAILABLE`；Web 与
-    JSON API 返回 409 `sql_artifact.expired` / `sql_artifact.unavailable`，`app.js` 显示对应固定文案并按确定失败处理；
+    `classify_application_exception` 映射为 `ApplicationFailure.SQL_ARTIFACT_EXPIRED` / `SQL_ARTIFACT_UNAVAILABLE`；Web 返回
+    409 `sql_artifact.expired` / `sql_artifact.unavailable`，`app.js` 显示对应固定文案并按确定失败处理；
     父任务不被消费、不建子任务、不访问 StarRocks；飞书（F1-3）复用同一分类；
   - worker 执行：Runner 在准入前水合，失败时不开始步骤，任务以对应终态码 FAILED；`project_terminal` 对无证据且属于
     这两码的 FAILED 任务返回同一固定文案，不交给 capability renderer；
@@ -438,7 +442,8 @@ PostgreSQL DELETE 不证明物理擦除；飞书聊天记录与 StarRocks 自身
 F1 不新增恢复状态机，沿用现有 step journal：`begin_step_attempt` 在同一事务里创建 started 并消耗工具预算；
 `max_tool_calls=1`，因此已开始但未提交的步骤再次领取时得到 `BUDGET_EXHAUSTED`，任务以 FAILED
 （`budget.tool_calls_exhausted`）结束，Gateway 调用次数为 0，不产生结果。回复把这种结局显示为“执行中断，结果未知，
-请重新发送 SQL”，不宣称查询已安全停止。已提交的步骤按现有规则 adopt，不重新查询。
+请重新发送 SQL”，不宣称查询已安全停止。已提交的步骤按现有规则 adopt，不重新查询。恢复判定先于 SQL 水合（§5.6
+第 0 步），因此恢复时 SQL 已过期或不可用也不会盖掉“结果未知”或已提交的结果。
 
 用户再发一次同一条 SQL 就是一次新任务，不是自动 retry。取消只关闭客户端连接；服务端终止无法证明时不得伪装为
 已安全停止。

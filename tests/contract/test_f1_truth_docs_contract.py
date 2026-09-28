@@ -483,3 +483,41 @@ def test_sql_artifact_failures_reach_the_user_on_both_paths() -> None:
     # F1-3 飞书复用同一分类，本轮只写要求。
     task_14 = plan[plan.index("### Task 14:") :]
     assert "复用 `classify_application_exception`" in task_14
+
+
+def test_recovery_facts_win_over_sql_rehydration() -> None:
+    # 恢复时只有 begin_step_attempt 能权威判定 ALREADY_COMMITTED / BUDGET_EXHAUSTED；
+    # 先水合会让“SQL 已过期”盖掉“结果未知”或已提交结果。
+    plan = _read(_PLAN)
+    task_10 = _task_block(plan, "### Task 10:")
+    for term in (
+        "step journal 中已有记录的步骤先调用 `begin_step_attempt`",
+        "已开始未提交 + SQL 过期或不可用",
+        "已提交 + SQL 过期或不可用",
+        "把水合挪回 journal 判定之前，两个组合用例必须转红",
+    ):
+        assert term in task_10, term
+    for name in (_SPEC, _ADR_009, "ARCHITECTURE.md"):
+        assert "恢复判定先于 SQL 水合" in _read(name), name
+    # 结果未知的结局没有证据；F1 renderer 自己处理，不按 capability 名称分支。
+    task_11 = _task_block(plan, "### Task 11:")
+    assert "`status=FAILED` 且无证据时渲染“执行中断，结果未知，请重新发送 SQL”" in task_11
+
+
+def test_clarification_sql_errors_only_touch_reachable_entries() -> None:
+    # JSON API /v1/tasks 不接受 clarification_parent_task_id，追问作答只经 Web；
+    # 不为不可达入口加分支。
+    plan = _read(_PLAN)
+    task_8 = _task_block(plan, "### Task 8:")
+    assert "`interfaces/api.py`" not in task_8
+    assert "JSON API" not in _read(_SPEC)
+    assert "API 与（F1-3）" not in _read(_ADR_018)
+    step_run = [line for line in task_8.splitlines() if "Step 2–4" in line]
+    assert len(step_run) == 1
+    for test_file in (
+        "tests/contract/test_channel_submission.py",
+        "tests/contract/test_web_task_api.py",
+        "tests/contract/test_task_view_runtime.py",
+        "tests/contract/test_web_static_assets.py",
+    ):
+        assert test_file in step_run[0], test_file
