@@ -60,6 +60,7 @@ class WorkerSettings(Protocol):
     worker_poll_interval_seconds: float
     dispatch_batch_limit: int
     worker_max_concurrent_tasks: int
+    worker_shutdown_grace_seconds: float
 
 
 class WorkerInfrastructureExhaustedError(RuntimeError):
@@ -112,7 +113,7 @@ class WorkerLoop:
         self._sleep = sleep
         self.owner = f"worker-{uuid.uuid4().hex}"
         self._log = StructuredLogTraceSink(worker_instance=self.owner)
-        # 按领取顺序保存在跑的尝试；dict 保序，失败按最早登记者上抛。
+        # 按领取顺序保存在跑的尝试；dict 保序，同类失败按最早登记者上抛。
         self._in_flight: dict[asyncio.Task[bool], None] = {}
 
     async def _log_committed(self, events: tuple[TraceEvent, ...]) -> None:
@@ -268,9 +269,14 @@ class WorkerLoop:
         return started
 
     def _reap(self) -> list[bool]:
-        """收走已结束的尝试；有失败则在全部收走后抛出最早登记的那个。"""
+        """收走全部已结束的尝试并按原串行语义分类上抛。
+
+        一批里可能同时有多个失败：致命错误（不变量、完整性等）优先于临时
+        ``PersistenceUnavailableError``，不能因为临时错误先登记就被丢掉。
+        """
         results: list[bool] = []
-        failure: BaseException | None = None
+        fatal: BaseException | None = None
+        transient: PersistenceUnavailableError | None = None
         for task in [task for task in self._in_flight if task.done()]:
             del self._in_flight[task]
             if task.cancelled():
@@ -278,10 +284,14 @@ class WorkerLoop:
             error = task.exception()
             if error is None:
                 results.append(task.result())
-            elif failure is None:
-                failure = error
-        if failure is not None:
-            raise failure
+            elif isinstance(error, PersistenceUnavailableError):
+                transient = transient or error
+            elif fatal is None:
+                fatal = error
+        if fatal is not None:
+            raise fatal
+        if transient is not None:
+            raise transient
         return results
 
     async def _cancel(self, tasks: Iterable[asyncio.Task[bool]]) -> None:
@@ -367,13 +377,41 @@ class WorkerLoop:
     async def run(self, stop: asyncio.Event) -> None:
         """运行到停止信号，或连续基础设施故障达到 fail-stop 窗口。
 
-        任何退出路径都先取消并等到在跑尝试退出，再返回或上抛；
-        被取消的尝试由 lease 过期后的既有恢复路径接手。
+        正常停机：停止领取，宽限内等在途尝试结束，超时才取消。fail-stop 或外部
+        取消：立即取消。被取消的尝试由 lease 过期后的既有恢复路径接手。
         """
         try:
             await self._run(stop)
+            await self._drain()
         finally:
             await self._cancel(self._in_flight)
+
+    async def _drain(self) -> None:
+        """正常停机收尾：已停止领取，只在 ``worker_shutdown_grace_seconds`` 内等待。"""
+        grace = asyncio.create_task(
+            self._sleep(self._settings.worker_shutdown_grace_seconds)
+        )
+        try:
+            while not grace.done():
+                pending = {task for task in self._in_flight if not task.done()}
+                if not pending:
+                    break
+                await asyncio.wait(
+                    {grace, *pending}, return_when=asyncio.FIRST_COMPLETED
+                )
+        finally:
+            grace.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await grace
+        try:
+            self._reap()
+        except PersistenceUnavailableError:
+            # 停机中不再退避重试：没写成的结果交给 lease 过期恢复，与被取消的尝试同路。
+            return
+        except PersistenceIntegrityError:
+            raise WorkerSystemFailureError(
+                "worker encountered a systemic failure"
+            ) from None
 
     async def _run(self, stop: asyncio.Event) -> None:
         first_failure_at: float | None = None
@@ -381,7 +419,7 @@ class WorkerLoop:
         while not stop.is_set():
             try:
                 # 先收已结束的尝试：后台失败与领取失败走同一套退避与 fail-stop。
-                self._reap()
+                completed = self._reap()
                 stopped = await self._dispatch_or_stop(stop)
             except PersistenceUnavailableError:
                 now = self._monotonic()
@@ -409,9 +447,12 @@ class WorkerLoop:
                 ) from None
             if stopped:
                 return
-            # 只有整轮没有基础设施异常，才清空窗口和退避计数。
-            first_failure_at = None
-            consecutive_failures = 0
+            # 只有整轮没有基础设施异常，才清空窗口和退避计数。并发下“整轮”指：
+            # 本轮有尝试干净结束，或没有尝试在跑。仅领取成功不算——刚启动的尝试
+            # 结果未知，执行阶段持续的故障必须能累计到 fail-stop。
+            if completed or not self._in_flight:
+                first_failure_at = None
+                consecutive_failures = 0
             if await self._wait_or_stop(
                 self._settings.worker_poll_interval_seconds,
                 stop,

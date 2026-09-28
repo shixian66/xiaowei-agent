@@ -7,7 +7,7 @@
 
 ## 0. 当前事实
 
-- **当前基线**：`main@905ba405a4e66d6dff5606618a015c241acdb852`（2026-09-26，PR #102 取消 W5-C 合入）。
+- **当前基线**：`main@a522212e19be4eaf2434f1eb847b36171143684e`（2026-09-28，PR #109 F1-0 设计 v9、真源/ADR 修订与 F1 详细计划合入）。
   开工时仍须核对实际最新 main；本文其余 SHA 都是证据对象，不是新的开工基线。
 - **W1a 写内核与 W1b 两个切片已离线实现并合入**，最强证据为 `tests`；该历史前置没有被 W2 取代。
 - **W2 离线范围已完成并收口**。计划 PR #71 与实现 PR #72–#74 均已合入；登录 context、
@@ -267,10 +267,10 @@ loopback `lan_http` 与合成凭据核对 1440/1280：`/` 落到登录页且无�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 项目目录 | 当前无已授权的在途实现分支；新工作从最新 main 建 `claude/<topic>`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
+| 项目目录 | 当前在途实现分支：`claude/f1-0b-worker-concurrency`（F1-0b PR-A，已获开工口令，待独立复审与负责人合并）；新工作从最新 main 建 `claude/<topic>`；基线只引用[第 0 节](#current-baseline)，不复制机器路径 |
 | 截止时间 | 2026-09-26（Asia/Shanghai） |
 | 阶段 | W5 详细计划 Approved V0.2、W5-A、W5-B 已分别由 PR #83、PR #84、PR #85 合入；W5 离线范围已完成；完整功能部署验收总控计划已批准（PR #88，仅计划）；S0 详细计划已批准（PR #89），S0 实现已由 PR #90 合入；W5-C 已取消（PR #102） |
-| 下一步 | F1 设计 v7 已批准并由 PR #108 合入（`91cadd4`）；负责人随后决定按“最小化实现”修订为 v9：SQL 查询作为 agent 普通能力接入统一对话主链，网页与飞书直接发 SQL，目标不唯一时追问，取消排队锁与配额，SQL 64 KiB，结果一次读完，只读清单写在代码里，worker 同时处理 4 个任务。该范围命名为 F1-Core 查询执行内核，完成后只标记“F1-Core 完成”；“小维 Agent 查询能力完成”另需 F1-NL，结果说明只在报错时做（确定性模板，不用模型）。F1-0（设计 v9 + 真源/ADR 修订 + [F1 详细计划](docs/superpowers/plans/2026-09-27-f1-starrocks-readonly-query.md)）在分支 `claude/f1-0-docs-plan`，经多轮 exact-SHA 复审后，2026-09-28 负责人接受 PR #109 `e9fdb30`（F1-0a 批准，ADR-018 与各 F1 修订 Accepted），PR #109 已由负责人合并（`a522212`）；负责人已下达 F1-0b PR-A（worker 有界并发）开工口令，实现在分支 `claude/f1-0b-worker-concurrency`，待独立复审与负责人合并；PR-B/PR-C 及之后每个切片（含 F1-1）仍需负责人明确开工口令，真实 StarRocks 调用另需 F1-H 现场 GO。W5-C 已取消（2026-09-26）；两容器 → RI6 部署方向仍暂缓，各需独立计划与 GO。此前不做部署、canary、UAT；真实调用另有独立门 |
+| 下一步 | F1 设计 v7 已批准并由 PR #108 合入（`91cadd4`）；负责人随后决定按“最小化实现”修订为 v9：SQL 查询作为 agent 普通能力接入统一对话主链，网页与飞书直接发 SQL，目标不唯一时追问，取消排队锁与配额，SQL 64 KiB，结果一次读完，只读清单写在代码里，worker 同时处理 4 个任务。该范围命名为 F1-Core 查询执行内核，完成后只标记“F1-Core 完成”；“小维 Agent 查询能力完成”另需 F1-NL，结果说明只在报错时做（确定性模板，不用模型）。F1-0（设计 v9 + 真源/ADR 修订 + [F1 详细计划](docs/superpowers/plans/2026-09-27-f1-starrocks-readonly-query.md)）在分支 `claude/f1-0-docs-plan`，经多轮 exact-SHA 复审后，2026-09-28 负责人接受 PR #109 `e9fdb30`（F1-0a 批准，ADR-018 与各 F1 修订 Accepted），PR #109 已由负责人合并（`a522212`）；负责人已下达 F1-0b PR-A（worker 有界并发）开工口令，实现在分支 `claude/f1-0b-worker-concurrency`（新增 `XIAOWEI_WORKER_MAX_CONCURRENT_TASKS` 默认 4、`XIAOWEI_WORKER_SHUTDOWN_GRACE_SECONDS` 默认 5 秒，`XIAOWEI_DB_POOL_SIZE` 默认改为 9），待独立复审与负责人合并；PR-B/PR-C 及之后每个切片（含 F1-1）仍需负责人明确开工口令，真实 StarRocks 调用另需 F1-H 现场 GO。W5-C 已取消（2026-09-26）；两容器 → RI6 部署方向仍暂缓，各需独立计划与 GO。此前不做部署、canary、UAT；真实调用另有独立门 |
 | 总体计划 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) 路线 V3.1；既有 M/W/RI 阶段批准和退出门不变。W3 后续增强延期但未取消，且不作为 W4a/W4b 的进入条件 |
 | 本机工具链 | Python 3.11.16；依赖由 uv.lock 锁定，标准安装与四门见 README / ADR-008；实际环境在每轮验收时记录 |
 | 分支保护 | 2026-09-01 的记录为 private + GitHub Free 不支持、API 403，负责人批准延后；本轮未重查套餐或保护设置，不能假定已受保护 |

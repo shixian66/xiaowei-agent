@@ -263,6 +263,9 @@ class Settings(BaseModel):
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
     dispatch_batch_limit: int = Field(default=10, gt=0, le=100)
     worker_max_concurrent_tasks: int = Field(default=4, ge=1, le=16)
+    # 正常停机时等在途任务结束的宽限；超时才取消，由 lease 过期恢复接手。
+    # 上限 8 秒：Docker 默认 10 秒后强杀，留出取消与关闭连接的时间。
+    worker_shutdown_grace_seconds: float = Field(default=5.0, gt=0, le=8)
     api_request_body_limit_bytes: int = Field(default=131_072, gt=0, lt=1_048_576)
     postgres_host: StrictStr = "postgres"
     postgres_port: int = Field(default=5432, gt=0, le=65_535)
@@ -617,6 +620,7 @@ _FIELD_TO_ENV: Final[Mapping[str, str]] = {
     "worker_poll_interval_seconds": "XIAOWEI_WORKER_POLL_INTERVAL_SECONDS",
     "dispatch_batch_limit": "XIAOWEI_DISPATCH_BATCH_LIMIT",
     "worker_max_concurrent_tasks": "XIAOWEI_WORKER_MAX_CONCURRENT_TASKS",
+    "worker_shutdown_grace_seconds": "XIAOWEI_WORKER_SHUTDOWN_GRACE_SECONDS",
     "api_request_body_limit_bytes": "XIAOWEI_API_REQUEST_BODY_LIMIT_BYTES",
     "postgres_host": "XIAOWEI_POSTGRES_HOST",
     "postgres_port": "XIAOWEI_POSTGRES_PORT",
