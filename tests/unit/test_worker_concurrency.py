@@ -391,7 +391,7 @@ def _unavailable() -> PersistenceUnavailableError:
 @pytest.mark.asyncio
 async def test_a_fatal_failure_wins_over_a_transient_one_in_the_same_batch() -> None:
     clock = ManualClock(start=_NOW)
-    store, (transient, fatal) = await _store_with_tasks(clock, 2)
+    store, (transient, _) = await _store_with_tasks(clock, 2)
     both_entered = asyncio.Event()
     arrivals: list[str] = []
 
