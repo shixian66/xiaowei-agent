@@ -267,18 +267,9 @@ async def test_limit_one_keeps_the_previous_one_at_a_time_order(
         await asyncio.sleep(0.002)
 
     runtime = _Runtime(record)
-    first_round = _worker(store, runtime, clock, worker_max_concurrent_tasks=1)
-    assert await asyncio.wait_for(first_round.poll_once(), _WAIT_SECONDS) == 1
-    stop = asyncio.Event()
-    running = asyncio.create_task(
-        _worker(store, runtime, clock, worker_max_concurrent_tasks=1).run(stop)
-    )
-    for _ in range(200):
-        if len(runtime.grants) == 3:
-            break
-        await asyncio.sleep(0.002)
-    stop.set()
-    await asyncio.wait_for(running, _WAIT_SECONDS)
+    # 旧 Worker 一轮 poll_once 逐个跑完列出的全部任务并返回完成数；上限 1 时必须一致。
+    worker = _worker(store, runtime, clock, worker_max_concurrent_tasks=1)
+    assert await asyncio.wait_for(worker.poll_once(), _WAIT_SECONDS) == 3
 
     assert claimed == task_ids
     assert [grant.task_id for grant in runtime.grants] == task_ids
@@ -489,17 +480,48 @@ async def test_claiming_alone_does_not_reset_the_infrastructure_window(
 
 
 @pytest.mark.asyncio
-async def test_a_clean_completion_still_resets_the_infrastructure_window() -> None:
+@pytest.mark.parametrize("limit", [1, 4])
+async def test_alternating_failures_and_successes_still_fail_stop(limit: int) -> None:
+    # 旧串行语义：一轮里只要有一次基础设施故障就不清零，个别任务成功不算整轮干净。
     clock = ManualClock(start=_NOW)
-    store, task_ids = await _store_with_tasks(clock, 6)
+    store, task_ids = await _store_with_tasks(clock, 24)
     monotonic = _Monotonic()
-    healthy = set(task_ids[1::2])
+    failing = set(task_ids[0::2])
 
     async def alternate(grant: TaskAttemptGrant) -> None:
-        if grant.task_id not in healthy:
+        if grant.task_id in failing:
             raise _unavailable()
 
-    runtime = _Runtime(alternate)
+    stop = asyncio.Event()
+    running = asyncio.create_task(
+        _worker(
+            store,
+            _Runtime(alternate),
+            clock,
+            sleep=monotonic.sleep,
+            monotonic=monotonic,
+            worker_max_concurrent_tasks=limit,
+            infrastructure_backoff_base_seconds=1.0,
+            infrastructure_backoff_cap_seconds=1.0,
+            continuous_infrastructure_failure_window_seconds=2.5,
+        ).run(stop)
+    )
+    await _finish(running, stop)
+    with pytest.raises(WorkerInfrastructureExhaustedError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_a_fully_clean_round_resets_the_infrastructure_window() -> None:
+    # 对照：故障之后出现完整无故障的一轮（此处为空闲轮），窗口清零，后来的故障重新计时。
+    clock = ManualClock(start=_NOW)
+    store, _ = await _store_with_tasks(clock, 1)
+    monotonic = _Monotonic()
+
+    async def fail(_: TaskAttemptGrant) -> None:
+        raise _unavailable()
+
+    runtime = _Runtime(fail)
     stop = asyncio.Event()
     running = asyncio.create_task(
         _worker(
@@ -508,17 +530,21 @@ async def test_a_clean_completion_still_resets_the_infrastructure_window() -> No
             clock,
             sleep=monotonic.sleep,
             monotonic=monotonic,
-            worker_max_concurrent_tasks=1,
             infrastructure_backoff_base_seconds=1.0,
             infrastructure_backoff_cap_seconds=1.0,
-            continuous_infrastructure_failure_window_seconds=1.5,
+            continuous_infrastructure_failure_window_seconds=2.5,
         ).run(stop)
     )
     for _ in range(500):
-        if len(runtime.grants) == len(task_ids):
+        if monotonic.value >= 10:
+            break
+        await asyncio.sleep(0)
+    await _add_task(store, 1)
+    for _ in range(500):
+        if len(runtime.grants) == 2 and monotonic.value >= 20:
             break
         await asyncio.sleep(0)
     stop.set()
-    # 故障与成功交替：每次成功完成都清空窗口，不会误判为连续故障。
+    # 两次故障相隔远超窗口，中间有干净的空闲轮：不能误判为连续故障。
     await asyncio.wait_for(running, _WAIT_SECONDS)
-    assert len(runtime.grants) == len(task_ids)
+    assert len(runtime.grants) == 2

@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import uuid
 from collections.abc import Callable, Collection, Coroutine, Iterable
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Protocol, TypeAlias
 
@@ -88,6 +89,20 @@ _LOSER_REJECTIONS = frozenset(
 )
 
 
+@dataclass
+class _Round:
+    """一次 poll iteration：一次列出的候选批次，加上它启动的全部尝试。
+
+    故障窗口只在一整轮都没有基础设施故障时清零（M5 §3.3）；并发下几轮会重叠，
+    所以任何一轮存续期间出现故障都会把它标脏。
+    """
+
+    attempts: set[asyncio.Task[bool]] = field(default_factory=set)
+    completed: int = 0
+    dispatched: bool = False
+    dirty: bool = False
+
+
 class WorkerLoop:
     """只负责任务调度；解释、规划、准入和执行均委托 Runtime。
 
@@ -113,8 +128,9 @@ class WorkerLoop:
         self._sleep = sleep
         self.owner = f"worker-{uuid.uuid4().hex}"
         self._log = StructuredLogTraceSink(worker_instance=self.owner)
-        # 按领取顺序保存在跑的尝试；dict 保序，同类失败按最早登记者上抛。
-        self._in_flight: dict[asyncio.Task[bool], None] = {}
+        # 按领取顺序保存在跑的尝试及其所属轮次；dict 保序，同类失败按最早登记者上抛。
+        self._in_flight: dict[asyncio.Task[bool], _Round] = {}
+        self._rounds: list[_Round] = []
 
     async def _log_committed(self, events: tuple[TraceEvent, ...]) -> None:
         for event in events:
@@ -228,20 +244,31 @@ class WorkerLoop:
         except LeaseLostError:
             return False
 
-    async def _dispatch(self) -> list[asyncio.Task[bool]]:
-        """只在有空位时列出并领取任务；领到的尝试在后台并发执行。"""
-        free = self._settings.worker_max_concurrent_tasks - len(self._in_flight)
-        if free <= 0:
-            return []
+    async def _wait_for_slot(self) -> None:
+        """收走已结束的尝试，直到有空位；等待中收到的失败照常上抛。"""
+        self._reap()
+        while len(self._in_flight) >= self._settings.worker_max_concurrent_tasks:
+            await asyncio.wait(
+                tuple(self._in_flight), return_when=asyncio.FIRST_COMPLETED
+            )
+            self._reap()
+
+    async def _dispatch(self, round_: _Round) -> None:
+        """列出一批候选并逐个领取；每次领取前都等到有空位。
+
+        与旧串行 Worker 同一轮语义：列出的批次在本轮内依次领取，其间任何失败
+        都中止本轮。领到的尝试在后台并发执行。
+        """
+        await self._wait_for_slot()
         candidates = await self._tasks.list_dispatchable_tasks(
             query=DispatchQuery(
                 tenant_id=self._settings.tenant_id,
                 environment_id=self._settings.environment_id,
-                limit=min(self._settings.dispatch_batch_limit, free),
+                limit=self._settings.dispatch_batch_limit,
             )
         )
-        started: list[asyncio.Task[bool]] = []
         for candidate in candidates:
+            await self._wait_for_slot()
             trace_id = uuid.uuid4().hex
             attempt = await self._tasks.begin_task_attempt(
                 command=TaskAttemptCommand(
@@ -264,26 +291,26 @@ class WorkerLoop:
                     grant=grant, submission=submission, trace_id=trace_id
                 )
             )
-            self._in_flight[task] = None
-            started.append(task)
-        return started
+            self._in_flight[task] = round_
+            round_.attempts.add(task)
+        round_.dispatched = True
 
-    def _reap(self) -> list[bool]:
-        """收走全部已结束的尝试并按原串行语义分类上抛。
+    def _reap(self) -> None:
+        """收走全部已结束的尝试，计入所属轮次，并按原串行语义分类上抛。
 
         一批里可能同时有多个失败：致命错误（不变量、完整性等）优先于临时
         ``PersistenceUnavailableError``，不能因为临时错误先登记就被丢掉。
         """
-        results: list[bool] = []
         fatal: BaseException | None = None
         transient: PersistenceUnavailableError | None = None
         for task in [task for task in self._in_flight if task.done()]:
-            del self._in_flight[task]
+            round_ = self._in_flight.pop(task)
+            round_.attempts.discard(task)
             if task.cancelled():
                 continue
             error = task.exception()
             if error is None:
-                results.append(task.result())
+                round_.completed += int(task.result())
             elif isinstance(error, PersistenceUnavailableError):
                 transient = transient or error
             elif fatal is None:
@@ -292,7 +319,6 @@ class WorkerLoop:
             raise fatal
         if transient is not None:
             raise transient
-        return results
 
     async def _cancel(self, tasks: Iterable[asyncio.Task[bool]]) -> None:
         """取消并等到尝试真正退出；续租子任务随 heartbeat scope 一起收净。"""
@@ -301,22 +327,36 @@ class WorkerLoop:
             task.cancel()
         await asyncio.gather(*owned, return_exceptions=True)
         for task in owned:
-            self._in_flight.pop(task, None)
+            round_ = self._in_flight.pop(task, None)
+            if round_ is not None:
+                round_.attempts.discard(task)
 
     async def poll_once(self) -> int:
         """领取一轮并等本轮尝试全部结束；任一异常取消其余尝试后向上抛。"""
+        round_ = _Round()
         with worker_log_context(self.owner):
-            started = await self._dispatch()
             try:
-                if started:
-                    await asyncio.wait(started, return_when=asyncio.FIRST_EXCEPTION)
-                return sum(self._reap())
+                await self._dispatch(round_)
+                if round_.attempts:
+                    await asyncio.wait(
+                        tuple(round_.attempts), return_when=asyncio.FIRST_EXCEPTION
+                    )
+                self._reap()
+                return round_.completed
             finally:
-                await self._cancel(started)
+                await self._cancel(tuple(round_.attempts))
 
-    async def _dispatch_logged(self) -> None:
+    async def _dispatch_logged(self, round_: _Round) -> None:
         with worker_log_context(self.owner):
-            await self._dispatch()
+            await self._dispatch(round_)
+
+    def _close_finished_rounds(self) -> bool:
+        """移除已派发且尝试全部结束的轮次；返回其中是否有一整轮没有故障。"""
+        clean = False
+        for round_ in [r for r in self._rounds if r.dispatched and not r.attempts]:
+            self._rounds.remove(round_)
+            clean = clean or not round_.dirty
+        return clean
 
     async def _wait_or_stop(
         self,
@@ -352,8 +392,8 @@ class WorkerLoop:
                 if not task.done():
                     task.cancel()
 
-    async def _dispatch_or_stop(self, stop: asyncio.Event) -> bool:
-        dispatcher = asyncio.create_task(self._dispatch_logged())
+    async def _dispatch_or_stop(self, stop: asyncio.Event, round_: _Round) -> bool:
+        dispatcher = asyncio.create_task(self._dispatch_logged(round_))
         stopper = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait(
@@ -417,11 +457,16 @@ class WorkerLoop:
         first_failure_at: float | None = None
         consecutive_failures = 0
         while not stop.is_set():
+            round_ = _Round()
+            self._rounds.append(round_)
             try:
-                # 先收已结束的尝试：后台失败与领取失败走同一套退避与 fail-stop。
-                completed = self._reap()
-                stopped = await self._dispatch_or_stop(stop)
+                # 后台失败与领取失败都在本轮派发中上抛，走同一套退避与 fail-stop。
+                stopped = await self._dispatch_or_stop(stop, round_)
             except PersistenceUnavailableError:
+                # 所有尚未结束的轮次都见到了这次故障，不能再算整轮干净；本轮就此中止。
+                for open_round in self._rounds:
+                    open_round.dirty = True
+                round_.dispatched = True
                 now = self._monotonic()
                 if first_failure_at is None:
                     first_failure_at = now
@@ -447,10 +492,9 @@ class WorkerLoop:
                 ) from None
             if stopped:
                 return
-            # 只有整轮没有基础设施异常，才清空窗口和退避计数。并发下“整轮”指：
-            # 本轮有尝试干净结束，或没有尝试在跑。仅领取成功不算——刚启动的尝试
-            # 结果未知，执行阶段持续的故障必须能累计到 fail-stop。
-            if completed or not self._in_flight:
+            # 只有整轮没有基础设施异常，才清空窗口和退避计数（M5 §3.3）。领取成功或
+            # 个别尝试成功都不算；要等一整轮（列出、领取及其全部尝试）干净结束。
+            if self._close_finished_rounds():
                 first_failure_at = None
                 consecutive_failures = 0
             if await self._wait_or_stop(
