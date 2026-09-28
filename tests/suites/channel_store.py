@@ -919,13 +919,11 @@ def _source_claim(
     at: dt.datetime,
     *,
     ref: str = "event-kind",
-    channel: ChannelKind = ChannelKind.WEB,
     environment_id: str = "dev",
 ) -> ClaimSourceEventCommand:
     return ClaimSourceEventCommand(
         tenant_id="dev-local",
         environment_id=environment_id,
-        channel=channel,
         source_event_ref=ref,
         input_kind=kind,  # type: ignore[arg-type]
         created_at=at,
@@ -944,15 +942,12 @@ async def test_source_event_keeps_the_first_submission_kind(
         await channel_store.claim_source_event(command=_source_claim("conversation", clock()))
 
 
-async def test_source_claims_are_scoped_like_bindings(
+async def test_source_claims_are_scoped_by_environment_and_source_event(
     channel_store: Any, clock: Any
 ) -> None:
     await channel_store.claim_source_event(command=_source_claim("conversation", clock()))
 
-    # 另一渠道、另一环境或另一来源事件各自独立选定类型。
-    await channel_store.claim_source_event(
-        command=_source_claim("sql_artifact", clock(), channel=ChannelKind.FEISHU_PRIVATE)
-    )
+    # 另一环境或另一来源事件各自独立选定类型；渠道已编码在来源摘要里。
     await channel_store.claim_source_event(
         command=_source_claim("sql_artifact", clock(), environment_id="test")
     )
@@ -983,7 +978,7 @@ CHANNEL_STORE_CASES = (
     test_completed_projection_is_terminal_against_claims_and_late_updates,
     test_dead_letter_projection_is_terminal_against_reclaim,
     test_source_event_keeps_the_first_submission_kind,
-    test_source_claims_are_scoped_like_bindings,
+    test_source_claims_are_scoped_by_environment_and_source_event,
 )
 
 ALL_GROUPS = {"channel_store": CHANNEL_STORE_CASES}

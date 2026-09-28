@@ -459,27 +459,21 @@ CHANNEL_BINDINGS: Final = sa.Table(
     ),
 )
 
-# 来源事件在创建任务之前选定的提交类型（ADR-018 D2 渠道侧约束）。主键与
-# ``uq_channel_bindings_source`` 同一唯一键；只保存类型，不保存消息文本或 SQL。
+# 来源事件在创建任务之前选定的提交类型（ADR-018 D2 渠道侧约束）。source_event_ref 是
+# 覆盖 channel 与 actor 的摘要，主键不再单列 channel；只保存类型，不保存消息文本或 SQL。
 CHANNEL_SOURCE_CLAIMS: Final = sa.Table(
     "channel_source_claims",
     METADATA,
     sa.Column("tenant_id", sa.Text, nullable=False),
     sa.Column("environment_id", sa.Text, nullable=False),
-    sa.Column("channel", sa.Text, nullable=False),
     sa.Column("source_event_ref", sa.Text, nullable=False),
     sa.Column("input_kind", sa.Text, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint(
         "tenant_id",
         "environment_id",
-        "channel",
         "source_event_ref",
         name="pk_channel_source_claims",
-    ),
-    sa.CheckConstraint(
-        "channel IN ('feishu_private', 'feishu_group', 'web')",
-        name="ck_channel_source_claims_channel",
     ),
     sa.CheckConstraint(
         "input_kind IN ('conversation', 'sql_artifact')",

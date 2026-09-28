@@ -719,7 +719,6 @@ class PostgresChannelStore:
                 .values(
                     tenant_id=command.tenant_id,
                     environment_id=command.environment_id,
-                    channel=command.channel.value,
                     source_event_ref=command.source_event_ref,
                     input_kind=command.input_kind,
                     created_at=command.created_at,
@@ -732,7 +731,6 @@ class PostgresChannelStore:
                     sa.select(CHANNEL_SOURCE_CLAIMS.c.input_kind).where(
                         CHANNEL_SOURCE_CLAIMS.c.tenant_id == command.tenant_id,
                         CHANNEL_SOURCE_CLAIMS.c.environment_id == command.environment_id,
-                        CHANNEL_SOURCE_CLAIMS.c.channel == command.channel.value,
                         CHANNEL_SOURCE_CLAIMS.c.source_event_ref
                         == command.source_event_ref,
                     )

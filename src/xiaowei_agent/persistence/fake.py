@@ -319,7 +319,6 @@ class InMemoryChannelStore:
             source_key = (
                 command.tenant_id,
                 command.environment_id,
-                command.channel.value,
                 command.source_event_ref,
             )
             chosen = self._state.channel_source_kinds.setdefault(

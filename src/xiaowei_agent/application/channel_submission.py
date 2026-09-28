@@ -304,7 +304,6 @@ class ChannelSubmissionService:
                 command=ClaimSourceEventCommand(
                     tenant_id=principal.tenant_id,
                     environment_id=principal.environment_id,
-                    channel=command.channel,
                     source_event_ref=references.source_event_ref,
                     input_kind=input_kind,
                     created_at=command.submitted_at,

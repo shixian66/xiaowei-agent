@@ -154,8 +154,9 @@ SQL 只有作为纯 SQL 消息被识别后才可能执行”这一保证由 §5.
 识别为 SQL 后，服务调用 `TaskStore.submit_sql_query`，在**同一个 PostgreSQL 事务**内写 SqlArtifact（原始 bytes、
 SHA-256、requester、tenant、environment、created_at）并创建 task 与 `ArtifactSubmission`；幂等键沿用渠道现有派生规则。
 TaskStore 让对话与 SQL 的幂等键分属不同作用域（ADR-018 D2），渠道来源事件却只有一个：服务在创建任务**之前**
-原子写入来源占位（`channel_source_claims`，与渠道绑定同一唯一键，只记录提交类型），第一次写入的类型胜出，同一
-来源事件的另一种类型按幂等冲突拒绝，不留下未绑定的任务或 SqlArtifact。
+原子写入来源占位（`channel_source_claims`，按 tenant、environment 与来源摘要唯一，只记录提交类型），第一次写入的
+类型胜出，同一来源事件的另一种类型按幂等冲突拒绝，不留下未绑定的任务或 SqlArtifact。升级前已建任务（包括绑定
+失败、尚未绑定的任务）由 migration 按任务幂等键回填占位（ADR-018 D2）。
 
 **同一个分类点。**识别端口由 `TaskViewRuntime` 持有，所有文本入口共用：渠道提交据此分流；`submit_task` 与
 `submit_clarification_child` 据此拒绝纯 SQL 的普通对话与澄清回答（`sql_message.not_accepted`，HTTP 422），在写入

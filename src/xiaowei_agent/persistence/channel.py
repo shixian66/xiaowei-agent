@@ -175,14 +175,15 @@ SourceSubmissionKind: TypeAlias = Literal["conversation", "sql_artifact"]
 class ClaimSourceEventCommand(Contract):
     """在创建任务之前为渠道来源事件选定提交类型（ADR-018 D2 的渠道侧约束）。
 
-    TaskStore 让对话与 SQL 的幂等键分属不同作用域；渠道来源引用只有一个。占位按绑定的
-    同一唯一键（tenant、environment、channel、source_event_ref）原子写入，第一次写入的类型
-    胜出，之后同类型重放通过、另一类型冲突。占位不保存消息文本或 SQL。
+    TaskStore 让对话与 SQL 的幂等键分属不同作用域；渠道来源引用只有一个。占位按
+    （tenant、environment、source_event_ref）原子写入，第一次写入的类型胜出，之后同类型
+    重放通过、另一类型冲突。``source_event_ref`` 是覆盖 tenant、environment、channel、actor
+    与事件标识的摘要，任务幂等键 ``channel:v1:<摘要>`` 也由它派生，所以占位不再单列
+    channel：升级前已建任务、尚未绑定的事件也能从任务本身回填占位。占位不保存消息文本或 SQL。
     """
 
     tenant_id: StrictStr
     environment_id: StrictStr
-    channel: ChannelKind
     source_event_ref: StrictStr
     input_kind: SourceSubmissionKind
     created_at: AwareDatetime
