@@ -96,8 +96,11 @@ SqlArtifactStore 不提供公开的提交方法，事务内的表写入只是共
   `load_sql_for_execution` 水合（同一事务 `SELECT … FOR UPDATE` 后分类，可用时延到 `now + 24h`，失败则 Gateway 调用为 0、
   任务 FAILED）、`commit_step_result` 成功提交（同事务延到结果的 `expires_at`）；
 - 取 SQL 失败由共用纯函数 `classify_sql_artifact_read` 按固定顺序分类：不存在、归属不符、hash 不符 →
-  `SqlArtifactUnavailableError`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，原因只进审计，用户侧统一
+  `SqlArtifactUnavailableError`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，具体原因仅用于内部分类，不向用户暴露，用户侧统一
   通用失败、不泄漏存在性）；之后才判已清除或过期 → `SqlArtifactExpiredError`（`sql_artifact.expired`）；
+- 两类失败经应用边界现有闭集 `classify_application_exception` 映射为 `sql_artifact.expired` / `sql_artifact.unavailable`
+  传到 Web、API 与（F1-3）飞书提示；worker 水合失败时不开始步骤，任务以对应终态码 FAILED；不新建失败任务、状态机、
+  Store 或渲染框架；
 - `TaskStore.transition` 不改 SQL 过期时间；从未水合的任务按创建或澄清时写入的时间过期，因此没有 SQL 会永久保存；
 - SQL 清除为 tombstone：`sql_bytes` 置空并写 `purged_at`，`ck_sql_artifacts_purge_shape` 要求
   `(purged_at IS NULL) = (sql_bytes IS NOT NULL)`；清除的 UPDATE 与水合的 `SELECT … FOR UPDATE` 争同一行锁而串行，

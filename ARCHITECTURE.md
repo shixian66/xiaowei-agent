@@ -151,8 +151,9 @@ SQL 查询是普通 capability，走上图同一条主链；差别只在交互�
             → 唯一 F1 target：继续；0 个：拒绝
             → 多个：ClarificationRecord（选项）→ CLARIFICATION_REQUIRED → 本人精确作答（网页 / 飞书引用回复）
        → PlanCompiler → ExecutionDisclosure → WorkflowRunner
+            → HydratedQuery 水合（失败即 sql_artifact.expired / unavailable FAILED，不开始步骤）
+            → StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)
             → begin_step_attempt（max_tool_calls=1，已开始未提交的步骤不重放）
-            → HydratedQuery 水合 → StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)
             → ToolGateway → target-bound StarRocks adapter → 进程内 QueryResultBuffer
             → commit_step_result（同一事务写步骤结果、Evidence、结果行与 requester grant）
        → Reflection → RenderPayload（状态、行数、截断 + 锁定结果页链接，不含数据）

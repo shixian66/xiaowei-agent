@@ -199,12 +199,13 @@ READ + RESTRICTED，无副作用步骤，不调用 ApprovalGate。执行前照�
 OperationSpec 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`，由 CapabilitySnapshot
 派生。`ToolCall.typed_args` 仍只接受 JSON 标量。`confirmed_artifact` 的 Runner 流程：
 
-1. `begin_step_attempt` 返回 `PROCEED` 后，重新解析当前 target、policy 与 config revision；
-2. 从 SqlArtifactStore 读取 `sql_ref` 一次，校验 actor、tenant、environment 与 SHA-256，构造不可变 HydratedQuery；
+1. 重新解析当前 target、policy 与 config revision；
+2. 在 StepAdmission 之前经 `load_sql_for_execution` 水合一次（SQLGuard 需要 bytes），构造不可变 HydratedQuery；失败时
+   不开始步骤，任务以 `sql_artifact.expired` / `sql_artifact.unavailable` FAILED（§9.4）；
 3. 构造只含标量的 ToolCall（引用、hash、target_fingerprint、config_revision 与三个预算值）；
 4. StepAdmission 先 ToolPolicy，再按 requirement 执行 `confirmed_readonly` SQLGuard（在 `asyncio.to_thread` 中运行），
    并校验引用、预算与 bytes hash 一致；
-5. `tool_call_hash` 覆盖完整标量 ToolCall；
+5. `tool_call_hash` 覆盖完整标量 ToolCall；准入通过后才 `begin_step_attempt`（消耗唯一工具预算），与现有 Runner 顺序一致；
 6. Gateway 重算 hash，再次校验 HydratedQuery，把同一 bytes 交给 target-bound adapter；adapter 发送前最后一次计算 SHA-256。
 
 | 载体 | 可含 SQL bytes | 约束 |
@@ -405,10 +406,17 @@ approval_ref、created_at、expires_at，只有 `requester_owner` 的 approval_r
      失败时步骤失败、Gateway 调用为 0、任务 FAILED；
 - 取 SQL 的失败由内存与 PostgreSQL 共用的纯函数 `classify_sql_artifact_read` 判定，顺序固定：行不存在 →
   `SqlArtifactUnavailableError`，原因 `NOT_FOUND`；requester、tenant 或 environment 不符 → `SCOPE_MISMATCH`；hash 不符 →
-  `HASH_MISMATCH`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，原因只进审计，回复统一为
+  `HASH_MISMATCH`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，具体原因仅用于内部分类，不向用户暴露，回复统一为
   “SQL 无法读取，本次未执行”，不泄漏对象是否存在）；以上都通过后，已清除或 `expires_at <= now` → `SqlArtifactExpiredError`
   （终态码 `sql_artifact.expired`，回复“SQL 已过期，请重新发送”）。先判归属再判过期，他人或错绑定的 SQL 不会得到
   “已过期”；
+- 两类失败传到用户的路径（不新建失败任务、状态机、Store 或渲染框架）：
+  - 追问作答：Store 异常经 `ChannelSubmissionService.submit` 原样透传（此时尚未 `bind_task`），由应用边界现有闭集
+    `classify_application_exception` 映射为 `ApplicationFailure.SQL_ARTIFACT_EXPIRED` / `SQL_ARTIFACT_UNAVAILABLE`；Web 与
+    JSON API 返回 409 `sql_artifact.expired` / `sql_artifact.unavailable`，`app.js` 显示对应固定文案并按确定失败处理；
+    父任务不被消费、不建子任务、不访问 StarRocks；飞书（F1-3）复用同一分类；
+  - worker 执行：Runner 在准入前水合，失败时不开始步骤，任务以对应终态码 FAILED；`project_terminal` 对无证据且属于
+    这两码的 FAILED 任务返回同一固定文案，不交给 capability renderer；
   4. `commit_step_result` 成功提交结果：同事务把 SQL 延到与结果相同的 `expires_at`；
 - 任务终态迁移（`TaskStore.transition`）不改 SQL 过期时间。失败任务的 SQL 按水合时写入的时间过期；从未水合的任务
   （未作答、长期排队、卡住或恢复失败）按创建或澄清时写入的时间过期，所以没有 SQL 会永久保存；

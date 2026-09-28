@@ -429,3 +429,57 @@ def test_f1_core_is_not_reported_as_the_full_agent_query_capability() -> None:
     assert "**F1-NL 完成**" in spec
     assert "**只在报错时做**" in spec
     assert "不需要模型、不需要 F2，也不修订 ADR-015" in spec
+
+
+# 取 SQL 失败在 Store 层已分为 expired / unavailable；两条用户路径都必须把这个分类传到用户提示。
+_SQL_EXPIRED_TEXT: Final = "SQL 已过期，请重新发送"
+_SQL_UNAVAILABLE_TEXT: Final = "SQL 无法读取，本次未执行"
+
+
+def test_sql_artifact_failures_reach_the_user_on_both_paths() -> None:
+    plan = _read(_PLAN)
+    spec = _read(_SPEC)
+    # 路径 A：追问回答 → ChannelSubmissionService → TaskViewRuntime → Store → Web API → app.js。
+    task_8 = _task_block(plan, "### Task 8:")
+    for touched in (
+        "`application/channel_submission.py`",
+        "`application/task_view_runtime.py`",
+        "`interfaces/web_app.py`",
+        # ErrorItem.code 是 Literal 闭集；不加新码，error_body 校验失败会掉回 500。
+        "`interfaces/http_models.py`",
+        "`interfaces/web_static/app.js`",
+        "`tests/contract/test_channel_submission.py`",
+        "`tests/contract/test_web_task_api.py`",
+    ):
+        assert touched in task_8, touched
+    for term in (
+        "`ApplicationFailure.SQL_ARTIFACT_EXPIRED`",
+        "`ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE`",
+        _SQL_EXPIRED_TEXT,
+        _SQL_UNAVAILABLE_TEXT,
+        "父任务仍为 `CLARIFICATION_REQUIRED`",
+        "非 F1 澄清",
+        "Gateway 调用为 0",
+        "删除 `classify_application_exception` 的两条 SQL 映射",
+    ):
+        assert term in task_8, term
+    # 路径 B：worker 水合 → 任务终态 → RenderPayload；水合在准入之前，失败不开始步骤。
+    task_10 = _task_block(plan, "### Task 10:")
+    assert "在 `_admit` 之前水合" in task_10
+    assert "不调用 `begin_step_attempt`" in task_10
+    assert "`render_sql_artifact_failure`" in task_10
+    # ChannelSubmissionService 只捕获 TaskNotFoundError；SQL 异常若继承它会被改写为 404。
+    assert "两者都不继承 `TaskNotFoundError`" in _task_block(plan, "### Task 3:")
+    assert "`project_terminal`" in task_10
+    adr_009 = _read(_ADR_009)
+    assert "`begin_step_attempt` 返回 `PROCEED` 后，水合" not in adr_009
+    assert "水合 HydratedQuery → StepAdmission" in adr_009
+    for text in (_SQL_EXPIRED_TEXT, _SQL_UNAVAILABLE_TEXT):
+        assert text in spec, text
+    # 具体原因只做内部分类；本轮不新增审计事务。
+    for name in (_SPEC, _ADR_018):
+        assert "原因只进审计" not in _read(name), name
+        assert "具体原因仅用于内部分类，不向用户暴露" in _read(name), name
+    # F1-3 飞书复用同一分类，本轮只写要求。
+    task_14 = plan[plan.index("### Task 14:") :]
+    assert "复用 `classify_application_exception`" in task_14

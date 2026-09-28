@@ -207,7 +207,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
   - `decisions.classify_sql_submit(...)`：内存与 PostgreSQL 共用的纯判定
   - `TaskStore.load_sql_for_execution(*, grant, sql_ref, sql_hash) -> SqlArtifactRecord`：同一事务内 `SELECT … FOR UPDATE` 锁行，交给 `classify_sql_artifact_read` 判定，可用时 `UPDATE … SET expires_at = GREATEST(expires_at, now + 24h)` 并返回；内存实现在同一锁内调用同一判定
   - `decisions.classify_sql_artifact_read(row, *, now, requester, tenant_id, environment_id, sql_hash) -> SqlArtifactReadDecision`：内存与 PostgreSQL 共用的纯判定，顺序为不存在 → 归属不符 → hash 不符 → 已清除或过期 → 可用
-  - `SqlArtifactUnavailableError(reason: SqlArtifactUnavailableReason)`，闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，映射终态码 `sql_artifact.unavailable`；`SqlArtifactExpiredError` 映射 `sql_artifact.expired`
+  - `SqlArtifactUnavailableError(reason: SqlArtifactUnavailableReason)`，闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，映射终态码 `sql_artifact.unavailable`；`SqlArtifactExpiredError` 映射 `sql_artifact.expired`；两者都不继承 `TaskNotFoundError`（否则 `ChannelSubmissionService.submit` 会把它们改写为 404 `not_found`）
   - `submit_sql_query` 写 `expires_at = now + 24h`
   - `sql_artifacts` 表：`sql_bytes BYTEA NULL`、`purged_at TIMESTAMPTZ NULL`、`ck_sql_artifacts_purge_shape CHECK ((purged_at IS NULL) = (sql_bytes IS NOT NULL))`
   - 表：`sql_artifacts`、`query_results`（列与行 JSONB、completeness、计数、`result_ref` 唯一）、`result_access_grants`（CHECK：只有 `requester_owner` 可空 `approval_ref`）
@@ -288,8 +288,8 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 
 **Files:**
 - Create: `src/xiaowei_agent/capabilities/readonly_query.py`、`src/xiaowei_agent/planning/starrocks/readonly_query.py`
-- Modify: `application/default_capabilities.py`、`capabilities/specs.py`、`contracts/resource_config.py`、澄清契约与 `rendering/generic.py`（追问文案）、`persistence/store.py`、`postgres.py`、`fake.py`（`create_clarification_child` 延长 SQL）
-- Test: `tests/unit/test_readonly_query_slots.py`、`tests/unit/test_readonly_query_planner.py`、`tests/unit/test_f1_resource_config.py`、`tests/security/test_plan_determinism.py`（新增用例）
+- Modify: `application/default_capabilities.py`、`capabilities/specs.py`、`contracts/resource_config.py`、澄清契约与 `rendering/generic.py`（追问文案）、`persistence/store.py`、`postgres.py`、`fake.py`（`create_clarification_child` 延长 SQL）、`application/task_view_runtime.py`（`ApplicationFailure` 与 `classify_application_exception`）、`application/channel_submission.py`（核对：两类 SQL 异常在 `bind_task` 之前原样透传，不新增分支）、`interfaces/web_app.py` 与 `interfaces/api.py`（`_application_error`）、`interfaces/http_models.py`（`ErrorItem.code` 闭集加入 `sql_artifact.expired`、`sql_artifact.unavailable`，否则 `error_body` 校验失败会落回 500）、`interfaces/web_static/app.js`（按错误码显示固定文案）
+- Test: `tests/unit/test_readonly_query_slots.py`、`tests/unit/test_readonly_query_planner.py`、`tests/unit/test_f1_resource_config.py`、`tests/security/test_plan_determinism.py`（新增用例）、`tests/contract/test_channel_submission.py`、`tests/contract/test_web_task_api.py`、`tests/contract/test_task_view_runtime.py`、`tests/contract/test_web_static_assets.py`
 
 **Interfaces:**
 - Produces:
@@ -297,12 +297,16 @@ SHOW HISTOGRAM META、SHOW VIEWS。
   - `CapabilityInputBinding` 与 `ReadonlyQuerySlotVerifier`：输入 `sql_ref`/`sql_hash`、RequestContext、F1 target 目录、可选澄清上下文；输出按设计 §5.4 决策表的 `SlotReady[ReadonlyQueryParams]` / `SlotIncomplete` / `SlotInvalid`
   - `ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED`；ClarificationRecord 为该 reason 保存 `sql_ref`、`sql_hash` 与 `target_options: tuple[TargetOption, ...]`（resource_id + 展示名）；提示从记录渲染选项
   - `create_clarification_child`：父澄清记录为 `CAPABILITY_TARGET_SELECTION_REQUIRED` 时，在消费父任务的同一事务里锁行并用 `classify_sql_artifact_read` 分类记录中的 `sql_ref`，可用时以 `GREATEST` 延到 `now + 24h`；过期抛 `SqlArtifactExpiredError`、其他失败抛 `SqlArtifactUnavailableError`，两种情况父任务都不被消费、不建子任务；其他澄清原因行为不变
+  - 应用边界闭集：`ApplicationFailure` 新增 `ApplicationFailure.SQL_ARTIFACT_EXPIRED`（值 `sql_artifact.expired`）与 `ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE`（值 `sql_artifact.unavailable`）；`classify_application_exception` 把 `SqlArtifactExpiredError` 与任一原因的 `SqlArtifactUnavailableError` 分别映射为这两项，丢弃 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`；不新建失败任务、状态机、Store 或渲染框架
+  - Web 与 JSON API 的 `_application_error`：两项分别返回 `409 {"error": {"code": "sql_artifact.expired"}}` 与 `409 {"error": {"code": "sql_artifact.unavailable"}}`，不再落入 500 `internal_error`；两码先加入 `ErrorItem.code` 的 `Literal` 闭集
+  - `app.js`：提交失败先按 `error.code` 判断，两码分别显示“SQL 已过期，请重新发送”与“SQL 无法读取，本次未执行”，视为确定失败（非 ambiguous），清空待重试提交与父任务上下文，引导用户重新发送 SQL；其他错误码的现有文案不变
   - `ReadonlyQueryParams(sql_ref, sql_hash, resource_id, config_revision, budget)`；`compile_readonly_query_plan(params) -> ExecutionPlan`（`max_steps=1`、`max_tool_calls=1`、`max_model_tokens=0`）
   - `StarRocksResource` 新增 `blocked_relation_names: tuple[str, ...] = ()`（规范化、去重，冲突/单段/通配启动失败）、`f1_enabled: bool = False`、`f1_budget: ReadonlyQueryBudget`；同一租户与环境内 F1 启用资源的 `display_name` 唯一，否则启动失败
 
-- [ ] **Step 1: 失败测试**：1 个 target → `SlotReady`；0 个 → `SlotInvalid`；多个 → `SlotIncomplete` 且记录选项；澄清回答与展示名完全一致 → `SlotReady`；大小写不同、前缀、序号、空白差异 → 再次追问；plan 无 SQL 原文；typed_arguments 与 budget 进入 `plan_hash`；预算放大被检出；该意图不出现在模型可选意图中；黑名单、展示名或上限变化改变 config revision；目标选择回答创建子任务时 SQL 过期时间被延长，SQL 已过期时回答以 `SqlArtifactExpiredError` 被拒、SQL 行缺失时以 `SqlArtifactUnavailableError(NOT_FOUND)` 被拒，两者父任务仍为 `CLARIFICATION_REQUIRED` 且无子任务，非 F1 澄清的子任务创建不变。
+- [ ] **Step 1: 失败测试**：1 个 target → `SlotReady`；0 个 → `SlotInvalid`；多个 → `SlotIncomplete` 且记录选项；澄清回答与展示名完全一致 → `SlotReady`；大小写不同、前缀、序号、空白差异 → 再次追问；plan 无 SQL 原文；typed_arguments 与 budget 进入 `plan_hash`；预算放大被检出；该意图不出现在模型可选意图中；黑名单、展示名或上限变化改变 config revision；目标选择回答创建子任务时 SQL 过期时间被延长，SQL 已过期时回答以 `SqlArtifactExpiredError` 被拒、SQL 行缺失时以 `SqlArtifactUnavailableError(NOT_FOUND)` 被拒，两者父任务仍为 `CLARIFICATION_REQUIRED` 且无子任务，非 F1 澄清的子任务创建不变。正式入口（`tests/contract/test_web_task_api.py` 经 `POST /app/api/tasks` 带 `clarification_parent_task_id`）：SQL 过期 → 409 `sql_artifact.expired`，父任务仍为 `CLARIFICATION_REQUIRED`、无子任务、无渠道绑定；`NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH` 三种内部原因 → 响应体逐字节相同的 409 `sql_artifact.unavailable`，不含内部原因；正常作答 → 202 并创建子任务；非 F1 澄清（例如慢查询缺时间范围）行为与现有测试一致；以上用例 fake StarRocks adapter 与 Gateway 调用为 0。`tests/contract/test_channel_submission.py` 断言两类异常原样透传且未调用 `bind_task`；`tests/contract/test_task_view_runtime.py` 断言分类闭集；`tests/contract/test_web_static_assets.py` 断言 app.js 两条固定文案与错误码对应。
 - [ ] **Step 2–4: 失败 → 实现 → 通过**：`python -m pytest tests/unit/test_readonly_query_slots.py tests/unit/test_readonly_query_planner.py tests/unit/test_f1_resource_config.py tests/security/test_plan_determinism.py -q`
-- [ ] **Step 5: 提交** `feat(capabilities): register starrocks.readonly_query with target clarification`
+- [ ] **Step 5: 变异**：删除 `classify_application_exception` 的两条 SQL 映射，正式入口用例必须转红（得到 500 `internal_error`）；还原。
+- [ ] **Step 6: 四门后提交** `feat(capabilities): register starrocks.readonly_query with target clarification`
 
 ### Task 9: SQL 识别、渠道提交与规则来源交互事实
 
@@ -333,7 +337,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 
 **Files:**
 - Create: `src/xiaowei_agent/tools/query_result_buffer.py`、`src/xiaowei_agent/tools/starrocks_query_fake.py`
-- Modify: `runners/deterministic.py`、`tools/gateway.py`、`tools/adapter.py`、`persistence/store.py`、`postgres.py`、`fake.py`
+- Modify: `runners/deterministic.py`、`application/task_view_runtime.py`（`project_terminal`）、`rendering/generic.py`、`tools/gateway.py`、`tools/adapter.py`、`persistence/store.py`、`postgres.py`、`fake.py`
 - Test: `tests/unit/test_query_result_buffer.py`、`tests/security/test_f1_gateway_query.py`、`tests/integration/test_f1_runner_flow_postgres.py`
 
 **Interfaces:**
@@ -343,10 +347,12 @@ SHOW HISTOGRAM META、SHOW VIEWS。
   - `ToolGateway.invoke(call, *, context, admission, hydrated_query: HydratedQuery | None = None, result_buffer: QueryResultBuffer | None = None)`；`AdapterResponse.payload` 与 `ToolResult.data_view` 必须为空
   - `StepCommitCommand` 增加可选 `query_result: BufferedQueryResult | None` 与 `result_ref: str | None`（二者同有同无）；Runner 在 `_build_evidence` 前用 `secrets.token_urlsafe(32)` 生成 `result_ref`，同一个值写入 Evidence 与命令；`commit_step_result` 在同一事务以它写结果行与 `requester_owner` grant，结果与 grant 的 `expires_at = now + 24h`，并以 `GREATEST` 把对应 SQL 延到同一时刻；失败或超时不写结果
   - 水合只按 `query_requirement` 分支，不按 operation 名称判断
+  - 顺序与现有 Runner 一致：在 `_admit` 之前水合（SQLGuard 需要 bytes），之后才 `begin_step_attempt` 与 Gateway；水合抛 `SqlArtifactExpiredError` / `SqlArtifactUnavailableError` 时不调用 `begin_step_attempt`、不消耗工具预算，按现有 `BUDGET_EXHAUSTED` 的返回方式 `_outcome(FAILED, terminal_reason="sql_artifact.expired" | "sql_artifact.unavailable")`
+  - `project_terminal`：`status=FAILED`、无证据且 `terminal_reason` 属于这两码时，按终态码返回 `rendering/generic.py` 中 `render_sql_artifact_failure` 的固定 RenderPayload（“SQL 已过期，请重新发送” / “SQL 无法读取，本次未执行”，与 Web 提示同文）；其他情况仍走 capability renderer
 
-- [ ] **Step 1: 失败测试**：HydratedQuery 缺失或 bytes hash 不符时 adapter 调用 0；payload/data_view 非空时 Gateway 拒绝；1000/1001 行得到 `truncated_rows`、超字节得到 `truncated_bytes`、不存半行；Gateway 超时后迟到写入被丢弃且不产生结果；Evidence 中的 `result_ref` 与结果表、grant 中的完全相同；成功提交后 SQL 的 `expires_at` 等于结果的 `expires_at`；水合时 SQL 已过期则步骤以 `sql_artifact.expired` 失败、SQL 不存在或绑定不符则以 `sql_artifact.unavailable` 失败，二者 Gateway 调用均为 0、任务 FAILED、回复文案不同且 unavailable 不透露成因；结果、grant 与步骤提交同事务，在两者之间注入故障时都不生效；提交前崩溃不产生结果；已开始未提交的步骤再次领取得到 `BUDGET_EXHAUSTED`、Gateway 调用 0；SQLGuard 在线程中执行时 heartbeat 按时续租；结果行不进入 Evidence、trace、audit；ExecutionDisclosure 在首次 Gateway 前写入。
+- [ ] **Step 1: 失败测试**：worker 水合时 SQL 过期 / 不存在 / 归属或 hash 不符 → 未开始步骤、Gateway 调用为 0、任务 FAILED、`terminal_reason` 为对应码，经 `project_recorded` 得到对应固定文案且不含内部原因；HydratedQuery 缺失或 bytes hash 不符时 adapter 调用 0；payload/data_view 非空时 Gateway 拒绝；1000/1001 行得到 `truncated_rows`、超字节得到 `truncated_bytes`、不存半行；Gateway 超时后迟到写入被丢弃且不产生结果；Evidence 中的 `result_ref` 与结果表、grant 中的完全相同；成功提交后 SQL 的 `expires_at` 等于结果的 `expires_at`；水合时 SQL 已过期则步骤以 `sql_artifact.expired` 失败、SQL 不存在或绑定不符则以 `sql_artifact.unavailable` 失败，二者 Gateway 调用均为 0、任务 FAILED、回复文案不同且 unavailable 不透露成因；结果、grant 与步骤提交同事务，在两者之间注入故障时都不生效；提交前崩溃不产生结果；已开始未提交的步骤再次领取得到 `BUDGET_EXHAUSTED`、Gateway 调用 0；SQLGuard 在线程中执行时 heartbeat 按时续租；结果行不进入 Evidence、trace、audit；ExecutionDisclosure 在首次 Gateway 前写入。
 - [ ] **Step 2–4: 失败 → 实现 → 通过 + Runner/worker 回归**：`python -m pytest tests/unit/test_query_result_buffer.py tests/security/test_f1_gateway_query.py tests/integration/test_f1_runner_flow_postgres.py -q && python -m pytest tests -k "runner or worker" -q`
-- [ ] **Step 5: 变异**：把结果写入挪出 `commit_step_result` 事务，同事务用例转红；还原。
+- [ ] **Step 5: 变异**：把结果写入挪出 `commit_step_result` 事务，同事务用例转红；去掉 `project_terminal` 的 SQL 失败分支，过期任务的 RenderPayload 用例转红；还原。
 - [ ] **Step 6: 提交** `feat(runners): execute SQL artifacts with an in-memory result buffer`
 
 ### Task 11: 回复渲染与锁定结果页
@@ -403,7 +409,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 **Interfaces:**
 - Produces: `FeishuMessageEvent.parent_message_ref: StrictStr | None`；ChannelStore 按已记录的小维消息 id 查询所属任务；`ChannelSubmitCommand.clarification_parent_task_id` 允许飞书渠道，但只能由引用回复的父消息推导，不接受客户端自报
 
-- [ ] **Step 1: 失败测试**：引用回复小维追问且作答人为提交人 → 子任务并继续执行；他人引用回复 → 拒绝；未引用回复的同名消息 → 当作新消息；引用回复非小维消息或非追问消息 → 当作新消息；父任务已完成或过期 → 提示重新发送；飞书 SQL 超过 8192 字符（≤ 65_536 bytes）可以提交；群聊未 @小维 的消息仍收不到。
+- [ ] **Step 1: 失败测试**：引用回复小维追问且作答人为提交人 → 子任务并继续执行；他人引用回复 → 拒绝；未引用回复的同名消息 → 当作新消息；引用回复非小维消息或非追问消息 → 当作新消息；父任务已完成或过期 → 提示重新发送；引用回复时 SQL 过期或不可用 → 复用 `classify_application_exception` 的同一分类，回复与 Web 相同的两条固定文案，不暴露内部原因；飞书 SQL 超过 8192 字符（≤ 65_536 bytes）可以提交；群聊未 @小维 的消息仍收不到。
 - [ ] **Step 2–4: 失败 → 实现 → 通过**：`python -m pytest tests/unit/test_feishu_reply_parent.py tests/integration/test_f1_feishu_clarification_postgres.py -q && python -m pytest tests -k "feishu" -q`
 - [ ] **Step 5: 四门后提交** `feat(feishu): answer F1 target clarification by quoted reply`
 
