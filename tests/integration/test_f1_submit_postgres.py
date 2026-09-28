@@ -17,9 +17,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from tests.conftest import lookup_for, make_envelope, make_submission
-from tests.suites.task_store import F1_SQL_CASES, bind
+from tests.suites.task_store import F1_SQL_CASES, _sql_attempt, _sql_task_grant, bind
 
-from xiaowei_agent.contracts import AttemptIntent
 from xiaowei_agent.persistence.errors import (
     PersistenceIntegrityError,
     PersistenceUnavailableError,
@@ -33,10 +32,10 @@ from xiaowei_agent.persistence.schema import (
 )
 from xiaowei_agent.persistence.store import (
     SQL_ARTIFACT_TTL,
+    GrantNotCurrentError,
     SqlArtifactExpiredError,
     SqlQuerySubmitCommand,
     SqlSubmitOutcome,
-    TaskAttemptCommand,
 )
 
 bind(globals(), F1_SQL_CASES)
@@ -202,17 +201,39 @@ async def test_concurrent_different_sql_under_one_key_conflicts_without_orphans(
 
 
 async def _grant(store: Any, context: Any, *, key: str) -> Any:
-    result = await store.submit_sql_query(command=_command(context, key=key))
-    attempt = await store.begin_task_attempt(
-        command=TaskAttemptCommand(
-            task_id=result.task.task_id,
-            intent=AttemptIntent.DISPATCH,
-            owner="worker-f1",
-            ttl_seconds=60,
-            trace_id="0" * 32,
-        )
-    )
+    _, attempt = await _sql_task_grant(store, context, key=key)
     return attempt
+
+
+async def _stored_expiry(engine: AsyncEngine, sql_ref: str) -> dt.datetime:
+    async with engine.connect() as connection:
+        value = await connection.scalar(
+            sa.select(SQL_ARTIFACTS.c.expires_at).where(SQL_ARTIFACTS.c.sql_ref == sql_ref)
+        )
+    assert isinstance(value, dt.datetime)
+    return value
+
+
+async def test_a_stale_grant_neither_reads_nor_extends_the_sql(
+    clean_database: AsyncEngine, store: Any, clock: Any, context: Any
+) -> None:
+    result, stale = await _sql_task_grant(store, context, key="sql-stale")
+    submission = stale.submission
+    before = await _stored_expiry(clean_database, submission.sql_ref)
+
+    async def load_with_stale_grant() -> None:
+        with pytest.raises(GrantNotCurrentError):
+            await store.load_sql_for_execution(
+                grant=stale.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+            )
+
+    clock.advance(seconds=61)
+    await load_with_stale_grant()  # 租约已过期
+    assert await _stored_expiry(clean_database, submission.sql_ref) == before
+
+    await _sql_attempt(store, result.task.task_id, owner="worker-next")
+    await load_with_stale_grant()  # 已被新 worker 接管
+    assert await _stored_expiry(clean_database, submission.sql_ref) == before
 
 
 async def test_a_purged_tombstone_is_expired_even_before_its_expiry_time(

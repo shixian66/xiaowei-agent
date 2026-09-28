@@ -9,13 +9,11 @@ import datetime as dt
 from typing import Any
 
 import pytest
-from tests.suites.task_store import F1_SQL_CASES, bind
+from tests.suites.task_store import F1_SQL_CASES, _sql_attempt, _sql_task_grant, bind
 
-from xiaowei_agent.contracts import AttemptIntent
 from xiaowei_agent.persistence.store import (
+    GrantNotCurrentError,
     SqlArtifactExpiredError,
-    SqlQuerySubmitCommand,
-    TaskAttemptCommand,
 )
 
 bind(globals(), F1_SQL_CASES)
@@ -24,23 +22,30 @@ _SQL = b"SELECT id FROM orders"
 
 
 async def _grant(store: Any, context: Any, *, key: str) -> Any:
-    result = await store.submit_sql_query(
-        command=SqlQuerySubmitCommand(
-            context=context,
-            sql_bytes=_SQL,
-            idempotency_key=key,
-            as_of=dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC),
-        )
-    )
-    return await store.begin_task_attempt(
-        command=TaskAttemptCommand(
-            task_id=result.task.task_id,
-            intent=AttemptIntent.DISPATCH,
-            owner="worker-f1",
-            ttl_seconds=60,
-            trace_id="0" * 32,
-        )
-    )
+    _, attempt = await _sql_task_grant(store, context, key=key)
+    return attempt
+
+
+async def test_a_stale_grant_neither_reads_nor_extends_the_sql(
+    store: Any, clock: Any, context: Any, memory_state: Any
+) -> None:
+    result, stale = await _sql_task_grant(store, context, key="sql-stale")
+    submission = stale.submission
+    before = memory_state.sql_artifacts[submission.sql_ref]
+
+    async def load_with_stale_grant() -> None:
+        with pytest.raises(GrantNotCurrentError):
+            await store.load_sql_for_execution(
+                grant=stale.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+            )
+
+    clock.advance(seconds=61)
+    await load_with_stale_grant()  # 租约已过期
+    assert memory_state.sql_artifacts[submission.sql_ref] == before
+
+    await _sql_attempt(store, result.task.task_id, owner="worker-next")
+    await load_with_stale_grant()  # 已被新 worker 接管
+    assert memory_state.sql_artifacts[submission.sql_ref] == before
 
 
 async def test_a_purged_tombstone_is_expired(

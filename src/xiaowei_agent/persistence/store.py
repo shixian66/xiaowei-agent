@@ -35,6 +35,7 @@ from xiaowei_agent.contracts import (
     Contract,
     ConversationSubmission,
     EvidenceEnvelope,
+    GrantRejection,
     LeaseGrant,
     PipelineStage,
     RequestContext,
@@ -127,6 +128,18 @@ class UnscopedAuditEventError(ValueError):
 
     这类事件不是"丢弃就行"，只是不归 TaskStore 管——它们的去处是 ``TraceSink``。
     """
+
+
+class GrantNotCurrentError(RuntimeError):
+    """水合时 grant 已不是任务唯一合法的 fenced 执行者：不读 SQL、不延期。
+
+    ``rejection`` 沿用 ``grant_is_current`` 的闭集，Runner 按既有映射把它当作
+    worker 输家（STALE_FENCING / NOT_RUNNABLE），而不是任务失败。
+    """
+
+    def __init__(self, *, rejection: GrantRejection) -> None:
+        super().__init__("grant is not current")
+        self.rejection = rejection
 
 
 class SqlArtifactUnavailableReason(StrEnum):
@@ -225,6 +238,23 @@ class SqlQuerySubmitResult(Contract):
 def new_sql_ref() -> str:
     """CSPRNG 生成、不可枚举的 SqlArtifact 引用（ADR-018 D1）。"""
     return secrets.token_urlsafe(32)
+
+
+def require_current_sql_grant(
+    record: TaskRecord, grant: "TaskAttemptGrant", *, now: _dt.datetime
+) -> None:
+    """水合前的 fencing：grant 必须此刻仍持有 RUNNING 任务的租约、token 与 attempt。
+
+    与 ``begin_step_attempt`` / ``commit_step_result`` 同一判定与状态集；先于任何
+    SQL 读取与延期执行，失效或被接管的 worker 拿不到 bytes，也改不了保留期。
+    """
+    from xiaowei_agent.persistence.decisions import grant_is_current
+
+    rejection = grant_is_current(
+        record, grant, now=now, allowed_statuses=frozenset({TaskStatus.RUNNING})
+    )
+    if rejection is not None:
+        raise GrantNotCurrentError(rejection=rejection)
 
 
 def raise_for_sql_artifact_read(
@@ -775,9 +805,10 @@ class TaskStore(Protocol):
     async def load_sql_for_execution(
         self, *, grant: TaskAttemptGrant, sql_ref: str, sql_hash: str
     ) -> SqlArtifactRecord:
-        """在同一事务内锁住 SQL 行、按任务的 requester 与 scope 分类，可用时只延不缩。
+        """先校验当前 grant，再在同一事务内锁住 SQL 行、分类，可用时只延不缩。
 
         :raises TaskNotFoundError: grant 指向的任务不存在。
+        :raises GrantNotCurrentError: grant 已失效、被接管或任务不在 RUNNING；不读、不延期。
         :raises SqlArtifactUnavailableError: 不存在、归属不符或 hash 不符。
         :raises SqlArtifactExpiredError: 已清除或已过期。
         """

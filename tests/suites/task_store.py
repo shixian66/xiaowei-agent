@@ -2071,19 +2071,44 @@ def _sql_command(context: Any, *, sql: bytes = _F1_SQL, key: str = "sql-1") -> A
     )
 
 
-async def _sql_task_grant(store: Any, context: Any, *, key: str, sql: bytes = _F1_SQL) -> Any:
+async def _sql_task_grant(
+    store: Any, context: Any, *, key: str, sql: bytes = _F1_SQL, owner: str = "worker-f1"
+) -> Any:
+    """提交 SQL 并以当前 grant 把任务推进到 RUNNING——Runner 水合时的真实状态。"""
     result = await store.submit_sql_query(command=_sql_command(context, sql=sql, key=key))
+    attempt = await _sql_attempt(store, result.task.task_id, owner=owner)
+    await _run_under(store, attempt)
+    return result, attempt
+
+
+async def _sql_attempt(store: Any, task_id: str, *, owner: str) -> Any:
     attempt = await store.begin_task_attempt(
         command=TaskAttemptCommand(
-            task_id=result.task.task_id,
+            task_id=task_id,
             intent=AttemptIntent.DISPATCH,
-            owner="worker-f1",
+            owner=owner,
             ttl_seconds=60,
             trace_id="0" * 32,
         )
     )
     assert attempt.applied
-    return result, attempt
+    return attempt
+
+
+async def _run_under(store: Any, attempt: Any) -> None:
+    current = attempt.winner
+    for status in (TaskStatus.PLANNING, TaskStatus.RUNNING):
+        if current.status is status:
+            continue
+        moved = await _transition(
+            store,
+            task_id=current.task_id,
+            expected_version=current.version,
+            to_status=status,
+            fencing_token=attempt.grant.fencing_token,
+        )
+        assert moved.applied
+        current = moved.winner
 
 
 async def test_sql_submit_creates_one_task_with_an_artifact_submission(store, context) -> None:
@@ -2181,12 +2206,14 @@ async def test_load_sql_returns_bytes_and_extends_expiry(store, clock, context) 
     from xiaowei_agent.persistence.store import SQL_ARTIFACT_TTL
 
     submitted_at = clock()
-    _, attempt = await _sql_task_grant(store, context, key="sql-load")
+    result, attempt = await _sql_task_grant(store, context, key="sql-load")
     submission = attempt.submission
     clock.advance(seconds=3600)
+    # 一小时后由当前持有租约的 worker 水合（原租约 60 秒早已过期）。
+    current = await _sql_attempt(store, result.task.task_id, owner="worker-f1")
 
     loaded = await store.load_sql_for_execution(
-        grant=attempt.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+        grant=current.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
     )
 
     assert loaded.sql_bytes == _F1_SQL
@@ -2227,14 +2254,85 @@ async def test_load_sql_classifies_every_read_failure(store, clock, context) -> 
     )
 
     clock.advance(seconds=24 * 3600)
+    # 原租约早已过期：各自重新领取当前 grant，只让 SQL 的过期参与判定。
+    alice_now = await _sql_attempt(store, alice.grant.task_id, owner="worker-f1")
+    bob_now = await _sql_attempt(store, bob.grant.task_id, owner="worker-f1")
     with pytest.raises(SqlArtifactExpiredError):
         await store.load_sql_for_execution(
-            grant=alice.grant, sql_ref=alice_sql.sql_ref, sql_hash=alice_sql.sql_hash
+            grant=alice_now.grant, sql_ref=alice_sql.sql_ref, sql_hash=alice_sql.sql_hash
         )
     # 他人的已过期 SQL 仍是归属不符，不暴露“已过期”。
-    assert await reason(bob.grant, alice_sql.sql_ref, alice_sql.sql_hash) is (
+    assert await reason(bob_now.grant, alice_sql.sql_ref, alice_sql.sql_hash) is (
         SqlArtifactUnavailableReason.SCOPE_MISMATCH
     )
+
+
+async def test_load_sql_rejects_an_expired_lease_before_reading(store, clock, context) -> None:
+    from xiaowei_agent.contracts import GrantRejection
+    from xiaowei_agent.persistence.store import GrantNotCurrentError
+
+    _, attempt = await _sql_task_grant(store, context, key="sql-expired-lease")
+    submission = attempt.submission
+    clock.advance(seconds=61)
+
+    with pytest.raises(GrantNotCurrentError) as caught:
+        await store.load_sql_for_execution(
+            grant=attempt.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+        )
+    assert caught.value.rejection is GrantRejection.LEASE_NOT_HELD
+
+
+async def test_load_sql_rejects_a_grant_taken_over_by_another_worker(
+    store, clock, context
+) -> None:
+    from xiaowei_agent.contracts import GrantRejection
+    from xiaowei_agent.persistence.store import GrantNotCurrentError
+
+    result, stale = await _sql_task_grant(store, context, key="sql-takeover")
+    submission = stale.submission
+    clock.advance(seconds=61)
+    current = await _sql_attempt(store, result.task.task_id, owner="worker-f1-next")
+    assert current.grant.fencing_token > stale.grant.fencing_token
+
+    with pytest.raises(GrantNotCurrentError) as caught:
+        await store.load_sql_for_execution(
+            grant=stale.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+        )
+    assert caught.value.rejection is GrantRejection.STALE_FENCING
+    # 正常对照：接管者持有当前 grant，照常读取并延期。
+    loaded = await store.load_sql_for_execution(
+        grant=current.grant, sql_ref=submission.sql_ref, sql_hash=submission.sql_hash
+    )
+    assert loaded.sql_bytes == _F1_SQL
+
+
+async def test_load_sql_requires_the_task_to_be_running(store, context) -> None:
+    from xiaowei_agent.contracts import GrantRejection
+    from xiaowei_agent.persistence.store import GrantNotCurrentError
+
+    result = await store.submit_sql_query(command=_sql_command(context, key="sql-planning"))
+    attempt = await _sql_attempt(store, result.task.task_id, owner="worker-f1")
+
+    async def rejection() -> Any:
+        with pytest.raises(GrantNotCurrentError) as caught:
+            await store.load_sql_for_execution(
+                grant=attempt.grant,
+                sql_ref=attempt.submission.sql_ref,
+                sql_hash=attempt.submission.sql_hash,
+            )
+        return caught.value.rejection
+
+    # 刚领取与已进入 PLANNING 都不是执行步骤的状态：只有 RUNNING 可以水合。
+    assert await rejection() is GrantRejection.STATUS_NOT_ALLOWED
+    planning = await _transition(
+        store,
+        task_id=attempt.winner.task_id,
+        expected_version=attempt.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=attempt.grant.fencing_token,
+    )
+    assert planning.applied
+    assert await rejection() is GrantRejection.STATUS_NOT_ALLOWED
 
 
 CONTRACT_CASES = (
@@ -2355,6 +2453,9 @@ F1_SQL_CASES = (
     test_sql_task_dispatches_with_its_artifact_submission,
     test_load_sql_returns_bytes_and_extends_expiry,
     test_load_sql_classifies_every_read_failure,
+    test_load_sql_rejects_an_expired_lease_before_reading,
+    test_load_sql_rejects_a_grant_taken_over_by_another_worker,
+    test_load_sql_requires_the_task_to_be_running,
 )
 
 ALL_GROUPS = {

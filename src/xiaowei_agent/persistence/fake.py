@@ -223,6 +223,7 @@ from xiaowei_agent.persistence.store import (
     raise_for_sql_artifact_read,
     reject_clarification_parent_on_plain_create,
     request_dedup_digest,
+    require_current_sql_grant,
     retry_command_digest,
     sql_request_dedup_digest,
     step_commit_digest,
@@ -2207,8 +2208,9 @@ class InMemoryTaskStore:
     ) -> SqlArtifactRecord:
         async with self._lock:
             record = self._require(grant.task_id)
-            row = self._state.sql_artifacts.get(sql_ref)
             now = self._clock()
+            require_current_sql_grant(record, grant, now=now)
+            row = self._state.sql_artifacts.get(sql_ref)
             decision = classify_sql_artifact_read(
                 row,
                 now=now,

@@ -315,6 +315,7 @@ from xiaowei_agent.persistence.store import (
     raise_for_sql_artifact_read,
     reject_clarification_parent_on_plain_create,
     request_dedup_digest,
+    require_current_sql_grant,
     retry_command_digest,
     sql_request_dedup_digest,
     step_commit_digest,
@@ -2374,9 +2375,12 @@ class PostgresTaskStore:
         提交则清除按新的过期时间跳过该行（ADR-018 D4）。
         """
         async with _write_transaction(self._engine) as connection:
+            # 先锁任务行再校验 grant：与步骤写路径同一把锁，校验通过前不碰 SQL 行。
             record = row_to_record(
-                await self._require_row(connection, grant.task_id, for_update=False)
+                await self._require_row(connection, grant.task_id, for_update=True)
             )
+            now = self._clock()
+            require_current_sql_grant(record, grant, now=now)
             found = (
                 (
                     await connection.execute(
@@ -2395,7 +2399,6 @@ class PostgresTaskStore:
                     {column.name: found[column.name] for column in SQL_ARTIFACTS.columns}
                 )
             )
-            now = self._clock()
             decision = classify_sql_artifact_read(
                 row,
                 now=now,
