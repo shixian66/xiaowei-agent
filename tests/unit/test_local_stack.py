@@ -24,13 +24,13 @@ from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     ModelInvocationProfile,
     ReadinessReport,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
 )
 from xiaowei_agent.interfaces import web_auth as web_auth_module
 from xiaowei_agent.interfaces.directory_identity import (
@@ -255,7 +255,7 @@ async def test_packaged_prometheus_recordings_run_the_two_gateway_task() -> None
         policy_revision=stack.policy_revision,
     )
     pending = await stack.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="request-prometheus",
                 tenant_id=context.tenant_id,
@@ -310,7 +310,7 @@ async def test_packaged_prometheus_recording_has_no_nondefault_window_fallback(
         policy_revision=stack.policy_revision,
     )
     pending = await stack.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="request-prometheus-nondefault-window",
                 tenant_id=context.tenant_id,
@@ -370,7 +370,7 @@ async def test_packaged_asset_recording_runs_one_exact_lookup() -> None:
         policy_revision=stack.policy_revision,
     )
     pending = await stack.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="request-asset",
                 tenant_id=context.tenant_id,
@@ -445,7 +445,7 @@ async def test_packaged_recording_runs_one_complete_task_without_tests_data() ->
         trace_id="0" * 32,
         policy_revision=stack.policy_revision,
     )
-    submission = TaskSubmission(
+    submission = ConversationSubmission(
         envelope=RequestEnvelope(
             request_id="request-1",
             tenant_id=context.tenant_id,
@@ -1285,7 +1285,7 @@ async def test_smoke_barrier_stops_after_tool_result_before_commit(
     clock = ManualClock(start=now)
     settings = Settings(environment_id="dev", smoke_step_barrier=True)
     stack = build_in_memory_local_stack(settings=settings, clock=clock)
-    submission = TaskSubmission(
+    submission = ConversationSubmission(
         envelope=RequestEnvelope(
             request_id="request-barrier",
             tenant_id=settings.tenant_id,

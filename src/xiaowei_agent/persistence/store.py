@@ -17,18 +17,25 @@ M2/M3 修正契约和测试，而不是在 adapter 内加兼容补丁（DEVELOPM
 """
 
 import datetime as _dt
+import hashlib
+import secrets
 from collections.abc import Callable
-from typing import Protocol, Self, TypeAlias
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import TYPE_CHECKING, Final, Protocol, Self, TypeAlias
 
 from pydantic import Field, model_validator
 
 from xiaowei_agent.contracts import (
     ActorTaskPageQuery,
     ApprovalRequest,
+    ArtifactSubmission,
     AttemptIntent,
     AwareDatetime,
     Contract,
+    ConversationSubmission,
     EvidenceEnvelope,
+    GrantRejection,
     LeaseGrant,
     PipelineStage,
     RequestContext,
@@ -59,7 +66,16 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.rows import dump_contract
 from xiaowei_agent.planning import canonical_json
 
+if TYPE_CHECKING:
+    from xiaowei_agent.persistence.decisions import SqlArtifactReadDecision
+
 Clock: TypeAlias = Callable[[], _dt.datetime]
+
+SQL_ARTIFACT_TTL: Final[_dt.timedelta] = _dt.timedelta(hours=24)
+"""SQL 的保留时长：创建、澄清消费、水合与结果提交都只把过期时间延到 now + 24h（ADR-018 D4）。"""
+
+SQL_MAX_BYTES: Final[int] = 65_536
+"""一条 SQL 原文的 UTF-8 字节上限（设计 §8.1）。"""
 
 
 class TaskIdCarryingError(Exception):
@@ -114,6 +130,150 @@ class UnscopedAuditEventError(ValueError):
     """
 
 
+class GrantNotCurrentError(RuntimeError):
+    """水合时 grant 已不是任务唯一合法的 fenced 执行者：不读 SQL、不延期。
+
+    ``rejection`` 沿用 ``grant_is_current`` 的闭集，Runner 按既有映射把它当作
+    worker 输家（STALE_FENCING / NOT_RUNNABLE），而不是任务失败。
+    """
+
+    def __init__(self, *, rejection: GrantRejection) -> None:
+        super().__init__("grant is not current")
+        self.rejection = rejection
+
+
+class SqlArtifactUnavailableReason(StrEnum):
+    """取 SQL 失败的内部原因闭集；只用于分类，不向用户暴露（ADR-018 D4）。"""
+
+    NOT_FOUND = "not_found"
+    SCOPE_MISMATCH = "scope_mismatch"
+    HASH_MISMATCH = "hash_mismatch"
+
+
+class SqlArtifactUnavailableError(RuntimeError):
+    """SQL 不存在、不属于请求方或 hash 不符；用户侧统一为“SQL 无法读取”。
+
+    刻意不继承 :class:`TaskNotFoundError`：渠道提交会把后者改写为 404 ``not_found``。
+    """
+
+    terminal_code: Final[str] = "sql_artifact.unavailable"
+
+    def __init__(self, *, reason: SqlArtifactUnavailableReason) -> None:
+        super().__init__("sql artifact unavailable")
+        self.reason = reason
+
+
+class SqlArtifactExpiredError(RuntimeError):
+    """归属与 hash 都通过，但 SQL 已清除或已过期。"""
+
+    terminal_code: Final[str] = "sql_artifact.expired"
+
+    def __init__(self) -> None:
+        super().__init__("sql artifact expired")
+
+
+@dataclass(frozen=True, slots=True)
+class SqlArtifactRecord:
+    """``sql_artifacts`` 的一行；已清除的 tombstone 没有 bytes（``purged_at`` 非空）。
+
+    只在 Store 与 Runner 水合之间流转，``repr`` 不含 SQL。
+    """
+
+    sql_ref: str
+    sql_hash: str
+    sql_bytes: bytes | None = field(repr=False)
+    requester: str
+    tenant_id: str
+    environment_id: str
+    created_at: _dt.datetime
+    expires_at: _dt.datetime
+    purged_at: _dt.datetime | None
+
+
+class SqlSubmitOutcome(StrEnum):
+    """SQL 提交的闭集结果（ADR-018 D2a）。"""
+
+    CREATED = "created"
+    REPLAYED = "replayed"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+
+
+class SqlQuerySubmitCommand(Contract):
+    """纯 SQL 消息的提交命令；``TaskStore.submit_sql_query`` 是唯一入口。
+
+    ``trace_id`` 取自 ``context``，不重复成第二个字段。SQL bytes 不进入 ``repr``，
+    校验失败的错误文本也不回显输入（``Contract`` 的 ``hide_input_in_errors``）。
+    """
+
+    context: RequestContext
+    sql_bytes: bytes = Field(repr=False, min_length=1, max_length=SQL_MAX_BYTES)
+    idempotency_key: StrictStr
+    as_of: AwareDatetime
+
+    @model_validator(mode="after")
+    def _sql_is_utf8(self) -> Self:
+        try:
+            self.sql_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("sql_bytes must be UTF-8") from None
+        return self
+
+    @property
+    def sql_hash(self) -> str:
+        return hashlib.sha256(self.sql_bytes).hexdigest()
+
+
+class SqlQuerySubmitResult(Contract):
+    outcome: SqlSubmitOutcome
+    task: TaskRecord | None
+
+    @model_validator(mode="after")
+    def _task_matches_outcome(self) -> Self:
+        conflicted = self.outcome is SqlSubmitOutcome.IDEMPOTENCY_CONFLICT
+        if conflicted != (self.task is None):
+            raise ValueError("only an idempotency conflict has no task")
+        return self
+
+
+def new_sql_ref() -> str:
+    """CSPRNG 生成、不可枚举的 SqlArtifact 引用（ADR-018 D1）。"""
+    return secrets.token_urlsafe(32)
+
+
+def require_current_sql_grant(
+    record: TaskRecord, grant: "TaskAttemptGrant", *, now: _dt.datetime
+) -> None:
+    """水合前的 fencing：grant 必须此刻仍持有 RUNNING 任务的租约、token 与 attempt。
+
+    与 ``begin_step_attempt`` / ``commit_step_result`` 同一判定与状态集；先于任何
+    SQL 读取与延期执行，失效或被接管的 worker 拿不到 bytes，也改不了保留期。
+    """
+    from xiaowei_agent.persistence.decisions import grant_is_current
+
+    rejection = grant_is_current(
+        record, grant, now=now, allowed_statuses=frozenset({TaskStatus.RUNNING})
+    )
+    if rejection is not None:
+        raise GrantNotCurrentError(rejection=rejection)
+
+
+def raise_for_sql_artifact_read(
+    row: SqlArtifactRecord | None, decision: "SqlArtifactReadDecision"
+) -> SqlArtifactRecord:
+    """把共享判定映射为闭集异常；可用时返回该行。内存与 PostgreSQL 共用。"""
+    from xiaowei_agent.persistence.decisions import SqlArtifactReadDecision
+
+    if decision is SqlArtifactReadDecision.EXPIRED:
+        raise SqlArtifactExpiredError
+    if decision is not SqlArtifactReadDecision.AVAILABLE or row is None:
+        reason = {
+            SqlArtifactReadDecision.SCOPE_MISMATCH: SqlArtifactUnavailableReason.SCOPE_MISMATCH,
+            SqlArtifactReadDecision.HASH_MISMATCH: SqlArtifactUnavailableReason.HASH_MISMATCH,
+        }.get(decision, SqlArtifactUnavailableReason.NOT_FOUND)
+        raise SqlArtifactUnavailableError(reason=reason)
+    return row
+
+
 def request_dedup_digest(
     envelope: RequestEnvelope,
     context: RequestContext,
@@ -139,7 +299,9 @@ def request_dedup_digest(
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
-def reject_clarification_parent_on_plain_create(submission: TaskSubmission) -> None:
+def reject_clarification_parent_on_plain_create(
+    submission: ConversationSubmission,
+) -> None:
     """普通创建不得携带澄清父任务，避免绕过一次性消费语义。"""
     if submission.clarification_parent_task_id is not None:
         raise ClarificationParentRequiredError(
@@ -150,7 +312,7 @@ def reject_clarification_parent_on_plain_create(submission: TaskSubmission) -> N
 def clarification_parent_is_usable(
     *,
     parent: TaskRecord,
-    submission: TaskSubmission,
+    submission: ConversationSubmission,
     authenticated_channel_owner: str,
 ) -> bool:
     """父任务能否被当前提交作为澄清回复消费。"""
@@ -164,19 +326,59 @@ def clarification_parent_is_usable(
 
 
 def idempotency_scope_digest(
-    *, tenant_id: str, environment_id: str, idempotency_key: str
+    *,
+    tenant_id: str,
+    environment_id: str,
+    idempotency_key: str,
+    input_kind: str | None = None,
 ) -> str:
-    """定长幂等作用域 checksum；命中后仍必须回查三项明文。"""
+    """定长幂等作用域 checksum；命中后仍必须回查三项明文。
+
+    对话提交不传 ``input_kind``，规范输入与 F1 之前逐字节相同；SQL 提交加入
+    ``input_kind``，与同字面值的对话幂等键分属不同作用域（ADR-018 D2）。
+    """
     payload = {
         "tenant_id": tenant_id,
         "environment_id": environment_id,
+        "idempotency_key": idempotency_key,
+    }
+    if input_kind is not None:
+        payload["input_kind"] = input_kind
+    return content_digest(canonical_json(payload).decode("utf-8"))
+
+
+def sql_request_dedup_digest(
+    context: RequestContext, *, sql_hash: str, idempotency_key: str
+) -> str:
+    """SQL 提交的去重摘要：tenant、environment、actor、``input_kind``、SQL hash 与幂等键。"""
+    payload = {
+        "tenant_id": context.tenant_id,
+        "environment_id": context.environment_id,
+        "actor": context.actor,
+        "input_kind": "sql_artifact",
+        "sql_hash": sql_hash,
         "idempotency_key": idempotency_key,
     }
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
 def submission_digest(submission: TaskSubmission) -> str:
-    """完整提交事实的一致性 checksum；不作为抗篡改证明。"""
+    """完整提交事实的一致性 checksum；不作为抗篡改证明。
+
+    对话提交的规范输入不含 ``input_kind``，与 F1 之前逐字节相同。
+    """
+    if isinstance(submission, ArtifactSubmission):
+        return content_digest(
+            canonical_json(
+                {
+                    "input_kind": submission.input_kind,
+                    "context": dump_contract(submission.context),
+                    "as_of": submission.as_of.isoformat(),
+                    "sql_ref": submission.sql_ref,
+                    "sql_hash": submission.sql_hash,
+                }
+            ).decode("utf-8")
+        )
     payload = {
         "envelope": dump_contract(submission.envelope),
         "context": dump_contract(submission.context),
@@ -193,6 +395,19 @@ def submission_matches_record(
     """提交行是否仍与创建时任务事实一致；摘要只防代码缺陷，不作安全声明。"""
     from xiaowei_agent.persistence.decisions import context_matches_envelope
 
+    if isinstance(submission, ArtifactSubmission):
+        return (
+            stored_digest == submission_digest(submission)
+            and record.request_digest
+            == sql_request_dedup_digest(
+                submission.context,
+                sql_hash=submission.sql_hash,
+                idempotency_key=record.idempotency_key,
+            )
+            and record.tenant_id == submission.context.tenant_id
+            and record.environment_id == submission.context.environment_id
+            and record.actor == submission.context.actor
+        )
     return (
         stored_digest == submission_digest(submission)
         and record.request_digest
@@ -318,7 +533,9 @@ class TaskAttemptResult(Contract):
             from xiaowei_agent.persistence.decisions import context_matches_envelope
 
             submission = self.submission
-            if not context_matches_envelope(submission.envelope, submission.context):
+            if isinstance(
+                submission, ConversationSubmission
+            ) and not context_matches_envelope(submission.envelope, submission.context):
                 raise ValueError("submission context does not match its envelope")
             if (
                 self.winner.tenant_id != submission.context.tenant_id
@@ -551,7 +768,7 @@ class LeaseCommand(Contract):
 
 
 class TaskStore(Protocol):
-    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+    async def create_task(self, *, submission: ConversationSubmission) -> TaskRecord:
         """按 ``(tenant_id, environment_id, idempotency_key)`` 幂等创建。
 
         :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
@@ -561,7 +778,7 @@ class TaskStore(Protocol):
     async def create_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskRecord:
         """一次性消费 ``CLARIFICATION_REQUIRED`` 父任务并创建澄清回复子任务。
@@ -574,6 +791,27 @@ class TaskStore(Protocol):
 
     async def get(self, *, lookup: TaskLookup) -> TaskRecord:
         """:raises TaskNotFoundError: 任务不存在或不属于指定作用域。"""
+
+    async def submit_sql_query(
+        self, *, command: SqlQuerySubmitCommand
+    ) -> SqlQuerySubmitResult:
+        """纯 SQL 消息的**唯一**提交入口：同一事务写 SqlArtifact、task 与 submission。
+
+        同幂等键同内容返回已有 winner（``REPLAYED``），内容不同返回
+        ``IDEMPOTENCY_CONFLICT``；任一步失败整体回滚。SQL 的 ``expires_at`` 为
+        ``now + 24h``。提交结果未知时，调用方以同一命令重试即回读 winner。
+        """
+
+    async def load_sql_for_execution(
+        self, *, grant: TaskAttemptGrant, sql_ref: str, sql_hash: str
+    ) -> SqlArtifactRecord:
+        """先校验当前 grant，再在同一事务内锁住 SQL 行、分类，可用时只延不缩。
+
+        :raises TaskNotFoundError: grant 指向的任务不存在。
+        :raises GrantNotCurrentError: grant 已失效、被接管或任务不在 RUNNING；不读、不延期。
+        :raises SqlArtifactUnavailableError: 不存在、归属不符或 hash 不符。
+        :raises SqlArtifactExpiredError: 已清除或已过期。
+        """
 
     async def get_submission(self, *, lookup: TaskLookup) -> TaskSubmission:
         """读取作用域内的不可变提交事实；不存在、错 scope 或损坏都按未找到处理。"""

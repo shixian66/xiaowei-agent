@@ -14,6 +14,7 @@ from xiaowei_agent.contracts import (
     ChannelKind,
     ChannelPermission,
     Contract,
+    ConversationSubmission,
     NonEmptyText,
     ScopeTaskPageQuery,
     StoredTaskRead,
@@ -33,6 +34,7 @@ from xiaowei_agent.persistence.channel import (
 )
 from xiaowei_agent.persistence.store import TaskNotFoundError, TaskStore
 from xiaowei_agent.redaction import scrub_text
+from xiaowei_agent.rendering.generic import request_preview_text
 
 TASK_SUMMARY_PREVIEW_LIMIT: Final[int] = 240
 TASK_DETAIL_PREVIEW_LIMIT: Final[int] = 8192
@@ -160,6 +162,8 @@ class TaskAccessService:
         if (
             record.status is not TaskStatus.CLARIFICATION_REQUIRED
             or record.actor != principal.actor
+            # SQL 提交的目标追问由 F1-1 接入；此前只接受 Web 对话父任务。
+            or not isinstance(submission, ConversationSubmission)
             or submission.clarification_parent_task_id == clarification_parent_task_id
             or submission.envelope.channel is not Channel.WEB
             or binding.channel is not ChannelKind.WEB
@@ -242,11 +246,15 @@ class TaskAccessService:
         return AccessibleTask(
             task_view=task_view,
             request_preview=_preview(
-                submission.envelope.text, limit=TASK_DETAIL_PREVIEW_LIMIT
+                request_preview_text(submission), limit=TASK_DETAIL_PREVIEW_LIMIT
             ),
             submitted_at=submission.as_of,
             task_version=record.version,
-            clarification_parent_task_id=submission.clarification_parent_task_id,
+            clarification_parent_task_id=(
+                submission.clarification_parent_task_id
+                if isinstance(submission, ConversationSubmission)
+                else None
+            ),
         )
 
     @staticmethod
@@ -255,7 +263,7 @@ class TaskAccessService:
             task_id=item.record.task_id,
             status=item.record.status,
             request_preview=_preview(
-                item.submission.envelope.text, limit=TASK_SUMMARY_PREVIEW_LIMIT
+                request_preview_text(item.submission), limit=TASK_SUMMARY_PREVIEW_LIMIT
             ),
             submitted_at=item.submission.as_of,
         )

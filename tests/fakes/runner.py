@@ -28,12 +28,12 @@ from xiaowei_agent.contracts import (
     AdmissionCertificate,
     AttemptIntent,
     Channel,
+    ConversationSubmission,
     EffectClass,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
     ToolCall,
     ToolResult,
 )
@@ -223,7 +223,7 @@ class RunnerHarness:
         if self._created:
             return
         record = await self.store.create_task(
-            submission=TaskSubmission(
+            submission=ConversationSubmission(
                 envelope=RequestEnvelope(
                 request_id="r1",
                 tenant_id=self.context.tenant_id,

@@ -22,6 +22,7 @@ from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import ConfigError, Settings, load_settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     InteractionDraft,
     InteractionKind,
     InteractionModelResult,
@@ -32,7 +33,6 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
 )
 from xiaowei_agent.interfaces.local_stack import build_in_memory_local_stack
 from xiaowei_agent.persistence.plans import PlanNotFoundError
@@ -297,7 +297,7 @@ async def test_release_in_memory_worker_has_no_adapters_and_rejects_before_tools
         policy_revision=stack.policy_revision,
     )
     pending = await runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="request-release-1",
                 tenant_id=context.tenant_id,

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
@@ -52,11 +53,12 @@ def _submission(**updates: object) -> TaskSubmission:
         "context": _context(),
         "as_of": _AS_OF,
     }
-    return TaskSubmission(**(values | updates))
+    return ConversationSubmission(**(values | updates))
 
 
 def test_submission_parent_is_optional_strict_text() -> None:
-    assert set(TaskSubmission.model_fields) == {
+    assert set(ConversationSubmission.model_fields) == {
+        "input_kind",
         "envelope",
         "context",
         "as_of",
@@ -175,10 +177,12 @@ def test_parent_changes_semantic_and_submission_digests_but_not_scope() -> None:
     assert submission_digest(without_parent) != submission_digest(first_parent)
     assert submission_digest(first_parent) != submission_digest(second_parent)
 
+    # 澄清父任务不进入幂等作用域；ADR-018 D2 只为 SQL 提交加入 input_kind。
     assert set(inspect.signature(idempotency_scope_digest).parameters) == {
         "tenant_id",
         "environment_id",
         "idempotency_key",
+        "input_kind",
     }
 
 

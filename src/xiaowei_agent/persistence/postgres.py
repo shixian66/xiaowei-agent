@@ -25,6 +25,7 @@
 六条既有的过期/抢占用例只能靠 ``sleep`` 才能测。注入时钟后两个实现共用同一批用例。
 """
 
+import dataclasses
 import datetime as _dt
 import functools
 import uuid
@@ -42,9 +43,11 @@ from xiaowei_agent.contracts import (
     AdminAuditOutcome,
     AdminAuditReasonCode,
     ApprovalRequest,
+    ArtifactSubmission,
     AttemptIntent,
     ChannelKind,
     ClarificationRecord,
+    ConversationSubmission,
     DestinationKind,
     EvidenceEnvelope,
     ExecutionPlan,
@@ -169,6 +172,8 @@ from xiaowei_agent.persistence.clarification_records import (
 from xiaowei_agent.persistence.decisions import (
     apply_transition,
     attempt_statuses,
+    classify_sql_artifact_read,
+    classify_sql_submit,
     classify_task_attempt,
     classify_transition,
     context_matches_envelope,
@@ -244,6 +249,8 @@ from xiaowei_agent.persistence.rows import (
     row_to_web_return_intent,
     row_to_web_session,
     step_execution_to_row,
+    submission_from_row,
+    submission_to_row,
     web_return_intent_to_row,
     web_session_to_row,
 )
@@ -257,6 +264,7 @@ from xiaowei_agent.persistence.schema import (
     LOCAL_ADMINS,
     PROJECTION_FENCING_SEQUENCE,
     PROJECTION_SUBSCRIPTIONS,
+    SQL_ARTIFACTS,
     TASK_APPROVALS,
     TASK_AUDIT_EVENTS,
     TASK_CLARIFICATION_RECORDS,
@@ -275,6 +283,7 @@ from xiaowei_agent.persistence.schema import (
     WEB_SESSIONS,
 )
 from xiaowei_agent.persistence.store import (
+    SQL_ARTIFACT_TTL,
     ClarificationParentRequiredError,
     Clock,
     ContextMismatchError,
@@ -283,6 +292,10 @@ from xiaowei_agent.persistence.store import (
     LeaseCommand,
     RetryCommand,
     RetryResult,
+    SqlArtifactRecord,
+    SqlQuerySubmitCommand,
+    SqlQuerySubmitResult,
+    SqlSubmitOutcome,
     StaleLeaseQuery,
     StepAttemptCommand,
     StepAttemptResult,
@@ -298,9 +311,13 @@ from xiaowei_agent.persistence.store import (
     attempt_terminal_event,
     clarification_parent_is_usable,
     idempotency_scope_digest,
+    new_sql_ref,
+    raise_for_sql_artifact_read,
     reject_clarification_parent_on_plain_create,
     request_dedup_digest,
+    require_current_sql_grant,
     retry_command_digest,
+    sql_request_dedup_digest,
     step_commit_digest,
     submission_digest,
     submission_matches_record,
@@ -329,7 +346,36 @@ from xiaowei_agent.persistence.web_session import (
     validate_oauth_state_capacity,
 )
 
+
+class _SqlSubmitLostRaceError(Exception):
+    """同幂等键的并发提交已先提交：回滚本事务（含已写的 SqlArtifact），再回读 winner。"""
+
+
+def _row_to_sql_artifact(row: Mapping[str, Any]) -> SqlArtifactRecord:
+    sql_bytes = row["sql_bytes"]
+    return SqlArtifactRecord(
+        sql_ref=row["sql_ref"],
+        sql_hash=row["sql_hash"],
+        sql_bytes=None if sql_bytes is None else bytes(sql_bytes),
+        requester=row["requester"],
+        tenant_id=row["tenant_id"],
+        environment_id=row["environment_id"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        purged_at=row["purged_at"],
+    )
+
+
 _TASK_COLUMNS: Final = tuple(column.name for column in TASKS.columns)
+_SUBMISSION_FIELDS: Final = (
+    "input_kind",
+    "envelope",
+    "context",
+    "as_of",
+    "clarification_parent_task_id",
+    "sql_ref",
+    "sql_hash",
+)
 _OAUTH_STATE_CAPACITY_LOCK: Final = sa.text(
     "SELECT pg_advisory_xact_lock(2026091001)"
 )
@@ -1364,11 +1410,8 @@ class PostgresTaskStore:
     def _stored_read_from_joined_row(self, row: Mapping[str, Any]) -> StoredTaskRead:
         record = row_to_record(_as_row(row))
         try:
-            submission = TaskSubmission(
-                envelope=load_contract(RequestEnvelope, row["submission_envelope"]),
-                context=load_contract(RequestContext, row["submission_context"]),
-                as_of=row["submission_as_of"],
-                clarification_parent_task_id=row["submission_clarification_parent_task_id"],
+            submission = submission_from_row(
+                {name: row[f"submission_{name}"] for name in _SUBMISSION_FIELDS}
             )
         except ValueError as exc:
             raise TaskNotFoundError(task_id=record.task_id) from exc
@@ -1405,6 +1448,9 @@ class PostgresTaskStore:
                 TASK_SUBMISSIONS.c.as_of.label("submission_as_of"),
                 TASK_SUBMISSIONS.c.submission_digest.label("submission_digest"),
                 TASK_SUBMISSIONS.c.clarification_parent_task_id.label("submission_clarification_parent_task_id"),
+                TASK_SUBMISSIONS.c.input_kind.label("submission_input_kind"),
+                TASK_SUBMISSIONS.c.sql_ref.label("submission_sql_ref"),
+                TASK_SUBMISSIONS.c.sql_hash.label("submission_sql_hash"),
             )
             .join(TASK_SUBMISSIONS, TASK_SUBMISSIONS.c.task_id == TASKS.c.task_id)
             .where(*conditions)
@@ -1632,12 +1678,7 @@ class PostgresTaskStore:
             submission: TaskSubmission | None = None
             if stored is not None:
                 try:
-                    submission = TaskSubmission(
-                        envelope=load_contract(RequestEnvelope, stored["envelope"]),
-                        context=load_contract(RequestContext, stored["context"]),
-                        as_of=stored["as_of"],
-                        clarification_parent_task_id=stored["clarification_parent_task_id"],
-                    )
+                    submission = submission_from_row(stored)
                 except ValueError:
                     submission = None
             if (
@@ -2131,10 +2172,11 @@ class PostgresTaskStore:
         connection: AsyncConnection,
         *,
         submission: TaskSubmission,
+        idempotency_key: str,
         digest: str,
         scope_digest: str,
     ) -> TaskRecord | None:
-        envelope = submission.envelope
+        """在调用方事务里插入 task 与 submission；幂等作用域冲突时返回 ``None``。"""
         request_context = submission.context
         created_seq = (
             await connection.execute(sa.select(CREATED_SEQUENCE.next_value()))
@@ -2144,7 +2186,7 @@ class PostgresTaskStore:
             tenant_id=request_context.tenant_id,
             environment_id=request_context.environment_id,
             actor=request_context.actor,
-            idempotency_key=envelope.idempotency_key,
+            idempotency_key=idempotency_key,
             request_digest=digest,
             status=TaskStatus.CREATED,
             version=0,
@@ -2168,17 +2210,14 @@ class PostgresTaskStore:
         await connection.execute(
             sa.insert(TASK_SUBMISSIONS).values(
                 task_id=candidate.task_id,
-                envelope=dump_contract(submission.envelope),
-                context=dump_contract(submission.context),
-                as_of=submission.as_of,
                 submission_digest=submission_digest(submission),
-                clarification_parent_task_id=submission.clarification_parent_task_id,
+                **submission_to_row(submission),
             )
         )
         return row_to_record(_as_row(inserted))
 
     @_persistence_boundary(write=True)
-    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+    async def create_task(self, *, submission: ConversationSubmission) -> TaskRecord:
         """幂等创建。**并发重复请求只产生一个任务事实。**
 
         用 ``ON CONFLICT DO NOTHING`` 而不是"先查后插"：后者两步之间有窗口，两个
@@ -2206,6 +2245,7 @@ class PostgresTaskStore:
             inserted = await self._insert_task_with_submission(
                 connection,
                 submission=submission,
+                idempotency_key=envelope.idempotency_key,
                 digest=digest,
                 scope_digest=scope_digest,
             )
@@ -2221,11 +2261,172 @@ class PostgresTaskStore:
             digest=digest,
         )
 
+    async def _sql_submit_result(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: SqlQuerySubmitCommand,
+        scope_digest: str,
+        digest: str,
+    ) -> SqlQuerySubmitResult | None:
+        """按幂等作用域判定已有 winner；无 winner 时返回 ``None``，由调用方创建。"""
+        found = (
+            (
+                await connection.execute(
+                    sa.select(TASKS).where(
+                        TASKS.c.idempotency_scope_digest == scope_digest
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        existing = None if found is None else row_to_record(_as_row(found))
+        context = command.context
+        outcome = classify_sql_submit(
+            existing,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            idempotency_key=command.idempotency_key,
+            request_digest=digest,
+        )
+        if outcome is SqlSubmitOutcome.CREATED:
+            return None
+        return SqlQuerySubmitResult(
+            outcome=outcome,
+            task=existing if outcome is SqlSubmitOutcome.REPLAYED else None,
+        )
+
+    @_persistence_boundary(write=True)
+    async def submit_sql_query(
+        self, *, command: SqlQuerySubmitCommand
+    ) -> SqlQuerySubmitResult:
+        """SqlArtifact、task 与 submission 在**同一个事务**里提交（ADR-018 D2a）。
+
+        并发同键时 ``ON CONFLICT DO NOTHING`` 只让一个事务插入 task；输家回滚整个
+        事务（连同它已写的 SqlArtifact），再在新读里回读 winner 并判定。
+        """
+        context = command.context
+        sql_hash = command.sql_hash
+        digest = sql_request_dedup_digest(
+            context, sql_hash=sql_hash, idempotency_key=command.idempotency_key
+        )
+        scope_digest = idempotency_scope_digest(
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            idempotency_key=command.idempotency_key,
+            input_kind="sql_artifact",
+        )
+        try:
+            async with _write_transaction(self._engine) as connection:
+                replayed = await self._sql_submit_result(
+                    connection, command=command, scope_digest=scope_digest, digest=digest
+                )
+                if replayed is not None:
+                    return replayed
+                now = self._clock()
+                sql_ref = new_sql_ref()
+                await connection.execute(
+                    sa.insert(SQL_ARTIFACTS).values(
+                        sql_ref=sql_ref,
+                        sql_hash=sql_hash,
+                        sql_bytes=command.sql_bytes,
+                        requester=context.actor,
+                        tenant_id=context.tenant_id,
+                        environment_id=context.environment_id,
+                        created_at=now,
+                        expires_at=now + SQL_ARTIFACT_TTL,
+                        purged_at=None,
+                    )
+                )
+                inserted = await self._insert_task_with_submission(
+                    connection,
+                    submission=ArtifactSubmission(
+                        input_kind="sql_artifact",
+                        context=context,
+                        as_of=command.as_of,
+                        sql_ref=sql_ref,
+                        sql_hash=sql_hash,
+                    ),
+                    idempotency_key=command.idempotency_key,
+                    digest=digest,
+                    scope_digest=scope_digest,
+                )
+                if inserted is None:
+                    raise _SqlSubmitLostRaceError
+                return SqlQuerySubmitResult(outcome=SqlSubmitOutcome.CREATED, task=inserted)
+        except _SqlSubmitLostRaceError:
+            pass
+        async with self._engine.connect() as connection:
+            winner = await self._sql_submit_result(
+                connection, command=command, scope_digest=scope_digest, digest=digest
+            )
+        if winner is None:
+            raise RuntimeError("idempotency scope lost its winner")
+        return winner
+
+    @_persistence_boundary(write=True)
+    async def load_sql_for_execution(
+        self, *, grant: TaskAttemptGrant, sql_ref: str, sql_hash: str
+    ) -> SqlArtifactRecord:
+        """``SELECT … FOR UPDATE`` 锁住 SQL 行后分类；可用时同事务 ``GREATEST`` 延期。
+
+        行锁与清除的 ``UPDATE`` 串行：清除先提交则读到 tombstone（已过期），水合先
+        提交则清除按新的过期时间跳过该行（ADR-018 D4）。
+        """
+        async with _write_transaction(self._engine) as connection:
+            # 先锁任务行再校验 grant：与步骤写路径同一把锁，校验通过前不碰 SQL 行。
+            record = row_to_record(
+                await self._require_row(connection, grant.task_id, for_update=True)
+            )
+            now = self._clock()
+            require_current_sql_grant(record, grant, now=now)
+            found = (
+                (
+                    await connection.execute(
+                        sa.select(SQL_ARTIFACTS)
+                        .where(SQL_ARTIFACTS.c.sql_ref == sql_ref)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            row = (
+                None
+                if found is None
+                else _row_to_sql_artifact(
+                    {column.name: found[column.name] for column in SQL_ARTIFACTS.columns}
+                )
+            )
+            decision = classify_sql_artifact_read(
+                row,
+                now=now,
+                requester=record.actor,
+                tenant_id=record.tenant_id,
+                environment_id=record.environment_id,
+                sql_hash=sql_hash,
+            )
+            available = raise_for_sql_artifact_read(row, decision)
+            expires_at = (
+                await connection.execute(
+                    sa.update(SQL_ARTIFACTS)
+                    .where(SQL_ARTIFACTS.c.sql_ref == sql_ref)
+                    .values(
+                        expires_at=sa.func.greatest(
+                            SQL_ARTIFACTS.c.expires_at, now + SQL_ARTIFACT_TTL
+                        )
+                    )
+                    .returning(SQL_ARTIFACTS.c.expires_at)
+                )
+            ).scalar_one()
+        return dataclasses.replace(available, expires_at=expires_at)
+
     @_persistence_boundary(write=True)
     async def create_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskRecord:
         clarification_parent_id = submission.clarification_parent_task_id
@@ -2289,6 +2490,7 @@ class PostgresTaskStore:
             inserted = await self._insert_task_with_submission(
                 connection,
                 submission=submission,
+                idempotency_key=envelope.idempotency_key,
                 digest=digest,
                 scope_digest=scope_digest,
             )

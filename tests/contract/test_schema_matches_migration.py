@@ -268,10 +268,10 @@ def test_rev_0017_has_the_expected_revision_chain() -> None:
 
 def test_latest_declared_revision_is_the_alembic_head() -> None:
     from xiaowei_agent.persistence.migrations.versions import (
-        rev_0018_w4a_config_domains as revision,
+        rev_0019_f1_sql_results as revision,
     )
 
-    assert revision.down_revision == "0017_w3_admin_query_indexes"
+    assert revision.down_revision == "0018_w4a_config_domains"
     assert ScriptDirectory.from_config(_alembic_config()).get_current_head() == (
         revision.revision
     )
@@ -388,8 +388,13 @@ def test_submission_table_has_one_row_per_task_and_complete_facts() -> None:
         "as_of",
         "submission_digest",
         "clarification_parent_task_id",
+        "input_kind",
+        "sql_ref",
+        "sql_hash",
     }
-    assert TASK_SUBMISSIONS.c.envelope.nullable is False
+    # ADR-018 D2：SQL 提交没有 envelope；形状由 ck_task_submissions_shape 承担。
+    assert TASK_SUBMISSIONS.c.envelope.nullable is True
+    assert TASK_SUBMISSIONS.c.input_kind.nullable is False
     assert TASK_SUBMISSIONS.c.context.nullable is False
     assert TASK_SUBMISSIONS.c.as_of.nullable is False
     assert TASK_SUBMISSIONS.c.submission_digest.nullable is False

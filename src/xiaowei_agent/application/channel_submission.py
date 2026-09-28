@@ -12,6 +12,7 @@ from xiaowei_agent.contracts import (
     ChannelKind,
     ChannelPermission,
     Contract,
+    ConversationSubmission,
     DestinationKind,
     NonEmptyText,
     ProjectionState,
@@ -19,7 +20,6 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     StrictStr,
     TaskId,
-    TaskSubmission,
     TaskView,
     TraceId,
     content_digest,
@@ -192,7 +192,7 @@ class ChannelSubmissionService:
                 clarification_parent_task_id=command.clarification_parent_task_id,
             )
         references = derive_channel_submission_references(command)
-        submission = TaskSubmission(
+        submission = ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id=command.request_id,
                 tenant_id=principal.tenant_id,

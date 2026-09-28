@@ -41,6 +41,7 @@ fencing / terminal 用例必须转红。
 """
 
 import datetime as _dt
+from enum import StrEnum
 
 from xiaowei_agent.contracts import (
     ALLOWED_TRANSITIONS,
@@ -55,18 +56,25 @@ from xiaowei_agent.contracts import (
     TransitionRejection,
 )
 from xiaowei_agent.persistence.store import (
+    SQL_ARTIFACT_TTL,
     DispatchQuery,
+    SqlArtifactRecord,
+    SqlSubmitOutcome,
     TaskAttemptGrant,
     TransitionCommand,
 )
 
 __all__ = [
+    "SqlArtifactReadDecision",
     "apply_transition",
     "attempt_statuses",
+    "classify_sql_artifact_read",
+    "classify_sql_submit",
     "classify_task_attempt",
     "classify_transition",
     "context_matches_envelope",
     "dispatch_sort_key",
+    "extended_sql_expiry",
     "grant_is_current",
     "is_dispatchable",
     "is_stale_lease",
@@ -299,3 +307,68 @@ def context_matches_envelope(envelope: RequestEnvelope, context: RequestContext)
             or envelope.environment_id == context.environment_id
         )
     )
+
+
+# --- F1 SQL（ADR-018 D2a/D4）：内存与 PostgreSQL 共用的纯判定 -----------------
+
+
+class SqlArtifactReadDecision(StrEnum):
+    AVAILABLE = "available"
+    NOT_FOUND = "not_found"
+    SCOPE_MISMATCH = "scope_mismatch"
+    HASH_MISMATCH = "hash_mismatch"
+    EXPIRED = "expired"
+
+
+def classify_sql_artifact_read(
+    row: SqlArtifactRecord | None,
+    *,
+    now: _dt.datetime,
+    requester: str,
+    tenant_id: str,
+    environment_id: str,
+    sql_hash: str,
+) -> SqlArtifactReadDecision:
+    """顺序固定：不存在 → 归属不符 → hash 不符 → 已清除或过期 → 可用。
+
+    先判归属再判过期：他人或错绑定的 SQL 不会得到“已过期”，不泄漏存在性。
+    """
+    if row is None:
+        return SqlArtifactReadDecision.NOT_FOUND
+    if (
+        row.requester != requester
+        or row.tenant_id != tenant_id
+        or row.environment_id != environment_id
+    ):
+        return SqlArtifactReadDecision.SCOPE_MISMATCH
+    if row.sql_hash != sql_hash:
+        return SqlArtifactReadDecision.HASH_MISMATCH
+    if row.purged_at is not None or row.sql_bytes is None or row.expires_at <= now:
+        return SqlArtifactReadDecision.EXPIRED
+    return SqlArtifactReadDecision.AVAILABLE
+
+
+def extended_sql_expiry(current: _dt.datetime, *, now: _dt.datetime) -> _dt.datetime:
+    """``GREATEST(expires_at, now + 24h)``：SQL 过期时间只延不缩。"""
+    return max(current, now + SQL_ARTIFACT_TTL)
+
+
+def classify_sql_submit(
+    existing: TaskRecord | None,
+    *,
+    tenant_id: str,
+    environment_id: str,
+    idempotency_key: str,
+    request_digest: str,
+) -> SqlSubmitOutcome:
+    """按幂等作用域命中的既有任务判定；作用域 digest 只是 checksum，仍回查三项明文。"""
+    if existing is None:
+        return SqlSubmitOutcome.CREATED
+    if (
+        existing.tenant_id != tenant_id
+        or existing.environment_id != environment_id
+        or existing.idempotency_key != idempotency_key
+        or existing.request_digest != request_digest
+    ):
+        return SqlSubmitOutcome.IDEMPOTENCY_CONFLICT
+    return SqlSubmitOutcome.REPLAYED

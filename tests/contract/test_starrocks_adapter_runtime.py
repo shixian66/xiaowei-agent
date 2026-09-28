@@ -12,11 +12,11 @@ from xiaowei_agent.capabilities.specs import SLOW_QUERY_SURFACE
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
 )
 from xiaowei_agent.interfaces.local_stack import (
     StarRocksLiveAssembly,
@@ -185,7 +185,7 @@ async def test_real_shaped_adapter_completes_the_existing_readonly_lifecycle(
         policy_revision=stack.policy_revision,
     )
     pending = await stack.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="request-m6b-runtime",
                 tenant_id=context.tenant_id,

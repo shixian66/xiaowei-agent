@@ -33,9 +33,11 @@ from xiaowei_agent.contracts.enums import (
     AdminAuditOutcome,
     AdminAuditReasonCode,
     AdminAuditTargetKind,
+    Completeness,
     ConfigDomain,
     IdentitySource,
     ProductRole,
+    ResultGrantKind,
     UserStatus,
 )
 
@@ -145,27 +147,81 @@ TASKS: Final = sa.Table(
 它会重新打开"过期后不带 token 即可写入"那个缺口。
 """
 
+SQL_ARTIFACTS: Final = sa.Table(
+    "sql_artifacts",
+    METADATA,
+    sa.Column("sql_ref", sa.Text, primary_key=True),
+    sa.Column("sql_hash", sa.CHAR(64), nullable=False),
+    sa.Column("sql_bytes", sa.LargeBinary, nullable=True),
+    sa.Column("requester", sa.Text, nullable=False),
+    sa.Column("tenant_id", sa.Text, nullable=False),
+    sa.Column("environment_id", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("purged_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint(
+        "(purged_at IS NULL) = (sql_bytes IS NOT NULL)",
+        name="ck_sql_artifacts_purge_shape",
+    ),
+    sa.CheckConstraint(
+        "sql_bytes IS NULL OR octet_length(sql_bytes) BETWEEN 1 AND 65536",
+        name="ck_sql_artifacts_sql_size",
+    ),
+)
+"""SQL 原文的唯一保存点（ADR-018 D1）。
+
+清除后只剩 tombstone，``task_submissions.sql_ref`` 不悬空。
+"""
+
+sa.Index("ix_sql_artifacts_expires_at", SQL_ARTIFACTS.c.expires_at)
+
 TASK_SUBMISSIONS: Final = sa.Table(
     "task_submissions",
     METADATA,
     sa.Column("task_id", sa.Text, primary_key=True),
-    sa.Column("envelope", JSONB, nullable=False),
+    # none_as_null：SQL 提交没有 envelope，必须写 SQL NULL 而不是 JSON 'null'，
+    # 否则 ck_task_submissions_shape 会把它当成“有 envelope”。
+    sa.Column("envelope", JSONB(none_as_null=True), nullable=True),
     sa.Column("context", JSONB, nullable=False),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=False),
     sa.Column("submission_digest", sa.CHAR(64), nullable=False),
     sa.Column("clarification_parent_task_id", sa.Text, nullable=True),
+    sa.Column("input_kind", sa.Text, nullable=False),
+    sa.Column("sql_ref", sa.Text, nullable=True),
+    sa.Column("sql_hash", sa.CHAR(64), nullable=True),
     sa.ForeignKeyConstraint(
         ["clarification_parent_task_id"],
         ["tasks.task_id"],
         name="fk_task_submissions_clarification_parent_task",
         ondelete="RESTRICT",
     ),
+    sa.ForeignKeyConstraint(
+        ["sql_ref"],
+        ["sql_artifacts.sql_ref"],
+        name="fk_task_submissions_sql_ref",
+        ondelete="RESTRICT",
+    ),
     sa.UniqueConstraint(
         "clarification_parent_task_id",
         name="uq_task_submissions_clarification_parent_task_id",
     ),
+    sa.CheckConstraint(
+        "input_kind IN ('conversation', 'sql_artifact')",
+        name="ck_task_submissions_input_kind",
+    ),
+    sa.CheckConstraint(
+        "(input_kind = 'conversation' AND envelope IS NOT NULL "
+        "AND sql_ref IS NULL AND sql_hash IS NULL) OR "
+        "(input_kind = 'sql_artifact' AND envelope IS NULL "
+        "AND clarification_parent_task_id IS NULL "
+        "AND sql_ref IS NOT NULL AND sql_hash IS NOT NULL)",
+        name="ck_task_submissions_shape",
+    ),
 )
-"""不可变提交事实；终态 M4 历史任务是唯一允许缺少该行的任务。"""
+"""不可变提交事实，按 ``input_kind`` 判别（ADR-018 D2）。
+
+终态 M4 历史任务是唯一允许缺少该行的任务。
+"""
 
 TASK_STEP_EXECUTIONS: Final = sa.Table(
     "task_step_executions",
@@ -1044,8 +1100,86 @@ ADMIN_AUDIT_ONE_TERMINAL_PER_OPERATION: Final = sa.Index(
 succeeded 和一条 failed，而读者无从判断哪条是真的。
 """
 
+QUERY_RESULTS: Final = sa.Table(
+    "query_results",
+    METADATA,
+    sa.Column("result_ref", sa.Text, primary_key=True),
+    sa.Column("task_id", sa.Text, nullable=False),
+    sa.Column("requester", sa.Text, nullable=False),
+    sa.Column("tenant_id", sa.Text, nullable=False),
+    sa.Column("environment_id", sa.Text, nullable=False),
+    sa.Column("target_fingerprint", sa.CHAR(64), nullable=False),
+    sa.Column("config_revision", sa.Text, nullable=False),
+    sa.Column("sql_ref", sa.Text, nullable=False),
+    sa.Column("sql_hash", sa.CHAR(64), nullable=False),
+    sa.Column("query_id", sa.Text, nullable=True),
+    sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("finished_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("columns", JSONB, nullable=False),
+    sa.Column("rows", JSONB, nullable=False),
+    sa.Column("saved_rows", sa.Integer, nullable=False),
+    sa.Column("saved_bytes", sa.BigInteger, nullable=False),
+    sa.Column("has_more", sa.Boolean, nullable=False),
+    sa.Column("completeness", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("export_policy", sa.Text, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["task_id"], ["tasks.task_id"], name="fk_query_results_task", ondelete="RESTRICT"
+    ),
+    sa.ForeignKeyConstraint(
+        ["sql_ref"],
+        ["sql_artifacts.sql_ref"],
+        name="fk_query_results_sql_ref",
+        ondelete="RESTRICT",
+    ),
+    sa.CheckConstraint(
+        "saved_rows BETWEEN 0 AND 1000", name="ck_query_results_saved_rows"
+    ),
+    sa.CheckConstraint(
+        "saved_bytes BETWEEN 0 AND 20971520", name="ck_query_results_saved_bytes"
+    ),
+    sa.CheckConstraint(
+        _closed_set("completeness", (item.value for item in Completeness)),
+        name="ck_query_results_completeness",
+    ),
+    sa.CheckConstraint(
+        "export_policy = 'disabled'", name="ck_query_results_export_disabled"
+    ),
+)
+"""有界结果预览（ADR-018 D3）：步骤成功提交时写入，过期即删除；F1 不导出。"""
+
+sa.Index("ix_query_results_expires_at", QUERY_RESULTS.c.expires_at)
+
+RESULT_ACCESS_GRANTS: Final = sa.Table(
+    "result_access_grants",
+    METADATA,
+    sa.Column("result_ref", sa.Text, primary_key=True),
+    sa.Column("principal", sa.Text, primary_key=True),
+    sa.Column("grant_kind", sa.Text, primary_key=True),
+    sa.Column("approval_ref", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["result_ref"],
+        ["query_results.result_ref"],
+        name="fk_result_access_grants_result",
+        ondelete="CASCADE",
+    ),
+    sa.CheckConstraint(
+        _closed_set("grant_kind", (item.value for item in ResultGrantKind)),
+        name="ck_result_access_grants_kind",
+    ),
+    sa.CheckConstraint(
+        "grant_kind = 'requester_owner' OR approval_ref IS NOT NULL",
+        name="ck_result_access_grants_approval_ref",
+    ),
+)
+"""结果访问授权（ADR-018 D5）；只有 ``requester_owner`` 可以不带 ``approval_ref``。"""
+
 ALL_TABLES: Final = (
     TASKS,
+    SQL_ARTIFACTS,
     TASK_SUBMISSIONS,
     TASK_STEP_EXECUTIONS,
     TASK_PLANS,
@@ -1069,4 +1203,6 @@ ALL_TABLES: Final = (
     EXTERNAL_IDENTITIES,
     ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
+    QUERY_RESULTS,
+    RESULT_ACCESS_GRANTS,
 )

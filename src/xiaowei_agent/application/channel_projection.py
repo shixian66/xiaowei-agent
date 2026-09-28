@@ -41,6 +41,7 @@ from xiaowei_agent.persistence.channel import (
 from xiaowei_agent.persistence.store import Clock, TaskStore
 from xiaowei_agent.redaction import scrub_text
 from xiaowei_agent.rendering.feishu import RenderedFeishuCard, render_feishu_card
+from xiaowei_agent.rendering.generic import request_preview_text
 
 AsyncSleep = Callable[[float], Coroutine[Any, Any, None]]
 _LOGGER = logging.getLogger(__name__)
@@ -189,7 +190,7 @@ class ChannelProjectionService:
         record: TaskRecord,
     ) -> tuple[RenderedFeishuCard, int, bool] | None:
         submission = await self._tasks.get_submission(lookup=lookup)
-        request_preview = scrub_text(submission.envelope.text)[:8192]
+        request_preview = scrub_text(request_preview_text(submission))[:8192]
         for _ in range(_PROJECTION_READ_ATTEMPTS):
             view = await self._runtime.project_task(record=record)
             after = await self._tasks.get(lookup=lookup)

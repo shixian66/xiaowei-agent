@@ -29,9 +29,11 @@ from xiaowei_agent.contracts import (
     ClarificationField,
     ClarificationReasonCode,
     ClarificationRecord,
+    ColumnSpec,
     ConfirmedSlot,
     ConfirmedTextValue,
     Contract,
+    ConversationSubmission,
     EvidenceEnvelope,
     ExecutionPlan,
     ExternalSource,
@@ -48,7 +50,6 @@ from xiaowei_agent.contracts import (
     ResolvedTarget,
     TaskRecord,
     TaskStatus,
-    TaskSubmission,
     TraceEvent,
 )
 from xiaowei_agent.persistence.rows import (
@@ -90,7 +91,7 @@ _APPROVAL = ApprovalRequest(
     state=ApprovalState.PENDING,
 )
 
-_SUBMISSION = TaskSubmission(
+_SUBMISSION = ConversationSubmission(
     envelope=RequestEnvelope(
         request_id="r1",
         tenant_id="dev-local",
@@ -194,6 +195,12 @@ _JSONB_PLAIN_PAYLOADS: dict[tuple[str, str], object] = {
     ("task_clarification_records", "confirmed_slots"): [
         dump_contract(_CONFIRMED_SLOT)
     ],
+    ("query_results", "columns"): [
+        dump_contract(ColumnSpec(ordinal=0, name="id", type="BIGINT")),
+        dump_contract(ColumnSpec(ordinal=1, name="id", type="VARCHAR")),
+    ],
+    # 行的带类型标签编码随唯一写入方 commit_step_result（计划 Task 10）落地，届时补样本。
+    ("query_results", "rows"): [],
 }
 
 _EXPECTED_TYPES: dict[tuple[str, str], type[Contract]] = {
@@ -273,7 +280,7 @@ def test_clarification_record_round_trips_through_columns_and_jsonb_lists() -> N
 def test_parented_submission_contract_round_trips_as_strict_json() -> None:
     parented = _SUBMISSION.model_copy(update={"clarification_parent_task_id": "task-parent"})
 
-    assert load_contract(TaskSubmission, dump_contract(parented)) == parented
+    assert load_contract(ConversationSubmission, dump_contract(parented)) == parented
 
 
 def test_dumped_payload_is_plain_json_types() -> None:

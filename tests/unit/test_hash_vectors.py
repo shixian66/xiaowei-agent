@@ -12,6 +12,7 @@ from tests.fakes.fixtures import FIXTURE_PLAN, FIXTURE_TARGET, FIXTURE_TOOL_CALL
 
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     EffectClass,
     ExecutionPlan,
     ReadClass,
@@ -74,7 +75,7 @@ _SUBMISSION_CANONICAL = (
 
 
 def _null_parent_submission() -> TaskSubmission:
-    return TaskSubmission(
+    return ConversationSubmission(
         envelope=RequestEnvelope(
             request_id="request-1",
             tenant_id="tenant-a",

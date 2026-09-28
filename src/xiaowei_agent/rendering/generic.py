@@ -8,9 +8,11 @@ from xiaowei_agent.contracts import (
     ClarificationPayload,
     ClarificationReasonCode,
     ClarificationRecord,
+    ConversationSubmission,
     RenderPayload,
     RenderSection,
     TaskStatus,
+    TaskSubmission,
 )
 
 _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何工具。"
@@ -28,7 +30,15 @@ _CONVERSATION_NEXT_STEPS: Final[tuple[str, ...]] = (
     "如果需要执行诊断，请提交明确的运维目标、环境和时间范围。",
 )
 _SNAPSHOT_REF_PREFIX: Final[str] = "capability-snapshot:"
+_SQL_SUBMISSION_PREVIEW: Final[str] = "SQL 查询（原文不在任务摘要中显示）"
 _CAPABILITY_REF_PREFIX: Final[str] = "capability:"
+
+
+def request_preview_text(submission: TaskSubmission) -> str:
+    """任务摘要与渠道卡片的请求原文；SQL 提交只持有引用，不回显 SQL（ADR-018 D1）。"""
+    if isinstance(submission, ConversationSubmission):
+        return submission.envelope.text
+    return _SQL_SUBMISSION_PREVIEW
 
 
 def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:

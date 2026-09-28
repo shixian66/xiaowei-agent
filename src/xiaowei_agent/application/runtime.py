@@ -73,6 +73,7 @@ from xiaowei_agent.contracts import (
     CapabilitySubject,
     ClarificationContext,
     ClarificationReasonCode,
+    ConversationSubmission,
     EvidenceEnvelope,
     ExecutionPlan,
     IntentDraft,
@@ -324,7 +325,7 @@ class XiaoweiRuntime:
 
     # --- 请求处理 -----------------------------------------------------------
 
-    async def submit_task(self, *, submission: TaskSubmission) -> TaskView:
+    async def submit_task(self, *, submission: ConversationSubmission) -> TaskView:
         """只持久化提交事实并返回应用层投影，不解释或执行。"""
         return await self._task_views.submit_task(submission=submission)
 
@@ -350,6 +351,14 @@ class XiaoweiRuntime:
         recovered_plan: ExecutionPlan | None = None
         retryable = False
         try:
+            if not isinstance(submission, ConversationSubmission):
+                # SQL 提交的规则来源解释在 F1-1 接入（计划 Task 9）；此前确定性拒绝，
+                # 不构造模型请求、不调用任何工具。
+                raise RequestRejectedError(
+                    "sql artifact submissions are not routable yet",
+                    stage=PipelineStage.INTENT,
+                    reason_code=InteractionRejectionReasonCode.ROUTE_NOT_AVAILABLE.value,
+                )
             clarification = await self._load_clarification_context(
                 submission=submission
             )
@@ -621,7 +630,7 @@ class XiaoweiRuntime:
         :param as_of: 注入的"现在"；时间窗由它确定性推导，不读进程时钟。
         :raises RequestRejectedError: 取数之前的确定性拒绝。
         """
-        submission = TaskSubmission(envelope=envelope, context=context, as_of=as_of)
+        submission = ConversationSubmission(envelope=envelope, context=context, as_of=as_of)
         view = await self.submit_task(submission=submission)
         if view.status in TERMINAL_STATUSES and view.render is not None:
             return view.render
@@ -978,7 +987,7 @@ class XiaoweiRuntime:
     async def _load_clarification_context(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
     ) -> ClarificationContext | None:
         parent_id = submission.clarification_parent_task_id
         if parent_id is None:

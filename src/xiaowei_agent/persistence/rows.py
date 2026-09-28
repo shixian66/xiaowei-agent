@@ -30,10 +30,12 @@ from xiaowei_agent.contracts import (
     AdminAuditOutcome,
     AdminAuditReasonCode,
     AdminAuditTargetKind,
+    ArtifactSubmission,
     ChannelKind,
     ClarificationRecord,
     ClarificationSubject,
     Contract,
+    ConversationSubmission,
     DestinationKind,
     IdentitySource,
     InteractionDraft,
@@ -42,10 +44,13 @@ from xiaowei_agent.contracts import (
     ProductRole,
     ProjectionErrorCode,
     ProjectionState,
+    RequestContext,
+    RequestEnvelope,
     StepOutcomeKind,
     StepResultStatus,
     TaskRecord,
     TaskStatus,
+    TaskSubmission,
     UserStatus,
 )
 from xiaowei_agent.contracts.activation import (
@@ -90,6 +95,64 @@ def load_contract(model_type: type[_C], payload: Mapping[str, Any]) -> _C:
     ``datetime`` 与字符串形态的枚举，而 JSONB 里存的正是这两种形态。
     """
     return model_type.model_validate_json(json.dumps(payload))
+
+
+def submission_to_row(submission: TaskSubmission) -> dict[str, Any]:
+    """提交事实 → ``task_submissions`` 的列（不含 ``task_id`` 与 digest）。"""
+    if isinstance(submission, ArtifactSubmission):
+        return {
+            "input_kind": submission.input_kind,
+            "envelope": None,
+            "context": dump_contract(submission.context),
+            "as_of": submission.as_of,
+            "clarification_parent_task_id": None,
+            "sql_ref": submission.sql_ref,
+            "sql_hash": submission.sql_hash,
+        }
+    return {
+        "input_kind": submission.input_kind,
+        "envelope": dump_contract(submission.envelope),
+        "context": dump_contract(submission.context),
+        "as_of": submission.as_of,
+        "clarification_parent_task_id": submission.clarification_parent_task_id,
+        "sql_ref": None,
+        "sql_hash": None,
+    }
+
+
+def submission_from_row(row: Mapping[str, Any]) -> TaskSubmission:
+    """按 ``input_kind`` 分派读回；未知值或违反形状一律 ``ValueError``（fail-closed）。
+
+    数据库的 ``ck_task_submissions_shape`` 已独立表达同一形状，这里再校验一次，
+    使内存实现与绕过约束的损坏行得到同一判定。
+    """
+    kind = row["input_kind"]
+    context = load_contract(RequestContext, row["context"])
+    if kind == "conversation":
+        if row["envelope"] is None or row["sql_ref"] is not None or row["sql_hash"] is not None:
+            raise ValueError("conversation submission row has an invalid shape")
+        return ConversationSubmission(
+            envelope=load_contract(RequestEnvelope, row["envelope"]),
+            context=context,
+            as_of=row["as_of"],
+            clarification_parent_task_id=row["clarification_parent_task_id"],
+        )
+    if kind == "sql_artifact":
+        if (
+            row["envelope"] is not None
+            or row["clarification_parent_task_id"] is not None
+            or row["sql_ref"] is None
+            or row["sql_hash"] is None
+        ):
+            raise ValueError("sql artifact submission row has an invalid shape")
+        return ArtifactSubmission(
+            input_kind="sql_artifact",
+            context=context,
+            as_of=row["as_of"],
+            sql_ref=row["sql_ref"],
+            sql_hash=row["sql_hash"],
+        )
+    raise ValueError("unknown submission input_kind")
 
 
 def record_to_row(record: TaskRecord) -> dict[str, Any]:

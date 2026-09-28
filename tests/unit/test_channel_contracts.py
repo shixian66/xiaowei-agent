@@ -11,6 +11,7 @@ from xiaowei_agent.contracts import (
     Channel,
     ChannelKind,
     ChannelPermission,
+    ConversationSubmission,
     DestinationKind,
     FeishuProjectionInput,
     IdentitySource,
@@ -23,7 +24,6 @@ from xiaowei_agent.contracts import (
     StoredTaskRead,
     TaskRecord,
     TaskStatus,
-    TaskSubmission,
     TaskView,
     task_query_path,
 )
@@ -71,7 +71,7 @@ def _stored_task(*, task_id: str, created_seq: int) -> StoredTaskRead:
             task_failure_count=0,
             next_attempt_at=None,
         ),
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id=f"request-{task_id}",
                 tenant_id="tenant-a",

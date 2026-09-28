@@ -19,10 +19,10 @@ from xiaowei_agent.application.task_view_runtime import (
 )
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
+    ConversationSubmission,
     ReadinessProbe,
     TaskId,
     TaskLookup,
-    TaskSubmission,
     TaskView,
 )
 from xiaowei_agent.interfaces.auth import Clock, trusted_submission, trusted_trace_id
@@ -34,7 +34,7 @@ from xiaowei_agent.trace import bind_trace_id
 
 
 class RuntimePort(Protocol):
-    async def submit_task(self, *, submission: TaskSubmission) -> TaskView: ...
+    async def submit_task(self, *, submission: ConversationSubmission) -> TaskView: ...
 
     async def query_task(self, *, lookup: TaskLookup) -> TaskView: ...
 
