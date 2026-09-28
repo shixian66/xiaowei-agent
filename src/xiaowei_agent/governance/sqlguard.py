@@ -1,4 +1,10 @@
-"""SQL AST 校验：闭集白名单 + 重编译比对。
+"""SQL AST 校验：唯一的 SQL 准入内核，两个 profile（设计 §7.1）。
+
+- ``template_locked``（:func:`verify_sql`）：慢查询模板 SQL，闭集白名单 + 重编译比对；
+- ``confirmed_readonly``（:func:`verify_confirmed_readonly`）：F1 用户直接提交的 SQL，原文
+  hash、单语句、只读证明、内部 Catalog 与黑名单；不重编译、不改写，也不返回任何 SQL 文本。
+
+以下是 ``template_locked`` 的设计说明。
 
 安全性来自四段，任何一段单独存在都不足以支撑"已批准的计划不能执行另一条 SQL"：
 参数闭集 → 确定性编译 → **AST 闭集校验** → **重编译逐字节比对**。本模块是后两段。
@@ -18,13 +24,26 @@
 """
 
 import datetime as _dt
+import hashlib
+import logging
 import unicodedata
-from typing import Final
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from typing import Final, Literal
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.errors import ParseError, TokenError
 
 from xiaowei_agent.contracts import SqlGuardRejection, SqlSurface
+from xiaowei_agent.contracts.sql_query import QualifiedRelation
+from xiaowei_agent.governance.readonly_statements import StatementMatch, match_statement
+from xiaowei_agent.governance.sql_tokens import (
+    TokenScan,
+    TokenScanError,
+    TokenScanReason,
+    scan_sql,
+)
 from xiaowei_agent.planning.starrocks.compiler import (
     ALLOWED_DIALECTS,
     TEMPLATE_PARAM_KEYS,
@@ -239,3 +258,332 @@ def verify_sql(
     # 把这种情形钉死。
     if sql != compile_sql(template_id=template_id, params=params, surface=surface):
         raise _reject(SqlGuardRejection.RECOMPILE_MISMATCH)
+
+
+# ---- confirmed_readonly（F1，设计 §7.3）----
+
+
+class _DropSqlglotRecords(logging.Filter):
+    """sqlglot 回退为 Command 时把被解析的原文写进 warning。
+
+    本进程里 sqlglot 只处理 SQL，而 SQL 原文不得进入日志（设计 §4 第 1 条），因此丢弃
+    ``sqlglot`` logger 的全部记录；解析失败由本模块以闭集拒绝码表达，不依赖它的日志。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return False
+
+
+logging.getLogger("sqlglot").addFilter(_DropSqlglotRecords())
+
+_READONLY_DIALECT: Final[str] = "starrocks"
+_DEFAULT_CATALOG: Final[str] = "default_catalog"
+
+_TOKEN_REJECTIONS: Final[Mapping[TokenScanReason, SqlGuardRejection]] = {
+    TokenScanReason.EMPTY: SqlGuardRejection.UNPARSABLE,
+    TokenScanReason.TOO_LONG: SqlGuardRejection.UNPARSABLE,
+    TokenScanReason.UNTERMINATED: SqlGuardRejection.UNPARSABLE,
+    TokenScanReason.INVALID_UTF8: SqlGuardRejection.AMBIGUOUS_CHARACTER,
+    TokenScanReason.BOM: SqlGuardRejection.AMBIGUOUS_CHARACTER,
+    TokenScanReason.CONTROL_CHARACTER: SqlGuardRejection.AMBIGUOUS_CHARACTER,
+    TokenScanReason.AMBIGUOUS_PUNCTUATION: SqlGuardRejection.AMBIGUOUS_CHARACTER,
+    TokenScanReason.HINT_COMMENT: SqlGuardRejection.HINT_PRESENT,
+    TokenScanReason.MULTI_STATEMENT: SqlGuardRejection.MULTIPLE_STATEMENTS,
+    TokenScanReason.INTO_OUTFILE: SqlGuardRejection.NOT_READONLY,
+}
+
+_WRITE_NODES: Final[tuple[type[exp.Expr], ...]] = (
+    exp.DML,
+    exp.DDL,
+    exp.Drop,
+    exp.Alter,
+    exp.TruncateTable,
+    exp.Comment,
+    exp.Refresh,
+    exp.Cache,
+    exp.Uncache,
+    exp.Set,
+    exp.Use,
+    exp.Transaction,
+    exp.Commit,
+    exp.Rollback,
+    exp.LoadData,
+    exp.Copy,
+    exp.Grant,
+    exp.Revoke,
+    exp.Kill,
+    exp.Analyze,
+    exp.Into,
+    exp.Lock,
+    exp.PropertyEQ,
+)
+"""出现在任何位置都说明不是只读的节点：写入、DDL、会话/事务改写、锁、``:=`` 赋值。
+
+安全不依赖本集合完整：根节点只按允许集合放行，本集合只让拒绝原因更具体，并拦截允许
+根节点**内部**的副作用（``INTO``、``FOR UPDATE``、``:=``、CTE 里的 DML）。
+"""
+
+_QUERY_ROOTS: Final[tuple[type[exp.Expr], ...]] = (exp.Select, exp.SetOperation)
+"""``SetOperation`` 覆盖 ``Union``、``Intersect`` 与 ``Except``。"""
+
+_SHOW_LISTINGS: Final[frozenset[str]] = frozenset(
+    {
+        "TABLES",
+        "TABLE STATUS",
+        "CREATE DATABASE",
+        "PROCESSLIST",
+        "VARIABLES",
+        "STATUS",
+        "GRANTS",
+        "ENGINES",
+        "CHARSET",
+        "CHARACTER SET",
+        "COLLATION",
+        "PLUGINS",
+        "WARNINGS",
+    }
+)
+"""parser 完整识别、无直接对象的 SHOW。黑名单不提供元数据保密，列举对象名照常放行。"""
+
+_SHOW_RELATION_READS: Final[frozenset[str]] = frozenset(
+    {"COLUMNS", "INDEX", "CREATE TABLE", "CREATE VIEW"}
+)
+"""直接读取一个对象的 SHOW：对象按默认库解析后检查黑名单。"""
+
+_DESCRIBE_TABLE_ARGS: Final[frozenset[str]] = frozenset({"this", "as_json"})
+_DESCRIBE_KEYWORDS: Final[frozenset[str]] = frozenset({"DESC", "DESCRIBE"})
+
+
+@dataclass(frozen=True, slots=True)
+class ReadonlyPolicy:
+    """一个 target 的只读准入参数：默认库与规范化后的关系黑名单。"""
+
+    default_database: str
+    blocked_relation_names: frozenset[QualifiedRelation]
+
+
+@dataclass(frozen=True, slots=True)
+class ReadonlyProof:
+    """只读证明。只含路径、语句族与直接对象，**不含**任何 SQL 文本。"""
+
+    path: Literal["ast", "statement_list"]
+    statement_family: str
+    relations: tuple[QualifiedRelation, ...]
+
+
+def _catalog_is_internal(catalog: str) -> bool:
+    return not catalog or catalog.lower() == _DEFAULT_CATALOG
+
+
+def _relation(
+    *, catalog: str, database: str, name: str, policy: ReadonlyPolicy
+) -> QualifiedRelation:
+    if not _catalog_is_internal(catalog):
+        raise _reject(SqlGuardRejection.EXTERNAL_CATALOG)
+    return QualifiedRelation(database=database or policy.default_database, name=name)
+
+
+def _visible_ctes(table: exp.Table) -> Iterator[str]:
+    """``table`` 所在位置可见的 CTE 名。
+
+    非递归 CTE 只对定义在它之后的 CTE 与主查询可见；自身正文与更早的 CTE 正文里同名
+    引用的是真实表。这里宁可少认 CTE：少认只会多查一张表，多认会漏查真实表。
+    """
+    child: exp.Expr = table
+    parent = table.parent
+    while parent is not None:
+        if isinstance(parent, exp.With):
+            ctes = list(parent.expressions)
+            index = next(i for i, cte in enumerate(ctes) if cte is child)
+            visible = ctes[: index + 1] if parent.args.get("recursive") else ctes[:index]
+            yield from (cte.alias for cte in visible)
+        else:
+            with_ = parent.args.get("with_")
+            if isinstance(with_, exp.With) and with_ is not child:
+                yield from (cte.alias for cte in with_.expressions)
+        child, parent = parent, parent.parent
+
+
+def _is_cte_reference(table: exp.Table) -> bool:
+    if table.args.get("db") or table.args.get("catalog"):
+        return False
+    return table.name in set(_visible_ctes(table))
+
+
+def _collect_relations(
+    root: exp.Expr, policy: ReadonlyPolicy
+) -> list[QualifiedRelation]:
+    """遍历整棵树：拒绝副作用、table function 与 qualified function，收集基础关系。"""
+    relations: list[QualifiedRelation] = []
+    for node in root.walk():
+        if isinstance(node, _WRITE_NODES):
+            raise _reject(SqlGuardRejection.NOT_READONLY)
+        if isinstance(node, exp.Unnest | exp.Explode):
+            raise _reject(SqlGuardRejection.TABLE_FUNCTION)
+        if isinstance(node, exp.Lateral) and not isinstance(node.this, exp.Subquery):
+            raise _reject(SqlGuardRejection.TABLE_FUNCTION)
+        if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Func):
+            raise _reject(SqlGuardRejection.QUALIFIED_FUNCTION)
+        if isinstance(node, exp.Column) and not _catalog_is_internal(node.catalog):
+            raise _reject(SqlGuardRejection.EXTERNAL_CATALOG)
+        if isinstance(node, exp.Table):
+            if not isinstance(node.this, exp.Identifier):
+                raise _reject(SqlGuardRejection.TABLE_FUNCTION)
+            if _is_cte_reference(node):
+                continue
+            relations.append(
+                _relation(
+                    catalog=node.catalog, database=node.db, name=node.name, policy=policy
+                )
+            )
+    return relations
+
+
+def _prove_show(
+    show: exp.Show, policy: ReadonlyPolicy
+) -> tuple[str, list[QualifiedRelation]] | None:
+    kind = show.name.upper()
+    family = "show." + kind.lower().replace(" ", "_")
+    database = show.args.get("db")
+    database_name = database.name if isinstance(database, exp.Identifier) else ""
+    relations = _collect_relations(show, policy)
+    if kind == "DATABASES":
+        # SHOW DATABASES FROM <catalog>：这里的 db 参数其实是 Catalog。
+        if not _catalog_is_internal(database_name):
+            raise _reject(SqlGuardRejection.EXTERNAL_CATALOG)
+        return family, relations
+    if kind in _SHOW_LISTINGS:
+        return family, relations
+    if kind in _SHOW_RELATION_READS:
+        target = show.args.get("target")
+        if not isinstance(target, exp.Identifier):
+            return None
+        relations.append(
+            _relation(catalog="", database=database_name, name=target.name, policy=policy)
+        )
+        return family, relations
+    return None
+
+
+def _prove_describe(
+    describe: exp.Describe, policy: ReadonlyPolicy, *, keyword: str
+) -> tuple[str, list[QualifiedRelation]] | None:
+    """parser 把 DESC 与 EXPLAIN 都解析成 ``Describe``，并接受 MySQL 的互换写法。
+
+    这里按首个关键字收窄：``DESC``/``DESCRIBE`` 只描述一个对象，``EXPLAIN`` 只包装查询。
+    """
+    style = describe.args.get("style")
+    inner = describe.this
+    if keyword in _DESCRIBE_KEYWORDS and isinstance(inner, exp.Table):
+        extras = {k for k, v in describe.args.items() if v and k not in _DESCRIBE_TABLE_ARGS}
+        if style or extras:
+            return None
+        return "describe", _collect_relations(describe, policy)
+    if keyword != "EXPLAIN":
+        return None
+    if isinstance(inner, _WRITE_NODES):
+        raise _reject(SqlGuardRejection.NOT_READONLY)
+    if isinstance(inner, _QUERY_ROOTS):
+        if style is None:
+            return "explain", _collect_relations(inner, policy)
+        if str(style).upper() == "ANALYZE":
+            return "explain.analyze", _collect_relations(inner, policy)
+    return None
+
+
+def _prove_ast(
+    root: exp.Expr, policy: ReadonlyPolicy, *, keyword: str
+) -> tuple[str, list[QualifiedRelation]] | None:
+    """AST 路径。能证明则返回（语句族, 关系），形状不在允许集合内返回 ``None``。"""
+    if isinstance(root, _QUERY_ROOTS):
+        return "query", _collect_relations(root, policy)
+    if isinstance(root, exp.Show):
+        return _prove_show(root, policy)
+    if isinstance(root, exp.Describe):
+        return _prove_describe(root, policy, keyword=keyword)
+    return None
+
+
+def _parse_statement(text: str) -> exp.Expr | None:
+    """解析单条语句；parser 不认识（ParseError / TokenError）返回 ``None`` 交清单路径。"""
+    try:
+        parsed = sqlglot.parse(text, read=_READONLY_DIALECT)
+    except (ParseError, TokenError):
+        return None
+    except Exception:
+        # 递归过深等非语法失败没有“交清单”的语义，直接拒绝；切断异常链防止原文外泄。
+        raise _reject(SqlGuardRejection.UNPARSABLE) from None
+    statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
+    if len(statements) != 1:
+        raise _reject(SqlGuardRejection.MULTIPLE_STATEMENTS)
+    return statements[0]
+
+
+def _scan(raw: bytes) -> TokenScan:
+    try:
+        return scan_sql(raw)
+    except TokenScanError as exc:
+        reason = exc.reason
+    # 在 except 块外抛出：扫描异常不留在 __context__ 里。
+    raise _reject(_TOKEN_REJECTIONS[reason])
+
+
+def _statement_text(scan: TokenScan) -> str:
+    """去掉首尾注释与尾随分号后的语句文本，只用于分析；执行的永远是原始 bytes。"""
+    tokens = scan.statement_tokens
+    return scan.raw[tokens[0].start_byte : tokens[-1].end_byte].decode()
+
+
+def _prove_statement_list(
+    matched: StatementMatch, scan: TokenScan, policy: ReadonlyPolicy
+) -> list[QualifiedRelation]:
+    """清单路径：解析清单项提取出的对象；带内层查询的项把内层字节交 AST 路径证明。"""
+    if matched.inner_query is not None:
+        start, end = matched.inner_query
+        inner = _parse_statement(scan.raw[start:end].decode())
+        if isinstance(inner, _WRITE_NODES):
+            raise _reject(SqlGuardRejection.NOT_READONLY)
+        if not isinstance(inner, _QUERY_ROOTS):
+            raise _reject(SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED)
+        return _collect_relations(inner, policy)
+    return [
+        _relation(catalog=ref.catalog, database=ref.database, name=ref.name, policy=policy)
+        for ref in matched.relations
+    ]
+
+
+def verify_confirmed_readonly(
+    *, raw: bytes, expected_sha256: str, policy: ReadonlyPolicy
+) -> ReadonlyProof:
+    """证明一条用户提交的 SQL 只读，并返回它直接读取的对象。
+
+    顺序：原文 hash → token 扫描 → 单语句解析 → AST 路径（parser 完整识别时）或代码内
+    只读语句清单 → 内部 Catalog 与黑名单。本函数不改写、不格式化 SQL，也不返回任何 SQL
+    文本；adapter 执行的仍是 ``raw``。
+
+    :raises SqlGuardError: 任一规则不通过；消息只含闭集拒绝码。
+    """
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise _reject(SqlGuardRejection.HASH_MISMATCH)
+    scan = _scan(raw)
+    root = _parse_statement(_statement_text(scan))
+    keyword = scan.text(scan.statement_tokens[0]).upper()
+    proven = _prove_ast(root, policy, keyword=keyword) if root is not None else None
+    path: Literal["ast", "statement_list"] = "ast"
+    if proven is None:
+        matched = match_statement(scan)
+        if matched is None:
+            if isinstance(root, _WRITE_NODES) and not isinstance(root, exp.Command):
+                raise _reject(SqlGuardRejection.NOT_READONLY)
+            raise _reject(SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED)
+        path = "statement_list"
+        proven = matched.family, _prove_statement_list(matched, scan, policy)
+    family, relations = proven
+    for relation in relations:
+        if relation in policy.blocked_relation_names:
+            raise _reject(SqlGuardRejection.BLOCKED_RELATION)
+    return ReadonlyProof(
+        path=path,
+        statement_family=family,
+        relations=tuple(dict.fromkeys(relations)),
+    )

@@ -574,6 +574,18 @@ class SqlGuardRejection(StrEnum):
     WINDOW_MISMATCH = "window_mismatch"
     WINDOW_TOO_WIDE = "window_too_wide"
     RECOMPILE_MISMATCH = "recompile_mismatch"
+    # ---- confirmed_readonly（F1，设计 §7.3）----
+    HASH_MISMATCH = "hash_mismatch"
+    HINT_PRESENT = "hint_present"
+    NOT_READONLY = "not_readonly"
+    READONLY_STATEMENT_NOT_SUPPORTED = "readonly_statement_not_supported"
+    EXTERNAL_CATALOG = "external_catalog"
+    BLOCKED_RELATION = "blocked_relation"
+    TABLE_FUNCTION = "table_function"
+    QUALIFIED_FUNCTION = "qualified_function"
+    # ---- StepAdmission 按 query_requirement 强制 profile（F1，设计 §5.6）----
+    QUERY_REQUIREMENT_MISMATCH = "query_requirement_mismatch"
+    QUERY_BINDING_MISMATCH = "query_binding_mismatch"
 
 
 class PromqlGuardRejection(StrEnum):
