@@ -136,7 +136,8 @@ capability。候选片段是每个 fenced code block 的正文，以及正文外
 嵌入 SQL。代码块只是载体，Python、日志、YAML 等代码块不满足该条件，不受影响。命中时 `route_interaction` 不看草案
 来源——模型或现有关键词规则（例如含“慢SQL”被规则识别为慢查询诊断）——直接返回 `REFUSE` 与
 `InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED`，不进入 CapabilityResolver，Gateway 调用为 0；任务
-`REJECTED`，回复为确定性文案“检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。”。F1-Core 不做 SQL 解释，不新增模型端口；
+`REJECTED`，`terminal_reason` 保存该码；`TaskViewRuntime.project_recorded` 把 `record.terminal_reason` 传给
+`render_preplan_rejection`，回复为确定性文案“检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。”。F1-Core 不做 SQL 解释，不新增模型端口；
 SQL 解释与慢因诊断属 F1-NL。
 
 这条检测是产品护栏，不是安全边界：漏判时消息按现有流程处理，现有 capability 只执行自己的模板 SQL。“用户粘贴的
@@ -234,7 +235,7 @@ Reflection 用现有 `AnswerabilityVerdict` 标出限制（例如“结果已截
 
 - 成功：目标展示名、返回行数、是否截断、耗时，以及锁定结果页链接和“数据需 F2 审批后查看”；
 - 失败：闭集原因与建议——不是只读语句、暂未支持的语句、命中黑名单、目标不唯一或未配置、超时、StarRocks 权限
-  不足、StarRocks 语法或执行错误（只给错误类别与 StarRocks 错误码，不回显上游错误正文）、SQL 已过期；
+  不足、StarRocks 语法或执行错误（只给错误类别与 StarRocks 错误码，不回显上游错误正文）、SQL 已过期、SQL 无法读取；
 - 嵌入 SQL：“检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。”
 
 回复不含 SQL 原文、列名或数据。模型 advisory 不参与 F1，因为它需要看到 SQL 或结果。
@@ -397,19 +398,25 @@ approval_ref、created_at、expires_at，只有 `requester_owner` 的 approval_r
 - 结果：`expires_at = 结果提交时刻 + 24h`，grant 同值；
 - SQL 的 `expires_at` 只在下列四个事务里写，一律 `GREATEST(expires_at, 新值)`，只延不缩：
   1. `submit_sql_query` 创建：`now + 24h`；
-  2. `create_clarification_child` 消费目标选择澄清：同事务把父澄清记录中的 `sql_ref` 延到 `now + 24h`；SQL 已过期或
-     已清除则抛 `SqlArtifactExpiredError`，不消费父任务、不建子任务，回复“已过期，请重新发送 SQL”；
-  3. `load_sql_for_execution` 水合：单条 `UPDATE … SET expires_at = GREATEST(expires_at, now + 24h) WHERE sql_ref = …
-     AND purged_at IS NULL AND expires_at > now RETURNING …`，原子地校验未过期并延长，覆盖本次有界执行（≤ 300 秒）
-     与提交；0 行即 `sql_artifact.expired`，步骤失败、Gateway 调用为 0、任务 FAILED，回复“SQL 已过期，请重新发送”；
+  2. `create_clarification_child` 消费目标选择澄清：同事务读取并分类父澄清记录中的 `sql_ref`，可用时延到 `now + 24h`；
+     失败时不消费父任务、不建子任务，按下文分类回复；
+  3. `load_sql_for_execution` 水合：同一事务内 `SELECT … FOR UPDATE` 锁住该 `sql_ref` 行，按下文分类，可用时
+     `UPDATE … SET expires_at = GREATEST(expires_at, now + 24h)` 并返回 bytes，覆盖本次有界执行（≤ 300 秒）与提交；
+     失败时步骤失败、Gateway 调用为 0、任务 FAILED；
+- 取 SQL 的失败由内存与 PostgreSQL 共用的纯函数 `classify_sql_artifact_read` 判定，顺序固定：行不存在 →
+  `SqlArtifactUnavailableError`，原因 `NOT_FOUND`；requester、tenant 或 environment 不符 → `SCOPE_MISMATCH`；hash 不符 →
+  `HASH_MISMATCH`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，原因只进审计，回复统一为
+  “SQL 无法读取，本次未执行”，不泄漏对象是否存在）；以上都通过后，已清除或 `expires_at <= now` → `SqlArtifactExpiredError`
+  （终态码 `sql_artifact.expired`，回复“SQL 已过期，请重新发送”）。先判归属再判过期，他人或错绑定的 SQL 不会得到
+  “已过期”；
   4. `commit_step_result` 成功提交结果：同事务把 SQL 延到与结果相同的 `expires_at`；
 - 任务终态迁移（`TaskStore.transition`）不改 SQL 过期时间。失败任务的 SQL 按水合时写入的时间过期；从未水合的任务
   （未作答、长期排队、卡住或恢复失败）按创建或澄清时写入的时间过期，所以没有 SQL 会永久保存；
 - SQL 清除是 tombstone：`UPDATE sql_artifacts SET sql_bytes = NULL, purged_at = now WHERE expires_at <= now AND
   purged_at IS NULL`；约束 `ck_sql_artifacts_purge_shape` 要求 `(purged_at IS NULL) = (sql_bytes IS NOT NULL)`；行保留
   sql_ref、SHA-256、requester、tenant、environment、created_at、expires_at、purged_at，`task_submissions.sql_ref` 不悬空；
-- 竞态：清除与水合都是对同一行的单条 UPDATE，PostgreSQL 行锁使二者串行，READ COMMITTED 下后到者重新评估条件——
-  水合先到则清除跳过该行，清除先到则水合 0 行按过期处理；水合后 SQL 至少再保留 24 小时，远大于执行上限，执行中
+- 竞态：清除的 UPDATE 与水合的 `SELECT … FOR UPDATE` 争同一行锁而串行——水合先提交时清除在 READ COMMITTED 下重新
+  评估 `expires_at <= now` 并跳过该行；清除先提交时水合读到已清除行，判为 `SqlArtifactExpiredError`；水合后 SQL 至少再保留 24 小时，远大于执行上限，执行中
   不会被清除；
 - 过期后读取立即拒绝；retention 删除 SQL bytes、列、行、grant 与活动索引；
 - 长期只保留 hash、actor、target、时间、上限、Guard/Policy 决定、query id 与资源指标；

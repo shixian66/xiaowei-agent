@@ -92,13 +92,16 @@ SqlArtifactStore 不提供公开的提交方法，事务内的表写入只是共
 
 - 结果在提交时写 `expires_at = 提交时刻 + 24h`，grant 同值；
 - SQL 的 `expires_at` 只在四个事务里写，一律 `GREATEST`、只延不缩：`submit_sql_query` 创建（`now + 24h`）、
-  `create_clarification_child` 消费目标选择澄清（同事务 `now + 24h`，已过期则 `SqlArtifactExpiredError`、不消费父任务）、
-  `load_sql_for_execution` 水合（单条条件 UPDATE 原子校验未过期并延到 `now + 24h`，0 行即 `sql_artifact.expired`、
-  Gateway 调用为 0、任务 FAILED）、`commit_step_result` 成功提交（同事务延到结果的 `expires_at`）；
+  `create_clarification_child` 消费目标选择澄清（同事务分类并延到 `now + 24h`，失败则不消费父任务）、
+  `load_sql_for_execution` 水合（同一事务 `SELECT … FOR UPDATE` 后分类，可用时延到 `now + 24h`，失败则 Gateway 调用为 0、
+  任务 FAILED）、`commit_step_result` 成功提交（同事务延到结果的 `expires_at`）；
+- 取 SQL 失败由共用纯函数 `classify_sql_artifact_read` 按固定顺序分类：不存在、归属不符、hash 不符 →
+  `SqlArtifactUnavailableError`（闭集 `NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`，终态码 `sql_artifact.unavailable`，原因只进审计，用户侧统一
+  通用失败、不泄漏存在性）；之后才判已清除或过期 → `SqlArtifactExpiredError`（`sql_artifact.expired`）；
 - `TaskStore.transition` 不改 SQL 过期时间；从未水合的任务按创建或澄清时写入的时间过期，因此没有 SQL 会永久保存；
 - SQL 清除为 tombstone：`sql_bytes` 置空并写 `purged_at`，`ck_sql_artifacts_purge_shape` 要求
-  `(purged_at IS NULL) = (sql_bytes IS NOT NULL)`；清除与水合是同一行上的单条 UPDATE，由行锁串行，水合后执行期间
-  不会被清除；
+  `(purged_at IS NULL) = (sql_bytes IS NOT NULL)`；清除的 UPDATE 与水合的 `SELECT … FOR UPDATE` 争同一行锁而串行，
+  水合后执行期间不会被清除；
 - 过期即拒绝读取，retention 删除 bytes、列、行、grant 与活动索引；不设数量配额；
 - 长期只保留 hash、actor、target、时间、上限、Guard/Policy 决定、query id 与资源指标；
 - PostgreSQL DELETE 不证明物理擦除；数据处置证据属于 F1-H。

@@ -304,6 +304,11 @@ def test_embedded_sql_is_refused_through_a_reachable_render_path() -> None:
     for touched in ("`application/interaction_router.py`", "`rendering/generic.py`"):
         assert touched in task_9, touched
     assert "render_preplan_rejection(*, status, reason_code: str | None = None)" in task_9
+    # 渲染函数的唯一调用点是 TaskViewRuntime.project_recorded；
+    # 不把终态码传进去，固定文案永远不可达。
+    assert "`application/task_view_runtime.py`" in task_9
+    assert "reason_code=record.terminal_reason" in task_9
+    assert "`tests/contract/test_task_view_runtime.py`" in task_9
     assert "`test_f1_non_sql_code_block_is_not_blocked` 必须转红" in task_9
 
 
@@ -354,7 +359,26 @@ def test_sql_expiry_is_written_by_store_transactions_only() -> None:
     task_12 = _task_block(plan, "### Task 12:")
     assert "`postgres.py`" in task_12
     assert "两个独立连接让清除与水合并发" in task_12
-    assert "先 SELECT 再单独 UPDATE，竞态用例必须转红" in task_12
+    assert "去掉 `FOR UPDATE`，竞态用例必须转红" in task_12
+
+
+# 取 SQL 失败有不同成因；只有真过期才能告诉用户“已过期”，其余不得伪装成过期。
+_SQL_READ_FAILURE_DOCS: Final[tuple[str, ...]] = (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md")
+
+
+def test_sql_read_failures_are_classified_not_collapsed_into_expiry() -> None:
+    for name in _SQL_READ_FAILURE_DOCS:
+        text = _read(name)
+        assert "`SqlArtifactUnavailableError`" in text, name
+        assert "`sql_artifact.unavailable`" in text, name
+        assert "0 行即" not in text, name
+    for name in (_SPEC, _ADR_018, _PLAN):
+        assert "`NOT_FOUND`、`SCOPE_MISMATCH`、`HASH_MISMATCH`" in _read(name), name
+        assert "SELECT … FOR UPDATE" in _read(name), name
+    plan = _read(_PLAN)
+    for title in ("### Task 3:", "### Task 8:"):
+        assert "`classify_sql_artifact_read`" in _task_block(plan, title), title
+    assert "断言具体错误类别" in _task_block(plan, "### Task 3:")
 
 
 def test_f1_guards_are_discriminating() -> None:
