@@ -1,6 +1,7 @@
 # ADR-009：`plan_hash` 规范形状、审批绑定与工具准入
 
 - 状态：Accepted
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-02
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §6/§7/§15、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[M2 实施计划](../plans/M2-contracts-kernel.md)
@@ -93,3 +94,45 @@ Gateway 在每次 `invoke` 时重算 `tool_call_hash` 并比对。凭证证明�
 | D2 | 跨 capability 计划须递增 `PLAN_SCHEMA_VERSION` 并另立 ADR，同时定义 policy profile 合并规则。 |
 | D3 | 恢复为字段存储，必须同时给出「存储值与重算值不一致时以谁为准」的规则，并说明该规则为何不构成第二真源。 |
 | D4 | 解除 E1 硬闸只需把 `_E1_EXECUTION_ENABLED` 改为 `True`，但须经独立评审、ADR-007 完成例外记录或修订，并同步更新对应安全测试。 |
+
+## F1 修订（2026-09-27，Accepted 2026-09-28）
+
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.5–§5.7、§10
+
+### F1-D1 query requirement 闭集
+
+`OperationSpec` 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`；
+它由 `CapabilitySnapshot` 派生，不能由 step、ToolCall 或用户自报。现有 `template_locked` 慢查询继续
+按原参数重编译和逐字节比对，不经 `confirmed_artifact` 分支。
+
+### F1-D2 标量 ToolCall 与进程内 HydratedQuery
+
+`ToolCall.typed_args` 继续只接受 JSON 标量，本修订不放宽 D4 的字段集合。`confirmed_artifact` 的
+ToolCall 只携带 `sql_ref`、`sql_hash`、`resource_id`、`target_fingerprint`、`config_revision` 与三个有效预算值；`tool_call_hash` 覆盖以上全部字段，其中 `sql_hash` 以 SHA-256 绑定原始 bytes。
+
+SQL bytes 只在 Runner 从 SqlArtifactStore 水合出的不可变 `HydratedQuery` 中存在。它只作为
+StepAdmission 与 Gateway 的受信 keyword-only 参数，不进入 Plan、TaskStore、trace 或 audit。
+operation 声明需要 query 而 HydratedQuery 缺失、多余或 hash 不符时，Gateway 调用次数为 0。
+`ExecutionPlan` 只保存引用与预算，`PlanBudget` 固定 `max_steps=1`、`max_tool_calls=1`、`max_model_tokens=0`。
+
+### F1-D3 执行顺序与结果缓冲
+
+Runner 复用现有顺序（准入在 `begin_step_attempt` 之前）：水合 HydratedQuery → StepAdmission（ToolPolicy → SQLGuard
+`confirmed_readonly`）→ `begin_step_attempt` → 以受信 keyword-only 参数把 HydratedQuery 与进程内 `QueryResultBuffer`
+交给 `ToolGateway.invoke`。顺序为：现有漂移校验 → journal 恢复判定 → 新步骤水合。恢复判定先于 SQL 水合：step journal 中已有记录的步骤先由
+`begin_step_attempt` 判定，按完整闭集表处理——`ALREADY_COMMITTED` → 采用已提交结果；`BUDGET_EXHAUSTED` → `budget.tool_calls_exhausted` FAILED；`UNKNOWN_STEP` → `recovery_drift` FAILED；已有 journal 却返回 `PROCEED` → `recovery_drift` FAILED（防重放，不访问 SQL 与 Gateway）；`STALE_FENCING`、`NOT_RUNNABLE` → 保留现有 `LifecycleError(rejection=...)`，由 Worker 按 loser 安静退出，不写终态；这些分支都不水合，Gateway 调用为 0；只有新步骤才按上述
+顺序执行。水合失败时不开始步骤、不消耗工具预算，任务以 `sql_artifact.expired` 或
+`sql_artifact.unavailable` FAILED（ADR-018 D4）。Gateway 重算 `tool_call_hash`，复核 target、config 与 bytes hash。
+结果行只进入 buffer；步骤成功时 Runner 先生成 `result_ref` 并写入 Evidence，`commit_step_result` 在同一事务里以它写入结果行（见 ADR-018 D3），
+ToolResult 与 Evidence 只以该引用指向结果。F1 不新增 target 排队锁、等待窗口或调度退让。
+
+### F1-D4 不重放
+
+`max_tool_calls=1` 使已开始但未提交的步骤再次领取时得到现有 `BUDGET_EXHAUSTED`，Gateway 调用次数为 0；
+任务以 FAILED（`budget.tool_calls_exhausted`）结束，不产生结果。已提交步骤按现有规则 adopt，不重新查询。
+
+### F1-D5 本修订不改变的部分
+
+D1 的 plan schema 规范输入集、D2 单 capability、D3 指纹不入 Plan、D4 的 `tool_call_hash` 覆盖面与
+`_E1_EXECUTION_ENABLED=False` 均不变。F1 为 READ + RESTRICTED、无副作用步骤，不调用 ApprovalGate。

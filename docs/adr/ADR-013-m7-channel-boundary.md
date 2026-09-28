@@ -1,6 +1,7 @@
 # ADR-013：M7 Web 与飞书薄渠道边界
 
 - 状态：Accepted
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-08
 - 决策人：项目负责人
 - 相关：[ARCHITECTURE.md](../../ARCHITECTURE.md) §3/§4/§5.9、[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-010](ADR-010-m5-durable-attempt-and-compose-boundary.md)、[M7 实施计划](../plans/M7-web-feishu-channels.md)
@@ -177,3 +178,26 @@ TaskStore 与 Runtime 不变。默认不删除渠道表或改写已完成任务�
 下列变化必须先修订本 ADR：渠道进程取得完整 Runtime/Runner/Gateway、ChannelStore 新增任务事实、
 新增 webhook/其他入站传输、渠道调用改走 ToolGateway、扩展核心权限枚举、开放数据库真实结果
 artifact，或放宽真实应用、凭据、网络、部署与 canary 的独立授权门。
+
+## F1 修订（2026-09-27，Accepted 2026-09-28）
+
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1、§5.4、§9.3、§11
+- 结果 artifact 契约：[ADR-018](ADR-018-f1-sql-and-result-artifacts.md)
+
+本修订是“未来 R1 的变更门”要求的修订，只做以下放开：
+
+- **网页聊天框、飞书单聊与飞书群聊（@小维）都可以直接提交 SQL。**渠道入口仍只做协议解析、鉴权与群聊 @ 校验，
+  把文本交给 application 层 ChannelSubmissionService；SQL 识别、目标确定与执行都在 application 以下完成，渠道进程
+  不取得 Runner、Gateway 或目标 adapter；
+- 渠道文本上限从 8192 字符放宽到 65_536 bytes，只为容纳 SQL；非 SQL 消息仍受 `RequestEnvelope.text` 8192 字符约束；
+- **飞书追问以引用回复作答**：飞书事件 DTO 新增父消息 id；ChannelSubmissionService 只在父消息是 ChannelStore 已记录
+  的小维消息、父任务处于 `CLARIFICATION_REQUIRED` 且作答人是父任务提交人时，才把该消息作为澄清子任务提交；
+  没有引用回复的消息按新消息处理。`ChannelSubmitCommand.clarification_parent_task_id` 因此不再只限网页；
+- 飞书、网页回复与 `RenderPayload` 可以投影服务端生成的受保护 `/results/{result_ref}` 深链；不嵌入 SQL 原文、列名或
+  结果行；ChannelStore 不保存 SQL、列或行；
+- 未登录、未激活、scope 不匹配或不是提交人时，深链在读取 artifact 前拒绝。
+
+仍不放开：渠道进程取得 Runner/Gateway/目标 adapter、ChannelStore 新增任务事实、结果行展示、导出、核心权限枚举
+扩展、新增入站传输，以及任何真实调用、部署或 canary 授权。F1 `/results` 路由只有在 Web 规格 §11.2 经 F1 设计
+§11.3 窄化后的适用条件全部验收通过时才可开放。

@@ -1,6 +1,7 @@
 # ADR-012：M6b target-bound StarRocks 测试环境只读 adapter
 
 - 状态：Accepted
+- F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态
 - 日期：2026-09-07
 - 决策人：项目负责人
 - 相关：[ADR-007](ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)、[ADR-009](ADR-009-plan-hash-approval-binding-and-tool-admission.md)、[M6b 计划](../plans/M6b-starrocks-test-readonly.md)
@@ -132,3 +133,37 @@ hash canonicalization、Runner、Policy profile 或 `_E1_EXECUTION_ENABLED=False
 
 下列任一变化必须先修订本 ADR：target-bound 注册键或 fallback 语义、受信元数据来源、固定 SQL
 闭集、selector 迁移策略、真实 Evidence 处置，或 M6b 对 operation/环境/调用类别的授权范围。
+
+## F1 修订（2026-09-27，Accepted 2026-09-28）
+
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.7、§6、§8
+
+### F1-D1 独立 profile，不改变慢查询
+
+F1 新增独立的 target-bound 查询 adapter 与 `confirmed_readonly` profile。M6b 的
+`list_slow_queries` / `count_queries_in_window`、D4 固定握手闭集、D5 preflight、`template_locked` SQLGuard、
+30 秒 ToolPolicy 上限与 recording 默认模式全部保持不变。D1 的 target-bound 注册、禁止 fallback 与
+Gateway 前复核同样适用于 F1 adapter。
+
+### F1-D2 target 配置
+
+F1 复用 W4 的 `StarRocksResource`，task-worker 启动时加载，新增 `blocked_relation_names`、F1 查询上限与启用
+开关；保存后 `restart_required`，不热加载。host、账号、黑名单、上限或启用状态变化都改变 config revision，
+旧计划在 Admission 前拒绝。F1 **不做** D5 的 version/grants/DDL/identity digest 比对，也不绑定 StarRocks
+版本区间；只读权限由 DBA 配置的专用账号承重，并在 F1-H 人工核验。
+
+### F1-D3 会话、读取与 timeout
+
+设有效 query timeout 为 Q（≤ 180 秒）：connect/write ≤ 10 秒且不大于 read；session `query_timeout=Q`；
+PyMySQL `read_timeout=Q+10`；Gateway timeout `Q+20`；ToolCall ≤ 300 秒。每次调用使用独占 connection，
+设置 `query_timeout` 与 `sql_select_limit=rows+1`，以 `SSCursor.fetchmany(≤100)` 读取到 EOF、第 1001 行或
+字节上限。提前截断、超时或取消时直接关闭 connection，不调用会耗尽未读结果的 `SSCursor.close()`。
+
+同步读取在 `asyncio.to_thread` 中运行，结果写入 Runner 创建的进程内 `QueryResultBuffer`；Gateway 超时或取消时
+关闭 buffer，迟到写入被丢弃。AdapterResponse.payload 与 ToolResult.data_view 必须为空。
+
+### F1-D4 授权
+
+本修订只定义离线契约。F1 真实 target 属 ADR-007 D 层，另需 F1-H 现场计划与现场 GO；M6b 的
+`test_readonly` 授权不外推到 F1。

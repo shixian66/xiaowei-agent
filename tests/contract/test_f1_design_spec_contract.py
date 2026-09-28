@@ -1,4 +1,4 @@
-"""F1 设计评审中发现的跨层安全缺口必须在规格里有单一闭环。"""
+"""F1 设计 v9 的承重决定必须在规格里有单一闭环，且不复活 v8 已删除的机制。"""
 
 import re
 from pathlib import Path
@@ -31,7 +31,7 @@ def _assert_terms(section: str, *terms: str) -> None:
 def _assert_ordered_terms(section: str, *terms: str) -> None:
     _assert_terms(section, *terms)
     positions = [section.index(term) for term in terms]
-    assert positions == sorted(positions), f"F1 规格调用顺序错误：{terms}"
+    assert positions == sorted(positions), f"F1 规格顺序错误：{terms}"
 
 
 def _table_row(section: str, marker: str) -> tuple[str, ...]:
@@ -41,388 +41,187 @@ def _table_row(section: str, marker: str) -> tuple[str, ...]:
     raise AssertionError(f"F1 规格缺少决策表行：{marker}")
 
 
-def test_f1_spec_defines_one_guarded_sql_and_streaming_result_path() -> None:
-    text = _spec()
+def _current_body(text: str) -> str:
+    """去掉 §2 修订记录后的现行正文；修订记录会按名称引用 v7 机制。"""
+    start = text.index("## 2. 修订记录")
+    end = text.index("## 3. 产品范围")
+    return text[:start] + text[end:]
 
-    for required in (
-        "HydratedQuery",
-        "ResultChunkSink",
-        "SSCursor",
-        "同名列",
-        "ToolResult.data_view",
-        "TaskSubmission",
+
+def test_f1_spec_records_the_owner_minimal_decisions() -> None:
+    record = _section(_spec(), "## 2. 修订记录")
+    for row, value in (
+        ("与 agent 的关系", "走统一对话主链"),
+        ("入口", "飞书群聊 @小维 直接发 SQL"),
+        ("识别方式", "确定性 SQL 识别，无前缀"),
+        ("目标选择", "无默认目标"),
+        ("配额", "取消"),
+        ("结果记录", "步骤成功提交时才建结果"),
+        ("连接前置校验", "不做权限校验码与版本区间检查"),
     ):
-        assert required in text, f"F1 规格缺少执行或结果链约束：{required}"
-
-    _assert_terms(
-        _section(text, "### 8.5 会话与流式读取"),
-        "SSCursor.close",
-        "耗尽未读结果",
-        "直接关闭本次独占",
-    )
+        assert value in _table_row(record, f"| {row} |")[2], row
 
 
-def test_f1_spec_defines_non_replayable_recovery_and_durable_concurrency() -> None:
-    text = _spec()
-
-    for required in (
-        "PREVIOUS_ATTEMPT_UNCERTAIN",
-        "waiting_target_slot",
-        "fencing",
-        "连接关闭",
-        "INDETERMINATE",
-    ):
-        assert required in text, f"F1 规格缺少恢复或并发约束：{required}"
-
-    recovery = _section(text, "## 10. 一次尝试、崩溃恢复和取消")
-    assert _table_row(recovery, "已有未提交 started") == (
-        "已有未提交 started，无论 task fencing 是否变化",
-        "无法证明 SQL 未发送或结果未产生",
-        "inspect 在 slot 前返回 PREVIOUS_ATTEMPT_UNCERTAIN → "
-        "TaskStatus.INDETERMINATE；Gateway 调用次数为 0",
-    )
-    assert _table_row(recovery, "已有 committed Step attempt") == (
-        "已有 committed Step attempt",
-        "结果已成为任务事实",
-        "inspect 在 slot 前返回 ADOPT_COMMITTED_RESULT；sealed result 只做幂等 "
-        "activation，不重新查询",
-    )
-
-
-def test_f1_spec_defers_a_busy_target_without_blocking_or_spending_attempt_budget() -> None:
-    text = _spec()
-
-    section = _section(text, "### 8.4 跨 worker slot")
-    _assert_terms(
-        section,
-        "非阻塞",
+def test_f1_spec_does_not_revive_removed_v7_machinery() -> None:
+    body = _current_body(_spec())
+    for retired in (
+        "TargetQueryLeaseStore",
         "schedule_deferral",
-        "next_attempt_at",
-        "task_failure_count",
-        "同一轮继续",
-        "处理其他任务",
-        "run_with_task_heartbeat",
-        "XiaoweiRuntime",
-        "Gateway.invoke",
-        "受信 keyword-only",
-        "inspect_step_execution 相同的恢复/预算判定",
-    )
-    assert "第 2 步的恢复/预算" not in section
-    sequence = section[section.index("WorkflowRunner 是唯一协调者") :]
-    _assert_ordered_terms(
-        sequence,
-        "inspect_step_execution",
-        "水合 ToolCall/HydratedQuery",
-        "完成 StepAdmission",
-        "ensure_slot_wait_window",
-        "check_slot_wait_deadline",
-        "TargetQueryLeaseStore.try_acquire",
-        "begin_step_attempt",
-        "Gateway.invoke",
-    )
-    assert _table_row(section, "BUSY schedule_deferral") == (
-        "BUSY schedule_deferral",
-        "不变",
-        "不创建",
-        "不消耗",
-        "结束并轮换 fencing",
-    )
-    _assert_terms(
-        _section(text, "## 10. 一次尝试、崩溃恢复和取消"),
-        "begin_step_attempt",
-        "Task attempt",
-        "Step attempt",
-        "没有 started",
-        "不消耗 max_tool_calls",
-    )
-
-
-def test_f1_spec_keeps_query_bytes_outside_scalar_tool_call() -> None:
-    section = _section(_spec(), "### 5.4 从引用到唯一 ToolCall")
-
-    assert "把 QueryEnvelope 放入本次 ToolCall.typed_args" not in section
-    assert _table_row(section, "`ToolCall.typed_args`") == (
-        "`ToolCall.typed_args`",
-        "否，只允许 JSON 标量",
-        "引用、hash、target_fingerprint、config_revision 和预算标量",
-    )
-    assert _table_row(section, "`HydratedQuery`") == (
-        "`HydratedQuery`",
-        "是",
-        "仅进程内；bytes 的 SHA-256 必须等于 ToolCall.sql_hash",
-    )
-    _assert_ordered_terms(
-        section,
-        "HydratedQuery；",
-        "构造只含标量的 ToolCall",
-        "StepAdmission 分别接收 ToolCall 与 HydratedQuery",
-        "ToolGateway 重算 tool_call_hash，并再次校验 HydratedQuery",
-    )
-
-
-def test_f1_spec_uses_the_locked_parser_and_a_raw_sql_transport() -> None:
-    text = _spec()
-
-    _assert_terms(_section(text, "### 2.1 十项阻断意见"), "sqlglot 30.17.0")
-    _assert_terms(
-        _section(text, "### 5.1 Web SQL 草稿与确认"),
-        "application/sql",
-        "原始请求体",
-        "1_048_576",
-        "api_request_body_limit_bytes",
-        "JSON 转义",
-    )
-
-
-def test_f1_spec_allows_internal_read_sql_without_a_database_allowlist() -> None:
-    text = _spec()
-
-    ast_section = _section(text, "### 7.3 只读证明闭集")
-    allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
-    _assert_terms(
-        allowed,
-        "SHOW DATABASES",
-        "SHOW",
-        "DESC",
-        "EXPLAIN",
-        "default_catalog.db.table",
-        "information_schema",
-    )
-    assert "SHOW DATABASES 及其别名" not in rejected
-    assert "allowed_database_names" not in text
-    _assert_terms(
-        rejected,
-        "DDL",
-        "写入",
-        "session",
-        "副作用",
-        "外部 Catalog",
-        "SHOW DATABASES FROM",
-    )
-    _assert_terms(
-        _section(text, "### 2.5 负责人确认的策略调整"),
-        "未来 DDL",
-        "新 capability",
-        "审批",
-        "readback",
-    )
-
-
-def test_f1_spec_defines_an_exact_relation_denylist_and_permission_boundary() -> None:
-    text = _spec()
-
-    snapshot = _section(text, "### 6.1 ResourceSnapshot")
-    _assert_terms(
-        snapshot,
-        "blocked_relation_names",
-        "默认空",
-        "database.object",
-        "表、视图和物化视图",
-        "SELECT 权限",
-    )
-
-    ast_section = _section(text, "### 7.3 只读证明闭集")
-    _assert_terms(
-        ast_section,
-        "精确命中",
-        "SELECT",
-        "EXPLAIN",
-        "DESC",
-        "SHOW CREATE",
-        "SHOW COLUMNS",
-        "SHOW TABLES",
-        "只列名称",
-        "不递归展开视图定义",
-        "数据库 credential",
-    )
-
-    admin = _section(text, "### 8.2 Admin 可调值")
-    _assert_terms(
-        admin,
-        "Web Admin",
-        "blocked_relation_names",
-        "默认空",
-        "database.object",
-        "通配符",
-        "正则",
-        "restart_required",
-        "删除条目",
-        "二次确认",
-    )
-
-
-def test_f1_spec_uses_an_incremental_registry_without_blocking_the_target() -> None:
-    text = _spec()
-    ast_section = _section(text, "### 7.3 只读证明闭集")
-    allowed, rejected = ast_section.split("拒绝：", maxsplit=1)
-
-    _assert_terms(
-        allowed,
-        "Union",
-        "Intersect",
-        "Except",
+        "WorkflowDeferred",
+        "ThreadsafeResultChunkWriter",
+        "ResultChunkSink",
+        "confirm_sql_artifact",
         "ReadonlyStatementRegistry",
-        "sqlglot 30.17.0",
-        "Command",
-        "首批登记",
-        "不得用“以 SHOW 开头”这类泛化正则",
-        "SHOW CREATE MATERIALIZED VIEW",
-        "SHOW MATERIALIZED VIEWS",
-        "SHOW PARTITIONS",
-        "SHOW TABLET",
-        "SHOW DATA",
-        "SHOW LOAD",
-        "SHOW ROUTINE LOAD",
-        "SHOW FUNCTIONS",
-        "SHOW CATALOGS",
-        "SHOW FRONTENDS",
-        "SHOW BACKENDS",
-        "SHOW RESOURCE GROUPS",
-        "SHOW PROC",
-        "SHOW ALTER TABLE",
-        "SHOW PROFILELIST",
-        "ADMIN SHOW",
-        "ANALYZE PROFILE",
-        "EXPLAIN LOGICAL",
-        "EXPLAIN VERBOSE",
-        "EXPLAIN COSTS",
-        "原始 SQL",
-        "内层 query",
-        "**不要求**把目标版本的只读语句**完整**登记才开放 target",
-    )
-    _assert_terms(
-        rejected,
-        "未登记",
-        "READONLY_STATEMENT_NOT_SUPPORTED",
-        "暂未支持",
-        "target 保持 enabled",
-        "无法唯一提取",
-        "INTO OUTFILE",
-        "外部 Catalog",
-        "零 SQL 发送",
-    )
-    assert _table_row(ast_section, "SHOW CREATE MATERIALIZED VIEW") == (
-        "SHOW CREATE MATERIALIZED VIEW",
-        "唯一提取 relation 目标并检查内部 Catalog 与黑名单",
-    )
-
-    implementation = _section(text, "### 14.2 实施时先红后绿")
-    _assert_terms(
-        implementation,
-        "每一个 registry descriptor",
-        "正常对照",
-        "黑名单目标",
-        "未知只读前缀",
-        "移除目标提取",
-    )
-
-    decision = _section(text, "### 2.6 第三轮复审与负责人决定")
-    _assert_terms(
-        decision,
-        "不要求",
-        "全部只读语句",
-        "首批",
-        "暂未支持",
-        "不影响 target 开放",
-        "小版本区间",
-    )
-    scope = _section(text, "### 3.1 F1 范围")
-    _assert_terms(scope, "首批", "常用只读语句", "暂未支持")
-
-    snapshot = _section(text, "### 6.1 ResourceSnapshot")
-    _assert_terms(
-        snapshot,
         "verified_min_version",
-        "verified_max_version",
-        "小版本区间",
-        "readonly registry profile/version/digest",
-    )
-    drift = _section(text, "### 6.2 确定性解析和漂移")
-    _assert_terms(
-        drift,
-        "回读实际 StarRocks version",
-        "verified_min_version <= actual_version <= verified_max_version",
-        "区间内",
-        "超出已验证小版本区间",
-        "target fail-closed",
-    )
-    live_gate = _section(text, "### 14.4 真实 target 现场门")
-    _assert_terms(
-        live_gate,
-        "首批 registry",
-        "区间下界",
-        "区间上界",
-        "未登记语句",
-        "READONLY_STATEMENT_NOT_SUPPORTED",
-        "target 继续可用",
-        "权限不足错误",
-    )
-    _assert_terms(
-        _section(text, "## 16. 已接受的权衡和残余风险"),
-        "增量",
-        "合法只读语句",
-        "暂未支持",
-        "不关闭 target",
-    )
-
-    for obsolete in (
-        "完整官方只读语句 inventory",
-        "目标版本完整只读 inventory",
-        "否则该版本的 target 不能开放",
+        "application/sql",
+        "`staging`",
+        "`pending`",
+        "1_048_576",
+        "存活 query set",
     ):
-        assert obsolete not in text, f"F1 规格仍保留过严完整性门：{obsolete}"
+        assert retired not in body, f"F1 规格现行正文仍含 v8 已删除的机制：{retired}"
 
 
-def test_f1_spec_discloses_that_the_relation_denylist_is_not_metadata_secrecy() -> None:
+def test_f1_spec_defines_one_guarded_sql_and_result_path() -> None:
     text = _spec()
-    ast_section = _section(text, "### 7.3 只读证明闭集")
-
-    _assert_terms(
-        ast_section,
-        "不提供元数据保密",
-        "information_schema.columns",
-        "information_schema.views",
-        "view_definition",
-        "列名",
-        "查询文本",
-        "集群拓扑",
+    _assert_ordered_terms(
+        _section(text, "## 1. 结论"),
+        "统一对话入口",
+        "交互路由",
+        "CapabilityResolver",
+        "SlotVerifier",
+        "PlanCompiler",
+        "执行披露",
+        "WorkflowRunner",
+        "StepAdmission",
+        "ToolGateway",
+        "Render",
     )
     _assert_terms(
-        _section(text, "## 16. 已接受的权衡和残余风险"),
-        "元数据",
-        "information_schema",
-        "独立隐藏策略",
+        _section(text, "### 5.6 从引用到唯一 ToolCall"),
+        "`ToolCall.typed_args` 仍只接受 JSON 标量",
+        "HydratedQuery",
+        "Gateway 调用次数为 0",
+        "`asyncio.to_thread`",
+    )
+    _assert_terms(
+        _section(text, "### 5.7 结果一次读完，随步骤结果同事务提交"),
+        "`QueryResultBuffer`",
+        "ColumnSpec(ordinal, name, type)",
+        "迟到写入被丢弃",
+        "**同一事务**",
+        "AdapterResponse.payload 与 ToolResult.data_view 必须为空",
     )
 
 
-def test_f1_spec_fences_late_chunk_writes() -> None:
+def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() -> None:
     text = _spec()
-
     _assert_terms(
-        _section(text, "### 5.5 结果只走 Gateway 管理的流式 sink"),
-        "run_coroutine_threadsafe",
-        "背压",
-        "abort",
-        "迟到写入",
-        "fencing",
+        _section(text, "### 5.1 统一入口与确定性 SQL 识别"),
+        "`recognize_sql_message(text)`",
+        "闭集 SQL 语句关键字",
+        "恰好是一条完整语句",
+        "不调用模型",
+        "**同一个 PostgreSQL 事务**",
     )
+    _assert_terms(
+        _section(text, "### 5.3 交互接受：规则来源，零模型调用"),
+        "`origin=rule`",
+        "不构造模型请求",
+        "`request_count=0`",
+    )
+    invariants = _section(text, "## 4. 不可破坏的不变量")
+    assert "纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型" in invariants
+    assert "模型来源不得产生 `starrocks_readonly_query` 意图、\n   SqlArtifact 或执行" in invariants
+    assert "SQL 原文永不进入模型端口" not in text
+    nl = _section(text, "## 12. 与 F2、F3、F1-NL 的边界")
+    _assert_terms(
+        nl,
+        "不得创建可执行 SqlArtifact",
+        "完整展示",
+        "未经完整确认 Gateway 调用为 0",
+        "不重新执行",
+    )
+
+
+def test_f1_spec_asks_instead_of_guessing_the_target() -> None:
+    slots = _section(_spec(), "### 5.4 SlotVerifier 确定目标，不确定就追问")
+    assert "`SlotReady`，使用它" in _table_row(slots, "恰好 1 个")[1]
+    assert "`SlotInvalid`" in _table_row(slots, "| 0 个 |")[1]
+    assert "`CAPABILITY_TARGET_SELECTION_REQUIRED`" in _table_row(slots, "多个且没有澄清回答")[1]
+    assert "再次 `SlotIncomplete`" in _table_row(slots, "回答不完全一致")[1]
+    _assert_terms(slots, "**引用回复**", "提交人本人", "不调用模型")
+
+
+def test_f1_spec_keeps_no_replay_on_the_existing_step_journal() -> None:
+    recovery = _section(_spec(), "## 10. 不重放与崩溃恢复")
+    _assert_terms(
+        recovery,
+        "`max_tool_calls=1`",
+        "`BUDGET_EXHAUSTED`",
+        "Gateway 调用次数为 0",
+        "结果未知",
+    )
+
+
+def test_f1_spec_bounds_worker_concurrency() -> None:
+    worker = _section(_spec(), "### 8.4 worker 有界并发")
+    _assert_terms(
+        worker,
+        "`worker_max_concurrent_tasks`，默认 4，范围 1..16",
+        "只在有空位时才调用 `begin_task_attempt`",
+        "`run_with_task_heartbeat`",
+        "停机时停止领取",
+        "`db_pool_size + db_pool_max_overflow >= 2 × 并发数 + 1`",
+    )
+
+
+def test_f1_spec_proves_readonly_with_ast_and_an_in_code_list() -> None:
+    proof = _section(_spec(), "### 7.3 只读证明")
+    _assert_terms(
+        proof,
+        "`Select`、`Union`、`Intersect`、`Except`",
+        "代码内只读语句清单",
+        "不用“以 SHOW 开头”放行",
+        "`error_code=READONLY_STATEMENT_NOT_SUPPORTED`",
+        "零 SQL 发送",
+        "登记支持不等于给账号增权",
+        "黑名单**不提供元数据保密**",
+    )
+    _assert_terms(
+        _section(_spec(), "### 7.2 原文 token 扫描"),
+        "`/*+` 或 `/*!` 拒绝",
+        "`INTO OUTFILE` 拒绝",
+    )
+
+
+def test_f1_spec_keeps_the_hard_limits() -> None:
+    limits = _section(_spec(), "### 8.1 系统硬上限")
+    for row, value in (
+        ("保存预览行", "1000"),
+        ("保存预览字节", "20 MiB"),
+        ("server query timeout", "180 秒"),
+        ("SQL 原文", "65_536 bytes UTF-8"),
+        ("worker 同时处理任务数", "4"),
+    ):
+        assert _table_row(limits, f"| {row} |")[1] == value, row
 
 
 def test_f1_spec_closes_channel_target_and_web_prerequisites() -> None:
     text = _spec()
-
     for required in (
         "F1-NL",
-        "Web 显式 SQL 模式",
-        "入口只传 `resource_id`",
+        "网页聊天框、飞书单聊、飞书群聊（@小维）都可以提交 SQL",
         "不热加载",
-        "Web 规格 §11.2 六项",
+        "Web §11.2 前置",
+        "不依赖 ADR-005",
     ):
         assert required in text, f"F1 规格缺少入口、target 或 Web 前置约束：{required}"
-
     for forbidden in (
         "SchemaContextStore",
         "等待中的任务保留 queued 状态",
         "安全的 StarRocks JOIN 分布提示",
+        "未批准时 F1 不开放 /results",
+        "默认 target",
     ):
         assert forbidden not in text, f"F1 规格仍保留未闭合设计：{forbidden}"

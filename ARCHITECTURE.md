@@ -138,6 +138,30 @@ RequestEnvelope
   → RenderPayload (exactly once)
 ```
 
+**F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订已 Accepted；F1-1 实现前不是源码事实）。**
+SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中检测到嵌入 SQL 的消息以 `EMBEDDED_SQL_NOT_EXECUTED` 固定文案拒绝执行，Gateway 调用为 0：
+
+```text
+网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
+  → ChannelSubmissionService：recognize_sql_message（确定性；认不出按普通对话）
+  → TaskStore.submit_sql_query（一个事务：SqlArtifact + task + ArtifactSubmission）
+  → Worker（最多同时 4 个任务）→ XiaoweiRuntime
+       → load_or_accept_interaction：ArtifactSubmission → origin=rule 交互事实，模型调用 0 次
+       → route_interaction → CapabilityResolver → SlotVerifier
+            → 唯一 F1 target：继续；0 个：拒绝
+            → 多个：ClarificationRecord（选项）→ CLARIFICATION_REQUIRED → 本人精确作答（网页 / 飞书引用回复）
+       → PlanCompiler → ExecutionDisclosure → WorkflowRunner
+            → 现有漂移校验（plan_hash、target_fingerprint、policy revision；config_revision 在 typed_arguments 中，由 plan_hash 覆盖）
+            → 恢复判定先于 SQL 水合：journal 已有记录 → begin_step_attempt 按 StepAttemptDecision 闭集表判定
+              （STALE_FENCING / NOT_RUNNABLE 保留 LifecycleError，由 Worker 按 loser 退出）
+            → 新步骤：HydratedQuery 水合（失败即 sql_artifact.expired / unavailable FAILED，不开始步骤）
+            → StepAdmission(ToolPolicy → SQLGuard confirmed_readonly)
+            → begin_step_attempt（max_tool_calls=1，已开始未提交的步骤不重放）
+            → ToolGateway → target-bound StarRocks adapter → 进程内 QueryResultBuffer
+            → commit_step_result（同一事务写步骤结果、Evidence、结果行与 requester grant）
+       → Reflection → RenderPayload（状态、行数、截断 + 锁定结果页链接，不含数据）
+```
+
 ### 4.1 模型边界
 
 当前 I1-A 源码事实是：只有获授权的 durable Runtime path 可以调用
@@ -469,6 +493,20 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | `ClarificationPayload` | reason_code、missing_fields、prompt | 只从 `ClarificationRecord` 投影，不是 `RenderPayload` 分支 |
 | `ExecutionDisclosure` | capability、target summary、read disposition、projected slots、external_target_access | 首次 Gateway 前的可查询披露事实；表示计划语义，不表示渠道已送达或真实目标已联网 |
 
+**F1 目标契约（Accepted，F1-1 实现前不是源码事实；精确字段见 [ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md) 与 ADR-009/ADR-010/ADR-012 的 F1 修订）：**
+
+| 契约 | 关键字段 | 约束 |
+| --- | --- | --- |
+| `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash，不含 SQL 原文、目标或结果引用；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
+| `submit_sql_query`（TaskStore 命令） | context、SQL bytes、幂等键 | SQL 消息唯一提交入口；同一 PostgreSQL 事务内写 SqlArtifact 与 task/ArtifactSubmission；失败整体回滚（ADR-018 D2a）；目标由后续 SlotVerifier 确定 |
+| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；`expires_at` 只在创建、澄清子任务创建、水合与成功提交四个事务里以 `GREATEST` 延长（只延不缩），任务终态迁移不改；水合在同一事务 `SELECT … FOR UPDATE` 后由 `classify_sql_artifact_read` 分类：不存在/归属/hash 不符为 `SqlArtifactUnavailableError`（`sql_artifact.unavailable`），之后才判过期（`sql_artifact.expired`），两者 Gateway 0 次；清除为 tombstone（`sql_bytes` 置空、`purged_at`） |
+| `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
+| `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
+| `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + Gateway 余量确定 |
+| `ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED` | sql_ref、sql_hash、目标选项（resource_id + 展示名） | F1 target 多于一个时追问；只接受提交人本人与展示名完全一致的回答；不设默认目标 |
+| `QueryResultBuffer` | ColumnSpec(ordinal, name, type)、行、has_more、completeness | 进程内；≤ 1000 行、≤ 20 MiB、不存半行；Gateway 超时后关闭并丢弃迟到写入 |
+| `ResultArtifact` | result_ref、ColumnSpec(ordinal, name, type)、行、saved rows/bytes、completeness | 只在步骤成功提交的同一事务里创建并写 requester grant；存在即可读，24 小时后删除；按 ordinal 保存同名列 |
+
 上表是按里程碑演进的稳定契约摘要：原始内核 DTO 的精确类型由 M2 审定，RI3 新增模型事实
 契约的精确字段与类型以已接受的 [ADR-015](docs/adr/ADR-015-real-model-provider-boundary.md) 为准。
 契约的**名称与职责边界**在各自 ADR 获批后冻结，各模块不得另造同义 DTO。
@@ -594,6 +632,12 @@ fencing token 有两个推进点：成功取得 lease 时推进；`schedule_retr
 
 状态终态化、retry 调度与 step checkpoint 的对应审计和状态事实同事务提交。成功领取只改变可由 TTL 自愈的 lease/attempt，不强制事务审计。持久化写必须区分 confirmed rollback 与 not-confirmed，不能从异常类别猜测数据库是否已经提交。
 
+**F1 目标语义（Accepted，见 ADR-009/ADR-010 F1 修订）**：`confirmed_artifact` 步骤沿用现有 step journal，
+`max_tool_calls=1`：已开始但未提交的步骤再次领取时得到 `BUDGET_EXHAUSTED`，任务以 FAILED 结束，Gateway 调用为 0，
+结果保持不可读；结果行只在 `commit_step_result` 的同一事务里写入并变为 available。F1 不新增 target 排队锁、等待
+窗口或调度退让。Worker 改为有界并发（`worker_max_concurrent_tasks` 默认 4）：只在有空位时领取任务，每个在途任务
+沿用现有 heartbeat 各自续租，lease、fencing、失败计数与终态保护不变；停机时停止领取并在宽限内收尾。
+
 **stale recovery 拆成「发现」与「接管」两半，只有前一半在 TaskStore 里**（M4）：`list_stale_leases(*, limit)` 是只读方法，返回「曾被租出、租约已过期、未终态」的任务，按 `(lease_expires_at, task_id)` 稳定排序。它不 claim、不调度、不判断审批是否应当恢复、不改变任何状态；接管仍走 `acquire_lease()`，并发 winner 仍由存储层裁决。把两半合成一个方法会让 TaskStore 长出调度能力，而调度属 Worker。
 
 **审计事件由 TaskStore 承接写入，消费路径不在 M4**：`record_audit_event(*, event)` 是 append-only 写入，按 `(task_id, seq)` 编号并返回本次分配到的 `seq`。**证据表替代不了审计**——证据回答「看到了什么」，审计回答「系统做了什么、准入判成了什么」，一次被策略拒绝的调用不产生任何证据但必须留下审计。载荷是 M2 的 `TraceEvent`，其 `detail` 已在契约层做过键值双向脱敏并限长，持久化层不再脱敏第二次。
@@ -648,9 +692,16 @@ DSL 可以复用域级默认 owner、renderer、adapter 和审计配置，因此
 
 ## 9. SQL 与工具安全
 
-- 允许执行的 SQL 由确定性 compiler 生成；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
-- SQLGuard 使用 `sqlglot` AST 解析，按方言和 policy profile 检查语句类型、表/列范围、子查询、锁、写入、注释和多语句边界。
-- PromQL 只允许 capability 注册的完整模板：参数经闭集 schema 与统一 escape 后编译，准入期从 `typed_arguments` 重新编译并逐字节比对；M6a 不接受任意 PromQL，不引入 parser，也不把固定模板安全外推为任意表达式安全。
+- 模板 SQL 由确定性 compiler 生成（`template_locked`）；模型提供的 SQL 只能作为展示性建议或待解析输入，不能直接执行。
+- F1 用户直接 SQL（`confirmed_readonly`，Accepted）：用户在网页或飞书直接发送、由确定性规则识别并保存的受保护 SQL
+  artifact，与原文 SHA-256 绑定；纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。SQLGuard 先做 quote-aware token scan（多语句、`/*+`/`/*!` hint、
+  控制字符、INTO OUTFILE），再走两条互斥的只读证明路径——sqlglot 完整解析的 AST 路径（`Select`/`Union`/`Intersect`/
+  `Except` 查询根、已识别 SHOW、DESC、EXPLAIN 递归），或 sqlglot 降级为 `Command`/ParseError 时的代码内只读语句清单。
+  清单外语句返回 `READONLY_STATEMENT_NOT_SUPPORTED`、零 SQL 发送。两条路径都统一校验内部 `default_catalog`、
+  `blocked_relation_names` 精确黑名单和副作用；拒绝外部 Catalog、table function、UNNEST、qualified function/UDF 与任何
+  hint。adapter 永远执行提交的原始 bytes，不改写、不补 LIMIT。
+- F1 关系黑名单只在 credential 权限面内额外拒绝，**不提供元数据保密**；StarRocks credential 的对象级 SELECT grants
+  是授权真源。视图 lineage 不递归展开，强隔离必须由 DBA 撤权。
 - AST 无法解析、方言不确定、目标不完整或权限无法确认时 fail-closed。
 - 所有工具调用都通过 ToolPolicy 校验 target 与 context 的 `tenant_id`、`environment_id` 一致，再检查 environment allowlist、operation、effect class 与最大超时；步骤/调用预算继续由计划和 Runner 约束。target/context 漂移必须在 Gateway 与 Evidence 之前 fail-closed。
 - adapter 不把第三方错误文本当作可信控制信号；原始错误先包成 `ExternalContent`，再由确定性 error mapper 归类。
@@ -997,7 +1048,8 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
 - ADR-002：TaskStore 事实真源与 Runner checkpoint 的关系。
 - ADR-003：DeterministicRunner / LangGraphRunner 准入和切换条件。
 - ADR-004：Capability DSL 的最小契约与量化推广标准。
-- ADR-005：审批绑定、hash canonicalization 和目标漂移处理。
+- ADR-005：审批绑定、hash canonicalization 和目标漂移处理；F2 结果查看与 F3 导出的审批主体、状态、有效期、
+  拒绝/过期/冲突与审计语义也须在此冻结。F1 锁定结果页不写 approver grant、不展示结果，不依赖 ADR-005。
 - ADR-006：PostgreSQL 全文检索到 pgvector 的升级门槛。
 - ADR-007：首批能力、初始执行上下文与真实调用许可（已记录：[docs/adr/ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)）。
 - ADR-008：工程与测试基线，含 Python 3.11、pytest、security marker gate、Ruff 和 mypy（已记录：[docs/adr/ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)）。
@@ -1013,5 +1065,6 @@ API/CLI 稳定后接 Web/飞书；随后按垂直闭环添加 Prometheus、MySQL
   [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)
   §RI5 Amendment R2，同时 R1 修订 D4 的 B2 行（任务模型调用仍 worker-only，Web 只获得
   固定 synthetic 探针）。ADR-007、ADR-014、ADR-015 与总体 spec 的 RI5 修订已由项目负责人于 2026-09-14 成套接受；该接受不授予 RI3 PR 3E 与 RI2 的真实调用 GO。
+- ADR-018：F1 SQL artifact、结果 artifact 与结果访问边界（**Accepted**：[docs/adr/ADR-018](docs/adr/ADR-018-f1-sql-and-result-artifacts.md)）。
 
 ADR 未形成前，不把对应争议藏在代码默认值里。

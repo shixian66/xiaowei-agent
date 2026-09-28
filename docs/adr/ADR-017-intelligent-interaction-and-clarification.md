@@ -3,6 +3,8 @@
 > 状态：已接受并作为 I1 实施门；I1/I2 已完成离线实现（不代表已运行或已连接任何真实服务，证据见
 > [AGENT_HANDOFF 当前状态](../../AGENT_HANDOFF.md#current-status)）。负责人于 2026-09-26 决定不再按原定义推进 I3/I4，
 > 并将其转为尚待设计的对话能力方向；本次只记录路线状态，不改变下文 I1/I2 决策契约，也不授权新能力实现。
+>
+> F1 修订：**Accepted**（2026-09-28，负责人接受 PR #109 `e9fdb30`），见文末“F1 修订”；不改变本 ADR 已接受条款的状态。
 
 ## 路线修订（2026-09-26）
 
@@ -339,3 +341,43 @@ PostgreSQL 唯一约束测试。
 I0 合入后，I1 仍必须按独立 PR 顺序实现。任何想改变本 ADR 中的状态、字段名、reason code 归属、
 model trace、migration revision、`ReadClass` 语义、披露屏障位置或 TaskView invariant 的变更，都必须先
 修订本文，并重新跑相应契约/安全测试。
+
+## F1 修订（2026-09-27，Accepted 2026-09-28）
+
+- 状态：Accepted（2026-09-28，项目负责人接受 PR #109 `e9fdb30`；F1-0b 起每个切片仍需负责人明确开工口令）
+- 设计真源：[F1 受治理只读查询设计](../superpowers/specs/2026-09-27-f1-starrocks-readonly-query-design.md) v9 §5.1–§5.4、§11.2
+
+### 确定性 SQL 识别与规则来源交互事实
+
+SQL 查询是普通 capability，走本 ADR 的同一交互主链。application 层在创建任务前用确定性纯函数识别“整条消息
+就是一条 SQL”（闭集语句关键字开头、通过 token 扫描、恰好一条完整语句）；识别为 SQL 的任务以
+`ArtifactSubmission` 提交，`load_or_accept_interaction` 不构造模型请求，直接保存 `origin=rule` 的
+`AcceptedInteractionArtifact`（`CAPABILITY_REQUEST` + `starrocks_readonly_query` 意图、空槽位），之后照常经
+`route_interaction`、CapabilityResolver、SlotVerifier、Plan、ExecutionDisclosure。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。
+认不出的消息保持现有流程，模型可以
+看到其中夹带的 SQL，但模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行；该意图只接受
+`origin=rule`。含有嵌入 SQL（`contains_embedded_sql`，按片段内容判定，不因代码块本身命中）的非 SQL 消息，`route_interaction`
+不看草案来源（模型或关键词规则），直接返回 `REFUSE` 与 `EMBEDDED_SQL_NOT_EXECUTED`，以固定文案拒绝执行，
+Gateway 调用为 0；F1-Core 不做 SQL 解释。混合文本的候选 SQL 与确认属 F1-NL，另行设计。
+
+### 目标选择追问
+
+新增 `ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED`。F1 的 SlotVerifier 在启用的 F1 target 多于一个时
+返回 `SlotIncomplete`，ClarificationRecord 保存 `sql_ref`、`sql_hash` 与目标选项（resource_id + 展示名）；提示从记录
+渲染选项。澄清子任务的回答由规则解释、不调用模型，只有与某个选项展示名完全一致才 `SlotReady`，否则再次追问；
+不设默认目标、不模糊匹配。子任务仍是普通 `ConversationSubmission`，SQL 通过父记录引用，不复制原文。现有 owner、
+一次性消费与终态约束不变；飞书以引用回复作答（ADR-013 F1 修订）。
+
+### RESTRICTED read
+
+`RESTRICTED` 不等于必须审批。只有获批 policy profile 显式声明的 `RESTRICTED` read 可以不经 `ApprovalGate`，
+F1 的 `starrocks.readonly_query` 须同时满足：
+
+- CapabilitySnapshot 明确绑定 `confirmed_readonly` profile；
+- 当前 requester 具有 `submit_readonly_task`；
+- target、配置、预算与 SQL artifact 全部通过 StepAdmission；
+- operation 无副作用，`export_policy=disabled`；
+- 结果页仍受 requester ACL 锁定。
+
+本修订不改变“`RESTRICTED` 读取不能复用 `ApprovalGate` 做额外确认”的既有决定，也不让现有三个能力脱离
+`BOUNDED`。写操作与 F2/F3 审批不受本条影响。
