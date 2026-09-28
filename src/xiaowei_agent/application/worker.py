@@ -89,12 +89,12 @@ _LOSER_REJECTIONS = frozenset(
 )
 
 
-@dataclass
+@dataclass(eq=False)
 class _Round:
     """一次 poll iteration：一次列出的候选批次，加上它启动的全部尝试。
 
-    故障窗口只在一整轮都没有基础设施故障时清零（M5 §3.3）；并发下几轮会重叠，
-    所以任何一轮存续期间出现故障都会把它标脏。
+    故障窗口只在一整轮都没有基础设施故障时清零（M5 §3.3）。轮次在派发完且尝试
+    全部结束的那一刻结算；并发下几轮会重叠，故障只标脏当时尚未结算的轮次。
     """
 
     attempts: set[asyncio.Task[bool]] = field(default_factory=set)
@@ -131,6 +131,9 @@ class WorkerLoop:
         # 按领取顺序保存在跑的尝试及其所属轮次；dict 保序，同类失败按最早登记者上抛。
         self._in_flight: dict[asyncio.Task[bool], _Round] = {}
         self._rounds: list[_Round] = []
+        # 进程级基础设施故障窗口：首次故障的 monotonic 时刻与连续退避次数。
+        self._failure_since: float | None = None
+        self._consecutive_failures = 0
 
     async def _log_committed(self, events: tuple[TraceEvent, ...]) -> None:
         for event in events:
@@ -294,6 +297,7 @@ class WorkerLoop:
             self._in_flight[task] = round_
             round_.attempts.add(task)
         round_.dispatched = True
+        self._settle(round_)
 
     def _reap(self) -> None:
         """收走全部已结束的尝试，计入所属轮次，并按原串行语义分类上抛。
@@ -303,18 +307,25 @@ class WorkerLoop:
         """
         fatal: BaseException | None = None
         transient: PersistenceUnavailableError | None = None
+        touched: list[_Round] = []
         for task in [task for task in self._in_flight if task.done()]:
             round_ = self._in_flight.pop(task)
             round_.attempts.discard(task)
+            touched.append(round_)
             if task.cancelled():
                 continue
             error = task.exception()
             if error is None:
                 round_.completed += int(task.result())
-            elif isinstance(error, PersistenceUnavailableError):
+                continue
+            round_.dirty = True
+            if isinstance(error, PersistenceUnavailableError):
                 transient = transient or error
             elif fatal is None:
                 fatal = error
+        # 先结算已结束的轮次，再上抛：干净结束的轮次不会被这次或之后的故障追溯标脏。
+        for round_ in touched:
+            self._settle(round_)
         if fatal is not None:
             raise fatal
         if transient is not None:
@@ -350,13 +361,14 @@ class WorkerLoop:
         with worker_log_context(self.owner):
             await self._dispatch(round_)
 
-    def _close_finished_rounds(self) -> bool:
-        """移除已派发且尝试全部结束的轮次；返回其中是否有一整轮没有故障。"""
-        clean = False
-        for round_ in [r for r in self._rounds if r.dispatched and not r.attempts]:
-            self._rounds.remove(round_)
-            clean = clean or not round_.dirty
-        return clean
+    def _settle(self, round_: _Round) -> None:
+        """轮次派发完且尝试全部结束时立即结算；整轮无故障才清零故障窗口。"""
+        if not round_.dispatched or round_.attempts or round_ not in self._rounds:
+            return
+        self._rounds.remove(round_)
+        if not round_.dirty:
+            self._failure_since = None
+            self._consecutive_failures = 0
 
     async def _wait_or_stop(
         self,
@@ -454,8 +466,6 @@ class WorkerLoop:
             ) from None
 
     async def _run(self, stop: asyncio.Event) -> None:
-        first_failure_at: float | None = None
-        consecutive_failures = 0
         while not stop.is_set():
             round_ = _Round()
             self._rounds.append(round_)
@@ -463,15 +473,16 @@ class WorkerLoop:
                 # 后台失败与领取失败都在本轮派发中上抛，走同一套退避与 fail-stop。
                 stopped = await self._dispatch_or_stop(stop, round_)
             except PersistenceUnavailableError:
-                # 所有尚未结束的轮次都见到了这次故障，不能再算整轮干净；本轮就此中止。
+                # 尚未结算的轮次都见到了这次故障，不能再算整轮干净；本轮就此中止。
                 for open_round in self._rounds:
                     open_round.dirty = True
                 round_.dispatched = True
+                self._settle(round_)
                 now = self._monotonic()
-                if first_failure_at is None:
-                    first_failure_at = now
+                if self._failure_since is None:
+                    self._failure_since = now
                 if (
-                    now - first_failure_at
+                    now - self._failure_since
                     >= self._settings.continuous_infrastructure_failure_window_seconds
                 ):
                     raise WorkerInfrastructureExhaustedError(
@@ -480,9 +491,9 @@ class WorkerLoop:
                 delay = min(
                     self._settings.infrastructure_backoff_cap_seconds,
                     self._settings.infrastructure_backoff_base_seconds
-                    * (2**consecutive_failures),
+                    * (2**self._consecutive_failures),
                 )
-                consecutive_failures += 1
+                self._consecutive_failures += 1
                 if await self._wait_or_stop(delay, stop):
                     return
                 continue
@@ -492,11 +503,6 @@ class WorkerLoop:
                 ) from None
             if stopped:
                 return
-            # 只有整轮没有基础设施异常，才清空窗口和退避计数（M5 §3.3）。领取成功或
-            # 个别尝试成功都不算；要等一整轮（列出、领取及其全部尝试）干净结束。
-            if self._close_finished_rounds():
-                first_failure_at = None
-                consecutive_failures = 0
             if await self._wait_or_stop(
                 self._settings.worker_poll_interval_seconds,
                 stop,

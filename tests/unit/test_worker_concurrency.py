@@ -548,3 +548,42 @@ async def test_a_fully_clean_round_resets_the_infrastructure_window() -> None:
     # 两次故障相隔远超窗口，中间有干净的空闲轮：不能误判为连续故障。
     await asyncio.wait_for(running, _WAIT_SECONDS)
     assert len(runtime.grants) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_finished_clean_round_is_not_dirtied_by_a_later_failure() -> None:
+    # 失败 → 非空干净轮结束（清零）→ 下一轮失败：后来的失败必须重新计时，
+    # 不能把已经结束的干净轮追溯标脏、沿用最初的故障时刻而提前 fail-stop。
+    clock = ManualClock(start=_NOW)
+    store, task_ids = await _store_with_tasks(clock, 12)
+    monotonic = _Monotonic()
+    # 每批列两个：[失败, 成功] 中止，[成功, 成功] 干净，如此往复。
+    failing = set(task_ids[0::3])
+
+    async def act(grant: TaskAttemptGrant) -> None:
+        if grant.task_id in failing:
+            raise _unavailable()
+
+    runtime = _Runtime(act)
+    stop = asyncio.Event()
+    running = asyncio.create_task(
+        _worker(
+            store,
+            runtime,
+            clock,
+            sleep=monotonic.sleep,
+            monotonic=monotonic,
+            worker_max_concurrent_tasks=1,
+            dispatch_batch_limit=2,
+            infrastructure_backoff_base_seconds=1.0,
+            infrastructure_backoff_cap_seconds=1.0,
+            continuous_infrastructure_failure_window_seconds=1.5,
+        ).run(stop)
+    )
+    for _ in range(2000):
+        if len(runtime.grants) == len(task_ids) or running.done():
+            break
+        await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(running, _WAIT_SECONDS)
+    assert [grant.task_id for grant in runtime.grants] == task_ids
