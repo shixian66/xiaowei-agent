@@ -179,6 +179,13 @@ assert worker_main is not None
         "xiaowei_agent.interfaces.body_limit",
         "xiaowei_agent.interfaces.http_models",
     }
+    # 只有接受提交的进程装配 SQL 识别；通知 worker 只做投影，不加载它。
+    submission_only = {
+        "xiaowei_agent.governance.readonly_statements",
+        "xiaowei_agent.governance.sql_message",
+        "xiaowei_agent.governance.sql_tokens",
+        "xiaowei_agent.governance.sqlguard",
+    }
     projection_only = {
         "xiaowei_agent.application.channel_projection",
         "xiaowei_agent.interfaces.feishu_sdk",
@@ -186,7 +193,7 @@ assert worker_main is not None
         "xiaowei_agent.rendering.feishu",
     }
     assert loaded == (
-        set(_TASK_VIEW_PROCESS_ALLOWED_MODULES) - internal_api_only
+        set(_TASK_VIEW_PROCESS_ALLOWED_MODULES) - internal_api_only - submission_only
     ) | projection_only
 
 
