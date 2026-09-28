@@ -574,6 +574,15 @@ class SqlGuardRejection(StrEnum):
     WINDOW_MISMATCH = "window_mismatch"
     WINDOW_TOO_WIDE = "window_too_wide"
     RECOMPILE_MISMATCH = "recompile_mismatch"
+    # ---- confirmed_readonly（F1，设计 §7.3）----
+    HASH_MISMATCH = "hash_mismatch"
+    HINT_PRESENT = "hint_present"
+    NOT_READONLY = "not_readonly"
+    READONLY_STATEMENT_NOT_SUPPORTED = "readonly_statement_not_supported"
+    EXTERNAL_CATALOG = "external_catalog"
+    BLOCKED_RELATION = "blocked_relation"
+    TABLE_FUNCTION = "table_function"
+    QUALIFIED_FUNCTION = "qualified_function"
 
 
 class PromqlGuardRejection(StrEnum):

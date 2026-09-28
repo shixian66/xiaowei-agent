@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Final, NoReturn
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import Completeness, QueryRequirement, ResultGrantKind
@@ -19,6 +19,7 @@ __all__ = [
     "ColumnSpec",
     "Completeness",
     "HydratedQuery",
+    "QualifiedRelation",
     "QueryRequirement",
     "ReadonlyQueryBudget",
     "ResultGrantKind",
@@ -33,6 +34,21 @@ class ReadonlyQueryBudget(Contract):
     preview_max_rows: StrictInt = Field(ge=1, le=1000)
     preview_max_bytes: StrictInt = Field(ge=1_048_576, le=20_971_520)
     query_timeout_seconds: StrictInt = Field(ge=1, le=180)
+
+
+class QualifiedRelation(Contract):
+    """内部 Catalog 中的 ``database.object``；两段都按小写规范化后比较。
+
+    黑名单只缩小权限面：大小写不同的名字一律视为同一对象，最坏情况是多拒，不会漏拒。
+    """
+
+    database: StrictStr = Field(min_length=1)
+    name: StrictStr = Field(min_length=1)
+
+    @field_validator("database", "name", mode="after")
+    @classmethod
+    def _lowercase(cls, value: str) -> str:
+        return value.lower()
 
 
 class ColumnSpec(Contract):
