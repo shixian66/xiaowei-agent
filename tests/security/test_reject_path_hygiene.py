@@ -85,6 +85,8 @@ SAFE_INTERPOLATIONS: frozenset[str] = frozenset(
         "SqlGuardRejection.QUALIFIED_FUNCTION",
         "SqlGuardRejection.READONLY_STATEMENT_NOT_SUPPORTED",
         "SqlGuardRejection.TABLE_FUNCTION",
+        "SqlGuardRejection.QUERY_BINDING_MISMATCH",
+        "SqlGuardRejection.QUERY_REQUIREMENT_MISMATCH",
         # 扫描原因到拒绝码的闭集映射：键与值都是代码里的枚举成员，不含 SQL；由
         # test_rejection_message_never_echoes_the_sql 反向承重。
         "_TOKEN_REJECTIONS[reason]",

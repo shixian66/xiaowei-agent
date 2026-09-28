@@ -16,6 +16,7 @@ from xiaowei_agent.contracts import (
     ReadClass,
     SqlSurface,
 )
+from xiaowei_agent.contracts.enums import QueryRequirement
 
 CAPABILITY_ID: Final[str] = "starrocks.slow_query.diagnose"
 CAPABILITY_VERSION: Final[str] = "1.0.0"
@@ -40,6 +41,7 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.list.v1",
+            query_requirement=QueryRequirement.TEMPLATE_LOCKED,
         ),
         OperationSpec(
             operation=OP_COUNT,
@@ -48,6 +50,7 @@ SLOW_QUERY_SPEC: Final[CapabilitySpec] = CapabilitySpec(
             read_class=ReadClass.BOUNDED,
             side_effect=False,
             argument_schema_ref="schema.starrocks.slow_query.count.v1",
+            query_requirement=QueryRequirement.TEMPLATE_LOCKED,
         ),
     ),
     policy_profile=POLICY_PROFILE,

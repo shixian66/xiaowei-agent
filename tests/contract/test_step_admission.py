@@ -9,7 +9,13 @@ import datetime as dt
 
 import pytest
 from tests.fakes.admission import (
+    CONTEXT,
     NOW,
+    POLICY_REVISION,
+    POLICY_SNAPSHOT,
+    REGISTRY_SNAPSHOT,
+    TARGET,
+    TASK_ID,
     admit,
     forged_write_step,
     granted_approval,
@@ -21,8 +27,15 @@ from tests.fakes.admission import (
     synthetic_write_step,
 )
 
-from xiaowei_agent.capabilities.effect import SpecResolutionError
+from xiaowei_agent.capabilities.effect import SpecResolutionError, build_plan_step
+from xiaowei_agent.capabilities.prometheus_alert import (
+    OP_QUERY_METRIC_RANGE,
+    PROMETHEUS_ALERT_CAPABILITY_ID,
+    PROMETHEUS_ALERT_CAPABILITY_VERSION,
+    PROMETHEUS_ALERT_POLICY_PROFILE,
+)
 from xiaowei_agent.contracts import (
+    AdmissionCertificate,
     CapabilitySnapshot,
     CapabilitySpec,
     EffectClass,
@@ -37,11 +50,13 @@ from xiaowei_agent.contracts import (
     PromqlSurface,
     ReadClass,
     RiskLevel,
+    SqlGuardRejection,
     ToolCall,
 )
 from xiaowei_agent.governance.approval import ApprovalRequiredError, NeverGrantingApprovalGate
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
+from xiaowei_agent.governance.profiles import PROMETHEUS_ALERT_READONLY_PROFILE
 from xiaowei_agent.governance.promqlguard import PromqlGuardError
 from xiaowei_agent.governance.sqlguard import SqlGuardError
 from xiaowei_agent.governance.step_admission import admit_step
@@ -266,17 +281,73 @@ def test_sql_envelope_without_a_registered_surface_is_refused() -> None:
         admit(step=slow_query_step(), call=slow_query_call(), sql_surface=None)
 
 
+def _admit_on_prometheus_operation(
+    step: PlanStep, *, promql_surface: PromqlSurface | None
+) -> AdmissionCertificate:
+    """把 PromQL 信封放在真实的 Prometheus operation 上准入。
+
+    慢查询 operation 声明 ``template_locked``，携带 PromQL 信封在进入 PromQL 闸门之前就会
+    以 ``query_requirement_mismatch`` 被拒；要单独观察 PromQL 闸门，宿主必须是声明
+    ``none`` 的 Prometheus operation。
+    """
+    hosted = build_plan_step(
+        REGISTRY_SNAPSHOT,
+        capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
+        capability_version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
+        operation=OP_QUERY_METRIC_RANGE,
+        step_id=step.step_id,
+        typed_arguments=dict(step.typed_arguments),
+    )
+    plan = ExecutionPlan(
+        capability_id=PROMETHEUS_ALERT_CAPABILITY_ID,
+        capability_version=PROMETHEUS_ALERT_CAPABILITY_VERSION,
+        steps=(hosted,),
+        policy_profile=PROMETHEUS_ALERT_POLICY_PROFILE,
+        policy_revision=POLICY_REVISION,
+        budget=PlanBudget(max_steps=1, max_tool_calls=1, max_model_tokens=1),
+    )
+    call = ToolCall(
+        gateway="prometheus",
+        operation=OP_QUERY_METRIC_RANGE,
+        step_id=hosted.step_id,
+        typed_args=dict(hosted.typed_arguments),
+        timeout_seconds=30.0,
+        idempotency_key="idem-promql",
+    )
+    return admit_step(
+        step=hosted,
+        plan=plan,
+        call=call,
+        context=CONTEXT,
+        target=TARGET,
+        snapshot=REGISTRY_SNAPSHOT,
+        policy_snapshot=POLICY_SNAPSHOT,
+        profile=PROMETHEUS_ALERT_READONLY_PROFILE,
+        sql_surface=None,
+        promql_surface=promql_surface,
+        approval_gate=NeverGrantingApprovalGate(),
+        task_id=TASK_ID,
+        now=NOW,
+    )
+
+
 def test_registered_promql_envelope_is_admitted() -> None:
     step = _promql_step()
-    call = slow_query_call(typed_args=dict(step.typed_arguments))
-    certificate = admit(
-        step=step,
-        plan=slow_query_plan(steps=(step,)),
-        call=call,
-        sql_surface=None,
-        promql_surface=PROMQL_SURFACE,
-    )
+    certificate = _admit_on_prometheus_operation(step, promql_surface=PROMQL_SURFACE)
     assert certificate.step_id == step.step_id
+
+
+def test_template_locked_operation_cannot_carry_a_promql_envelope() -> None:
+    step = _promql_step()
+    with pytest.raises(SqlGuardError) as caught:
+        admit(
+            step=step,
+            plan=slow_query_plan(steps=(step,)),
+            call=slow_query_call(typed_args=dict(step.typed_arguments)),
+            sql_surface=None,
+            promql_surface=PROMQL_SURFACE,
+        )
+    assert caught.value.rejection is SqlGuardRejection.QUERY_REQUIREMENT_MISMATCH
 
 
 @pytest.mark.parametrize("gateway", ["prometheus", "unregistered"])
@@ -343,12 +414,7 @@ def test_sql_and_promql_envelopes_cannot_coexist() -> None:
 def test_promql_envelope_without_a_registered_surface_is_refused() -> None:
     step = _promql_step()
     with pytest.raises(PromqlGuardError) as caught:
-        admit(
-            step=step,
-            plan=slow_query_plan(steps=(step,)),
-            call=slow_query_call(typed_args=dict(step.typed_arguments)),
-            sql_surface=None,
-        )
+        _admit_on_prometheus_operation(step, promql_surface=None)
     assert caught.value.rejection is PromqlGuardRejection.SURFACE_MISSING
 
 

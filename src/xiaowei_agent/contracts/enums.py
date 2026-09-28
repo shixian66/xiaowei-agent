@@ -583,6 +583,9 @@ class SqlGuardRejection(StrEnum):
     BLOCKED_RELATION = "blocked_relation"
     TABLE_FUNCTION = "table_function"
     QUALIFIED_FUNCTION = "qualified_function"
+    # ---- StepAdmission 按 query_requirement 强制 profile（F1，设计 §5.6）----
+    QUERY_REQUIREMENT_MISMATCH = "query_requirement_mismatch"
+    QUERY_BINDING_MISMATCH = "query_binding_mismatch"
 
 
 class PromqlGuardRejection(StrEnum):
