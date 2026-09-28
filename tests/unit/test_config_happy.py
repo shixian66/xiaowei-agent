@@ -86,7 +86,7 @@ def test_m5_database_and_process_defaults_are_explicit() -> None:
     assert settings.postgres_password_file == "/run/secrets/postgres_" + "password"
     assert settings.db_connect_timeout_seconds == 5.0
     assert settings.db_command_timeout_seconds == 15.0
-    assert settings.db_pool_size == 5
+    assert settings.db_pool_size == 9
     assert settings.db_pool_max_overflow == 0
     assert settings.api_bind_host == "127.0.0.1"
     assert settings.api_bind_port == 8000
@@ -226,3 +226,41 @@ def test_all_documented_fields_load_from_the_environment() -> None:
     assert settings.db_pool_max_overflow == 2
     assert settings.api_bind_host == "::1"
     assert settings.api_bind_port == 9000
+
+
+def test_default_worker_concurrency_fits_the_default_pool() -> None:
+    settings = Settings(environment_id="dev")
+    assert settings.worker_max_concurrent_tasks == 4
+    # 每个在跑任务最多同时占执行与续租两条连接，另留一条给领取。
+    assert (
+        settings.db_pool_size + settings.db_pool_max_overflow
+        >= 2 * settings.worker_max_concurrent_tasks + 1
+    )
+
+
+def test_worker_concurrency_loads_from_the_environment() -> None:
+    settings = load_settings(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_WORKER_MAX_CONCURRENT_TASKS": "1",
+            "XIAOWEI_DB_POOL_SIZE": "3",
+        }
+    )
+    assert settings.worker_max_concurrent_tasks == 1
+    assert settings.db_pool_size == 3
+
+
+def test_env_example_equals_settings_defaults_item_by_item() -> None:
+    # .env.example 是默认值的第二个来源；逐项相等，改默认值时两处不会漂移。
+    values: dict[str, str] = {}
+    for line in (Path(__file__).resolve().parents[2] / ".env.example").read_text(
+        encoding="utf-8"
+    ).splitlines():
+        if line.startswith("XIAOWEI_") and "=" in line:
+            name, value = line.split("=", 1)
+            values[name] = value
+    assert set(values) == set(_FIELD_TO_ENV.values())
+    documented = load_settings({k: v for k, v in values.items() if v != ""})
+    defaults = Settings(environment_id=documented.environment_id)
+    for field in _FIELD_TO_ENV:
+        assert getattr(documented, field) == getattr(defaults, field), field

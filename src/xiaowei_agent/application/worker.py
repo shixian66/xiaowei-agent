@@ -1,10 +1,11 @@
-"""Worker 的确定性领取、执行、重试与进程级退避。"""
+"""Worker 的确定性领取、有界并发执行、重试与进程级退避。"""
 
 import asyncio
 import contextlib
 import datetime as dt
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine, Iterable
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Protocol, TypeAlias
 
@@ -59,6 +60,8 @@ class WorkerSettings(Protocol):
     continuous_infrastructure_failure_window_seconds: float
     worker_poll_interval_seconds: float
     dispatch_batch_limit: int
+    worker_max_concurrent_tasks: int
+    worker_shutdown_grace_seconds: float
 
 
 class WorkerInfrastructureExhaustedError(RuntimeError):
@@ -86,8 +89,26 @@ _LOSER_REJECTIONS = frozenset(
 )
 
 
+@dataclass(eq=False)
+class _Round:
+    """一次 poll iteration：一次列出的候选批次，加上它启动的全部尝试。
+
+    故障窗口只在一整轮都没有基础设施故障时清零（M5 §3.3）。轮次在派发完且尝试
+    全部结束的那一刻结算；并发下几轮会重叠，故障只标脏当时尚未结算的轮次。
+    """
+
+    attempts: set[asyncio.Task[bool]] = field(default_factory=set)
+    completed: int = 0
+    dispatched: bool = False
+    dirty: bool = False
+
+
 class WorkerLoop:
-    """只负责任务调度；解释、规划、准入和执行均委托 Runtime。"""
+    """只负责任务调度；解释、规划、准入和执行均委托 Runtime。
+
+    最多同时处理 ``worker_max_concurrent_tasks`` 个任务：只在有空位时领取，
+    每个领到的尝试在自己的 heartbeat scope 里后台执行，长任务不阻塞其他任务。
+    """
 
     def __init__(
         self,
@@ -107,6 +128,12 @@ class WorkerLoop:
         self._sleep = sleep
         self.owner = f"worker-{uuid.uuid4().hex}"
         self._log = StructuredLogTraceSink(worker_instance=self.owner)
+        # 按领取顺序保存在跑的尝试及其所属轮次；dict 保序，同类失败按最早登记者上抛。
+        self._in_flight: dict[asyncio.Task[bool], _Round] = {}
+        self._rounds: list[_Round] = []
+        # 进程级基础设施故障窗口：首次故障的 monotonic 时刻与连续退避次数。
+        self._failure_since: float | None = None
+        self._consecutive_failures = 0
 
     async def _log_committed(self, events: tuple[TraceEvent, ...]) -> None:
         for event in events:
@@ -195,7 +222,47 @@ class WorkerLoop:
             )
         return True
 
-    async def _poll_once(self) -> int:
+    async def _run_attempt(
+        self,
+        *,
+        grant: TaskAttemptGrant,
+        submission: TaskSubmission,
+        trace_id: str,
+    ) -> bool:
+        """在一个 heartbeat scope 内执行已领取的尝试；失租按输家处理。"""
+        try:
+            return await run_with_task_heartbeat(
+                partial(
+                    self._execute_granted_attempt,
+                    grant=grant,
+                    submission=submission,
+                    trace_id=trace_id,
+                ),
+                grant=grant,
+                task_store=self._tasks,
+                lease_ttl_seconds=self._settings.lease_ttl_seconds,
+                heartbeat_interval_seconds=self._settings.heartbeat_interval_seconds,
+                sleep=self._sleep,
+            )
+        except LeaseLostError:
+            return False
+
+    async def _wait_for_slot(self) -> None:
+        """收走已结束的尝试，直到有空位；等待中收到的失败照常上抛。"""
+        self._reap()
+        while len(self._in_flight) >= self._settings.worker_max_concurrent_tasks:
+            await asyncio.wait(
+                tuple(self._in_flight), return_when=asyncio.FIRST_COMPLETED
+            )
+            self._reap()
+
+    async def _dispatch(self, round_: _Round) -> None:
+        """列出一批候选并逐个领取；每次领取前都等到有空位。
+
+        与旧串行 Worker 同一轮语义：列出的批次在本轮内依次领取，其间任何失败
+        都中止本轮。领到的尝试在后台并发执行。
+        """
+        await self._wait_for_slot()
         candidates = await self._tasks.list_dispatchable_tasks(
             query=DispatchQuery(
                 tenant_id=self._settings.tenant_id,
@@ -203,8 +270,8 @@ class WorkerLoop:
                 limit=self._settings.dispatch_batch_limit,
             )
         )
-        executed = 0
         for candidate in candidates:
+            await self._wait_for_slot()
             trace_id = uuid.uuid4().hex
             attempt = await self._tasks.begin_task_attempt(
                 command=TaskAttemptCommand(
@@ -222,39 +289,100 @@ class WorkerLoop:
             submission = attempt.submission
             if grant is None or submission is None:
                 raise WorkerInvariantError("successful attempt result is incomplete")
-            try:
-                completed = await run_with_task_heartbeat(
-                    partial(
-                        self._execute_granted_attempt,
-                        grant=grant,
-                        submission=submission,
-                        trace_id=trace_id,
-                    ),
-                    grant=grant,
-                    task_store=self._tasks,
-                    lease_ttl_seconds=self._settings.lease_ttl_seconds,
-                    heartbeat_interval_seconds=(
-                        self._settings.heartbeat_interval_seconds
-                    ),
-                    sleep=self._sleep,
+            task = asyncio.create_task(
+                self._run_attempt(
+                    grant=grant, submission=submission, trace_id=trace_id
                 )
-            except LeaseLostError:
+            )
+            self._in_flight[task] = round_
+            round_.attempts.add(task)
+        round_.dispatched = True
+        self._settle(round_)
+
+    def _reap(self) -> None:
+        """收走全部已结束的尝试，计入所属轮次，并按原串行语义分类上抛。
+
+        一批里可能同时有多个失败：致命错误（不变量、完整性等）优先于临时
+        ``PersistenceUnavailableError``，不能因为临时错误先登记就被丢掉。
+        """
+        fatal: BaseException | None = None
+        transient: PersistenceUnavailableError | None = None
+        touched: list[_Round] = []
+        for task in [task for task in self._in_flight if task.done()]:
+            round_ = self._in_flight.pop(task)
+            round_.attempts.discard(task)
+            touched.append(round_)
+            if task.cancelled():
                 continue
-            if completed:
-                executed += 1
-        return executed
+            error = task.exception()
+            if error is None:
+                round_.completed += int(task.result())
+                continue
+            round_.dirty = True
+            if isinstance(error, PersistenceUnavailableError):
+                transient = transient or error
+            elif fatal is None:
+                fatal = error
+        # 先结算已结束的轮次，再上抛：干净结束的轮次不会被这次或之后的故障追溯标脏。
+        for round_ in touched:
+            self._settle(round_)
+        if fatal is not None:
+            raise fatal
+        if transient is not None:
+            raise transient
+
+    async def _cancel(self, tasks: Iterable[asyncio.Task[bool]]) -> None:
+        """取消并等到尝试真正退出；续租子任务随 heartbeat scope 一起收净。"""
+        owned = list(tasks)
+        for task in owned:
+            task.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
+        for task in owned:
+            round_ = self._in_flight.pop(task, None)
+            if round_ is not None:
+                round_.attempts.discard(task)
 
     async def poll_once(self) -> int:
-        """完整执行一轮；任一基础设施异常向上抛，由进程循环统一计时。"""
+        """领取一轮并等本轮尝试全部结束；任一异常取消其余尝试后向上抛。"""
+        round_ = _Round()
         with worker_log_context(self.owner):
-            return await self._poll_once()
+            try:
+                await self._dispatch(round_)
+                if round_.attempts:
+                    await asyncio.wait(
+                        tuple(round_.attempts), return_when=asyncio.FIRST_EXCEPTION
+                    )
+                self._reap()
+                return round_.completed
+            finally:
+                await self._cancel(tuple(round_.attempts))
 
-    async def _wait_or_stop(self, seconds: float, stop: asyncio.Event) -> bool:
+    async def _dispatch_logged(self, round_: _Round) -> None:
+        with worker_log_context(self.owner):
+            await self._dispatch(round_)
+
+    def _settle(self, round_: _Round) -> None:
+        """轮次派发完且尝试全部结束时立即结算；整轮无故障才清零故障窗口。"""
+        if not round_.dispatched or round_.attempts or round_ not in self._rounds:
+            return
+        self._rounds.remove(round_)
+        if not round_.dirty:
+            self._failure_since = None
+            self._consecutive_failures = 0
+
+    async def _wait_or_stop(
+        self,
+        seconds: float,
+        stop: asyncio.Event,
+        *,
+        wake_on: Collection[asyncio.Task[bool]] = (),
+    ) -> bool:
+        """等满时长、停止信号，或任一在跑尝试结束（空出槽位）。"""
         sleeper = asyncio.create_task(self._sleep(seconds))
         stopper = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait(
-                {sleeper, stopper}, return_when=asyncio.FIRST_COMPLETED
+                {sleeper, stopper, *wake_on}, return_when=asyncio.FIRST_COMPLETED
             )
             if stopper in done:
                 sleeper.cancel()
@@ -264,47 +392,97 @@ class WorkerLoop:
             stopper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await stopper
-            await sleeper
+            if sleeper in done:
+                await sleeper
+            else:
+                sleeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeper
             return False
         finally:
             for task in (sleeper, stopper):
                 if not task.done():
                     task.cancel()
 
-    async def _poll_or_stop(self, stop: asyncio.Event) -> tuple[bool, int]:
-        poller = asyncio.create_task(self.poll_once())
+    async def _dispatch_or_stop(self, stop: asyncio.Event, round_: _Round) -> bool:
+        dispatcher = asyncio.create_task(self._dispatch_logged(round_))
         stopper = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait(
-                {poller, stopper}, return_when=asyncio.FIRST_COMPLETED
+                {dispatcher, stopper}, return_when=asyncio.FIRST_COMPLETED
             )
             if stopper in done:
-                poller.cancel()
+                dispatcher.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await poller
-                return True, 0
+                    await dispatcher
+                return True
             stopper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await stopper
-            return False, await poller
+            await dispatcher
+            return False
         finally:
-            for task in (poller, stopper):
+            for task in (dispatcher, stopper):
                 if not task.done():
                     task.cancel()
 
     async def run(self, stop: asyncio.Event) -> None:
-        """运行到停止信号，或连续基础设施故障达到 fail-stop 窗口。"""
-        first_failure_at: float | None = None
-        consecutive_failures = 0
+        """运行到停止信号，或连续基础设施故障达到 fail-stop 窗口。
+
+        正常停机：停止领取，宽限内等在途尝试结束，超时才取消。fail-stop 或外部
+        取消：立即取消。被取消的尝试由 lease 过期后的既有恢复路径接手。
+        """
+        try:
+            await self._run(stop)
+            await self._drain()
+        finally:
+            await self._cancel(self._in_flight)
+
+    async def _drain(self) -> None:
+        """正常停机收尾：已停止领取，只在 ``worker_shutdown_grace_seconds`` 内等待。"""
+        grace = asyncio.create_task(
+            self._sleep(self._settings.worker_shutdown_grace_seconds)
+        )
+        try:
+            while not grace.done():
+                pending = {task for task in self._in_flight if not task.done()}
+                if not pending:
+                    break
+                await asyncio.wait(
+                    {grace, *pending}, return_when=asyncio.FIRST_COMPLETED
+                )
+        finally:
+            grace.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await grace
+        try:
+            self._reap()
+        except PersistenceUnavailableError:
+            # 停机中不再退避重试：没写成的结果交给 lease 过期恢复，与被取消的尝试同路。
+            return
+        except PersistenceIntegrityError:
+            raise WorkerSystemFailureError(
+                "worker encountered a systemic failure"
+            ) from None
+
+    async def _run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
+            round_ = _Round()
+            self._rounds.append(round_)
             try:
-                stopped, _ = await self._poll_or_stop(stop)
+                # 后台失败与领取失败都在本轮派发中上抛，走同一套退避与 fail-stop。
+                stopped = await self._dispatch_or_stop(stop, round_)
             except PersistenceUnavailableError:
+                # 尚未结算的轮次都见到了这次故障，不能再算整轮干净；本轮就此中止。
+                for open_round in self._rounds:
+                    open_round.dirty = True
+                round_.dispatched = True
+                self._settle(round_)
                 now = self._monotonic()
-                if first_failure_at is None:
-                    first_failure_at = now
+                if self._failure_since is None:
+                    self._failure_since = now
                 if (
-                    now - first_failure_at
+                    now - self._failure_since
                     >= self._settings.continuous_infrastructure_failure_window_seconds
                 ):
                     raise WorkerInfrastructureExhaustedError(
@@ -313,9 +491,9 @@ class WorkerLoop:
                 delay = min(
                     self._settings.infrastructure_backoff_cap_seconds,
                     self._settings.infrastructure_backoff_base_seconds
-                    * (2**consecutive_failures),
+                    * (2**self._consecutive_failures),
                 )
-                consecutive_failures += 1
+                self._consecutive_failures += 1
                 if await self._wait_or_stop(delay, stop):
                     return
                 continue
@@ -325,10 +503,9 @@ class WorkerLoop:
                 ) from None
             if stopped:
                 return
-            # 只有整轮没有基础设施异常，才清空窗口和退避计数。
-            first_failure_at = None
-            consecutive_failures = 0
             if await self._wait_or_stop(
-                self._settings.worker_poll_interval_seconds, stop
+                self._settings.worker_poll_interval_seconds,
+                stop,
+                wake_on=tuple(self._in_flight),
             ):
                 return

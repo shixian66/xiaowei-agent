@@ -2183,7 +2183,9 @@ _W4B_OVERCLAIMS: Final[tuple[str, ...]] = (
 
 def test_handoff_records_the_w5b_merge_and_the_w5c_cancellation() -> None:
     handoff = _truth_doc_text("AGENT_HANDOFF.md")
-    assert _current_baseline(handoff) == _W5C_CANCEL_MERGE_COMMIT
+    # 当前基线随合并前移，不永久绑定某个历史提交；W5-C 取消的合并记录必须留在历史里。
+    assert _current_baseline(handoff) != _W5C_CANCEL_MERGE_COMMIT
+    assert f"#102 `{_W5C_CANCEL_MERGE_COMMIT[:7]}` 取消 W5-C" in handoff
     assert _S0_PLAN in handoff and "PR #89" in handoff
     assert _S0_IMPL_MERGE_COMMIT in handoff and "PR #90" in handoff
     assert "S0 实现在分支" not in handoff and "S0 实现离线完成待复审" not in handoff

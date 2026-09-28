@@ -32,6 +32,8 @@ def test_engine_factory_uses_structured_url_and_all_limits(
         db_command_timeout_seconds=12,
         db_pool_size=7,
         db_pool_max_overflow=0,
+        # 池 7 恰好容纳 3 个并发任务（2 × 3 + 1）；本测试只看限值原样透传。
+        worker_max_concurrent_tasks=3,
     )
     captured: dict[str, object] = {}
     sentinel = object()

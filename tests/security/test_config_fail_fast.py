@@ -147,6 +147,8 @@ def test_import_does_not_load_settings() -> None:
         ("XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS", "0"),
         ("XIAOWEI_DB_POOL_SIZE", "0"),
         ("XIAOWEI_DB_POOL_MAX_OVERFLOW", "-1"),
+        ("XIAOWEI_WORKER_MAX_CONCURRENT_TASKS", "0"),
+        ("XIAOWEI_WORKER_MAX_CONCURRENT_TASKS", "17"),
         ("XIAOWEI_API_BIND_HOST", "not-an-ip"),
         ("XIAOWEI_API_BIND_PORT", "65536"),
     ],
@@ -253,3 +255,31 @@ def test_starrocks_settings_validation_does_not_read_password_file(tmp_path: Pat
     )
 
     assert settings.starrocks_password_file == str(missing_path)
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "pool", "overflow"),
+    [("4", "8", "0"), ("16", "32", "0"), ("1", "2", "0")],
+)
+def test_worker_concurrency_must_fit_the_database_pool(
+    concurrency: str, pool: str, overflow: str
+) -> None:
+    # 池不够时后台任务会在等连接时丢续租；启动即拒绝，不在运行中退化。
+    with pytest.raises(ConfigError):
+        load_settings(
+            {
+                "XIAOWEI_ENVIRONMENT_ID": "dev",
+                "XIAOWEI_WORKER_MAX_CONCURRENT_TASKS": concurrency,
+                "XIAOWEI_DB_POOL_SIZE": pool,
+                "XIAOWEI_DB_POOL_MAX_OVERFLOW": overflow,
+            }
+        )
+    fitted = load_settings(
+        {
+            "XIAOWEI_ENVIRONMENT_ID": "dev",
+            "XIAOWEI_WORKER_MAX_CONCURRENT_TASKS": concurrency,
+            "XIAOWEI_DB_POOL_SIZE": pool,
+            "XIAOWEI_DB_POOL_MAX_OVERFLOW": str(int(overflow) + 1),
+        }
+    )
+    assert fitted.worker_max_concurrent_tasks == int(concurrency)
