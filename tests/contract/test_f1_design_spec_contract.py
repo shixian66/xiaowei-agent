@@ -119,8 +119,13 @@ def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() 
     _assert_terms(
         _section(text, "### 5.1 统一入口与确定性 SQL 识别"),
         "`recognize_sql_message(text)`",
-        "闭集 SQL 语句关键字",
-        "恰好是一条完整语句",
+        # 负责人 2026-09-28 收窄：三类才走 SQL 流程，Command 不一律当 SQL，自然语言走对话。
+        "**明确标记为 sql 的代码块**",
+        "**已知 StarRocks 语句族**",
+        "**完整、有效的 SQL**",
+        "`Command`（只是“关键字 + 原文”）不算",
+        "以 SQL 关键字开头的自然语言",
+        "**升级兼容。**",
         "不调用模型",
         "**同一个 PostgreSQL 事务**",
     )

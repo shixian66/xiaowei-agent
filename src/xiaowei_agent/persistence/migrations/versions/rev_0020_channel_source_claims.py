@@ -18,8 +18,8 @@ under the new SQL recognizer. Candidates are every binding and every channel tas
 by its ``channel:v1:<source_event_ref>`` idempotency key (conversation rows must carry a
 Web or Feishu envelope, since API callers may pick any key). For each event one
 statement keeps the candidate with the smallest task ``created_seq`` (``DISTINCT ON``),
-so the earliest task's kind wins whether that task is bound or not. Downgrade only drops the claims: they hold no user content and the
-old schema needs none of them.
+so the earliest task's kind wins whether that task is bound or not. Downgrade only drops
+the claims: they hold no user content and the old schema needs none of them.
 """
 
 from collections.abc import Sequence
