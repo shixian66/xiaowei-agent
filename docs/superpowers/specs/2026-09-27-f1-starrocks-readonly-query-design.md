@@ -199,8 +199,10 @@ READ + RESTRICTED，无副作用步骤，不调用 ApprovalGate。执行前照�
 OperationSpec 增加受信 `query_requirement`，闭集为 `none`、`template_locked`、`confirmed_artifact`，由 CapabilitySnapshot
 派生。`ToolCall.typed_args` 仍只接受 JSON 标量。`confirmed_artifact` 的 Runner 流程：
 
-1. 漂移校验：沿用现有 `_verify_no_drift`（plan_hash、target_fingerprint、policy revision），并重新解析当前 target 与
-   config revision；漂移即按现有规则拒绝，早于 journal 判定与 SQL 水合；
+1. 漂移校验：只沿用现有 `_verify_no_drift`（plan_hash、target_fingerprint、policy revision）。config_revision 已随
+   ReadonlyQueryParams 进入 `PlanStep.typed_arguments`，由 plan_hash 覆盖：按当前配置重新编译的计划与已存计划的
+   plan_hash 不一致即为配置漂移；通用 Runner 不新增 config revision 参数、分支或 F1 字段解析。漂移即按现有规则拒绝，
+   早于 journal 判定与 SQL 水合；
 2. 恢复判定先于 SQL 水合：该步骤在 step journal（Runner 已加载的 `load_step_executions`）中已有记录时，先调用现有
    `begin_step_attempt`，按 `StepAttemptDecision` 完整闭集处理：
    - `ALREADY_COMMITTED` → 采用已提交结果；

@@ -552,11 +552,19 @@ def test_journal_recovery_uses_the_full_decision_table_after_drift_checks() -> N
     for term in (
         "journal + `STALE_FENCING` 或 `NOT_RUNNABLE`",
         "journal + `PROCEED` 或 `UNKNOWN_STEP`",
-        "journal + target、policy 或 config revision 漂移",
+        "当前 config revision 改变（按当前配置重新编译后表现为 plan_hash drift）",
     ):
         assert term in task_10, term
     task_11 = _task_block(plan, "### Task 11:")
     assert "只可能是" not in task_11
+    # config_revision 在 typed_arguments 中，由 plan_hash 覆盖；通用 Runner 不另设 config 漂移分支。
+    for name in (_SPEC, "ARCHITECTURE.md"):
+        assert "由 plan_hash 覆盖" in _read(name), name
+    assert "由 plan_hash 覆盖，通用 Runner 不新增 config revision 参数" in task_10
+    for text in (spec, task_10, _read("ARCHITECTURE.md")):
+        assert "加 config revision" not in text
+        assert "policy / config revision" not in text
+        assert "并重新解析当前 target 与\n   config revision" not in text
 
 
 def _section_of(text: str, heading: str) -> str:

@@ -151,7 +151,7 @@ SQL 查询是普通 capability，走上图同一条主链；差别只在交互�
             → 唯一 F1 target：继续；0 个：拒绝
             → 多个：ClarificationRecord（选项）→ CLARIFICATION_REQUIRED → 本人精确作答（网页 / 飞书引用回复）
        → PlanCompiler → ExecutionDisclosure → WorkflowRunner
-            → 现有漂移校验（plan_hash、target_fingerprint、policy / config revision）
+            → 现有漂移校验（plan_hash、target_fingerprint、policy revision；config_revision 在 typed_arguments 中，由 plan_hash 覆盖）
             → 恢复判定先于 SQL 水合：journal 已有记录 → begin_step_attempt 按 StepAttemptDecision 闭集表判定
               （STALE_FENCING / NOT_RUNNABLE 保留 LifecycleError，由 Worker 按 loser 退出）
             → 新步骤：HydratedQuery 水合（失败即 sql_artifact.expired / unavailable FAILED，不开始步骤）
