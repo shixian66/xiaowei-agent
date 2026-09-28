@@ -118,31 +118,35 @@ v8 中保留的决定：不做 target 排队锁；SQL 上限 65_536 bytes；结�
 application 层 ChannelSubmissionService，不在入口判断业务。渠道文本上限从 8192 字符放宽到 65_536 bytes，
 非 SQL 的普通消息仍受现有 8192 字符上限约束，超出时按“消息过长”拒绝。
 
-ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_message(text)`。去掉首尾空白、整条消息恰好是一个
-fenced code block 时只取块内正文后，满足下列**任一条**就是 SQL 消息（负责人 2026-09-28 决定收窄）：
+ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_message(text)`，分档规则由 `classify_sql_text` 给出。
+去掉首尾空白、整条消息恰好是一个 fenced code block 时只取块内正文后，以 SQL 关键字开头的文本分三档（负责人
+2026-09-28 决定）：
 
-1. **明确标记为 sql 的代码块**（```` ```sql ````）：用户已声明这是 SQL，内容交 SQLGuard 判断；
-2. **已知 StarRocks 语句族**：跳过前置注释与 hint 后，首词与第二个词命中代码内语句族表（如 SHOW USERS、
-   ADMIN SHOW、CREATE TABLE、ANALYZE TABLE、KILL QUERY、KILL 123、INSERT INTO、DELETE FROM），或命中 §7.3 只读语句
-   清单。sqlglot 30.17.0 能否解析都识别，因此清单外的已知语句（包括 sqlglot 降级为 `Command` 或解析失败的，例如
-   SHOW USERS、ADMIN SHOW FRONTEND CONFIG）由 SQLGuard 回复“暂未支持”；
-3. **完整、有效的 SQL**：首词属于第二个词无法枚举的开放语句族（SELECT、WITH、UPDATE、SET、GRANT、REVOKE、DESC、
-   DESCRIBE、USE），且 sqlglot 把整条解析为语句或因嵌套过深放弃；`Command`（只是“关键字 + 原文”）不算。
-   INTO OUTFILE 与 hint 只出现在 SQL 里，也算。
+1. **SQL**：满足任一条——
+   - **明确标记为 sql 的代码块**（```` ```sql ````）：用户已声明这是 SQL，内容交 SQLGuard 判断；
+   - **登记表里的完整语句**：命中 **SQL 语句识别登记表**（`governance/sql_statements.py`，唯一真源）某种语句的签名，
+     且整条符合它的**完整形状**（token 文法完整匹配；SELECT/WITH/UPDATE 交 sqlglot 30.17.0 判断**完整、有效**，
+     `Command`（只是“关键字 + 原文”）不算），或命中 §7.3 只读语句清单。登记表覆盖 StarRocks 文档
+     `docs/en/sql-reference/sql-statements` 的全部顶层 SQL 语句（含 3.2 起的 PREPARE / EXECUTE / DEALLOCATE PREPARE）
+     与 MySQL 兼容的事务、CALL、MERGE、RENAME 等写语句；完整性测试按固定的文档快照逐页校验，不会静默漏登记。
+     多语句按第一条判断；hint 与 INTO OUTFILE 只出现在 SQL 里，命中签名即算。
+2. **像 SQL（SQL_LIKE）**：命中签名但不符合完整形状，例如 “show data for yesterday”“create table for this report”
+   “prepare a report”、未闭合的 `SELECT 'x`。不执行、不进模型：任务照常创建，worker 在构造模型请求前以
+   `SQL_LIKE_TEXT_NOT_EXECUTED` 固定文案提示“如需执行，请放入 sql 代码块重发”。
+3. **对话**：签名都不命中，例如 “show me the slow queries”“create a dashboard”“analyze this”“explain why …”
+   “select the best option”；或字符串、quoted identifier 与注释之外出现中文等自然语言文字（混合消息，由下面的嵌入
+   SQL 检测兜底）。以 SQL 关键字开头的自然语言都走对话。
 
-识别不判断是否支持、是否安全：多语句、hint、INTO OUTFILE 只要满足上面某条就保存为 SqlArtifact，由 SQLGuard 给出
-确定性拒绝，永不进入模型。判定在一份判定副本上进行，复制粘贴带进来的智能引号、全角字符（NFKC）与不可见的控制/
-格式字符先归一化或去掉，保存与执行的仍是原文，SQLGuard 照样按原文拒绝这些字符。第 2、3 条要求字符串、quoted
-identifier 与注释之外没有中文等自然语言文字。
+签名只认这种 SQL 才会有的开头（如 `SHOW DATA`、`CREATE TABLE`、`PREPARE <名字>`），单词语句（BEGIN、COMMIT、
+SYNC 等）要求整条就是这个词。识别不判断是否支持、是否安全：写语句、清单外的已知语句（例如 SHOW USERS、
+ADMIN SHOW FRONTEND CONFIG）与多语句都保存为 SqlArtifact，由 SQLGuard 给出“暂未支持”“只允许只读查询”等确定性
+拒绝，永不进入模型。判定在一份判定副本上进行，复制粘贴带进来的智能引号、全角字符（NFKC）与不可见的控制/格式
+字符先归一化或去掉，保存与执行的仍是原文，SQLGuard 照样按原文拒绝这些字符。识别是确定性规则，不调用模型，
+同一输入永远得到同一结论。
 
-sqlglot 会把 “show me the slow queries”“create a dashboard” 降级为 `Command`，把 “analyze this”“delete prod” 宽松
-解析成语句，所以既不把 `Command` 一律当 SQL，也不只看能否解析：以 SQL 关键字开头的自然语言（上面这些，以及
-“explain why …”“select the best option”）都走对话。写语句也会被识别，目的是明确回复“只允许只读查询”，而不是当成
-聊天。其他消息（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）都不是 SQL 消息，不会被当作
-SQL 执行。识别是确定性规则，不调用模型，同一输入永远得到同一结论。
-
-**升级兼容。**升级前按对话持久化、现在识别为 SQL 的任务，worker 在构造模型请求前用同一个 `recognize_sql_message`
-确定性拒绝（`EMBEDDED_SQL_NOT_EXECUTED`，固定文案提示单独重新发送），不调用模型、不建 SqlArtifact、Gateway 调用为 0。
+**升级兼容。**worker 在构造模型请求前对每个对话任务复用同一个分档函数：升级前按对话持久化、现在是 SQL 的任务
+以 `EMBEDDED_SQL_NOT_EXECUTED` 拒绝（固定文案提示单独重新发送），像 SQL 的以 `SQL_LIKE_TEXT_NOT_EXECUTED` 拒绝；
+都不调用模型、不建 SqlArtifact、Gateway 调用为 0。
 
 **嵌入 SQL 不执行。**不是 SQL 消息、但 `contains_embedded_sql(text)` 为真的消息，以固定文案拒绝，不执行任何
 capability。候选片段是每个 fenced code block 的正文，以及正文外每个以闭集 SQL 语句关键字（词边界、不分大小写）

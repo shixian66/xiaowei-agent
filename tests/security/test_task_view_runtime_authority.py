@@ -86,6 +86,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.governance.profiles
     xiaowei_agent.governance.readonly_statements
     xiaowei_agent.governance.sql_message
+    xiaowei_agent.governance.sql_statements
     xiaowei_agent.governance.sql_tokens
     xiaowei_agent.governance.sqlguard
     xiaowei_agent.interfaces

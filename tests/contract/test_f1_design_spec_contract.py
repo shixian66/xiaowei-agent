@@ -119,12 +119,16 @@ def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() 
     _assert_terms(
         _section(text, "### 5.1 统一入口与确定性 SQL 识别"),
         "`recognize_sql_message(text)`",
-        # 负责人 2026-09-28 收窄：三类才走 SQL 流程，Command 不一律当 SQL，自然语言走对话。
+        # 负责人 2026-09-28 决定：登记表是唯一真源，分 SQL / 像 SQL / 对话三档，Command 不一律当
+        # SQL，以 SQL 关键字开头的自然语言走对话。
         "**明确标记为 sql 的代码块**",
-        "**已知 StarRocks 语句族**",
-        "**完整、有效的 SQL**",
+        "**SQL 语句识别登记表**",
+        "**完整形状**",
+        "**完整、有效**",
         "`Command`（只是“关键字 + 原文”）不算",
-        "以 SQL 关键字开头的自然语言",
+        "**像 SQL（SQL_LIKE）**",
+        "`SQL_LIKE_TEXT_NOT_EXECUTED`",
+        "以 SQL 关键字开头的自然语言都走对话",
         "**升级兼容。**",
         "不调用模型",
         "**同一个 PostgreSQL 事务**",

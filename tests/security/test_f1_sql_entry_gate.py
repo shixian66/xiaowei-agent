@@ -61,6 +61,12 @@ SQL_SHAPED: tuple[str, ...] = (
     f"ADMIN SHOW FRONTEND CONFIG -- {_MARKER}",
     # 明确标记为 sql 的代码块
     f"```sql\nshow me {_MARKER}\n```",
+    # StarRocks 3.2+ 预处理语句与 MySQL 兼容写语句（登记表之前漏登记，会进模型）
+    f"PREPARE p FROM 'SHOW {_MARKER}'",
+    f"EXECUTE {_MARKER}",
+    f"DEALLOCATE PREPARE {_MARKER}",
+    f"DROP PREPARE {_MARKER}",
+    f"RENAME TABLE {_MARKER} TO new_name",
     # hint
     f"SHOW /*+ SET_VAR({_MARKER}=1) */ BACKENDS",
     # 前置注释 + 多语句
@@ -78,6 +84,18 @@ NATURAL_LANGUAGE: tuple[str, ...] = (
     "show me the slow queries",
     "create a dashboard",
     "analyze this",
+    "show status of my task",
+    "grant me access to the dashboard",
+)
+
+# 命中语句签名却不是完整语句：任务照常创建，worker 在构造模型请求前以固定文案拒绝（提示放入
+# sql 代码块重发），不建 SqlArtifact，不进模型。
+SQL_LIKE: tuple[str, ...] = (
+    "show data for yesterday",
+    "create table for this report",
+    "prepare a report",
+    "execute the plan",
+    "SELECT 'unterminated",
 )
 
 
@@ -419,3 +437,63 @@ async def test_legacy_natural_language_conversation_still_reaches_the_model(
     await _execute(harness, task_id)
 
     assert len(model.interaction_requests) == 1
+
+
+# --- 像 SQL 却不是完整语句：各入口都只给固定提示，不进模型 ------------------------
+
+
+def _assert_sql_like_rejected(harness: RuntimeHarness, model: ScriptedModelAdapter) -> None:
+    from xiaowei_agent.contracts import InteractionRejectionReasonCode
+
+    (record,) = harness.state.tasks.values()
+    assert record.status is TaskStatus.REJECTED
+    assert record.terminal_reason == (
+        InteractionRejectionReasonCode.SQL_LIKE_TEXT_NOT_EXECUTED.value
+    )
+    assert model.interaction_requests == []
+    assert harness.calls == []
+    assert harness.state.sql_artifacts == {}
+
+
+@pytest.mark.parametrize("text", SQL_LIKE)
+async def test_feishu_sql_like_text_gets_a_fixed_prompt_without_the_model(text: str) -> None:
+    from xiaowei_agent.rendering.generic import SQL_LIKE_TEXT_REJECTED
+
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+
+    assert await _feishu(harness).handle_event(event=_event(text)) is True
+
+    (task_id,) = harness.state.tasks
+    submission = await harness.store.get_submission(lookup=_lookup(harness, task_id))
+    assert isinstance(submission, ConversationSubmission)
+    await _execute(harness, task_id)
+    _assert_sql_like_rejected(harness, model)
+    view = await harness.runtime.query_task(lookup=_lookup(harness, task_id))
+    assert view.render is not None and view.render.answer == SQL_LIKE_TEXT_REJECTED
+
+
+@pytest.mark.parametrize("text", SQL_LIKE)
+async def test_api_sql_like_text_gets_a_fixed_prompt_without_the_model(text: str) -> None:
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+
+    response = await _post(_api(harness), text)
+
+    assert response.status_code == 202
+    await _execute(harness, response.json()["task_id"])
+    _assert_sql_like_rejected(harness, model)
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "unbound"])
+@pytest.mark.parametrize("text", SQL_LIKE)
+async def test_legacy_sql_like_conversation_is_rejected_before_the_model(
+    text: str, bound: bool
+) -> None:
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+    task_id = await _legacy_conversation(harness, text, bound=bound)
+
+    await _execute(harness, task_id)
+
+    _assert_sql_like_rejected(harness, model)

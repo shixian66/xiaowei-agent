@@ -183,6 +183,7 @@ assert worker_main is not None
     submission_only = {
         "xiaowei_agent.governance.readonly_statements",
         "xiaowei_agent.governance.sql_message",
+        "xiaowei_agent.governance.sql_statements",
         "xiaowei_agent.governance.sql_tokens",
         "xiaowei_agent.governance.sqlguard",
     }

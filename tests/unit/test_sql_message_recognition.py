@@ -3,14 +3,13 @@
 import pytest
 
 from xiaowei_agent.governance.sql_message import (
-    SQL_STATEMENT_FAMILIES,
-    SQL_STATEMENT_KEYWORDS,
     SqlMessage,
     contains_embedded_sql,
     recognize_sql_message,
 )
 
 _HINTED_SHOW = "SHOW /*+ SET_VAR(query_timeout=1) */ BACKENDS"
+_PREPARED = "PREPARE p FROM 'SELECT salary FROM payroll'"
 _DEEP_SELECT = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
 
 
@@ -48,11 +47,18 @@ _DEEP_SELECT = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
         ("SHOW RESOURCES", "SHOW RESOURCES"),
         ("SHOW BACKENDS; SHOW FRONTENDS", "SHOW BACKENDS; SHOW FRONTENDS"),
         (_HINTED_SHOW, _HINTED_SHOW),
-        # 已知 StarRocks 语句族：sqlglot 解析不了也识别。
+        # 登记表里的已知语句：sqlglot 解析不了也识别。
         ("ADMIN SHOW FRONTEND CONFIG", "ADMIN SHOW FRONTEND CONFIG"),
         ("ADMIN SHOW REPLICA STATUS FROM ops.t", "ADMIN SHOW REPLICA STATUS FROM ops.t"),
         # 只读清单里的语句即使 sqlglot 解析不了、首词属于开放语句族，也识别。
         ("DESC ops.t ALL", "DESC ops.t ALL"),
+        ("EXPLAIN LOGICAL SHOW TABLES", "EXPLAIN LOGICAL SHOW TABLES"),
+        # StarRocks 3.2+ 预处理语句与 MySQL 兼容写语句：完整语句都识别（此前按对话进入模型）。
+        (_PREPARED, _PREPARED),
+        ("EXECUTE p USING @a", "EXECUTE p USING @a"),
+        ("DEALLOCATE PREPARE p", "DEALLOCATE PREPARE p"),
+        ("DROP PREPARE p", "DROP PREPARE p"),
+        ("RENAME TABLE old_name TO new_name", "RENAME TABLE old_name TO new_name"),
         ("KILL QUERY 1", "KILL QUERY 1"),
         ("ANALYZE TABLE t", "ANALYZE TABLE t"),
         ("CREATE TABLE t (a int)", "CREATE TABLE t (a int)"),
@@ -94,8 +100,8 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
         "最近有哪些慢查询",
         "SELECT a FROM t 为什么慢",
         "SHOW USERS 是什么",
-        # 以 SQL 关键字开头的自然语言：不是已知语句族，也不是完整有效的 SQL（sqlglot 会把其中不少
-        # 降级为 Command 或宽松解析成语句，二者都不够）。
+        # 以 SQL 关键字开头的自然语言（不命中签名）与像 SQL 却不完整的文本（命中签名）都不是 SQL
+        # 消息；两者的区别见 test_sql_statement_registry.py。
         "show me the slow queries",
         "create a dashboard",
         "analyze this",
@@ -132,11 +138,6 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
 )
 def test_other_messages_are_conversation(text: str) -> None:
     assert recognize_sql_message(text) is None
-
-
-def test_statement_families_use_only_statement_keywords() -> None:
-    # 嵌入 SQL 检测按关键字闭集找候选；识别的语句族不能超出它。
-    assert set(SQL_STATEMENT_FAMILIES) <= SQL_STATEMENT_KEYWORDS
 
 
 def test_recognition_is_deterministic() -> None:

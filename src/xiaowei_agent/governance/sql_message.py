@@ -1,26 +1,21 @@
 """确定性 SQL 消息识别与嵌入 SQL 检测（设计 §5.1）。
 
-``recognize_sql_message`` 决定一条消息是否是“纯 SQL 消息”：识别出的 SQL 保存为 SqlArtifact，
-永不进入模型；其余消息才可能按普通对话进入模型。它只判断 **是不是 SQL**，不判断是否支持、
-是否安全——那是 SQLGuard 的事。去掉首尾空白、整条消息恰好是一个 fenced code block 时只取块内
-正文后，满足下列任一条就是 SQL：
+``classify_sql_text`` 把一条消息分成三档（设计 §5.1，负责人 2026-09-28 决定），依据是唯一的
+识别登记表 ``governance.sql_statements``（覆盖 StarRocks 文档全部顶层 SQL 语句与 MySQL 兼容语句）：
 
-1. 代码块明确标记为 ``sql``：用户已声明这是 SQL，内容交 SQLGuard 判断；
-2. 跳过前置注释与 hint 后，前两个词命中已知 StarRocks 语句族（``SQL_STATEMENT_FAMILIES``，
-   如 ``SHOW USERS``、``ADMIN SHOW``、``CREATE TABLE``），或命中代码内只读语句清单——清单外的
-   已知语句（包括 sqlglot 解析不了的）照样识别，由 SQLGuard 回复“暂未支持”；
-3. 首词属于开放语句族（``SELECT``、``WITH``、``UPDATE`` 等，第二个词无法枚举）且整条是完整
-   有效的 SQL：sqlglot 解析为语句或因嵌套过深放弃；``INTO OUTFILE`` 与 hint 虽不能通过 token
-   扫描，也算。
+- **SQL**：明确标记为 ``sql`` 的代码块；或命中只读语句清单；或命中登记表某种语句的签名且整条
+  符合它的完整形状（文法完整匹配，SELECT/WITH/UPDATE 交 sqlglot 判断完整有效）。多语句按第一条
+  判断，hint 与 ``INTO OUTFILE`` 只出现在 SQL 里。识别出的 SQL 保存为 SqlArtifact，永不进入模型；
+  是否支持、是否只读由 SQLGuard 判断（清单外的已知语句回复“暂未支持”）。
+- **像 SQL（SQL_LIKE）**：命中签名但不符合完整形状（如 “show data for yesterday”、
+  “create table for this report”、未闭合的 ``SELECT 'x``）。不执行、不进模型，固定提示放入 sql
+  代码块重发。
+- **对话**：首词不是登记的语句关键字，或签名都不命中（如 “show me the slow queries”、
+  “create a dashboard”、“analyze this”），或在字符串与注释之外出现中文等自然语言文字。
 
-sqlglot 会把 “show me the slow queries”“create a dashboard” 降级为 ``Command``、把
-“analyze this”“delete prod” 宽松解析成语句，所以既不能把 ``Command`` 一律当 SQL，也不能只看
-能否解析；以 SQL 关键字开头的自然语言都按对话处理。多语句、hint 与 ``INTO OUTFILE`` 只要满足
-上面某条就识别，由 SQLGuard 明确拒绝。
-
-判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）与不可见的
-控制/格式字符先归一化或去掉。保存与执行的永远是原文，SQLGuard 仍按原文拒绝这些字符。
-字符串、quoted identifier 与注释之外出现中文等自然语言文字的消息不是 SQL 消息（第 1 条除外）。
+sqlglot 会把不少英文短句降级为 ``Command`` 或宽松解析成语句，所以既不把 ``Command`` 一律当 SQL，
+也不只看能否解析。判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）
+与不可见的控制/格式字符先归一化或去掉。保存与执行的永远是原文，SQLGuard 仍按原文拒绝这些字符。
 
 ``contains_embedded_sql`` 是产品护栏，不是安全边界：它让“夹带 SQL 的对话”以固定文案拒绝，
 不执行任何 capability。漏判时消息按现有流程处理，现有能力只执行自己的模板 SQL。
@@ -30,12 +25,18 @@ sqlglot 会把 “show me the slow queries”“create a dashboard” 降级为 
 
 import re
 import unicodedata
-from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
+from enum import StrEnum
 from typing import Final
 
 from xiaowei_agent.governance.readonly_statements import match_statement
+from xiaowei_agent.governance.sql_statements import (
+    SQL_STATEMENT_FORMS,
+    SqlStatementForm,
+    lenient_tokens,
+    shape_matches,
+    signature_matches,
+)
 from xiaowei_agent.governance.sql_tokens import (
     SQL_MAX_BYTES,
     TokenScanError,
@@ -49,164 +50,37 @@ from xiaowei_agent.governance.sqlguard import (
 )
 
 __all__ = [
-    "SQL_STATEMENT_FAMILIES",
     "SQL_STATEMENT_KEYWORDS",
     "SqlMessage",
+    "SqlTextKind",
+    "classify_sql_text",
     "contains_embedded_sql",
     "recognize_sql_message",
 ]
 
 SQL_STATEMENT_KEYWORDS: Final[frozenset[str]] = frozenset(
-    {
-        # 读
-        "SELECT",
-        "WITH",
-        "SHOW",
-        "DESC",
-        "DESCRIBE",
-        "EXPLAIN",
-        "ADMIN",
-        "ANALYZE",
-        # 写、DDL、权限与会话
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "MERGE",
-        "REPLACE",
-        "UPSERT",
-        "CREATE",
-        "DROP",
-        "ALTER",
-        "TRUNCATE",
-        "RENAME",
-        "GRANT",
-        "REVOKE",
-        "SET",
-        "USE",
-        "KILL",
-        "LOAD",
-        "EXPORT",
-        "SUBMIT",
-        "CANCEL",
-        "BEGIN",
-        "START",
-        "COMMIT",
-        "ROLLBACK",
-        "LOCK",
-        "UNLOCK",
-        "REFRESH",
-        "RECOVER",
-        "BACKUP",
-        "RESTORE",
-        "INSTALL",
-        "UNINSTALL",
-        "PAUSE",
-        "RESUME",
-        "STOP",
-        "CALL",
-    }
+    form.keyword for form in SQL_STATEMENT_FORMS
 )
-"""SQL 语句关键字闭集：嵌入 SQL 检测用它找候选片段；只影响“是不是 SQL”，不授予任何权限。"""
+"""SQL 语句关键字闭集，从识别登记表派生；嵌入 SQL 检测用它找候选片段。不授予任何权限。"""
 
-_NUMBER: Final = "#NUMBER"
-"""第二个 token 是整数（``KILL 123``）。"""
-_END: Final = ""
-"""关键字之后就结束（``BEGIN``、``COMMIT;``）。"""
-_OTHER: Final = "#OTHER"
-"""第二个 token 是符号等，不属于任何已知语句族。"""
+_FORMS_BY_KEYWORD: Final[dict[str, tuple[SqlStatementForm, ...]]] = {
+    keyword: tuple(form for form in SQL_STATEMENT_FORMS if form.keyword == keyword)
+    for keyword in SQL_STATEMENT_KEYWORDS
+}
 
-_DDL_OBJECTS: Final = frozenset(
-    {
-        "ANALYZE", "CATALOG", "DATABASE", "DICTIONARY", "EXTERNAL", "FILE", "FUNCTION",
-        "GLOBAL", "INDEX", "MATERIALIZED", "OR", "PIPE", "REPOSITORY", "RESOURCE", "ROLE",
-        "ROUTINE", "SCHEMA", "SECURITY", "STATS", "STORAGE", "SYSTEM", "TABLE", "TASK",
-        "TEMPORARY", "USER", "VIEW", "WAREHOUSE",
-    }
-)
-_SHOW_OBJECTS: Final = frozenset(
-    {
-        "ALTER", "ANALYZE", "AUTHENTICATION", "BACKENDS", "BACKUP", "BROKER", "BUILTIN",
-        "CATALOGS", "CHARACTER", "CHARSET", "COLLATION", "COLUMNS", "COMPACTIONS", "COMPUTE",
-        "CREATE", "DATA", "DATABASES", "DATACACHE", "DELETE", "DYNAMIC", "ENGINES", "ERRORS",
-        "EVENTS", "EXPORT", "EXTERNAL", "FIELDS", "FILE", "FRONTENDS", "FULL", "FUNCTIONS",
-        "GLOBAL", "GRANTS", "HISTOGRAM", "INDEX", "INDEXES", "KEYS", "LOAD", "MATERIALIZED",
-        "OPEN", "PARTITIONS", "PIPES", "PLUGINS", "PRIVILEGES", "PROC", "PROCEDURE",
-        "PROCESSLIST", "PROFILELIST", "PROPERTIES", "PROPERTY", "REPOSITORIES", "RESOURCE",
-        "RESOURCES", "RESTORE", "ROLES", "ROUTINE", "RUNNING", "SCHEMAS", "SESSION",
-        "SNAPSHOT", "SQLBLACKLIST", "STATS", "STATUS", "STORAGE", "STREAM", "TABLE", "TABLES",
-        "TABLET", "TABLETS", "TEMPORARY", "TRANSACTION", "TRIGGERS", "USERS", "VARIABLES",
-        "WAREHOUSES", "WARNINGS", "WHITELIST",
-    }
-)
-_TRANSACTION_TAIL: Final = frozenset({_END, "WORK"})
 
-SQL_STATEMENT_FAMILIES: Final[Mapping[str, frozenset[str] | None]] = MappingProxyType(
-    {
-        # 开放语句族：第二个词无法枚举，整条必须是完整有效的 SQL。
-        "SELECT": None,
-        "WITH": None,
-        "UPDATE": None,
-        "SET": None,
-        "GRANT": None,
-        "REVOKE": None,
-        "DESC": None,
-        "DESCRIBE": None,
-        "USE": None,
-        # 已知 StarRocks 语句族：关键字 + 第二个词，sqlglot 能否解析都识别。
-        "SHOW": _SHOW_OBJECTS,
-        "CREATE": _DDL_OBJECTS,
-        "DROP": _DDL_OBJECTS,
-        "ALTER": _DDL_OBJECTS,
-        "EXPLAIN": frozenset(
-            {"SELECT", "WITH", "VERBOSE", "COSTS", "LOGICAL", "ANALYZE", "INSERT",
-             "UPDATE", "DELETE"}
-        ),
-        "ADMIN": frozenset({"SHOW", "SET", "REPAIR", "CANCEL", "CHECK", "COMPACT", "EXECUTE"}),
-        "ANALYZE": frozenset({"TABLE", "FULL", "SAMPLE", "PROFILE"}),
-        "KILL": frozenset({"QUERY", "CONNECTION", _NUMBER}),
-        "INSERT": frozenset({"INTO", "OVERWRITE"}),
-        "DELETE": frozenset({"FROM"}),
-        "REPLACE": frozenset({"INTO"}),
-        "TRUNCATE": frozenset({"TABLE"}),
-        "LOCK": frozenset({"TABLES"}),
-        "UNLOCK": frozenset({"TABLES"}),
-        "LOAD": frozenset({"LABEL"}),
-        "EXPORT": frozenset({"TABLE"}),
-        "SUBMIT": frozenset({"TASK"}),
-        "CANCEL": frozenset(
-            {"LOAD", "EXPORT", "ALTER", "BACKUP", "RESTORE", "REFRESH", "DECOMMISSION"}
-        ),
-        "REFRESH": frozenset({"MATERIALIZED", "EXTERNAL"}),
-        "RECOVER": frozenset({"DATABASE", "TABLE", "PARTITION"}),
-        "BACKUP": frozenset({"SNAPSHOT"}),
-        "RESTORE": frozenset({"SNAPSHOT"}),
-        "INSTALL": frozenset({"PLUGIN"}),
-        "UNINSTALL": frozenset({"PLUGIN"}),
-        "PAUSE": frozenset({"ROUTINE"}),
-        "RESUME": frozenset({"ROUTINE"}),
-        "STOP": frozenset({"ROUTINE"}),
-        "BEGIN": _TRANSACTION_TAIL,
-        "COMMIT": _TRANSACTION_TAIL,
-        "ROLLBACK": _TRANSACTION_TAIL,
-        "START": frozenset({"TRANSACTION"}),
-    }
-)
-"""识别 SQL 消息的语句族（设计 §5.1）：首词 → 已知第二个词，``None`` 表示开放语句族。
-读、写与会话语句都在内——写语句也要被识别，以便明确回复“只允许只读查询”，而不是当成聊天。"""
+class SqlTextKind(StrEnum):
+    """一条消息的识别结论（设计 §5.1 三档）。"""
 
-_SQL_SHAPED_SCAN_FAILURES: Final[frozenset[TokenScanReason]] = frozenset(
-    {
-        TokenScanReason.MULTI_STATEMENT,
-        TokenScanReason.HINT_COMMENT,
-        TokenScanReason.INTO_OUTFILE,
-    }
-)
-"""扫描拒绝但语法上仍可能是 SQL 的原因：满足语句族规则时识别，交 SQLGuard 明确拒绝。"""
+    SQL = "sql"
+    SQL_LIKE = "sql_like"
+    CONVERSATION = "conversation"
+
 
 _UNMISTAKABLE_SCAN_FAILURES: Final[frozenset[TokenScanReason]] = frozenset(
     {TokenScanReason.HINT_COMMENT, TokenScanReason.INTO_OUTFILE}
 )
-"""sqlglot 解析不了、但只会出现在 SQL 里的语法；开放语句族据此识别。"""
+"""sqlglot 解析不了、但只会出现在 SQL 里的语法：命中签名即识别，交 SQLGuard 明确拒绝。"""
 
 _VALID_PARSE_SHAPES: Final[frozenset[SqlParseShape]] = frozenset(
     {SqlParseShape.STATEMENTS, SqlParseShape.TOO_COMPLEX}
@@ -216,7 +90,6 @@ _VALID_PARSE_SHAPES: Final[frozenset[SqlParseShape]] = frozenset(
 _LOOKALIKE_QUOTES: Final[dict[int, str]] = {
     ord(char): "'" for char in "\u2018\u2019\u201a\u201b"
 } | {ord(char): '"' for char in "\u201c\u201d\u201e\u201f"}
-_LEADING_COMMENT: Final = re.compile(r"\A\s*(?:(?:--|#)[^\r\n]*|/\*.*?\*/)", re.DOTALL)
 
 _WHOLE_FENCE: Final = re.compile(
     r"\A```(?P<info>[^\n`]*)\n(?P<body>.*?)\n?```\Z", re.DOTALL
@@ -224,10 +97,6 @@ _WHOLE_FENCE: Final = re.compile(
 _FENCE_BLOCK: Final = re.compile(r"^```[^\n`]*\n(?P<body>.*?)^```", re.DOTALL | re.MULTILINE)
 _PARAGRAPH_BREAK: Final = re.compile(r"\n[ \t]*\n")
 _LEADING_WORD: Final = re.compile(r"\A\s*([A-Za-z]+)(?![A-Za-z0-9_])")
-_FOLLOWING_TOKEN: Final = re.compile(
-    r"\A\s*(?:(?P<word>[A-Za-z]+)|(?P<number>[0-9]+))(?![A-Za-z0-9_])"
-)
-_STATEMENT_END: Final = re.compile(r"\A\s*(?:;\s*)?\Z")
 _KEYWORD: Final = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     + "|".join(sorted(SQL_STATEMENT_KEYWORDS))
@@ -269,12 +138,6 @@ def _leading_keyword(text: str) -> bool:
     return match is not None and match.group(1).upper() in SQL_STATEMENT_KEYWORDS
 
 
-def _without_leading_comments(text: str) -> str:
-    while (comment := _LEADING_COMMENT.match(text)) is not None:
-        text = text[comment.end() :]
-    return text
-
-
 def _judgement_copy(body: str) -> str:
     """判定副本：智能引号换成 ASCII 引号，NFKC 折叠全角字符，去掉控制与格式字符。
 
@@ -289,57 +152,68 @@ def _judgement_copy(body: str) -> str:
     )
 
 
-def _statement_head(text: str) -> tuple[str, str] | None:
-    """跳过注释与 hint 后的首词与第二个 token（整数记为 ``#NUMBER``，语句结束记为空串）。"""
-    text = _without_leading_comments(text)
-    first = _LEADING_WORD.match(text)
-    if first is None:
-        return None
-    rest = _without_leading_comments(text[first.end() :])
-    if _STATEMENT_END.match(rest) is not None:
-        return first.group(1).upper(), _END
-    following = _FOLLOWING_TOKEN.match(rest)
-    if following is None:
-        return first.group(1).upper(), _OTHER
-    word = following.group("word")
-    return first.group(1).upper(), _NUMBER if word is None else word.upper()
+def _first_statement(probe: str) -> str:
+    for token in lenient_tokens(probe):
+        if token.kind == "symbol" and token.text == ";":
+            return probe[: token.start]
+    return probe
 
 
-def _is_sql(probe: str) -> bool:
-    head = _statement_head(probe)
-    if head is None or head[0] not in SQL_STATEMENT_FAMILIES:
-        return False
-    keyword, following = head
+def _kind(probe: str) -> SqlTextKind:
+    tokens = lenient_tokens(probe)
+    if not tokens or tokens[0].kind != "word":
+        return SqlTextKind.CONVERSATION
+    signed = [
+        form
+        for form in _FORMS_BY_KEYWORD.get(tokens[0].text, ())
+        if signature_matches(form.signature, tokens)
+    ]
+    if not signed:
+        return SqlTextKind.CONVERSATION
     try:
         scan = scan_sql(probe.encode("utf-8"))
     except TokenScanError as exc:
-        if exc.reason not in _SQL_SHAPED_SCAN_FAILURES:
-            return False
-        scan_failure: TokenScanReason | None = exc.reason
-    else:
-        if match_statement(scan) is not None:
-            return True
-        scan_failure = None
-    followers = SQL_STATEMENT_FAMILIES[keyword]
-    if followers is not None:
-        return following in followers
-    return (
-        scan_failure in _UNMISTAKABLE_SCAN_FAILURES
-        or sql_parse_shape(probe) in _VALID_PARSE_SHAPES
-    )
+        if exc.reason in _UNMISTAKABLE_SCAN_FAILURES:
+            return SqlTextKind.SQL
+        if exc.reason is TokenScanReason.MULTI_STATEMENT:
+            # 多语句按第一条判断：是 SQL 就交 SQLGuard 以多语句拒绝。
+            return _kind(_first_statement(probe))
+        if exc.reason is TokenScanReason.AMBIGUOUS_PUNCTUATION:
+            # 字符串与注释之外有中文等自然语言文字：混合消息，交嵌入 SQL 检测。
+            return SqlTextKind.CONVERSATION
+        return SqlTextKind.SQL_LIKE
+    if match_statement(scan) is not None:
+        return SqlTextKind.SQL
+    for form in signed:
+        complete = shape_matches(form.shape, scan)
+        if complete is None:
+            complete = sql_parse_shape(probe) in _VALID_PARSE_SHAPES
+        if complete:
+            return SqlTextKind.SQL
+    return SqlTextKind.SQL_LIKE
+
+
+def _classify(text: str) -> tuple[SqlTextKind, str]:
+    body, declared_sql = _unwrap(text.strip())
+    if not body or len(body.encode("utf-8")) > SQL_MAX_BYTES:
+        return SqlTextKind.CONVERSATION, body
+    if declared_sql:
+        return SqlTextKind.SQL, body
+    return _kind(_judgement_copy(body)), body
+
+
+def classify_sql_text(text: str) -> SqlTextKind:
+    """按设计 §5.1 把消息分成 SQL / 像 SQL / 对话三档；纯函数，同一输入同一结论。"""
+    return _classify(text)[0]
 
 
 def recognize_sql_message(text: str) -> SqlMessage | None:
-    """按设计 §5.1 识别纯 SQL 消息；不是 SQL 时返回 ``None``（按普通对话处理）。
+    """识别纯 SQL 消息；不是 SQL（像 SQL 或对话）时返回 ``None``。
 
     返回的 ``SqlMessage`` 保存原文正文，不是判定副本。
     """
-    body, declared_sql = _unwrap(text.strip())
-    if not body or len(body.encode("utf-8")) > SQL_MAX_BYTES:
-        return None
-    if declared_sql or _is_sql(_judgement_copy(body)):
-        return SqlMessage(sql=body)
-    return None
+    kind, body = _classify(text)
+    return SqlMessage(sql=body) if kind is SqlTextKind.SQL else None
 
 
 def _ascii_prefix(fragment: str) -> str:
