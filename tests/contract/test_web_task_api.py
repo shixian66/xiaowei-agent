@@ -32,12 +32,14 @@ from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdminCapability,
     AuthenticatedPrincipal,
+    ChannelKind,
     ChannelPermission,
     IdentitySource,
     ProductRole,
     ReadinessReport,
     RenderPayload,
     RenderSection,
+    TaskLookup,
     TaskStatus,
     TaskView,
     WebMode,
@@ -630,3 +632,197 @@ async def test_invalid_or_replayed_cursor_is_rejected_without_service_call() -> 
             assert response.status_code == 404
             assert response.json() == {"error": {"code": "not_found"}}
     assert access.list_calls == []
+
+
+# --- F1：目标选择作答时 SQL 已过期或不可读（设计 §9.4、计划 Task 8） --------------
+
+_F1_HEADERS = {"origin": "https://ops.example.test", "x-csrf-token": _CSRF}
+
+
+async def _f1_web_stack(store: Any, memory_state: Any, clock: Any) -> Any:
+    from xiaowei_agent.application.channel_access import TaskAccessService
+    from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+    from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+    from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
+    from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
+    from xiaowei_agent.persistence.fake import InMemoryChannelStore
+    from xiaowei_agent.persistence.plans import InMemoryPlanStore
+
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),  # type: ignore[arg-type]
+    )
+    channels = InMemoryChannelStore(clock=clock, state=memory_state)
+    access = TaskAccessService(
+        runtime=runtime, task_store=store, channel_store=channels, membership=None
+    )
+    submissions = ChannelSubmissionService(
+        runtime=runtime, channel_store=channels, web_parent_access=access
+    )
+    return channels, submissions
+
+
+async def _f1_web_parent(
+    store: Any,
+    records: Any,
+    channels: Any,
+    context: Any,
+    *,
+    key: str,
+    sql_ref: str | None = None,
+    sql_hash: str | None = None,
+) -> Any:
+    """Web 提交的 SQL 任务停在目标选择追问；记录可指向任意（含不可读的）SQL。"""
+    from tests.suites.task_store import park_for_target_selection
+
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    submitted = await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=context,
+            sql_bytes=b"SELECT id FROM orders",
+            idempotency_key=key,
+            as_of=_NOW,
+        )
+    )
+    task = submitted.task
+    own = await store.get_submission(
+        lookup=TaskLookup(
+            task_id=task.task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+        )
+    )
+    await channels.bind_task(
+        command=BindTaskCommand(
+            task_id=task.task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            channel=ChannelKind.WEB,
+            initiator_subject_ref="subject-alice",
+            conversation_ref=None,
+            source_event_ref=f"event-{key}",
+            created_at=_NOW,
+        )
+    )
+    await park_for_target_selection(
+        store,
+        records,
+        task.task_id,
+        sql_ref=own.sql_ref if sql_ref is None else sql_ref,
+        sql_hash=own.sql_hash if sql_hash is None else sql_hash,
+    )
+    return task, own
+
+
+async def _answer(client: httpx.AsyncClient, parent_id: str, key: str) -> httpx.Response:
+    return await client.post(
+        "/app/api/tasks",
+        json={
+            "text": "Orders",
+            "client_submission_id": f"browser-answer-{key}-0001",
+            "clarification_parent_task_id": parent_id,
+        },
+        headers=_F1_HEADERS,
+    )
+
+
+async def test_expired_sql_answer_is_409_without_consuming_the_parent(
+    store, memory_state, clock, context, clarification_record_store
+) -> None:
+    channels, submissions = await _f1_web_stack(store, memory_state, clock)
+    parent, _ = await _f1_web_parent(
+        store, clarification_record_store, channels, context, key="f1-exp"
+    )
+    tasks_before = set(memory_state.tasks)
+    bindings_before = dict(memory_state.channel_bindings)
+    clock.advance(seconds=24 * 3600 + 1)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await _answer(client, parent.task_id, "exp")
+
+    assert response.status_code == 409
+    assert response.json() == {"error": {"code": "sql_artifact.expired"}}
+    assert memory_state.tasks[parent.task_id].status is TaskStatus.CLARIFICATION_REQUIRED
+    assert set(memory_state.tasks) == tasks_before
+    assert dict(memory_state.channel_bindings) == bindings_before
+
+
+async def test_unreadable_sql_answers_are_one_indistinguishable_409(
+    store, memory_state, clock, context, clarification_record_store
+) -> None:
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    channels, submissions = await _f1_web_stack(store, memory_state, clock)
+    bob = context.model_copy(update={"actor": "bob"})
+    foreign = await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=bob, sql_bytes=b"SELECT 2", idempotency_key="bob-sql", as_of=_NOW
+        )
+    )
+    foreign_submission = await store.get_submission(
+        lookup=TaskLookup(
+            task_id=foreign.task.task_id,
+            tenant_id=bob.tenant_id,
+            environment_id=bob.environment_id,
+        )
+    )
+    parents = []
+    for key, sql_ref, sql_hash in (
+        ("f1-missing", "no-such-ref", None),
+        ("f1-scope", foreign_submission.sql_ref, foreign_submission.sql_hash),
+        ("f1-hash", None, "f" * 64),
+    ):
+        parent, _ = await _f1_web_parent(
+            store,
+            clarification_record_store,
+            channels,
+            context,
+            key=key,
+            sql_ref=sql_ref,
+            sql_hash=sql_hash,
+        )
+        parents.append(parent)
+    tasks_before = set(memory_state.tasks)
+    bindings_before = dict(memory_state.channel_bindings)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        responses = [
+            await _answer(client, parent.task_id, f"unavailable-{index}")
+            for index, parent in enumerate(parents)
+        ]
+
+    assert {response.status_code for response in responses} == {409}
+    assert {response.content for response in responses} == {
+        b'{"error":{"code":"sql_artifact.unavailable"}}'
+    }
+    for parent in parents:
+        assert memory_state.tasks[parent.task_id].status is (
+            TaskStatus.CLARIFICATION_REQUIRED
+        )
+    assert set(memory_state.tasks) == tasks_before
+    assert dict(memory_state.channel_bindings) == bindings_before
+
+
+async def test_a_readable_sql_answer_creates_the_child(
+    store, memory_state, clock, context, clarification_record_store
+) -> None:
+    channels, submissions = await _f1_web_stack(store, memory_state, clock)
+    parent, _ = await _f1_web_parent(
+        store, clarification_record_store, channels, context, key="f1-ok"
+    )
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await _answer(client, parent.task_id, "ok")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["clarification_parent_task_id"] == parent.task_id
+    assert body["task_id"] in memory_state.tasks

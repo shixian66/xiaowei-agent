@@ -28,6 +28,7 @@ from xiaowei_agent.contracts import (
     SlotInvalid,
     SlotReady,
 )
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.planning.slot_verification import (
     SlotCandidate,
     SlotSource,
@@ -75,9 +76,13 @@ def verify_slow_query_slots(
     as_of: dt.datetime,
     user_text: str,
     clarification: ClarificationContext | None = None,
+    sql_artifact: SqlArtifactRef | None = None,
 ) -> SlotReady[SlowQueryParams] | SlotInvalid:
     """Upgrade only trusted slow-query slots into typed params."""
     _ = (candidate, context)
+    if sql_artifact is not None:
+        # 只有 F1 只读查询消费 SQL 引用；其他能力收到即拒绝，不忽略。
+        return _invalid()
     try:
         parent = () if clarification is None else clarification.confirmed_slots
         slots = extract_slots_for_intent(text=user_text, intent=draft.intent)

@@ -19,6 +19,15 @@ SLOW_QUERY_INTENT: Final[str] = "starrocks.slow_query.diagnose"
 PROMETHEUS_ALERT_INTENT: Final[str] = "prometheus.alert.evidence"
 ASSET_INVENTORY_INTENT: Final[str] = "asset.inventory.lookup"
 UNKNOWN_INTENT: Final[str] = "unknown"
+READONLY_QUERY_INTENT: Final[str] = "starrocks.readonly_query"
+"""F1 只读查询意图；与 capability id 相同（Resolver 按相等匹配）。"""
+
+RULE_ONLY_INTENTS: Final[frozenset[str]] = frozenset({READONLY_QUERY_INTENT})
+"""只能由规则来源交互事实产生的意图（设计 §5.3）。
+
+它们刻意**不在** :data:`INTENT_SLOT_ALLOWLISTS` 中，所以供应商响应无法选中；Router 另外
+拒绝非规则来源的同名草案，两层互不替代。
+"""
 
 INTENT_SLOT_ALLOWLISTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {

@@ -23,6 +23,7 @@ from pydantic import AfterValidator, Field, field_validator, model_validator
 
 from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
 from xiaowei_agent.contracts.integration_config import SecretRef
+from xiaowei_agent.contracts.sql_query import ReadonlyQueryBudget
 
 MAX_RESOURCES: Final[int] = 100
 _MAX_TEXT: Final[int] = 128
@@ -32,6 +33,14 @@ _MAX_BASE_URL: Final[int] = 2048
 _RESOURCE_ID_RE: Final = re.compile(r"[0-9a-f]{32}")
 _LABEL_RE: Final = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _PATH_SEGMENT_RE: Final = re.compile(r"[A-Za-z0-9_~-][A-Za-z0-9._~-]*")
+_RELATION_PART_RE: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_$-]{0,63}")
+
+DEFAULT_READONLY_QUERY_BUDGET: Final[ReadonlyQueryBudget] = ReadonlyQueryBudget(
+    preview_max_rows=1000,
+    preview_max_bytes=20_971_520,
+    query_timeout_seconds=180,
+)
+"""F1 默认上限即系统硬上限（设计 §8.1）；Admin 只能在此之内调低。"""
 
 ResourceEnvironment = Literal["dev", "test", "staging", "prod"]
 TlsMode = Literal["disabled", "verify_ca", "verify_identity"]
@@ -128,8 +137,26 @@ Host = Annotated[StrictStr, AfterValidator(_host)]
 BaseUrl = Annotated[StrictStr, AfterValidator(_base_url)]
 
 
+def _blocked_relation_names(value: tuple[str, ...]) -> tuple[str, ...]:
+    """内部 Catalog 的精确 ``database.object``：小写规范化、排序，冲突或重复即拒绝。
+
+    不接受 catalog 前缀、单段名、通配符或正则（设计 §6）；错误文本不回显取值。
+    """
+    normalised: list[str] = []
+    for name in value:
+        parts = name.split(".")
+        if len(parts) != 2 or any(
+            _RELATION_PART_RE.fullmatch(part) is None for part in parts
+        ):
+            raise ValueError("blocked relation must be an exact database.object name")
+        normalised.append(name.lower())
+    if len(set(normalised)) != len(normalised):
+        raise ValueError("blocked relation names conflict after normalisation")
+    return tuple(sorted(normalised))
+
+
 class StarRocksResource(Contract):
-    """一个 StarRocks FE 的登记参数。"""
+    """一个 StarRocks FE 的登记参数；``f1_*`` 与黑名单只用于 F1 只读查询（设计 §6）。"""
 
     kind: Literal["starrocks"]
     resource_id: ResourceId
@@ -142,6 +169,16 @@ class StarRocksResource(Contract):
     password: SecretRef | None = Field(default=None, exclude=True, repr=False)
     tls_mode: TlsMode
     enabled: bool
+    f1_enabled: bool = False
+    blocked_relation_names: Annotated[
+        tuple[StrictStr, ...], AfterValidator(_blocked_relation_names)
+    ] = ()
+    f1_budget: ReadonlyQueryBudget = DEFAULT_READONLY_QUERY_BUDGET
+
+    @field_validator("blocked_relation_names", mode="before")
+    @classmethod
+    def _json_array_is_a_tuple(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
 
     @property
     def secret_configured(self) -> bool:
@@ -210,8 +247,21 @@ class ResourcesConfig(Contract):
             raise ValueError("resource ids must be unique")
         return self
 
+    @model_validator(mode="after")
+    def _f1_display_names_are_unique(self) -> Self:
+        """目标追问按展示名精确匹配，同一环境内 F1 启用资源的展示名必须唯一。"""
+        names = [
+            (resource.environment, resource.display_name)
+            for resource in self.resources
+            if isinstance(resource, StarRocksResource) and resource.f1_enabled
+        ]
+        if len(set(names)) != len(names):
+            raise ValueError("f1 display names must be unique per environment")
+        return self
+
 
 __all__ = [
+    "DEFAULT_READONLY_QUERY_BUDGET",
     "MAX_RESOURCES",
     "PrometheusAuthMode",
     "PrometheusResource",

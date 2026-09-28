@@ -28,6 +28,7 @@ from xiaowei_agent.contracts import (
     SlotInvalid,
     SlotReady,
 )
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.planning.prometheus.params import (
     DEFAULT_WINDOW_MINUTES,
     AlertName,
@@ -92,9 +93,13 @@ def verify_prometheus_alert_slots(
     as_of: dt.datetime,
     user_text: str,
     clarification: ClarificationContext | None = None,
+    sql_artifact: SqlArtifactRef | None = None,
 ) -> SlotReady[PrometheusAlertParams] | SlotIncomplete | SlotInvalid:
     """Upgrade only trusted alert slots into typed Prometheus params."""
     _ = (candidate, context)
+    if sql_artifact is not None:
+        # 只有 F1 只读查询消费 SQL 引用；其他能力收到即拒绝，不忽略。
+        return _invalid()
     try:
         parent = () if clarification is None else clarification.confirmed_slots
         slots = dict(extract_slots_for_intent(text=user_text, intent=draft.intent))

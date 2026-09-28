@@ -102,6 +102,7 @@ from xiaowei_agent.contracts import (
     TaskView,
     TraceEvent,
 )
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
 from xiaowei_agent.governance.sqlguard import SqlGuardError
@@ -906,6 +907,7 @@ class XiaoweiRuntime:
         grant: TaskAttemptGrant,
         clarification: ClarificationContext | None,
         user_text: str,
+        sql_artifact: SqlArtifactRef | None = None,
         task_id: str | None = None,
         attempt_number: int | None = None,
     ) -> PreparedCapability | None:
@@ -922,6 +924,7 @@ class XiaoweiRuntime:
                 as_of=as_of,
                 user_text=user_text,
                 clarification=capability_clarification,
+                sql_artifact=sql_artifact,
             )
             if isinstance(verified, SlotIncomplete):
                 await self._save_capability_clarification(
@@ -1044,6 +1047,7 @@ class XiaoweiRuntime:
             operation=candidate.operation,
             input_schema_ref=binding.input_binding.input_schema_ref,
             confirmed_slots=result.confirmed_slots,
+            target_selection=result.target_selection,
         )
         await self._clarification_records.save(
             grant=grant,

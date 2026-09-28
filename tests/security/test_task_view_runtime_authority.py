@@ -31,6 +31,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.capabilities.effect
     xiaowei_agent.capabilities.intent
     xiaowei_agent.capabilities.prometheus_alert
+    xiaowei_agent.capabilities.readonly_query
     xiaowei_agent.capabilities.registry
     xiaowei_agent.capabilities.resolver
     xiaowei_agent.capabilities.specs
@@ -131,6 +132,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.planning.starrocks
     xiaowei_agent.planning.starrocks.compiler
     xiaowei_agent.planning.starrocks.params
+    xiaowei_agent.planning.starrocks.readonly_query
     xiaowei_agent.planning.starrocks.slots
     xiaowei_agent.redaction
     xiaowei_agent.reflection

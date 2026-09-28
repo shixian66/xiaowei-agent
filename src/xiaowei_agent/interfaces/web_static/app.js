@@ -75,6 +75,10 @@ let activeFilter = "all";
 let pollTimer = null;
 let pollDelay = 2000;
 let pendingSubmission = null;
+const SQL_ARTIFACT_FAILURES = new Map([
+  ["sql_artifact.expired", "SQL 已过期，请重新发送。"],
+  ["sql_artifact.unavailable", "SQL 无法读取，本次未执行。"],
+]);
 let pendingParentTaskId = null;
 let requestedParentTaskId = null;
 
@@ -461,6 +465,13 @@ async function submitTask() {
     await loadTasks();
     selectTask(accepted.task_id);
   } catch (error) {
+    if (SQL_ARTIFACT_FAILURES.has(error.code)) {
+      // 确定失败：父任务未被消费，但这条 SQL 已不能执行；清空上下文，请用户重新发送 SQL。
+      pendingSubmission = null;
+      setParentContext(null);
+      setSubmitState({ busy: false, message: SQL_ARTIFACT_FAILURES.get(error.code) });
+      return;
+    }
     const ambiguous = !Number.isInteger(error.status) || error.status >= 500;
     if (!ambiguous) {
       pendingSubmission = null;

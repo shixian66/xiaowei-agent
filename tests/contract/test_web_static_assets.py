@@ -291,3 +291,12 @@ def test_workbench_links_to_the_admin_center_only_by_capability() -> None:
     assert 'capabilities.includes("view_integration_status")' in script
     # 入口只是展示，不绕过服务端：脚本不直接读取任何 /admin/api 路由。
     assert "/admin/api/" not in script
+
+
+def test_sql_artifact_errors_have_fixed_definite_failure_copy() -> None:
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert '["sql_artifact.expired", "SQL 已过期，请重新发送。"]' in app_script
+    assert '["sql_artifact.unavailable", "SQL 无法读取，本次未执行。"]' in app_script
+    # 确定失败：清空待重试提交与父任务上下文，引导重新发送 SQL。
+    assert "SQL_ARTIFACT_FAILURES.has(error.code)" in app_script

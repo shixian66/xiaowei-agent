@@ -41,6 +41,8 @@ from xiaowei_agent.persistence.model_artifacts import ModelArtifactStore
 from xiaowei_agent.persistence.plans import PlanNotFoundError, PlanStore
 from xiaowei_agent.persistence.store import (
     IdempotencyConflictError,
+    SqlArtifactExpiredError,
+    SqlArtifactUnavailableError,
     TaskNotFoundError,
     TaskStore,
 )
@@ -64,6 +66,8 @@ class ApplicationFailure(StrEnum):
     CONFLICT = "conflict"
     NOT_FOUND = "not_found"
     UNAVAILABLE = "unavailable"
+    SQL_ARTIFACT_EXPIRED = "sql_artifact.expired"
+    SQL_ARTIFACT_UNAVAILABLE = "sql_artifact.unavailable"
     INTERNAL = "internal"
 
 
@@ -82,6 +86,11 @@ def classify_application_exception(exc: Exception) -> ApplicationFailure:
         return ApplicationFailure.CONFLICT
     if isinstance(exc, TaskNotFoundError):
         return ApplicationFailure.NOT_FOUND
+    # 目标选择作答时 SQL 已过期或不可读（设计 §9.4）；内部原因一律不外泄。
+    if isinstance(exc, SqlArtifactExpiredError):
+        return ApplicationFailure.SQL_ARTIFACT_EXPIRED
+    if isinstance(exc, SqlArtifactUnavailableError):
+        return ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE
     if isinstance(exc, PersistenceUnavailableError):
         return ApplicationFailure.UNAVAILABLE
     return ApplicationFailure.INTERNAL

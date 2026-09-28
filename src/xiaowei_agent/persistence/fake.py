@@ -229,6 +229,7 @@ from xiaowei_agent.persistence.store import (
     step_commit_digest,
     submission_digest,
     submission_matches_record,
+    target_selection_sql,
     validate_task_failure_limit,
 )
 from xiaowei_agent.persistence.web_session import (
@@ -2146,7 +2147,31 @@ class InMemoryTaskStore:
                 clarification_parent_id=clarification_parent_id
             ):
                 raise TaskNotFoundError(task_id=clarification_parent_id)
+            self._extend_selected_sql_locked(parent=parent)
             return self._create_task_locked(submission=submission, digest=digest)
+
+    def _extend_selected_sql_locked(self, *, parent: TaskRecord) -> None:
+        """父记录为目标选择时分类并延期其 SQL；失败抛闭集异常，不留任何写入。"""
+        selected = target_selection_sql(
+            self._state.clarification_records.get(parent.task_id)
+        )
+        if selected is None:
+            return
+        now = self._clock()
+        row = self._state.sql_artifacts.get(selected.sql_ref)
+        decision = classify_sql_artifact_read(
+            row,
+            now=now,
+            requester=parent.actor,
+            tenant_id=parent.tenant_id,
+            environment_id=parent.environment_id,
+            sql_hash=selected.sql_hash,
+        )
+        available = raise_for_sql_artifact_read(row, decision)
+        self._state.sql_artifacts[selected.sql_ref] = dataclasses.replace(
+            available,
+            expires_at=extended_sql_expiry(available.expires_at, now=now),
+        )
 
     async def submit_sql_query(
         self, *, command: SqlQuerySubmitCommand

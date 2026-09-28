@@ -28,6 +28,13 @@ from xiaowei_agent.capabilities.prometheus_alert import (
     PROMETHEUS_ALERT_INPUT_SCHEMA_REF,
     PROMQL_SURFACE,
 )
+from xiaowei_agent.capabilities.readonly_query import (
+    OP_EXECUTE_READONLY_QUERY,
+    READONLY_QUERY_CAPABILITY_ID,
+    READONLY_QUERY_CAPABILITY_VERSION,
+    READONLY_QUERY_INPUT_SCHEMA_REF,
+    ReadonlyQueryTargetCatalog,
+)
 from xiaowei_agent.capabilities.specs import (
     CAPABILITY_ID,
     CAPABILITY_VERSION,
@@ -37,14 +44,18 @@ from xiaowei_agent.capabilities.specs import (
 )
 from xiaowei_agent.capabilities.target import TargetResolutionError, resolve_target
 from xiaowei_agent.contracts import (
+    AnswerabilityVerdict,
     Candidate,
     CapabilitySnapshot,
     EvidenceEnvelope,
     ExecutionPlan,
+    MissingItem,
     PlanStep,
     PolicySnapshot,
+    RenderPayload,
     RequestContext,
     ResolvedTarget,
+    TaskStatus,
     ToolResult,
 )
 from xiaowei_agent.evidence.asset_inventory import build_asset_evidence
@@ -57,6 +68,7 @@ from xiaowei_agent.evidence.prometheus_alert import (
 from xiaowei_agent.governance.profiles import (
     ASSET_INVENTORY_READONLY_PROFILE,
     PROMETHEUS_ALERT_READONLY_PROFILE,
+    READONLY_QUERY_PROFILE,
     SLOW_QUERY_READONLY_PROFILE,
 )
 from xiaowei_agent.planning.assets.compiler import (
@@ -87,6 +99,12 @@ from xiaowei_agent.planning.prometheus.templates import metric_name_for_template
 from xiaowei_agent.planning.starrocks.compiler import compile_plan
 from xiaowei_agent.planning.starrocks.params import (
     SlowQueryParams,
+)
+from xiaowei_agent.planning.starrocks.readonly_query import (
+    ReadonlyQueryParams,
+    ReadonlyQuerySlotVerifier,
+    compile_readonly_query_plan,
+    resolve_readonly_query_target,
 )
 from xiaowei_agent.planning.starrocks.slots import (
     SLOW_QUERY_CLARIFICATION_FIELDS,
@@ -389,13 +407,123 @@ ASSET_INVENTORY_BINDING: Final[CapabilityRuntimeBinding] = CapabilityRuntimeBind
 )
 
 
+def _plan_readonly_query(
+    *,
+    candidate: Candidate,
+    params: ReadonlyQueryParams,
+    context: RequestContext,
+    snapshot: CapabilitySnapshot,
+) -> PreparedCapability:
+    try:
+        target = resolve_readonly_query_target(context=context, params=params)
+        plan = compile_readonly_query_plan(
+            candidate=candidate,
+            params=params,
+            target=target,
+            context=context,
+            snapshot=snapshot,
+        )
+    except ValueError as exc:
+        raise CapabilityPreparationError(
+            "capability parameters are outside the allowed range"
+        ) from exc
+    return PreparedCapability(target=target, plan=plan)
+
+
+# F1 的结果证据、Reflection 与回复属 PR-E（计划 Task 10–11）。在此之前 Runtime 在
+# Runner 之前就以 ``read_class.not_allowed`` 拒绝 RESTRICTED 计划，下面三项不可达；
+# 它们保持 fail-closed：不产生证据、不声称可答、不回显 SQL。
+_READONLY_QUERY_NOT_EXECUTED: Final[str] = "SQL 查询未执行，没有可展示的结果。"
+
+
+def _build_readonly_query_evidence(
+    *,
+    task_id: str,
+    step: PlanStep,
+    plan: ExecutionPlan,
+    target: ResolvedTarget,
+    result: ToolResult,
+    captured_at: dt.datetime,
+) -> EvidenceEnvelope:
+    _ = (task_id, step, plan, target, result, captured_at)
+    raise EvidenceBuildError
+
+
+def _assess_readonly_query(
+    *, evidences: tuple[EvidenceEnvelope, ...]
+) -> AnswerabilityVerdict:
+    _ = evidences
+    return AnswerabilityVerdict(
+        sufficient=False,
+        limitations=(_READONLY_QUERY_NOT_EXECUTED,),
+        missing=(MissingItem(key="query_result", reason_key="result.absent"),),
+        downgrade_suggestion=True,
+        needs_user_input=False,
+    )
+
+
+def _render_readonly_query(
+    *,
+    evidences: tuple[EvidenceEnvelope, ...],
+    verdict: AnswerabilityVerdict,
+    status: TaskStatus,
+) -> RenderPayload:
+    _ = (evidences, verdict)
+    return RenderPayload(
+        answer=_READONLY_QUERY_NOT_EXECUTED,
+        sections=(),
+        next_steps=(),
+        status=status,
+        refs=(),
+    )
+
+
+def readonly_query_binding(
+    catalog: ReadonlyQueryTargetCatalog,
+) -> CapabilityRuntimeBinding:
+    """F1 binding；目标目录由 task-worker 启动时加载后注入。"""
+    return CapabilityRuntimeBinding(
+        capability_id=READONLY_QUERY_CAPABILITY_ID,
+        capability_version=READONLY_QUERY_CAPABILITY_VERSION,
+        entry_operation=OP_EXECUTE_READONLY_QUERY,
+        input_binding=bind_capability_input(
+            params_type=ReadonlyQueryParams,
+            input_schema_ref=READONLY_QUERY_INPUT_SCHEMA_REF,
+            allowed_clarification_fields=frozenset(),
+            slot_verifier=ReadonlyQuerySlotVerifier(catalog=catalog),
+            planner=_plan_readonly_query,
+            confirmed_slot_projector=None,
+        ),
+        assessor=_assess_readonly_query,
+        renderer=_render_readonly_query,
+        execution=CapabilityExecutionBinding(
+            capability_id=READONLY_QUERY_CAPABILITY_ID,
+            capability_version=READONLY_QUERY_CAPABILITY_VERSION,
+            disclosure=DisclosureProjectionBinding(
+                capability_id=READONLY_QUERY_CAPABILITY_ID,
+                capability_version=READONLY_QUERY_CAPABILITY_VERSION,
+                allowed_clarification_fields=frozenset(),
+                confirmed_slot_projector=None,
+            ),
+            policy_profile=READONLY_QUERY_PROFILE,
+            sql_surface=None,
+            promql_surface=None,
+            evidence_builder=_build_readonly_query_evidence,
+        ),
+    )
+
+
 def build_default_capability_bindings(
     *,
     snapshot: CapabilitySnapshot,
     policy_snapshot: PolicySnapshot,
     slow_query_live_policy: SlowQueryEvidencePolicy | None = None,
+    readonly_query_targets: ReadonlyQueryTargetCatalog | None = None,
 ) -> CapabilityBindingRegistry:
-    """构造生产 binding 闭集；新增能力必须在此显式登记。"""
+    """构造生产 binding 闭集；新增能力必须在此显式登记。
+
+    ``readonly_query_targets`` 缺省为空目录：F1 请求一律得到“没有可查询的 StarRocks”。
+    """
     slow_query_binding = SLOW_QUERY_BINDING
     if slow_query_live_policy is not None:
         slow_query_binding = replace(
@@ -412,5 +540,8 @@ def build_default_capability_bindings(
             slow_query_binding,
             PROMETHEUS_ALERT_BINDING,
             ASSET_INVENTORY_BINDING,
+            readonly_query_binding(
+                readonly_query_targets or ReadonlyQueryTargetCatalog.empty()
+            ),
         ),
     )

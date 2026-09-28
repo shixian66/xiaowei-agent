@@ -9,6 +9,7 @@ from xiaowei_agent.contracts.base import (
     AwareDatetime,
     Contract,
     NonEmptyText,
+    Sha256Hex,
     StrictInt,
     StrictStr,
 )
@@ -18,6 +19,7 @@ from xiaowei_agent.contracts.enums import (
     InteractionKind,
 )
 from xiaowei_agent.contracts.ids import TaskId
+from xiaowei_agent.contracts.resource_config import BoundedText, ResourceId
 from xiaowei_agent.redaction import scrub_text
 
 TimezoneId = Literal["UTC", "Asia/Shanghai"]
@@ -77,6 +79,32 @@ class RouteSubject(Contract):
         return self
 
 
+class TargetOption(Contract):
+    """目标选择追问的一个选项：资源 id 与管理员配置的展示名。"""
+
+    resource_id: ResourceId
+    display_name: BoundedText
+
+
+class TargetSelection(Contract):
+    """F1 目标选择追问要保存的事实：SQL 引用与当时列出的选项（设计 §5.4）。
+
+    不含 SQL 原文；选项至少两个，resource id 与展示名各自唯一（回答按展示名精确匹配）。
+    """
+
+    sql_ref: StrictStr = Field(min_length=1)
+    sql_hash: Sha256Hex
+    options: tuple[TargetOption, ...] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _options_are_distinguishable(self) -> Self:
+        ids = [option.resource_id for option in self.options]
+        names = [option.display_name for option in self.options]
+        if len(set(ids)) != len(ids) or len(set(names)) != len(names):
+            raise ValueError("target options must be unique")
+        return self
+
+
 class CapabilitySubject(Contract):
     kind: Literal["capability"]
     capability_id: StrictStr
@@ -84,6 +112,10 @@ class CapabilitySubject(Contract):
     operation: StrictStr
     input_schema_ref: StrictStr
     confirmed_slots: tuple[ConfirmedSlot, ...] = ()
+    # 为空时不序列化：既有澄清记录与交互摘要的字节保持不变。
+    target_selection: TargetSelection | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 ClarificationSubject = Annotated[
@@ -115,7 +147,18 @@ class ClarificationRecord(Contract):
         _validate_slot_snapshot(self.confirmed_slots)
         if tuple(self.subject.confirmed_slots) != self.confirmed_slots:
             raise ValueError("subject slots must match the record snapshot")
+        require_target_selection_matches_reason(self.subject, self.reason_code)
         return self
+
+
+def require_target_selection_matches_reason(
+    subject: "ClarificationSubject", reason_code: ClarificationReasonCode
+) -> None:
+    """目标选择事实只属于目标选择追问，且该追问必须带着它。"""
+    selecting = reason_code is ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED
+    recorded = isinstance(subject, CapabilitySubject) and subject.target_selection is not None
+    if selecting != recorded:
+        raise ValueError("target selection must match the clarification reason")
 
 
 class ClarificationContext(Contract):

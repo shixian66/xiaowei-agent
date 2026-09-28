@@ -283,3 +283,26 @@ async def test_conversation_projection_requires_the_conversation_terminal_reason
 
     with pytest.raises(PlanNotFoundError):
         await views.project_recorded(record=current)
+
+
+def test_sql_artifact_failures_map_to_two_closed_codes() -> None:
+    from xiaowei_agent.application.task_view_runtime import (
+        ApplicationFailure,
+        classify_application_exception,
+    )
+    from xiaowei_agent.persistence.store import (
+        SqlArtifactExpiredError,
+        SqlArtifactUnavailableError,
+        SqlArtifactUnavailableReason,
+    )
+
+    assert classify_application_exception(SqlArtifactExpiredError()) is (
+        ApplicationFailure.SQL_ARTIFACT_EXPIRED
+    )
+    for reason in SqlArtifactUnavailableReason:
+        # 三种内部原因对入口不可区分，不泄漏对象是否存在或属于谁。
+        assert classify_application_exception(
+            SqlArtifactUnavailableError(reason=reason)
+        ) is ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE
+    assert ApplicationFailure.SQL_ARTIFACT_EXPIRED.value == "sql_artifact.expired"
+    assert ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE.value == "sql_artifact.unavailable"

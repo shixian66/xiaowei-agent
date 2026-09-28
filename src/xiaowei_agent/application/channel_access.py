@@ -8,6 +8,7 @@ from pydantic import Field
 from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
 from xiaowei_agent.contracts import (
     ActorTaskPageQuery,
+    ArtifactSubmission,
     AuthenticatedPrincipal,
     AwareDatetime,
     Channel,
@@ -159,13 +160,19 @@ class TaskAccessService:
             )
         except (TaskNotFoundError, ChannelBindingNotFoundError):
             raise TaskAccessNotFoundError from None
+        # SQL 提交没有信封：渠道只以绑定为准（F1 目标选择追问的父任务就是 SQL 任务）。
+        submitted_on_web = (
+            isinstance(submission, ArtifactSubmission)
+            or (
+                submission.envelope.channel is Channel.WEB
+                and submission.clarification_parent_task_id
+                != clarification_parent_task_id
+            )
+        )
         if (
             record.status is not TaskStatus.CLARIFICATION_REQUIRED
             or record.actor != principal.actor
-            # SQL 提交的目标追问由 F1-1 接入；此前只接受 Web 对话父任务。
-            or not isinstance(submission, ConversationSubmission)
-            or submission.clarification_parent_task_id == clarification_parent_task_id
-            or submission.envelope.channel is not Channel.WEB
+            or not submitted_on_web
             or binding.channel is not ChannelKind.WEB
             or binding.initiator_subject_ref != principal.subject_ref
         ):

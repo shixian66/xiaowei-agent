@@ -5,6 +5,7 @@ from typing import Final
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     CapabilitySpec,
+    CapabilitySubject,
     ClarificationPayload,
     ClarificationReasonCode,
     ClarificationRecord,
@@ -109,12 +110,24 @@ _CLARIFICATION_PROMPTS: Final[dict[ClarificationReasonCode, str]] = {
     ClarificationReasonCode.CAPABILITY_ASSET_SELECTOR_REQUIRED: (
         "请补充一个明确的资产选择条件。"
     ),
+    ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED: (
+        "当前环境有多个可查询的 StarRocks，请回复其中一个名称（需与下列名称完全一致）："
+    ),
 }
 
 
 def render_clarification_payload(*, record: ClarificationRecord) -> ClarificationPayload:
     """只从持久化 ClarificationRecord 投影澄清提示。"""
     prompt = _CLARIFICATION_PROMPTS[record.reason_code]
+    selection = (
+        record.subject.target_selection
+        if isinstance(record.subject, CapabilitySubject)
+        else None
+    )
+    if selection is not None:
+        # 只列展示名；SQL 引用与 hash 不进入提示。
+        names = "、".join(option.display_name for option in selection.options)
+        prompt = f"{prompt}{names}。"
     if record.subject.kind == "capability" and record.missing_fields:
         fields = ", ".join(field.value for field in record.missing_fields)
         prompt = f"{prompt} 缺失字段：{fields}。"

@@ -315,6 +315,7 @@ class ClarificationReasonCode(StrEnum):
     CAPABILITY_FIELDS_MISSING = "capability.fields_missing"
     CAPABILITY_FIELDS_AMBIGUOUS = "capability.fields_ambiguous"
     CAPABILITY_ASSET_SELECTOR_REQUIRED = "capability.asset_selector_required"
+    CAPABILITY_TARGET_SELECTION_REQUIRED = "capability.target_selection_required"
 
 
 class InteractionRejectionReasonCode(StrEnum):
@@ -326,6 +327,7 @@ class InteractionRejectionReasonCode(StrEnum):
         "interaction.clarification_subject_incompatible"
     )
     CAPABILITY_FIELDS_INVALID = "capability.fields_invalid"
+    CAPABILITY_TARGET_UNAVAILABLE = "capability.target_unavailable"
 
 
 class ModelErrorCode(StrEnum):

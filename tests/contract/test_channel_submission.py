@@ -716,3 +716,60 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
     assert set(memory_state.tasks) == {recovered.task_view.task_id}
     assert len(memory_state.channel_bindings) == 1
     assert len(memory_state.projection_subscriptions) == 1
+
+
+@pytest.mark.parametrize("failure", ["expired", "unavailable"])
+async def test_sql_artifact_failures_pass_through_before_binding(
+    store, channel_store, memory_state, clock, failure: str
+) -> None:
+    from xiaowei_agent.persistence.store import (
+        SqlArtifactExpiredError,
+        SqlArtifactUnavailableError,
+        SqlArtifactUnavailableReason,
+    )
+
+    error: Exception = (
+        SqlArtifactExpiredError()
+        if failure == "expired"
+        else SqlArtifactUnavailableError(reason=SqlArtifactUnavailableReason.NOT_FOUND)
+    )
+
+    class FailingRuntime:
+        async def submit_clarification_child(self, **_: Any) -> Any:
+            raise error
+
+    class RecordingChannels:
+        def __init__(self, delegate: Any) -> None:
+            self.delegate = delegate
+            self.bind_calls = 0
+
+        async def bind_task(self, *, command: Any) -> Any:
+            self.bind_calls += 1
+            return await self.delegate.bind_task(command=command)
+
+        async def find_private_chat_ref(self, **kwargs: Any) -> Any:
+            return await self.delegate.find_private_chat_ref(**kwargs)
+
+    class AllowParent:
+        async def require_web_parent_access(self, **_: Any) -> None:
+            return None
+
+    channels = RecordingChannels(channel_store)
+    service = ChannelSubmissionService(
+        runtime=FailingRuntime(),  # type: ignore[arg-type]
+        channel_store=channels,  # type: ignore[arg-type]
+        web_parent_access=AllowParent(),
+    )
+    command = _command(
+        clock,
+        channel=ChannelKind.WEB,
+        client_key="sql-parent-answer",
+        clarification_parent_task_id="task-parent",
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await service.submit(command=command)
+
+    assert caught.value is error
+    assert channels.bind_calls == 0
+    assert memory_state.channel_bindings == {}

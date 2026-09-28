@@ -14,7 +14,7 @@ from typing import ClassVar, Generic, Self, TypeAlias, TypeVar
 from pydantic import model_validator
 
 from xiaowei_agent.contracts.base import Contract, StrictStr
-from xiaowei_agent.contracts.clarification import ConfirmedSlot
+from xiaowei_agent.contracts.clarification import ConfirmedSlot, TargetSelection
 from xiaowei_agent.contracts.enums import (
     ClarificationField,
     ClarificationReasonCode,
@@ -69,6 +69,7 @@ class SlotIncomplete:
     reason_code: ClarificationReasonCode
     missing_fields: tuple[ClarificationField, ...]
     confirmed_slots: tuple[ConfirmedSlot, ...]
+    target_selection: TargetSelection | None = None
 
 
 @dataclass(frozen=True)

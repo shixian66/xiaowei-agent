@@ -22,6 +22,7 @@ from xiaowei_agent.contracts import (
     SlotReady,
     SlotVerificationResult,
 )
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 
 if TYPE_CHECKING:
     from xiaowei_agent.application.capability_runtime import PreparedCapability
@@ -58,6 +59,7 @@ class SlotVerifier(Protocol[ParamsT]):
         as_of: dt.datetime,
         user_text: str,
         clarification: ClarificationContext | None = None,
+        sql_artifact: SqlArtifactRef | None = None,
     ) -> SlotVerificationResult[ParamsT]: ...
 
 

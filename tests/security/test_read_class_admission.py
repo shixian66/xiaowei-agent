@@ -9,7 +9,9 @@ from xiaowei_agent.application.default_capabilities import (
     ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
+    readonly_query_binding,
 )
+from xiaowei_agent.capabilities.readonly_query import ReadonlyQueryTargetCatalog
 from xiaowei_agent.capabilities.specs import OP_LIST
 from xiaowei_agent.contracts import (
     AttemptIntent,
@@ -20,6 +22,9 @@ from xiaowei_agent.contracts import (
 from xiaowei_agent.persistence.store import TaskAttemptCommand
 
 pytestmark = pytest.mark.security
+
+
+EMPTY_READONLY_QUERY_BINDING = readonly_query_binding(ReadonlyQueryTargetCatalog.empty())
 
 
 async def test_restricted_read_plan_is_refused_before_admission_or_gateway() -> None:
@@ -39,7 +44,12 @@ async def test_restricted_read_plan_is_refused_before_admission_or_gateway() -> 
     harness.runtime._bindings = CapabilityBindingRegistry(
         snapshot=restricted_snapshot,
         policy_snapshot=harness.runtime._runner._policy_snapshot,
-        bindings=(SLOW_QUERY_BINDING, PROMETHEUS_ALERT_BINDING, ASSET_INVENTORY_BINDING),
+        bindings=(
+            SLOW_QUERY_BINDING,
+            PROMETHEUS_ALERT_BINDING,
+            ASSET_INVENTORY_BINDING,
+            EMPTY_READONLY_QUERY_BINDING,
+        ),
     )
     submission = harness.submission("最近30分钟有哪些慢查询")
     view = await harness.runtime.submit_task(submission=submission)

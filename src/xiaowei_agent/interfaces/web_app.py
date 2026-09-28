@@ -634,6 +634,10 @@ async def _application_error(_: Request, exc: Exception) -> Response:
         return _error(404, "not_found")
     if failure is ApplicationFailure.UNAVAILABLE:
         return _error(503, "unavailable")
+    if failure is ApplicationFailure.SQL_ARTIFACT_EXPIRED:
+        return _error(409, "sql_artifact.expired")
+    if failure is ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE:
+        return _error(409, "sql_artifact.unavailable")
     return _error(500, "internal_error")
 
 

@@ -7,7 +7,7 @@
 未用户验收**，也未连接任何真实系统。
 
 
-快照标识：`snapshot.m6a.starrocks-prometheus-asset.v1`
+快照标识：`snapshot.f1.starrocks-prometheus-asset-readonly-query.v1`
 
 | capability | version | domain | operation | gateway | effect_class | read_class | side_effect |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -16,6 +16,7 @@
 | `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `get_active_alerts` | `alertmanager` | `read` | `bounded` | `false` |
 | `prometheus.alert.evidence` | `1.0.0` | `prometheus` | `query_metric_range` | `prometheus` | `read` | `bounded` | `false` |
 | `asset.inventory.lookup` | `1.0.0` | `asset` | `lookup_asset` | `asset_inventory` | `read` | `bounded` | `false` |
+| `starrocks.readonly_query` | `1.0.0` | `starrocks` | `execute_readonly_query` | `starrocks` | `read` | `restricted` | `false` |
 
 ## 契约引用
 
@@ -36,3 +37,9 @@
 - policy profile：`readonly.asset.inventory.lookup.v1`
 - evidence contract：`evidence.asset.inventory.v1`
 - eval：`evals.asset.inventory.v1`
+
+### `starrocks.readonly_query`
+
+- policy profile：`readonly.starrocks.readonly_query.v1`
+- evidence contract：`evidence.starrocks.readonly_query.v1`
+- eval：`evals.starrocks.readonly_query.v1`

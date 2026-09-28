@@ -12,11 +12,12 @@ def test_policy_revision_and_ordered_profile_set_are_one_golden() -> None:
         ACTIVE_POLICY_SNAPSHOT.policy_revision,
         ACTIVE_POLICY_SNAPSHOT.profiles,
     ) == (
-        "policy-2026-09-05.2",
+        "policy-2026-09-28.1",
         (
             "readonly.starrocks.slow_query.v1",
             "readonly.prometheus.alert.evidence.v1",
             "readonly.asset.inventory.lookup.v1",
+            "readonly.starrocks.readonly_query.v1",
         ),
     )
     assert POLICY_REVISION == ACTIVE_POLICY_SNAPSHOT.policy_revision
