@@ -139,7 +139,7 @@ RequestEnvelope
 ```
 
 **F1 SQL 查询能力（目标契约，ADR-018 及相关 F1 修订为 Proposed；F1-1 实现前不是源码事实）。**
-SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中夹带 SQL 的混合消息只做解释，任何 capability 都不调用 Gateway：
+SQL 查询是普通 capability，走上图同一条主链；差别只在交互接受阶段由确定性规则识别 SQL。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。F1-Core 中检测到嵌入 SQL 的消息以 `EMBEDDED_SQL_NOT_EXECUTED` 固定文案拒绝执行，Gateway 调用为 0：
 
 ```text
 网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
@@ -495,7 +495,7 @@ preflight 闭合逻辑目标和物理集群；完整决策见
 | --- | --- | --- |
 | `TaskSubmission`（以 `input_kind` 判别的 union） | `ConversationSubmission` / `ArtifactSubmission` | 前者保持现有 envelope 行为与 digest 字节；后者除公共 context、as_of 外只含 `input_kind=sql_artifact`、sql_ref、sql_hash，不含 SQL 原文、目标或结果引用；未知 `input_kind` fail-closed；同一 TaskStore 与 task_submissions 表（ADR-018 D2） |
 | `submit_sql_query`（TaskStore 命令） | context、SQL bytes、幂等键 | SQL 消息唯一提交入口；同一 PostgreSQL 事务内写 SqlArtifact 与 task/ArtifactSubmission；失败整体回滚（ADR-018 D2a）；目标由后续 SlotVerifier 确定 |
-| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；创建即 `created_at + 24h` 过期，新引用或任务终态时延到该时刻 + 24h、只延不缩；执行前已过期则 `sql_artifact.expired`、Gateway 0 次 |
+| `SqlArtifact` | sql_ref、原始 bytes（≤ 65_536）、SHA-256、requester、tenant/environment、expires_at | SQL 原文唯一保存点；CSPRNG 引用；`expires_at` 只在创建、澄清子任务创建、水合与成功提交四个事务里以 `GREATEST` 延长（只延不缩），任务终态迁移不改；水合是原子条件 UPDATE，已过期则 `sql_artifact.expired`、Gateway 0 次；清除为 tombstone（`sql_bytes` 置空、`purged_at`） |
 | `OperationSpec.query_requirement` | `none` / `template_locked` / `confirmed_artifact` | 由 CapabilitySnapshot 派生，不由 step 或用户自报 |
 | `HydratedQuery` | sql_ref、sql_hash、SQL bytes 等绑定字段 | 仅进程内；作为 StepAdmission 与 Gateway 的受信 keyword-only 参数；不进 Plan/TaskStore/trace/audit |
 | `ToolCall`（F1 用法） | 仅 JSON 标量：引用、hash、target_fingerprint、config_revision、三个预算值 | 不放宽标量约束；timeout 由有效 query timeout + Gateway 余量确定 |

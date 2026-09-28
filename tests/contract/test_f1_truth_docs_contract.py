@@ -250,6 +250,14 @@ _RETIRED_MODEL_WORDING: Final[tuple[str, ...]] = (
     "SQL 原文永不进入模型",
     "执行 SQL 不来自模型原文",
     "优先扩展现有慢查询",
+    # cd62578 复审：同义旧说法——“模型请求只保存引用”与“原文只在两处出现”都否认混合对话进模型。
+    "模型请求只保存",
+    "SQL 原文只在 SqlArtifactStore 与进程内",
+    # F1-Core 不做 SQL 解释：现有对话回复只投影能力清单，没有能解释 SQL 的端口。
+    "只做解释（",
+    "混合 SQL 只解释",
+    "模型可以解释这段 SQL",
+    "advisory-only",
 )
 _RETIRED_MODEL_WORDING_DOCS: Final[tuple[str, ...]] = (
     *_MODEL_BOUNDARY_DOCS,
@@ -276,17 +284,27 @@ def test_model_boundary_has_one_wording_across_truth_sources() -> None:
     assert _model_boundary_drift(_named_docs(_RETIRED_MODEL_WORDING_DOCS)) == []
 
 
-def test_embedded_sql_is_advisory_only_for_every_route() -> None:
-    # 含“慢SQL”的混合消息会被现有关键词规则路由到慢查询诊断，
-    # 所以 advisory-only 必须覆盖规则与模型两条路由。
+_EMBEDDED_SQL_REFUSAL: Final = "检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。"
+
+
+def _task_block(plan: str, title: str) -> str:
+    start = plan.index(title)
+    return plan[start : plan.index("\n### Task", start + 1)]
+
+
+def test_embedded_sql_is_refused_through_a_reachable_render_path() -> None:
+    # 现有 RESPOND 只投影能力清单、与用户文本无关；嵌入 SQL 必须走带码的拒绝路径与固定文案。
     for name in (_SPEC, _ADR_017, _PLAN):
-        text = _read(name)
-        assert "contains_embedded_sql" in text, name
-        assert "advisory-only" in text, name
+        assert "EMBEDDED_SQL_NOT_EXECUTED" in _read(name), name
     spec = _read(_SPEC)
-    assert "无论来自模型还是现有关键词规则" in spec
-    assert "Gateway 调用为 0" in spec
-    assert "`test_f1_embedded_sql_is_advisory_only` 必须转红" in _read(_PLAN)
+    assert _EMBEDDED_SQL_REFUSAL in spec
+    assert "代码块只是载体" in spec
+    assert "不依赖本检测" in spec
+    task_9 = _task_block(_read(_PLAN), "### Task 9:")
+    for touched in ("`application/interaction_router.py`", "`rendering/generic.py`"):
+        assert touched in task_9, touched
+    assert "render_preplan_rejection(*, status, reason_code: str | None = None)" in task_9
+    assert "`test_f1_non_sql_code_block_is_not_blocked` 必须转红" in task_9
 
 
 def test_result_ref_exists_before_evidence() -> None:
@@ -303,21 +321,40 @@ def test_result_ref_exists_before_evidence() -> None:
 
 
 def test_default_pool_fits_default_worker_concurrency() -> None:
+    # 默认值有两个来源：Settings 与 .env.example；两处都必须随并发 4 一起改。
     concurrency, pool = 4, 9
     assert pool >= 2 * concurrency + 1
     for name in (_SPEC, _ADR_010, _PLAN):
         assert "由 5 调为 9" in _read(name) or "由 5 改为 9" in _read(name), name
-    assert "默认 `Settings()` 构造成功且满足校验" in _read(_PLAN)
+    task_1 = _task_block(_read(_PLAN), "### Task 1:")
+    assert "`.env.example`（`XIAOWEI_DB_POOL_SIZE=9`" in task_1
+    assert "与 Settings 默认值逐项相等" in task_1
+    assert "默认 `Settings()` 构造成功且满足校验" in task_1
 
 
-def test_sql_artifact_expires_even_if_its_task_never_ends() -> None:
-    for name in (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md"):
+# SQL 过期只在四个事务里延长；任务终态迁移不参与，以免依赖终态时刻才延长而与清除竞态。
+_SQL_LIFECYCLE_DOCS: Final[tuple[str, ...]] = (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md")
+
+
+def test_sql_expiry_is_written_by_store_transactions_only() -> None:
+    for name in _SQL_LIFECYCLE_DOCS:
         text = _read(name)
-        assert "created_at + 24h" in text, name
-        assert "只延不缩" in text, name
-        assert "`sql_artifact.expired`" in text, name
-    for name in (_SPEC, _ADR_018, _PLAN, "ARCHITECTURE.md"):
-        assert "最后一个引用它的任务终态后 24" not in _read(name), name
+        for term in ("GREATEST", "只延不缩", "`sql_artifact.expired`"):
+            assert term in text, (name, term)
+        for retired in ("任务终态后 24", "该时刻 + 24h", "created_at + 24h"):
+            assert retired not in text, (name, retired)
+    for name in (_SPEC, _ADR_018):
+        assert "`TaskStore.transition` 不改 SQL 过期时间" in _read(name).replace(
+            "（`TaskStore.transition`）", "`TaskStore.transition` "
+        ), name
+    for name in (_SPEC, _ADR_018, _PLAN):
+        assert "ck_sql_artifacts_purge_shape" in _read(name), name
+    plan = _read(_PLAN)
+    assert "`create_clarification_child` 延长 SQL" in _task_block(plan, "### Task 8:")
+    task_12 = _task_block(plan, "### Task 12:")
+    assert "`postgres.py`" in task_12
+    assert "两个独立连接让清除与水合并发" in task_12
+    assert "先 SELECT 再单独 UPDATE，竞态用例必须转红" in task_12
 
 
 def test_f1_guards_are_discriminating() -> None:

@@ -26,7 +26,8 @@ F1 让已认证用户在网页聊天框或飞书直接发送一条原始 SQL，�
 ### D1 SqlArtifact 是 SQL 原文的唯一保存点
 
 - `SqlArtifactStore` 保存原始 UTF-8 bytes（1..65_536 bytes）、SHA-256、requester、tenant、environment、created_at 与
-  expires_at；目标由后续 SlotVerifier 确定，不在 SQL 保存时绑定；
+  expires_at，清除后只剩 tombstone（`sql_bytes` 为空、`purged_at` 非空，过期规则见 D4）；目标由后续 SlotVerifier
+  确定，不在 SQL 保存时绑定；
 - `sql_ref` 由 CSPRNG 生成、不可枚举；
 - TaskStore、PlanStore、Evidence、RenderPayload、ChannelStore、trace、audit 与日志只保存 `sql_ref`、`sql_hash` 或
   闭集决定，不保存 SQL 原文；
@@ -89,10 +90,15 @@ SqlArtifactStore 不提供公开的提交方法，事务内的表写入只是共
 
 ### D4 保留（不设配额）
 
-- 结果在任务终态后 24 小时过期；
-- SQL 创建时即写 `expires_at = created_at + 24h`；新任务引用它或引用它的任务进入终态时延到“该时刻 + 24h”，
-  只延不缩；因此非终态任务也不会让 SQL 永久保存；
-- 执行前水合时 SQL 已过期，步骤以 `sql_artifact.expired` 失败、Gateway 调用为 0，任务 FAILED；过期后的澄清回答同样拒绝；
+- 结果在提交时写 `expires_at = 提交时刻 + 24h`，grant 同值；
+- SQL 的 `expires_at` 只在四个事务里写，一律 `GREATEST`、只延不缩：`submit_sql_query` 创建（`now + 24h`）、
+  `create_clarification_child` 消费目标选择澄清（同事务 `now + 24h`，已过期则 `SqlArtifactExpiredError`、不消费父任务）、
+  `load_sql_for_execution` 水合（单条条件 UPDATE 原子校验未过期并延到 `now + 24h`，0 行即 `sql_artifact.expired`、
+  Gateway 调用为 0、任务 FAILED）、`commit_step_result` 成功提交（同事务延到结果的 `expires_at`）；
+- `TaskStore.transition` 不改 SQL 过期时间；从未水合的任务按创建或澄清时写入的时间过期，因此没有 SQL 会永久保存；
+- SQL 清除为 tombstone：`sql_bytes` 置空并写 `purged_at`，`ck_sql_artifacts_purge_shape` 要求
+  `(purged_at IS NULL) = (sql_bytes IS NOT NULL)`；清除与水合是同一行上的单条 UPDATE，由行锁串行，水合后执行期间
+  不会被清除；
 - 过期即拒绝读取，retention 删除 bytes、列、行、grant 与活动索引；不设数量配额；
 - 长期只保留 hash、actor、target、时间、上限、Guard/Policy 决定、query id 与资源指标；
 - PostgreSQL DELETE 不证明物理擦除；数据处置证据属于 F1-H。

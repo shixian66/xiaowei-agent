@@ -356,8 +356,9 @@ SQL 查询是普通 capability，走本 ADR 的同一交互主链。application 
 `route_interaction`、CapabilityResolver、SlotVerifier、Plan、ExecutionDisclosure。纯 SQL 消息、SqlArtifact 和最终执行字节不进入模型；混合对话可以进入模型。模型候选不能直接执行，只有完整展示、用户确认并绑定 hash 后，才能生成新的 SqlArtifact。
 认不出的消息保持现有流程，模型可以
 看到其中夹带的 SQL，但模型来源不得产生 `starrocks_readonly_query` 意图、SqlArtifact 或执行；该意图只接受
-`origin=rule`。含有嵌入 SQL（`contains_embedded_sql`）的非 SQL 消息为 advisory-only：`route_interaction` 把来自模型或
-关键词规则的任何 `CAPABILITY_REQUEST` 改为对话回复，Gateway 调用为 0。混合文本的候选 SQL 与确认属 F1-NL，另行设计。
+`origin=rule`。含有嵌入 SQL（`contains_embedded_sql`，按片段内容判定，不因代码块本身命中）的非 SQL 消息，`route_interaction`
+不看草案来源（模型或关键词规则），直接返回 `REFUSE` 与 `EMBEDDED_SQL_NOT_EXECUTED`，以固定文案拒绝执行，
+Gateway 调用为 0；F1-Core 不做 SQL 解释。混合文本的候选 SQL 与确认属 F1-NL，另行设计。
 
 ### 目标选择追问
 
