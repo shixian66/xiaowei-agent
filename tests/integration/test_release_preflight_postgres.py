@@ -16,6 +16,7 @@ from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
@@ -46,7 +47,7 @@ def _submission(settings: Settings, *, key: str, text: str) -> TaskSubmission:
         trace_id="0" * 32,
         policy_revision=local_stack_module.ACTIVE_POLICY_SNAPSHOT.policy_revision,
     )
-    return TaskSubmission(
+    return ConversationSubmission(
         envelope=RequestEnvelope(
             request_id=f"request-{key}",
             tenant_id=context.tenant_id,

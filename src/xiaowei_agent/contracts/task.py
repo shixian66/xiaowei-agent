@@ -8,7 +8,7 @@
 from collections.abc import Mapping
 from itertools import pairwise
 from types import MappingProxyType
-from typing import Final, Self
+from typing import Annotated, Final, Literal, Self, TypeAlias
 from urllib.parse import quote
 
 from pydantic import Field, model_validator
@@ -38,13 +38,30 @@ TERMINAL_STATUSES: Final[frozenset[TaskStatus]] = frozenset(
     }
 )
 
-class TaskSubmission(Contract):
-    """创建任务时不可变持久化的完整提交事实。"""
+class ConversationSubmission(Contract):
+    """对话消息创建任务时不可变持久化的完整提交事实。"""
 
+    input_kind: Literal["conversation"] = "conversation"
     envelope: RequestEnvelope
     context: RequestContext
     as_of: AwareDatetime
     clarification_parent_task_id: TaskId | None = None
+
+
+class ArtifactSubmission(Contract):
+    """纯 SQL 消息的提交事实：只持有 SqlArtifact 引用，不含 SQL 原文（ADR-018 D2）。"""
+
+    input_kind: Literal["sql_artifact"]
+    context: RequestContext
+    as_of: AwareDatetime
+    sql_ref: StrictStr
+    sql_hash: Sha256Hex
+
+
+TaskSubmission: TypeAlias = Annotated[
+    ConversationSubmission | ArtifactSubmission, Field(discriminator="input_kind")
+]
+"""以 ``input_kind`` 判别的提交 union；缺少标签的输入被拒绝，不设无标签兼容层。"""
 
 
 class TaskLookup(Contract):

@@ -26,6 +26,7 @@ from xiaowei_agent.contracts import (
     ActorTaskPageQuery,
     ApprovalRequest,
     ChannelKind,
+    ConversationSubmission,
     DestinationKind,
     GrantRejection,
     IdentitySource,
@@ -2010,7 +2011,7 @@ class InMemoryTaskStore:
             raise TaskNotFoundError(task_id=task_id) from exc
 
     def _create_task_locked(
-        self, *, submission: TaskSubmission, digest: str
+        self, *, submission: ConversationSubmission, digest: str
     ) -> TaskRecord:
         envelope = submission.envelope
         context = submission.context
@@ -2038,7 +2039,7 @@ class InMemoryTaskStore:
         return record
 
     def _existing_task_for_submission_locked(
-        self, *, submission: TaskSubmission, digest: str
+        self, *, submission: ConversationSubmission, digest: str
     ) -> TaskRecord | None:
         envelope = submission.envelope
         context = submission.context
@@ -2057,11 +2058,12 @@ class InMemoryTaskStore:
         self, *, clarification_parent_id: str
     ) -> bool:
         return any(
-            submission.clarification_parent_task_id == clarification_parent_id
+            isinstance(submission, ConversationSubmission)
+            and submission.clarification_parent_task_id == clarification_parent_id
             for submission in self._state.submissions.values()
         )
 
-    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+    async def create_task(self, *, submission: ConversationSubmission) -> TaskRecord:
         envelope = submission.envelope
         context = submission.context
         # 先校验上下文一致性，再谈幂等：不一致时连"属于哪个作用域"都不成立。
@@ -2084,7 +2086,7 @@ class InMemoryTaskStore:
     async def create_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskRecord:
         clarification_parent_id = submission.clarification_parent_task_id

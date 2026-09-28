@@ -45,6 +45,7 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     ChannelKind,
     ClarificationRecord,
+    ConversationSubmission,
     DestinationKind,
     EvidenceEnvelope,
     ExecutionPlan,
@@ -1364,7 +1365,7 @@ class PostgresTaskStore:
     def _stored_read_from_joined_row(self, row: Mapping[str, Any]) -> StoredTaskRead:
         record = row_to_record(_as_row(row))
         try:
-            submission = TaskSubmission(
+            submission = ConversationSubmission(
                 envelope=load_contract(RequestEnvelope, row["submission_envelope"]),
                 context=load_contract(RequestContext, row["submission_context"]),
                 as_of=row["submission_as_of"],
@@ -1632,7 +1633,7 @@ class PostgresTaskStore:
             submission: TaskSubmission | None = None
             if stored is not None:
                 try:
-                    submission = TaskSubmission(
+                    submission = ConversationSubmission(
                         envelope=load_contract(RequestEnvelope, stored["envelope"]),
                         context=load_contract(RequestContext, stored["context"]),
                         as_of=stored["as_of"],
@@ -2130,7 +2131,7 @@ class PostgresTaskStore:
         self,
         connection: AsyncConnection,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         digest: str,
         scope_digest: str,
     ) -> TaskRecord | None:
@@ -2178,7 +2179,7 @@ class PostgresTaskStore:
         return row_to_record(_as_row(inserted))
 
     @_persistence_boundary(write=True)
-    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+    async def create_task(self, *, submission: ConversationSubmission) -> TaskRecord:
         """幂等创建。**并发重复请求只产生一个任务事实。**
 
         用 ``ON CONFLICT DO NOTHING`` 而不是"先查后插"：后者两步之间有窗口，两个
@@ -2225,7 +2226,7 @@ class PostgresTaskStore:
     async def create_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskRecord:
         clarification_parent_id = submission.clarification_parent_task_id

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
@@ -52,11 +53,12 @@ def _submission(**updates: object) -> TaskSubmission:
         "context": _context(),
         "as_of": _AS_OF,
     }
-    return TaskSubmission(**(values | updates))
+    return ConversationSubmission(**(values | updates))
 
 
 def test_submission_parent_is_optional_strict_text() -> None:
-    assert set(TaskSubmission.model_fields) == {
+    assert set(ConversationSubmission.model_fields) == {
+        "input_kind",
         "envelope",
         "context",
         "as_of",

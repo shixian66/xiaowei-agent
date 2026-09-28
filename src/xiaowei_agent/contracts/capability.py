@@ -22,6 +22,7 @@ from xiaowei_agent.contracts.enums import (
     InteractionRejectionReasonCode,
     ReadClass,
 )
+from xiaowei_agent.contracts.sql_query import QueryRequirement
 
 ParamsT = TypeVar("ParamsT", bound="CapabilityParams")
 
@@ -33,6 +34,7 @@ class OperationSpec(Contract):
     read_class: ReadClass | None
     side_effect: bool
     argument_schema_ref: StrictStr
+    query_requirement: QueryRequirement = QueryRequirement.NONE
 
     @model_validator(mode="after")
     def _classifications_match_effect_class(self) -> Self:

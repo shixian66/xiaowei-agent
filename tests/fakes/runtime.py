@@ -30,6 +30,7 @@ from xiaowei_agent.capabilities.resolver_impl import DeterministicCapabilityReso
 from xiaowei_agent.contracts import (
     AttemptIntent,
     Channel,
+    ConversationSubmission,
     ModelInvocationProfile,
     RenderPayload,
     RequestEnvelope,
@@ -216,7 +217,7 @@ class RuntimeHarness:
             idempotency_key=idempotency_key,
             environment_id=self.context.environment_id,
         )
-        return TaskSubmission(
+        return ConversationSubmission(
             envelope=envelope,
             context=self.context,
             as_of=self.as_of if as_of is None else as_of,

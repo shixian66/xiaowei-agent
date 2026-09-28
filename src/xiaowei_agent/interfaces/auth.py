@@ -8,9 +8,9 @@ from typing import TypeAlias
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
-    TaskSubmission,
 )
 from xiaowei_agent.interfaces.http_models import SubmitTaskRequest
 from xiaowei_agent.trace import new_trace_id
@@ -25,7 +25,7 @@ def trusted_submission(
     clock: Clock,
     policy_revision: str,
     trace_id: str,
-) -> TaskSubmission:
+) -> ConversationSubmission:
     """只从受信配置和服务端生成值构造执行上下文。"""
     context = RequestContext(
         tenant_id=settings.tenant_id,
@@ -43,7 +43,7 @@ def trusted_submission(
         idempotency_key=request.idempotency_key,
         environment_id=context.environment_id,
     )
-    return TaskSubmission(envelope=envelope, context=context, as_of=clock())
+    return ConversationSubmission(envelope=envelope, context=context, as_of=clock())
 
 
 def trusted_trace_id() -> str:

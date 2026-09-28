@@ -28,6 +28,7 @@ from xiaowei_agent.contracts import (
     AttemptIntent,
     AwareDatetime,
     Contract,
+    ConversationSubmission,
     EvidenceEnvelope,
     LeaseGrant,
     PipelineStage,
@@ -139,7 +140,9 @@ def request_dedup_digest(
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
-def reject_clarification_parent_on_plain_create(submission: TaskSubmission) -> None:
+def reject_clarification_parent_on_plain_create(
+    submission: ConversationSubmission,
+) -> None:
     """普通创建不得携带澄清父任务，避免绕过一次性消费语义。"""
     if submission.clarification_parent_task_id is not None:
         raise ClarificationParentRequiredError(
@@ -150,7 +153,7 @@ def reject_clarification_parent_on_plain_create(submission: TaskSubmission) -> N
 def clarification_parent_is_usable(
     *,
     parent: TaskRecord,
-    submission: TaskSubmission,
+    submission: ConversationSubmission,
     authenticated_channel_owner: str,
 ) -> bool:
     """父任务能否被当前提交作为澄清回复消费。"""
@@ -175,7 +178,7 @@ def idempotency_scope_digest(
     return content_digest(canonical_json(payload).decode("utf-8"))
 
 
-def submission_digest(submission: TaskSubmission) -> str:
+def submission_digest(submission: ConversationSubmission) -> str:
     """完整提交事实的一致性 checksum；不作为抗篡改证明。"""
     payload = {
         "envelope": dump_contract(submission.envelope),
@@ -193,6 +196,8 @@ def submission_matches_record(
     """提交行是否仍与创建时任务事实一致；摘要只防代码缺陷，不作安全声明。"""
     from xiaowei_agent.persistence.decisions import context_matches_envelope
 
+    if not isinstance(submission, ConversationSubmission):
+        return False
     return (
         stored_digest == submission_digest(submission)
         and record.request_digest
@@ -318,7 +323,9 @@ class TaskAttemptResult(Contract):
             from xiaowei_agent.persistence.decisions import context_matches_envelope
 
             submission = self.submission
-            if not context_matches_envelope(submission.envelope, submission.context):
+            if isinstance(
+                submission, ConversationSubmission
+            ) and not context_matches_envelope(submission.envelope, submission.context):
                 raise ValueError("submission context does not match its envelope")
             if (
                 self.winner.tenant_id != submission.context.tenant_id
@@ -551,7 +558,7 @@ class LeaseCommand(Contract):
 
 
 class TaskStore(Protocol):
-    async def create_task(self, *, submission: TaskSubmission) -> TaskRecord:
+    async def create_task(self, *, submission: ConversationSubmission) -> TaskRecord:
         """按 ``(tenant_id, environment_id, idempotency_key)`` 幂等创建。
 
         :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
@@ -561,7 +568,7 @@ class TaskStore(Protocol):
     async def create_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskRecord:
         """一次性消费 ``CLARIFICATION_REQUIRED`` 父任务并创建澄清回复子任务。

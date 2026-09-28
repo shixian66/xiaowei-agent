@@ -605,3 +605,27 @@ class BindingRejection(StrEnum):
     POLICY_REVISION_DRIFT = "policy_revision_drift"
     APPROVAL_EXPIRED = "approval_expired"
     APPROVAL_NOT_GRANTED = "approval_not_granted"
+
+
+class QueryRequirement(StrEnum):
+    """operation 对查询来源的静态要求；StepAdmission 按它强制 SQLGuard profile。"""
+
+    NONE = "none"
+    TEMPLATE_LOCKED = "template_locked"
+    CONFIRMED_ARTIFACT = "confirmed_artifact"
+
+
+class Completeness(StrEnum):
+    """保存预览是否完整；闭集（ADR-018 D3）。"""
+
+    COMPLETE = "complete"
+    TRUNCATED_ROWS = "truncated_rows"
+    TRUNCATED_BYTES = "truncated_bytes"
+
+
+class ResultGrantKind(StrEnum):
+    """结果访问授权种类；F1 只写 ``requester_owner``（ADR-018 D5）。"""
+
+    REQUESTER_OWNER = "requester_owner"
+    VIEW_APPROVER = "view_approver"
+    EXPORT_APPROVER = "export_approver"

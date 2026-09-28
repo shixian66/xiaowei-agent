@@ -10,11 +10,11 @@ from xiaowei_agent.application.worker import WorkerLoop
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     Channel,
+    ConversationSubmission,
     RequestContext,
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
 )
 from xiaowei_agent.interfaces import local_stack as local_stack_module
 from xiaowei_agent.interfaces.local_stack import build_postgres_local_stack
@@ -44,7 +44,7 @@ async def test_prometheus_task_persists_and_reprojects_after_stack_restart(
         policy_revision=first.policy_revision,
     )
     pending = await first.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="m6a-postgres-prometheus",
                 tenant_id=context.tenant_id,
@@ -113,7 +113,7 @@ async def test_asset_task_persists_and_reprojects_after_stack_restart(
         policy_revision=first.policy_revision,
     )
     pending = await first.runtime.submit_task(
-        submission=TaskSubmission(
+        submission=ConversationSubmission(
             envelope=RequestEnvelope(
                 request_id="m6a-postgres-asset",
                 tenant_id=context.tenant_id,

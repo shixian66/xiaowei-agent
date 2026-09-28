@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 
     from xiaowei_agent.contracts import (
         AdmissionCertificate,
+        ConversationSubmission,
         ExecutionPlan,
         RequestContext,
         RequestEnvelope,
         TaskLookup,
         TaskRecord,
         TaskStatus,
-        TaskSubmission,
         ToolCall,
     )
     from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
@@ -200,13 +200,13 @@ def make_submission(
     envelope: "RequestEnvelope | None" = None,
     as_of: object | None = None,
     clarification_parent_task_id: str | None = None,
-) -> "TaskSubmission":
+) -> "ConversationSubmission":
     """构造提交事实；默认时间固定，避免测试隐式读取进程时钟。"""
     import datetime as dt
 
-    from xiaowei_agent.contracts import TaskSubmission
+    from xiaowei_agent.contracts import ConversationSubmission
 
-    return TaskSubmission(
+    return ConversationSubmission(
         envelope=make_envelope() if envelope is None else envelope,
         context=context,
         as_of=dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.UTC) if as_of is None else as_of,

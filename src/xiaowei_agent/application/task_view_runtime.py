@@ -18,6 +18,7 @@ from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     ClarificationPayload,
     ConfirmedSlot,
+    ConversationSubmission,
     EvidenceEnvelope,
     ExecutionDisclosure,
     ExecutionPlan,
@@ -29,7 +30,6 @@ from xiaowei_agent.contracts import (
     TaskOutcome,
     TaskRecord,
     TaskStatus,
-    TaskSubmission,
     TaskView,
     task_query_path,
 )
@@ -122,7 +122,7 @@ class TaskViewRuntime:
         self._model_artifacts = model_artifacts
         self._model_profile = model_profile
 
-    async def submit_task(self, *, submission: TaskSubmission) -> TaskView:
+    async def submit_task(self, *, submission: ConversationSubmission) -> TaskView:
         """只持久化提交事实并返回任务投影，不解释或执行。"""
         record = await self._tasks.create_task(submission=submission)
         return await self.project_task(record=record)
@@ -130,7 +130,7 @@ class TaskViewRuntime:
     async def submit_clarification_child(
         self,
         *,
-        submission: TaskSubmission,
+        submission: ConversationSubmission,
         authenticated_channel_owner: str,
     ) -> TaskView:
         """一次性消费澄清父任务并返回子任务投影，不解释或执行。"""
@@ -193,6 +193,9 @@ class TaskViewRuntime:
                 environment_id=record.environment_id,
             )
         )
+        # SQL 提交不带澄清父任务（ADR-018 D2 形状约束）。
+        if not isinstance(submission, ConversationSubmission):
+            return ()
         parent_id = submission.clarification_parent_task_id
         if parent_id is None:
             return ()

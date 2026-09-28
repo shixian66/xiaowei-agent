@@ -102,7 +102,7 @@ from xiaowei_agent.contracts import (
     RequestEnvelope,
     TaskLookup,
     TaskStatus,
-    TaskSubmission,
+    ConversationSubmission,
 )
 from xiaowei_agent.interfaces.local_stack import build_in_memory_local_stack
 
@@ -118,7 +118,7 @@ async def run():
         trace_id="0" * 32,
         policy_revision=stack.policy_revision,
     )
-    submission = TaskSubmission(
+    submission = ConversationSubmission(
         envelope=RequestEnvelope(
             request_id="wheel-request",
             tenant_id=context.tenant_id,
