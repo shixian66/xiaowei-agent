@@ -6,7 +6,6 @@ from pydantic import model_validator
 
 from xiaowei_agent.application.task_view_runtime import (
     RecognizedSql,
-    SqlLikeTextNotAcceptedError,
     SqlMessageRecognizer,
     TaskViewRuntime,
 )
@@ -209,10 +208,7 @@ class ChannelSubmissionService:
         self._web_parent_access = web_parent_access
 
     async def submit(self, *, command: ChannelSubmitCommand) -> SubmittedTask:
-        """提交任务；Runtime 成功但绑定失败时由同一服务端幂等键安全重试。
-
-        :raises SqlLikeTextNotAcceptedError: 文本像 SQL；来源事件与任务事实都还没写。
-        """
+        """提交任务；Runtime 成功但绑定失败时由同一服务端幂等键安全重试。"""
         principal = command.principal
         if ChannelPermission.SUBMIT_READONLY_TASK not in principal.permissions:
             raise ChannelSubmissionForbiddenError
@@ -232,8 +228,7 @@ class ChannelSubmissionService:
             policy_revision=command.policy_revision,
         )
         # 澄清回答只是补充信息（例如目标名称），永远不当作新的 SQL；是 SQL 形状的回答由
-        # Runtime 的同一分类点拒绝，不进入模型。像 SQL 的文本在这里（占用来源事件之前）就被
-        # 同一分类点拒绝，原文不落进普通对话提交。
+        # Runtime 的同一分类点拒绝，不进入模型。
         sql = (
             self._runtime.recognize_sql(command.text)
             if command.clarification_parent_task_id is None
@@ -371,7 +366,6 @@ __all__ = [
     "ChannelSubmissionService",
     "ChannelSubmitCommand",
     "RecognizedSql",
-    "SqlLikeTextNotAcceptedError",
     "SqlMessageRecognizer",
     "SubmittedTask",
     "WebParentAccessPort",

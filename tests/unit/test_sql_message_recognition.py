@@ -4,7 +4,6 @@ import pytest
 
 from xiaowei_agent.governance.sql_message import (
     SqlMessage,
-    SqlTextKind,
     contains_embedded_sql,
     recognize_sql_message,
 )
@@ -84,7 +83,7 @@ _DEEP_SELECT = "SELECT " + "(" * 20_000 + "1" + ")" * 20_000
     ],
 )
 def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
-    assert recognize_sql_message(text) == SqlMessage(sql=sql, kind=SqlTextKind.SQL)
+    assert recognize_sql_message(text) == SqlMessage(sql=sql)
     assert recognize_sql_message(text).sql_bytes == sql.encode()  # type: ignore[union-attr]
 
 
@@ -98,9 +97,9 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
         "SELECT /*+ SET_VAR(a=1) */ TRUE",
     ],
 )
-def test_sql_like_messages_are_returned_with_their_tier(text: str) -> None:
-    """“像 SQL”不能和对话一起返回 ``None``：提交边界要据此在写任何事实前拒绝。"""
-    assert recognize_sql_message(text) == SqlMessage(sql=text, kind=SqlTextKind.SQL_LIKE)
+def test_incomplete_or_unsigned_sql_is_still_a_sql_message(text: str) -> None:
+    """像 SQL 就是 SQL：原文保存为 SqlArtifact，不落进普通对话提交，也不进模型。"""
+    assert recognize_sql_message(text) == SqlMessage(sql=text)
 
 
 @pytest.mark.parametrize(
@@ -116,8 +115,7 @@ def test_sql_like_messages_are_returned_with_their_tier(text: str) -> None:
         "最近有哪些慢查询",
         "SELECT a FROM t 为什么慢",
         "SHOW USERS 是什么",
-        # 以 SQL 关键字开头的自然语言（不命中签名）与像 SQL 却不完整的文本（命中签名）都不是 SQL
-        # 消息；两者的区别见 test_sql_statement_registry.py。
+        # 以 SQL 关键字开头、签名都不命中也不是查询的自然语言（见 registry 测试）。
         "show me the slow queries",
         "create a dashboard",
         "analyze this",

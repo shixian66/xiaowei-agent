@@ -79,9 +79,6 @@ const SQL_ARTIFACT_FAILURES = new Map([
   ["sql_artifact.expired", "SQL 已过期，请重新发送。"],
   ["sql_artifact.unavailable", "SQL 无法读取，本次未执行。"],
 ]);
-// 与服务端 rendering.generic.SQL_LIKE_TEXT_REJECTED 同一句；请求在写任何事实前已被拒绝。
-const SQL_LIKE_TEXT_REJECTED =
-  "这条消息像 SQL，但无法确认是完整语句，本轮未执行；如需执行，请放入 sql 代码块重发。";
 let pendingParentTaskId = null;
 let requestedParentTaskId = null;
 
@@ -481,8 +478,6 @@ async function submitTask() {
     }
     const message = ambiguous
       ? "发送结果暂时无法确认。请重试，本次会继续使用同一个请求标识。"
-      : error.code === "sql_message.incomplete"
-        ? SQL_LIKE_TEXT_REJECTED
       : error.status === 409
         ? "这次请求标识已用于另一段内容，请重新输入后发送。"
         : error.status === 403

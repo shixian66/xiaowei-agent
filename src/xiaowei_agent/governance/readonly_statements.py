@@ -493,24 +493,3 @@ def match_statement(scan: TokenScan) -> StatementMatch | None:
     if len(matches) != 1:
         return None
     return matches.pop()
-
-
-GrammarElement = _Element
-"""文法元素的公开名：识别登记表（``sql_statements``）用同一套元素写完整形状。"""
-
-
-@dataclass(frozen=True, slots=True)
-class AnyStr(_Element):
-    """任意字符串字面量（含转义）；只用于识别登记表，不捕获、不反转义。"""
-
-    def match(self, source: _Input, pos: int, captures: _Captures) -> _Matches:
-        if pos < len(source.tokens) and source.tokens[pos].kind is TokenKind.STRING:
-            yield pos + 1, captures
-
-
-def matches_completely(scan: TokenScan, pattern: tuple[_Element, ...]) -> bool:
-    """同一文法元素的完整匹配（全部 statement tokens 恰好耗尽）；供识别登记表复用。"""
-    source = _Input(scan=scan, tokens=scan.statement_tokens)
-    return any(
-        end == len(source.tokens) for end, _ in _match_sequence(pattern, source, 0, ())
-    )

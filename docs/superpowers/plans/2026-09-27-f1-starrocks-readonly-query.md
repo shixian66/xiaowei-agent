@@ -317,7 +317,7 @@ SHOW HISTOGRAM META、SHOW VIEWS。
 
 **Interfaces:**
 - Produces:
-  - `recognize_sql_message(text: str) -> SqlMessage | None`：纯函数；按设计 §5.1 分三档（`classify_sql_text`）：sql 代码块或 SQL 语句识别登记表（`governance/sql_statements.py`，覆盖 StarRocks 文档全部顶层语句与 MySQL 兼容语句）里的完整语句为 SQL；只命中签名、或签名不命中却能解析为真正查询的为“像 SQL”（`SqlMessage.kind` 为 `SQL_LIKE`），`TaskViewRuntime.recognize_sql` 在写任何事实前以 `SqlLikeTextNotAcceptedError`（HTTP 422 `sql_message.incomplete`）拒绝，飞书回固定提示卡片；其余以 SQL 关键字开头的自然语言走对话；整条 fenced code block 解包；复用 Task 4–6 的扫描与清单
+  - `recognize_sql_message(text: str) -> SqlMessage | None`：纯函数；按设计 §5.1 只分 SQL 与对话（像 SQL 的就是 SQL）：sql 代码块、命中 SQL 语句识别登记表（`governance/sql_statements.py`，覆盖 StarRocks 文档全部顶层语句与 MySQL 兼容语句）的签名、或签名不命中却能被 sqlglot 完整解析成真正查询的为 SQL；其余以 SQL 关键字开头的自然语言走对话；整条 fenced code block 解包；复用 Task 4–6 的扫描与清单
   - `contains_embedded_sql(text: str) -> bool`：纯函数；候选片段为每个 fenced code block 正文与正文外以闭集语句关键字开头、到段落末尾的文本；片段首 token 属闭集且 sqlglot 完整解析为非 `Command` 语句才命中；代码块本身不算
   - `InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED = "interaction.embedded_sql_not_executed"`
   - `route_interaction(*, draft, context, embedded_sql: bool = False)`：`embedded_sql=True` 时在读取草案前返回 `REFUSE` + 该码，不进入 Resolver；Runtime 用 `contains_embedded_sql(submission.envelope.text)` 传入，不取自模型；复用现有 `RequestRejectedError` 终态路径

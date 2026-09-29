@@ -311,24 +311,23 @@ def test_sql_artifact_failures_map_to_two_closed_codes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("terminal_reason", "fixed"),
+    ("terminal_reason", "embedded"),
     [
-        ("interaction.embedded_sql_not_executed", "embedded"),
-        ("interaction.sql_like_text_not_executed", "sql_like"),
-        ("interaction.route_not_available", None),
-        ("capability.fields_invalid", None),
-        (None, None),
+        ("interaction.embedded_sql_not_executed", True),
+        ("interaction.route_not_available", False),
+        ("capability.fields_invalid", False),
+        (None, False),
     ],
 )
 async def test_preplan_rejection_projection_uses_the_recorded_reason(
-    store, memory_state, context, terminal_reason: str | None, fixed: str | None
+    store, memory_state, context, terminal_reason: str | None, embedded: bool
 ) -> None:
     from tests.conftest import drive_to_terminal, lookup_for, make_submission
 
     from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
     from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
     from xiaowei_agent.persistence.plans import InMemoryPlanStore
-    from xiaowei_agent.rendering.generic import EMBEDDED_SQL_REJECTED, SQL_LIKE_TEXT_REJECTED
+    from xiaowei_agent.rendering.generic import EMBEDDED_SQL_REJECTED
 
     record = await store.create_task(submission=make_submission(context))
     await drive_to_terminal(store, lookup_for(record), TaskStatus.REJECTED)
@@ -346,9 +345,6 @@ async def test_preplan_rejection_projection_uses_the_recorded_reason(
     payload = await runtime.project_recorded(record=rejected)
 
     assert payload.status is TaskStatus.REJECTED
-    expected = {
-        "embedded": EMBEDDED_SQL_REJECTED,
-        "sql_like": SQL_LIKE_TEXT_REJECTED,
-        None: "请求在执行前被拒绝，未调用任何工具。",
-    }[fixed]
-    assert payload.answer == expected
+    assert (payload.answer == EMBEDDED_SQL_REJECTED) is embedded
+    if not embedded:
+        assert payload.answer == "请求在执行前被拒绝，未调用任何工具。"

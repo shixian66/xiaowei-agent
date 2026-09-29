@@ -8,7 +8,6 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
-from tests.fakes.activation import RecordingSqlLikeNotices
 from tests.fakes.feishu import RecordingFeishuInboundTransport
 
 from xiaowei_agent.application.activation_notification import (
@@ -131,7 +130,6 @@ def _listener(
     activations: _ActivationRequests | None = None,
     notifications: _Notifications | None = None,
     identity_directory: FeishuIdentityDirectory | None = None,
-    sql_like_notices: RecordingSqlLikeNotices | None = None,
 ) -> FeishuListener:
     identity = _principal() if principal is None else principal
     return FeishuListener(
@@ -149,7 +147,6 @@ def _listener(
         activation_notifications=cast(
             ActivationNotificationService, notifications or _Notifications()
         ),
-        sql_like_notices=(sql_like_notices or RecordingSqlLikeNotices()).as_service(),
         policy_revision="policy-1",
         clock=lambda: _NOW,
         trace_id_factory=lambda: "1" * 32,
@@ -427,26 +424,6 @@ async def test_permanent_submission_conflicts_are_acknowledged_without_success(
 
     assert await _listener(service).handle_event(event=_event()) is False
     assert len(service.commands) == 1
-
-
-async def test_sql_like_text_gets_one_fixed_notice_and_a_permanent_ack(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from xiaowei_agent.application.channel_submission import SqlLikeTextNotAcceptedError
-
-    service = _RecordingSubmissionService(failure=SqlLikeTextNotAcceptedError())
-    notices = RecordingSqlLikeNotices()
-
-    with caplog.at_level(logging.INFO):
-        handled = await _listener(service, sql_like_notices=notices).handle_event(
-            event=_event()
-        )
-
-    assert handled is False
-    assert notices.calls == [(_event().chat_id, _event().event_id)]
-    (record,) = [r for r in caplog.records if r.getMessage() == "feishu event rejected"]
-    assert record.levelno == logging.INFO
-    assert record.failure_kind == "sql_like_text"
 
 
 def test_local_event_contract_rejects_oversized_text_and_unknown_fields() -> None:

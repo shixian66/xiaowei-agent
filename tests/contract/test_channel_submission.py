@@ -842,22 +842,19 @@ async def test_same_key_with_different_sql_is_an_idempotency_conflict(
     ["SELECT 'password=hunter2", "SELECT TRUE AND TRUE", "show data for yesterday"],
 )
 @pytest.mark.parametrize("channel", [ChannelKind.WEB, ChannelKind.FEISHU_PRIVATE])
-async def test_sql_like_text_is_rejected_before_any_channel_or_task_fact(
+async def test_sql_like_text_is_stored_only_as_an_artifact(
     service, memory_state, clock, text: str, channel: ChannelKind
 ) -> None:
-    """像 SQL 的原文不能落进普通对话提交（没有 24 小时清理），也不占用来源事件。"""
-    from xiaowei_agent.application.task_view_runtime import SqlLikeTextNotAcceptedError
+    """像 SQL 就是 SQL：原文只进 SqlArtifact（24 小时清理），不落进普通对话提交。"""
+    await service.submit(
+        command=_command(clock, channel=channel, client_key="sql-like", text=text)
+    )
 
-    with pytest.raises(SqlLikeTextNotAcceptedError):
-        await service.submit(
-            command=_command(clock, channel=channel, client_key="sql-like", text=text)
-        )
-
-    assert memory_state.tasks == {}
-    assert memory_state.submissions == {}
-    assert memory_state.sql_artifacts == {}
-    assert memory_state.channel_source_kinds == {}
-    assert memory_state.channel_bindings == {}
+    (submission,) = memory_state.submissions.values()
+    assert submission.input_kind == "sql_artifact"
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes == text.encode()
+    assert set(memory_state.channel_source_kinds.values()) == {"sql_artifact"}
 
 
 async def test_conversation_text_keeps_the_8192_character_limit(service, clock) -> None:

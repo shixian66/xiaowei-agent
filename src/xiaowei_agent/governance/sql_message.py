@@ -1,23 +1,20 @@
 """确定性 SQL 消息识别与嵌入 SQL 检测（设计 §5.1）。
 
-``classify_sql_text`` 把一条消息分成三档（设计 §5.1，负责人 2026-09-28 决定），依据是唯一的
-识别登记表 ``governance.sql_statements``（覆盖 StarRocks 文档全部顶层 SQL 语句与 MySQL 兼容语句）：
+``recognize_sql_message`` 只给两种结论：SQL 或对话（负责人 2026-09-29 决定：像 SQL 的就是 SQL）。
+依据是唯一的识别登记表 ``governance.sql_statements``（覆盖 StarRocks 文档全部顶层 SQL 语句与 MySQL
+兼容语句）：
 
-- **SQL**：明确标记为 ``sql`` 的代码块；或命中只读语句清单；或命中登记表某种语句的签名且整条
-  符合它的完整形状（文法完整匹配，SELECT/WITH/UPDATE 交 sqlglot 判断完整有效）。多语句按第一条
-  判断，hint 与 ``INTO OUTFILE`` 只出现在 SQL 里。识别出的 SQL 保存为 SqlArtifact，永不进入模型；
-  是否支持、是否只读由 SQLGuard 判断（清单外的已知语句回复“暂未支持”）。
-- **像 SQL（SQL_LIKE）**：命中签名但不符合完整形状（如 “show data for yesterday”、
-  “create table for this report”、未闭合的 ``SELECT 'x``）；或签名都不命中、首条语句却能被 sqlglot
-  完整解析成真正的查询（``SELECT TRUE AND TRUE``、``SELECT NULL``、一元表达式、CASE，以及分不开的
-  “select this”）——签名补不完，这里 fail-closed。提交边界在写任何事实前拒绝，原文不落库、不进
-  模型，固定提示放入 sql 代码块重发。
-- **对话**：首词不是登记的语句关键字，或签名都不命中且不是查询（如 “show me the slow queries”、
-  “create a dashboard”、“analyze this”），或在字符串与注释之外出现中文等自然语言文字。
+- **SQL**：明确标记为 ``sql`` 的代码块；或命中登记表某种语句的签名（写不完整、写错也算，例如
+  “show data for yesterday”、未闭合的 ``SELECT 'x``）；或签名都不命中、首条
+  语句却能被 sqlglot 完整解析成真正的查询（``SELECT TRUE AND TRUE``、``SELECT NULL``、一元表达式、
+  CASE）。识别出的 SQL 保存为 SqlArtifact，永不进入模型；是否支持、是否只读由 SQLGuard 判断，
+  执行失败把报错返回给用户。
+- **对话**：首词不是登记的语句关键字，或签名都不命中也不是查询（如 “show me the slow queries”、
+  “create a dashboard”、“analyze this”），或在字符串与注释之外出现中文等自然语言文字（混合消息，
+  交嵌入 SQL 检测）。
 
-sqlglot 会把不少英文短句降级为 ``Command`` 或宽松解析成语句，所以既不把 ``Command`` 一律当 SQL，
-也不只看能否解析。判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）
-与不可见的控制/格式字符先归一化或去掉。保存与执行的永远是原文，SQLGuard 仍按原文拒绝这些字符。
+判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）与不可见的控制/格式
+字符先归一化或去掉。保存与执行的永远是原文，SQLGuard 仍按原文拒绝这些字符。
 
 ``contains_embedded_sql`` 是产品护栏，不是安全边界：它让“夹带 SQL 的对话”以固定文案拒绝，
 不执行任何 capability。漏判时消息按现有流程处理，现有能力只执行自己的模板 SQL。
@@ -30,13 +27,10 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
-from xiaowei_agent.contracts import SqlTextKind
-from xiaowei_agent.governance.readonly_statements import match_statement
 from xiaowei_agent.governance.sql_statements import (
     SQL_STATEMENT_FORMS,
     SqlStatementForm,
     lenient_tokens,
-    shape_matches,
     signature_matches,
 )
 from xiaowei_agent.governance.sql_tokens import (
@@ -46,17 +40,13 @@ from xiaowei_agent.governance.sql_tokens import (
     scan_sql,
 )
 from xiaowei_agent.governance.sqlguard import (
-    SqlParseShape,
     parses_as_complete_statements,
     parses_as_query,
-    sql_parse_shape,
 )
 
 __all__ = [
     "SQL_STATEMENT_KEYWORDS",
     "SqlMessage",
-    "SqlTextKind",
-    "classify_sql_text",
     "contains_embedded_sql",
     "recognize_sql_message",
 ]
@@ -71,16 +61,6 @@ _FORMS_BY_KEYWORD: Final[dict[str, tuple[SqlStatementForm, ...]]] = {
     for keyword in SQL_STATEMENT_KEYWORDS
 }
 
-
-_UNMISTAKABLE_SCAN_FAILURES: Final[frozenset[TokenScanReason]] = frozenset(
-    {TokenScanReason.HINT_COMMENT, TokenScanReason.INTO_OUTFILE}
-)
-"""sqlglot 解析不了、但只会出现在 SQL 里的语法：命中签名即识别，交 SQLGuard 明确拒绝。"""
-
-_VALID_PARSE_SHAPES: Final[frozenset[SqlParseShape]] = frozenset(
-    {SqlParseShape.STATEMENTS, SqlParseShape.TOO_COMPLEX}
-)
-"""完整有效的 SQL：解析为语句，或因嵌套过深放弃。``Command`` 只是“关键字 + 原文”，不算。"""
 
 _LOOKALIKE_QUOTES: Final[dict[int, str]] = {
     ord(char): "'" for char in "\u2018\u2019\u201a\u201b"
@@ -108,14 +88,9 @@ _MAX_EMBEDDED_CANDIDATES: Final[int] = 64
 
 @dataclass(frozen=True, slots=True)
 class SqlMessage:
-    """识别出的 SQL 形状文本与它的分档。
-
-    只有 ``kind`` 为 ``SQL`` 的才保存为 SqlArtifact（就是 ``sql`` 的 UTF-8 bytes）；``SQL_LIKE``
-    只用来在写任何事实前拒绝。
-    """
+    """识别出的 SQL 语句文本；保存为 SqlArtifact 的就是它的 UTF-8 bytes。"""
 
     sql: str
-    kind: SqlTextKind
 
     @property
     def sql_bytes(self) -> bytes:
@@ -159,77 +134,37 @@ def _first_statement(probe: str) -> str:
     return probe
 
 
-def _unsigned_query(probe: str) -> bool:
-    """签名都不命中时，首条语句能否被完整解析成真正的查询。
-
-    字符串与注释之外出现中文等自然语言文字的仍是混合消息，交嵌入 SQL 检测。
-    """
-    first = _first_statement(probe)
-    try:
-        scan_sql(first.encode("utf-8"))
-    except TokenScanError as exc:
-        if exc.reason is TokenScanReason.AMBIGUOUS_PUNCTUATION:
-            return False
-    return parses_as_query(first)
-
-
-def _kind(probe: str) -> SqlTextKind:
+def _is_sql(probe: str) -> bool:
     tokens = lenient_tokens(probe)
     if not tokens or tokens[0].kind != "word":
-        return SqlTextKind.CONVERSATION
+        return False
     forms = _FORMS_BY_KEYWORD.get(tokens[0].text, ())
     if not forms:
-        return SqlTextKind.CONVERSATION
-    signed = [form for form in forms if signature_matches(form.signature, tokens)]
-    if not signed:
-        # 签名补不完（SELECT TRUE、SELECT NULL、一元表达式、CASE…），也分不开 “select this”：
-        # 能解析成真正查询的 fail-closed 为“像 SQL”，绝不进模型。
-        return SqlTextKind.SQL_LIKE if _unsigned_query(probe) else SqlTextKind.CONVERSATION
+        return False
     try:
-        scan = scan_sql(probe.encode("utf-8"))
+        scan_sql(probe.encode("utf-8"))
     except TokenScanError as exc:
-        if exc.reason in _UNMISTAKABLE_SCAN_FAILURES:
-            return SqlTextKind.SQL
-        if exc.reason is TokenScanReason.MULTI_STATEMENT:
+        first = _first_statement(probe)
+        if exc.reason is TokenScanReason.MULTI_STATEMENT and first != probe:
             # 多语句按第一条判断：是 SQL 就交 SQLGuard 以多语句拒绝。
-            return _kind(_first_statement(probe))
+            return _is_sql(first)
         if exc.reason is TokenScanReason.AMBIGUOUS_PUNCTUATION:
             # 字符串与注释之外有中文等自然语言文字：混合消息，交嵌入 SQL 检测。
-            return SqlTextKind.CONVERSATION
-        return SqlTextKind.SQL_LIKE
-    if match_statement(scan) is not None:
-        return SqlTextKind.SQL
-    for form in signed:
-        complete = shape_matches(form.shape, scan)
-        if complete is None:
-            complete = sql_parse_shape(probe) in _VALID_PARSE_SHAPES
-        if complete:
-            return SqlTextKind.SQL
-    return SqlTextKind.SQL_LIKE
-
-
-def _classify(text: str) -> tuple[SqlTextKind, str]:
-    body, declared_sql = _unwrap(text.strip())
-    if not body or len(body.encode("utf-8")) > SQL_MAX_BYTES:
-        return SqlTextKind.CONVERSATION, body
-    if declared_sql:
-        return SqlTextKind.SQL, body
-    return _kind(_judgement_copy(body)), body
-
-
-def classify_sql_text(text: str) -> SqlTextKind:
-    """按设计 §5.1 把消息分成 SQL / 像 SQL / 对话三档；纯函数，同一输入同一结论。"""
-    return _classify(text)[0]
+            return False
+    if any(signature_matches(form.signature, tokens) for form in forms):
+        return True
+    # 签名补不完（SELECT TRUE、SELECT NULL、一元表达式、CASE…）：能解析成真正查询的也是 SQL。
+    return parses_as_query(_first_statement(probe))
 
 
 def recognize_sql_message(text: str) -> SqlMessage | None:
-    """识别 SQL 形状的消息；对话返回 ``None``。
-
-    “像 SQL”也返回（``kind`` 为 ``SQL_LIKE``），不和对话混成 ``None``：提交边界必须据此在写任何
-    事实前拒绝，否则原文会落进没有 24 小时清理的普通对话提交。返回的正文是原文，不是判定副本。
-    """
-    kind, body = _classify(text)
-    return None if kind is SqlTextKind.CONVERSATION else SqlMessage(sql=body, kind=kind)
+    """识别纯 SQL 消息；对话返回 ``None``。返回的是原文正文，不是判定副本。"""
+    body, declared_sql = _unwrap(text.strip())
+    if not body or len(body.encode("utf-8")) > SQL_MAX_BYTES:
+        return None
+    if declared_sql or _is_sql(_judgement_copy(body)):
+        return SqlMessage(sql=body)
+    return None
 
 
 def _ascii_prefix(fragment: str) -> str:

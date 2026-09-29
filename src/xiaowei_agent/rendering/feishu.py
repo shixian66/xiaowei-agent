@@ -280,8 +280,14 @@ def render_feishu_card(projection: FeishuProjectionInput) -> RenderedFeishuCard:
     )
 
 
-def _notice_card(*, title: str, body: str, template: str) -> RenderedFeishuCard:
-    """固定标题与正文的通知卡片：不含主体、原始问题或交互入口。"""
+def render_activation_card(*, submitted: bool) -> RenderedFeishuCard:
+    """投影不含主体、原始问题、目录信息或交互入口的激活状态卡片。"""
+    title = "身份激活申请已提交" if submitted else "身份激活暂不可用"
+    body = (
+        "申请已记录，请等待管理员处理。"
+        if submitted
+        else "申请暂时无法提交，请稍后重试。"
+    )
     payload: dict[str, object] = {
         "config": {
             "enable_forward": False,
@@ -290,7 +296,7 @@ def _notice_card(*, title: str, body: str, template: str) -> RenderedFeishuCard:
         },
         "elements": [_text_element(body)],
         "header": {
-            "template": template,
+            "template": "blue" if submitted else "orange",
             "title": _plain_text(title),
         },
     }
@@ -302,29 +308,4 @@ def _notice_card(*, title: str, body: str, template: str) -> RenderedFeishuCard:
     )
 
 
-def render_activation_card(*, submitted: bool) -> RenderedFeishuCard:
-    """投影不含主体、原始问题、目录信息或交互入口的激活状态卡片。"""
-    if submitted:
-        return _notice_card(
-            title="身份激活申请已提交",
-            body="申请已记录，请等待管理员处理。",
-            template="blue",
-        )
-    return _notice_card(
-        title="身份激活暂不可用",
-        body="申请暂时无法提交，请稍后重试。",
-        template="orange",
-    )
-
-
-def render_sql_like_notice_card(*, body: str) -> RenderedFeishuCard:
-    """像 SQL 却无法确认完整的消息：调用方给出固定文案，卡片不回显原文（设计 §5.1）。"""
-    return _notice_card(title="本轮未执行", body=body, template="orange")
-
-
-__all__ = [
-    "RenderedFeishuCard",
-    "render_activation_card",
-    "render_feishu_card",
-    "render_sql_like_notice_card",
-]
+__all__ = ["RenderedFeishuCard", "render_activation_card", "render_feishu_card"]

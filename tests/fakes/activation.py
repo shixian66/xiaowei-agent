@@ -10,7 +10,6 @@ from xiaowei_agent.application.identity_activation import (
     ActivationResumeUnavailableError,
     IdentityActivationService,
 )
-from xiaowei_agent.application.sql_like_notice import SqlLikeNoticeService
 from xiaowei_agent.contracts.activation import ActivationRequest, ActivationStatus
 from xiaowei_agent.contracts.web_navigation import WebReturnIntent
 
@@ -91,22 +90,4 @@ class RecordingActivationNotifications:
         return cast(ActivationNotificationService, self)
 
 
-class RecordingSqlLikeNotices:
-    """记录“像 SQL”固定提示的发送请求。"""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-
-    async def notify(self, *, conversation_ref: str, event_id: str) -> bool:
-        self.calls.append((conversation_ref, event_id))
-        return True
-
-    def as_service(self) -> SqlLikeNoticeService:
-        return cast(SqlLikeNoticeService, self)
-
-
-__all__ = [
-    "RecordingActivationNotifications",
-    "RecordingActivationRequests",
-    "RecordingSqlLikeNotices",
-]
+__all__ = ["RecordingActivationNotifications", "RecordingActivationRequests"]

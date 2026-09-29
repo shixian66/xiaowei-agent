@@ -21,13 +21,6 @@ _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何�
 EMBEDDED_SQL_REJECTED: Final[str] = (
     "检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。"
 )
-SQL_LIKE_TEXT_REJECTED: Final[str] = (
-    "这条消息像 SQL，但无法确认是完整语句，本轮未执行；如需执行，请放入 sql 代码块重发。"
-)
-_FIXED_REJECTIONS: Final[dict[str, str]] = {
-    InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value: EMBEDDED_SQL_REJECTED,
-    InteractionRejectionReasonCode.SQL_LIKE_TEXT_NOT_EXECUTED.value: SQL_LIKE_TEXT_REJECTED,
-}
 CONVERSATION_TERMINAL_REASON: Final[str] = "interaction.conversation_responded"
 _CONVERSATION_ANSWER: Final[str] = (
     "我能做的事就是下面这份能力清单，它直接来自当前能力快照，不是我总结出来的。"
@@ -58,12 +51,15 @@ def render_preplan_rejection(
 ) -> RenderPayload:
     """只投影确定性拒绝；没有计划时不得猜测领域事实。
 
-    嵌入 SQL 与“像 SQL”的拒绝有固定文案（设计 §5.1）；其他原因与 ``None`` 保持通用文案。
+    嵌入 SQL 拒绝有固定文案（设计 §5.1）；其他原因与 ``None`` 保持通用文案。
     """
     if status is not TaskStatus.REJECTED:
         raise ValueError("generic pre-plan projection requires rejected status")
+    embedded = (
+        reason_code == InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+    )
     return RenderPayload(
-        answer=_FIXED_REJECTIONS.get(reason_code or "", _PREPLAN_REJECTED),
+        answer=EMBEDDED_SQL_REJECTED if embedded else _PREPLAN_REJECTED,
         sections=(),
         next_steps=(),
         status=status,

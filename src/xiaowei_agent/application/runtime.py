@@ -110,8 +110,6 @@ from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.governance.binding import BindingError
 from xiaowei_agent.governance.policy import PolicyDeniedError
 from xiaowei_agent.governance.sql_message import (
-    SqlTextKind,
-    classify_sql_text,
     contains_embedded_sql,
     recognize_sql_message,
 )
@@ -179,13 +177,6 @@ RENDER_REF: Final[None] = None
 它只由兼容的同步 ``handle()`` 返回，不另建 render store。M5 的异步查询从 TaskRecord
 与 Evidence 纯函数重建终态投影；非终态统一返回 ``render=None``。
 """
-
-_SQL_TEXT_REJECTIONS: Final[dict[SqlTextKind, InteractionRejectionReasonCode]] = {
-    SqlTextKind.SQL: InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED,
-    SqlTextKind.SQL_LIKE: InteractionRejectionReasonCode.SQL_LIKE_TEXT_NOT_EXECUTED,
-}
-"""对话任务的文本若是 SQL 或像 SQL，worker 在构造模型请求前以这些原因拒绝（设计 §5.1）。"""
-
 
 class RequestRejectedError(RuntimeError):
     """请求在取数之前就被确定性地拒绝（无候选能力、目标不可解析、参数越界）。
@@ -387,11 +378,10 @@ class XiaoweiRuntime:
                 )
             else:
                 user_text = submission.envelope.text
-                sql_rejection = _SQL_TEXT_REJECTIONS.get(classify_sql_text(user_text))
-                if sql_rejection is not None:
-                    # 在构造模型请求前拒绝（设计 §5.1）：SQL 是升级前按对话持久化的任务（今天的
-                    # 入口在写任务前就会拒绝它），提示单独重新发送；像 SQL 却无法确认完整的文本
-                    # 提示放入 sql 代码块重发。都不建 SqlArtifact，Gateway 调用为 0。
+                if recognize_sql_message(user_text) is not None:
+                    # 在构造模型请求前拒绝（设计 §5.1）：这是升级前按对话持久化、现在识别为 SQL 的
+                    # 任务（今天的入口在写任务前就会把它分流为 SqlArtifact），提示单独重新发送。
+                    # 不建 SqlArtifact，Gateway 调用为 0。
                     await self._emit(
                         stage=PipelineStage.INTENT,
                         outcome=StageOutcome.REJECTED,
@@ -403,7 +393,9 @@ class XiaoweiRuntime:
                     raise RequestRejectedError(
                         "sql text is not executed as a conversation",
                         stage=PipelineStage.INTENT,
-                        reason_code=sql_rejection.value,
+                        reason_code=(
+                            InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+                        ),
                     )
                 # 由原文确定性检测，不取自模型或草案（设计 §5.1）。
                 embedded_sql = contains_embedded_sql(user_text)

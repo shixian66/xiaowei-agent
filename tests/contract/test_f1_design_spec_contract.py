@@ -119,19 +119,17 @@ def test_f1_spec_recognizes_sql_deterministically_and_keeps_it_from_the_model() 
     _assert_terms(
         _section(text, "### 5.1 统一入口与确定性 SQL 识别"),
         "`recognize_sql_message(text)`",
-        # 负责人 2026-09-28 决定：登记表是唯一真源，分 SQL / 像 SQL / 对话三档，Command 不一律当
-        # SQL，以 SQL 关键字开头的自然语言走对话。
+        # 负责人 2026-09-28/29 决定：登记表是唯一真源；像 SQL 的就是 SQL（命中签名即算，写错也保存为
+        # SqlArtifact 交 SQLGuard 与数据库报错），其余以 SQL 关键字开头的自然语言走对话。
         "**明确标记为 sql 的代码块**",
         "**SQL 语句识别登记表**",
-        "**完整形状**",
-        "**完整、有效**",
-        "`Command`（只是“关键字 + 原文”）不算",
-        "**像 SQL（SQL_LIKE）**",
-        "`SQL_LIKE_TEXT_NOT_EXECUTED`",
-        "首条语句却能被 sqlglot 完整解析成真正的查询",
-        "**写任何事实前拒绝**",
-        "`sql_message.incomplete`",
-        "以 SQL 关键字开头、既不命中签名也不是查询的自然语言都走对话",
+        "**像 SQL 的就是 SQL**",
+        "**命中签名**",
+        "或写错也算",
+        "**签名补不完的查询**",
+        "（`Query`，`Command`",
+        "上游新增的文档页不会让测试自动失败",
+        "§5.8 闭集原因返回错误类别与 StarRocks 错误码",
         "**升级兼容。**",
         "不调用模型",
         "**同一个 PostgreSQL 事务**",

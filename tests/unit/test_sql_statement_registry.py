@@ -3,16 +3,15 @@
 ``STARROCKS_STATEMENT_DOCS`` 是 StarRocks 仓库 ``docs/en/sql-reference/sql-statements``
 下全部文档页的快照（StarRocks main ``5cb44e451b3603c31934a4598dd6d9cb4807628f``，
 2026-09-28 取得）。每一页的顶层 SQL 语句都必须在登记表里有形式，并由该页“Examples”里的
-真实语句证明被识别为 SQL；否则这条语句会按对话进入模型。升级 StarRocks 大版本时刷新快照，
-新增的文档页会让本测试失败，直到登记。
+真实语句证明被识别为 SQL；否则这条语句会按对话进入模型。快照是手写的：上游新增的文档页不会
+让本测试自动失败，升级 StarRocks 大版本时要先刷新快照，新页才会在这里暴露、要求登记。
 """
 
 import pytest
 
 from xiaowei_agent.governance.sql_message import (
     SQL_STATEMENT_KEYWORDS,
-    SqlTextKind,
-    classify_sql_text,
+    recognize_sql_message,
 )
 from xiaowei_agent.governance.sql_statements import SQL_STATEMENT_FORMS
 
@@ -388,7 +387,7 @@ def test_registry_covers_exactly_the_documented_statements() -> None:
     [sql for examples in EXAMPLES.values() for sql in examples] + list(MYSQL_EXAMPLES),
 )
 def test_every_documented_statement_is_recognized_as_sql(sql: str) -> None:
-    assert classify_sql_text(sql) is SqlTextKind.SQL
+    assert recognize_sql_message(sql) is not None
 
 
 def test_keywords_come_only_from_the_registry() -> None:
@@ -397,8 +396,9 @@ def test_keywords_come_only_from_the_registry() -> None:
     assert firsts <= SQL_STATEMENT_KEYWORDS
 
 
-# 命中语句签名、却不是完整语句：不执行、不进模型，提示放入 sql 代码块重发。
-SQL_LIKE: tuple[str, ...] = (
+# 像 SQL 就是 SQL（负责人 2026-09-29 决定）：命中签名却写得不完整、写错，照样保存为 SqlArtifact，
+# 由 SQLGuard 拒绝或交数据库执行后把报错返回给用户，不进模型。
+INCOMPLETE_OR_WRONG_SQL: tuple[str, ...] = (
     "show data for yesterday",
     "create table for this report",
     "prepare a report",
@@ -413,10 +413,14 @@ SQL_LIKE: tuple[str, ...] = (
     "show create table",
     "grant select on everything",
     "grant role1, role2",
+    "describe the problem",
+    # 签名要求 SELECT 后出现字符串：未闭合的也算（带撇号的英文句子一并当 SQL，执行报错返回）。
+    "SELECT password = 'hunter2",
+    "select what's wrong",
 )
 
-# 签名没命中、却能被 sqlglot 完整解析成真正查询：逐个补签名补不完（TRUE/NULL/一元表达式/CASE…），
-# 英文短句（“select this”）也分不开，fail-closed 为“像 SQL”，绝不进模型。
+# 签名没命中、却能被 sqlglot 完整解析成真正查询：签名补不完（TRUE/NULL/一元表达式/CASE…），
+# 也是 SQL。
 UNSIGNED_QUERIES: tuple[str, ...] = (
     "SELECT TRUE AND TRUE",
     "select true and true",
@@ -432,7 +436,7 @@ UNSIGNED_QUERIES: tuple[str, ...] = (
     "select this",
 )
 
-# 首词是语句关键字、但签名都不命中：自然语言，继续走对话。
+# 首词是语句关键字、但签名都不命中也不是查询：自然语言，继续走对话。
 NATURAL_LANGUAGE: tuple[str, ...] = (
     "show me the slow queries",
     "show status of my task",
@@ -471,7 +475,7 @@ NATURAL_LANGUAGE: tuple[str, ...] = (
 )
 
 
-# 字符串与注释之外出现中文：混合消息走对话，由嵌入 SQL 检测兜底，不给“放入代码块”的提示。
+# 字符串与注释之外出现中文：混合消息走对话，由嵌入 SQL 检测兜底。
 MIXED_LANGUAGE: tuple[str, ...] = (
     "SHOW USERS 是什么",
     "SELECT a FROM t 为什么慢",
@@ -481,19 +485,14 @@ MIXED_LANGUAGE: tuple[str, ...] = (
 
 @pytest.mark.parametrize("text", MIXED_LANGUAGE)
 def test_mixed_language_is_conversation(text: str) -> None:
-    assert classify_sql_text(text) is SqlTextKind.CONVERSATION
+    assert recognize_sql_message(text) is None
 
 
-@pytest.mark.parametrize("text", SQL_LIKE)
-def test_signature_without_complete_shape_is_sql_like(text: str) -> None:
-    assert classify_sql_text(text) is SqlTextKind.SQL_LIKE
-
-
-@pytest.mark.parametrize("text", UNSIGNED_QUERIES)
-def test_unsigned_complete_query_is_at_least_sql_like(text: str) -> None:
-    assert classify_sql_text(text) is SqlTextKind.SQL_LIKE
+@pytest.mark.parametrize("text", INCOMPLETE_OR_WRONG_SQL + UNSIGNED_QUERIES)
+def test_sql_like_text_is_sql(text: str) -> None:
+    assert recognize_sql_message(text) is not None
 
 
 @pytest.mark.parametrize("text", NATURAL_LANGUAGE)
 def test_keyword_led_natural_language_is_conversation(text: str) -> None:
-    assert classify_sql_text(text) is SqlTextKind.CONVERSATION
+    assert recognize_sql_message(text) is None

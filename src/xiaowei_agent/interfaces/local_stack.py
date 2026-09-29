@@ -904,7 +904,6 @@ async def build_postgres_feishu_listener_stack(
     )
     from xiaowei_agent.application.channel_submission import ChannelSubmissionService
     from xiaowei_agent.application.identity_activation import IdentityActivationService
-    from xiaowei_agent.application.sql_like_notice import SqlLikeNoticeService
     from xiaowei_agent.interfaces.directory_identity import (
         DirectoryFeishuIdentityDirectory,
     )
@@ -987,7 +986,6 @@ async def build_postgres_feishu_listener_stack(
             submission_service=submission_service,
             activation_service=activation_service,
             activation_notifications=activation_notifications,
-            sql_like_notices=SqlLikeNoticeService(messages=messages),
             policy_revision=ACTIVE_POLICY_SNAPSHOT.policy_revision,
             clock=clock,
         )

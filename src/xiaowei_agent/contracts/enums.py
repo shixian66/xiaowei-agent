@@ -329,15 +329,6 @@ class InteractionRejectionReasonCode(StrEnum):
     CAPABILITY_FIELDS_INVALID = "capability.fields_invalid"
     CAPABILITY_TARGET_UNAVAILABLE = "capability.target_unavailable"
     EMBEDDED_SQL_NOT_EXECUTED = "interaction.embedded_sql_not_executed"
-    SQL_LIKE_TEXT_NOT_EXECUTED = "interaction.sql_like_text_not_executed"
-
-
-class SqlTextKind(StrEnum):
-    """一条消息的 SQL 识别结论（设计 §5.1 三档）；只有 ``SQL`` 可以保存为 SqlArtifact。"""
-
-    SQL = "sql"
-    SQL_LIKE = "sql_like"
-    CONVERSATION = "conversation"
 
 
 class ModelErrorCode(StrEnum):

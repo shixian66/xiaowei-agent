@@ -646,9 +646,6 @@ async def _application_error(_: Request, exc: Exception) -> Response:
     if failure is ApplicationFailure.SQL_MESSAGE_NOT_ACCEPTED:
         # 纯 SQL 不能作为普通对话或澄清回答提交；确定性拒绝，不进模型。
         return _error(422, "sql_message.not_accepted")
-    if failure is ApplicationFailure.SQL_MESSAGE_INCOMPLETE:
-        # 像 SQL 却无法确认完整：写任何事实前拒绝，原文不落库；提示放入 sql 代码块重发。
-        return _error(422, "sql_message.incomplete")
     return _error(500, "internal_error")
 
 

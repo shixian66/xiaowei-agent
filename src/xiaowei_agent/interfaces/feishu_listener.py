@@ -19,10 +19,8 @@ from xiaowei_agent.application.channel_submission import (
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
     ChannelSubmitCommand,
-    SqlLikeTextNotAcceptedError,
 )
 from xiaowei_agent.application.identity_activation import IdentityActivationService
-from xiaowei_agent.application.sql_like_notice import SqlLikeNoticeService
 from xiaowei_agent.config import ConfigError, Settings, load_settings
 from xiaowei_agent.contracts import ChannelKind
 from xiaowei_agent.interfaces.feishu_identity import (
@@ -61,7 +59,6 @@ class _FailureKind(StrEnum):
     IDENTITY_UNMAPPED = "identity_unmapped"
     SUBMIT_FORBIDDEN = "submit_forbidden"
     SUBMISSION_CONFLICT = "submission_conflict"
-    SQL_LIKE_TEXT = "sql_like_text"
     CONFIGURATION_INVALID = "configuration_invalid"
     CALLBACK_TIMEOUT = "callback_timeout"
     LISTENER_FAILURE = "listener_failure"
@@ -74,7 +71,6 @@ _EXPECTED_FILTERS: Final[frozenset[_FailureKind]] = frozenset(
         _FailureKind.CHAT_TYPE_UNSUPPORTED,
         _FailureKind.BOT_MENTION_MISSING,
         _FailureKind.MESSAGE_EMPTY,
-        _FailureKind.SQL_LIKE_TEXT,
     }
 )
 
@@ -105,7 +101,6 @@ class FeishuListener:
         submission_service: ChannelSubmissionService,
         activation_service: IdentityActivationService,
         activation_notifications: ActivationNotificationService,
-        sql_like_notices: SqlLikeNoticeService,
         policy_revision: str,
         clock: Callable[[], dt.datetime],
         trace_id_factory: Callable[[], str] = new_trace_id,
@@ -119,7 +114,6 @@ class FeishuListener:
         self._submissions = submission_service
         self._activations = activation_service
         self._activation_notifications = activation_notifications
-        self._sql_like_notices = sql_like_notices
         self._policy_revision = policy_revision
         self._clock = clock
         self._trace_id_factory = trace_id_factory
@@ -238,12 +232,6 @@ class FeishuListener:
                 )
         except ChannelSubmissionForbiddenError:
             return self._reject(_FailureKind.SUBMIT_FORBIDDEN)
-        except SqlLikeTextNotAcceptedError:
-            # 写任何事实前已拒绝，没有任务可投影：直接回固定提示，再按永久拒绝 ACK。
-            await self._sql_like_notices.notify(
-                conversation_ref=event.chat_id, event_id=event.event_id
-            )
-            return self._reject(_FailureKind.SQL_LIKE_TEXT)
         except (
             IdempotencyConflictError,
             ChannelBindingConflictError,
