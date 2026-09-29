@@ -130,6 +130,9 @@ def _exit_for_status(status: int) -> int:
         return 4
     if status == 413:
         return 5
+    if status == 422:
+        # F1：纯 SQL 不能经 API/CLI 提交；服务端在创建任务前确定性拒绝。
+        return 9
     if status == 503:
         return 6
     if status == 504:
@@ -147,6 +150,7 @@ _ERROR_LABELS: Mapping[int, str] = {
     6: "unavailable",
     7: "timeout",
     8: "server_error",
+    9: "sql_message_not_accepted",
 }
 
 

@@ -17,7 +17,9 @@ from xiaowei_agent.application.default_capabilities import (
     ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
+    readonly_query_binding,
 )
+from xiaowei_agent.capabilities.readonly_query import ReadonlyQueryTargetCatalog
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     Candidate,
@@ -54,8 +56,9 @@ def _never_verify_slots(
     as_of: dt.datetime,
     user_text: str,
     clarification: ClarificationContext | None = None,
+    sql_artifact: object = None,
 ) -> SlotInvalid:
-    _ = (candidate, draft, context, as_of, user_text, clarification)
+    _ = (candidate, draft, context, as_of, user_text, clarification, sql_artifact)
     return SlotInvalid(
         reason_code=InteractionRejectionReasonCode.CAPABILITY_FIELDS_INVALID
     )
@@ -171,6 +174,9 @@ def build_test_capability_bindings(
     )
     if asset_key in keys:
         bindings.append(ASSET_INVENTORY_BINDING)
+    readonly_query = readonly_query_binding(ReadonlyQueryTargetCatalog.empty())
+    if (readonly_query.capability_id, readonly_query.capability_version) in keys:
+        bindings.append(readonly_query)
     if (WRITE_CAP, CAP_VERSION) in keys:
         bindings.append(SYNTHETIC_WRITE_BINDING)
     return CapabilityBindingRegistry(

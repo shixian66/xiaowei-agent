@@ -545,6 +545,7 @@ async def test_postgres_task_view_stack_has_only_projection_dependencies(
             "_ledger",
             "_conversation_snapshot",
             "_rendering_bindings",
+            "_recognize_sql",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -766,6 +767,7 @@ async def test_postgres_web_stack_has_only_auth_and_task_view_dependencies(
             "_ledger",
             "_conversation_snapshot",
             "_rendering_bindings",
+            "_recognize_sql",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -1050,6 +1052,7 @@ async def test_postgres_feishu_listener_stack_has_only_ingress_dependencies(
             "_ledger",
             "_conversation_snapshot",
             "_rendering_bindings",
+            "_recognize_sql",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
@@ -1182,10 +1185,15 @@ async def test_postgres_channel_worker_stack_has_only_projection_dependencies(
             "_ledger",
             "_conversation_snapshot",
             "_rendering_bindings",
+            "_recognize_sql",
             "_clarification_records",
             "_model_artifacts",
             "_model_profile",
     }
+    # 通知 worker 只做投影：不装配 SQL 识别，任何提交都 fail-closed。
+    assert stack.runtime._recognize_sql is None
+    with pytest.raises(RuntimeError, match="not assembled"):
+        stack.runtime.recognize_sql("SELECT 1")
     assert stack.task_store._engine is engine
     assert stack.channel_store._engine is engine
     await stack.aclose()

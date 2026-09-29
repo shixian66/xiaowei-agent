@@ -2445,6 +2445,214 @@ STEP_EXECUTION_CASES = (
     test_timeout_is_a_distinct_persisted_step_outcome,
 )
 
+# --- F1：目标选择澄清消费时的 SQL 分类与延期（设计 §9.4 第 2 项） --------------
+
+
+async def park_for_target_selection(
+    store: Any, records: Any, task_id: str, *, sql_ref: str, sql_hash: str
+) -> Any:
+    """把一个 CREATED 任务按 Runtime 的真实顺序推进到目标选择追问终态。"""
+    from xiaowei_agent.contracts import CapabilitySubject, ClarificationReasonCode
+    from xiaowei_agent.contracts.clarification import TargetOption, TargetSelection
+    from xiaowei_agent.persistence.clarification_records import (
+        ClarificationRecordCandidate,
+    )
+
+    attempt = await _sql_attempt(store, task_id, owner=f"worker-{task_id}")
+    planning = await _transition(
+        store,
+        task_id=task_id,
+        expected_version=attempt.winner.version,
+        to_status=TaskStatus.PLANNING,
+        fencing_token=attempt.grant.fencing_token,
+    )
+    assert planning.applied
+    await records.save(
+        grant=attempt.grant,
+        candidate=ClarificationRecordCandidate(
+            subject=CapabilitySubject(
+                kind="capability",
+                capability_id="starrocks.readonly_query",
+                capability_version="1.0.0",
+                operation="execute_readonly_query",
+                input_schema_ref="input.starrocks.readonly_query.v1",
+                target_selection=TargetSelection(
+                    sql_ref=sql_ref,
+                    sql_hash=sql_hash,
+                    options=(
+                        TargetOption(resource_id="a" * 32, display_name="Orders"),
+                        TargetOption(resource_id="b" * 32, display_name="指标库"),
+                    ),
+                ),
+            ),
+            reason_code=ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED,
+            missing_fields=(),
+            confirmed_slots=(),
+        ),
+    )
+    moved = await _transition(
+        store,
+        task_id=task_id,
+        expected_version=planning.winner.version,
+        to_status=TaskStatus.CLARIFICATION_REQUIRED,
+        fencing_token=attempt.grant.fencing_token,
+    )
+    assert moved.applied
+    return moved.winner
+
+
+async def _f1_selection_parent(
+    store: Any,
+    records: Any,
+    context: Any,
+    *,
+    key: str,
+    sql_ref: str,
+    sql_hash: str,
+) -> Any:
+    """一个等待目标选择回答的 F1 父任务；澄清记录保存 SQL 引用与两个选项。"""
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(request_id=key, idempotency_key=key),
+        )
+    )
+    return await park_for_target_selection(
+        store, records, parent.task_id, sql_ref=sql_ref, sql_hash=sql_hash
+    )
+
+
+def _selection_answer(context: Any, parent: Any, *, key: str) -> Any:
+    return make_submission(
+        context,
+        envelope=make_envelope(request_id=key, idempotency_key=key, text="Orders"),
+        clarification_parent_task_id=parent.task_id,
+    )
+
+
+async def _actor_task_ids(store: Any, context: Any) -> set[str]:
+    page = await store.list_tasks_for_actor(
+        query=ActorTaskPageQuery(
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            actor=context.actor,
+            limit=100,
+        )
+    )
+    return {item.record.task_id for item in page.items}
+
+
+async def test_target_selection_answer_extends_the_sql_expiry(
+    store, clarification_record_store, context, clock
+) -> None:
+    submitted = await store.submit_sql_query(command=_sql_command(context, key="sql-sel"))
+    sql = await store.get_submission(lookup=lookup_for(submitted.task))
+    parent = await _f1_selection_parent(
+        store,
+        clarification_record_store,
+        context,
+        key="sel-parent",
+        sql_ref=sql.sql_ref,
+        sql_hash=sql.sql_hash,
+    )
+    clock.advance(seconds=23 * 3600)
+    child = await store.create_clarification_child(
+        submission=_selection_answer(context, parent, key="sel-child"),
+        authenticated_channel_owner=context.actor,
+    )
+    # 创建后 25 小时：没有延期就已过期；延期后以子任务 grant 水合仍可读。
+    clock.advance(seconds=2 * 3600)
+    attempt = await _sql_attempt(store, child.task_id, owner="worker-child")
+    await _run_under(store, attempt)
+    loaded = await store.load_sql_for_execution(
+        grant=attempt.grant, sql_ref=sql.sql_ref, sql_hash=sql.sql_hash
+    )
+    assert loaded.sql_bytes == _F1_SQL
+
+
+async def test_target_selection_answer_is_refused_for_an_expired_sql(
+    store, clarification_record_store, context, clock
+) -> None:
+    from xiaowei_agent.persistence.store import SqlArtifactExpiredError
+
+    submitted = await store.submit_sql_query(command=_sql_command(context, key="sql-exp"))
+    sql = await store.get_submission(lookup=lookup_for(submitted.task))
+    parent = await _f1_selection_parent(
+        store,
+        clarification_record_store,
+        context,
+        key="exp-parent",
+        sql_ref=sql.sql_ref,
+        sql_hash=sql.sql_hash,
+    )
+    before = await _actor_task_ids(store, context)
+    clock.advance(seconds=24 * 3600 + 1)
+
+    with pytest.raises(SqlArtifactExpiredError):
+        await store.create_clarification_child(
+            submission=_selection_answer(context, parent, key="exp-child"),
+            authenticated_channel_owner=context.actor,
+        )
+
+    assert (await store.get(lookup=lookup_for(parent))).status is (
+        TaskStatus.CLARIFICATION_REQUIRED
+    )
+    assert await _actor_task_ids(store, context) == before
+
+
+async def test_target_selection_answer_classifies_unavailable_sql(
+    store, clarification_record_store, context
+) -> None:
+    from xiaowei_agent.persistence.store import (
+        SqlArtifactUnavailableError,
+        SqlArtifactUnavailableReason,
+    )
+
+    submitted = await store.submit_sql_query(command=_sql_command(context, key="sql-own"))
+    own = await store.get_submission(lookup=lookup_for(submitted.task))
+    other_context = context.model_copy(update={"actor": "bob"})
+    other = await store.submit_sql_query(
+        command=_sql_command(other_context, key="sql-other")
+    )
+    foreign = await store.get_submission(lookup=lookup_for(other.task))
+    cases = (
+        ("missing", "no-such-ref", own.sql_hash, SqlArtifactUnavailableReason.NOT_FOUND),
+        (
+            "scope",
+            foreign.sql_ref,
+            foreign.sql_hash,
+            SqlArtifactUnavailableReason.SCOPE_MISMATCH,
+        ),
+        ("hash", own.sql_ref, "f" * 64, SqlArtifactUnavailableReason.HASH_MISMATCH),
+    )
+    for name, sql_ref, sql_hash, reason in cases:
+        parent = await _f1_selection_parent(
+            store,
+            clarification_record_store,
+            context,
+            key=f"{name}-parent",
+            sql_ref=sql_ref,
+            sql_hash=sql_hash,
+        )
+        before = await _actor_task_ids(store, context)
+        with pytest.raises(SqlArtifactUnavailableError) as caught:
+            await store.create_clarification_child(
+                submission=_selection_answer(context, parent, key=f"{name}-child"),
+                authenticated_channel_owner=context.actor,
+            )
+        assert caught.value.reason is reason
+        assert (await store.get(lookup=lookup_for(parent))).status is (
+            TaskStatus.CLARIFICATION_REQUIRED
+        )
+        assert await _actor_task_ids(store, context) == before
+
+
+F1_CLARIFICATION_CASES = (
+    test_target_selection_answer_extends_the_sql_expiry,
+    test_target_selection_answer_is_refused_for_an_expired_sql,
+    test_target_selection_answer_classifies_unavailable_sql,
+)
+
 F1_SQL_CASES = (
     test_sql_submit_creates_one_task_with_an_artifact_submission,
     test_sql_submit_replays_the_same_key_and_sql,
@@ -2466,4 +2674,5 @@ ALL_GROUPS = {
     "dispatch_attempt": DISPATCH_ATTEMPT_CASES,
     "step_execution": STEP_EXECUTION_CASES,
     "f1_sql": F1_SQL_CASES,
+    "f1_clarification": F1_CLARIFICATION_CASES,
 }

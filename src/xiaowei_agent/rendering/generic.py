@@ -5,10 +5,12 @@ from typing import Final
 from xiaowei_agent.contracts import (
     CapabilitySnapshot,
     CapabilitySpec,
+    CapabilitySubject,
     ClarificationPayload,
     ClarificationReasonCode,
     ClarificationRecord,
     ConversationSubmission,
+    InteractionRejectionReasonCode,
     RenderPayload,
     RenderSection,
     TaskStatus,
@@ -16,6 +18,9 @@ from xiaowei_agent.contracts import (
 )
 
 _PREPLAN_REJECTED: Final[str] = "请求在执行前被拒绝，未调用任何工具。"
+EMBEDDED_SQL_REJECTED: Final[str] = (
+    "检测到消息中包含 SQL，本轮未执行；需要执行请单独发送这条 SQL。"
+)
 CONVERSATION_TERMINAL_REASON: Final[str] = "interaction.conversation_responded"
 _CONVERSATION_ANSWER: Final[str] = (
     "我能做的事就是下面这份能力清单，它直接来自当前能力快照，不是我总结出来的。"
@@ -41,12 +46,20 @@ def request_preview_text(submission: TaskSubmission) -> str:
     return _SQL_SUBMISSION_PREVIEW
 
 
-def render_preplan_rejection(*, status: TaskStatus) -> RenderPayload:
-    """只投影确定性拒绝；没有计划时不得猜测领域事实。"""
+def render_preplan_rejection(
+    *, status: TaskStatus, reason_code: str | None = None
+) -> RenderPayload:
+    """只投影确定性拒绝；没有计划时不得猜测领域事实。
+
+    嵌入 SQL 拒绝有固定文案（设计 §5.1）；其他原因与 ``None`` 保持通用文案。
+    """
     if status is not TaskStatus.REJECTED:
         raise ValueError("generic pre-plan projection requires rejected status")
+    embedded = (
+        reason_code == InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED.value
+    )
     return RenderPayload(
-        answer=_PREPLAN_REJECTED,
+        answer=EMBEDDED_SQL_REJECTED if embedded else _PREPLAN_REJECTED,
         sections=(),
         next_steps=(),
         status=status,
@@ -109,12 +122,24 @@ _CLARIFICATION_PROMPTS: Final[dict[ClarificationReasonCode, str]] = {
     ClarificationReasonCode.CAPABILITY_ASSET_SELECTOR_REQUIRED: (
         "请补充一个明确的资产选择条件。"
     ),
+    ClarificationReasonCode.CAPABILITY_TARGET_SELECTION_REQUIRED: (
+        "当前环境有多个可查询的 StarRocks，请回复其中一个名称（需与下列名称完全一致）："
+    ),
 }
 
 
 def render_clarification_payload(*, record: ClarificationRecord) -> ClarificationPayload:
     """只从持久化 ClarificationRecord 投影澄清提示。"""
     prompt = _CLARIFICATION_PROMPTS[record.reason_code]
+    selection = (
+        record.subject.target_selection
+        if isinstance(record.subject, CapabilitySubject)
+        else None
+    )
+    if selection is not None:
+        # 只列展示名；SQL 引用与 hash 不进入提示。
+        names = "、".join(option.display_name for option in selection.options)
+        prompt = f"{prompt}{names}。"
     if record.subject.kind == "capability" and record.missing_fields:
         fields = ", ".join(field.value for field in record.missing_fields)
         prompt = f"{prompt} 缺失字段：{fields}。"

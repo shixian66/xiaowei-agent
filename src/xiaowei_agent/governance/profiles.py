@@ -17,6 +17,10 @@ from xiaowei_agent.capabilities.prometheus_alert import (
     PROMETHEUS_ALERT_POLICY_PROFILE,
     PROMETHEUS_ENVIRONMENT_IDS,
 )
+from xiaowei_agent.capabilities.readonly_query import (
+    OP_EXECUTE_READONLY_QUERY,
+    READONLY_QUERY_POLICY_PROFILE,
+)
 from xiaowei_agent.capabilities.specs import OP_COUNT, OP_LIST, POLICY_PROFILE
 from xiaowei_agent.capabilities.target import KNOWN_ENVIRONMENT_IDS
 from xiaowei_agent.contracts import (
@@ -27,7 +31,7 @@ from xiaowei_agent.contracts import (
     RiskLevel,
 )
 
-POLICY_REVISION: Final[str] = "policy-2026-09-05.2"
+POLICY_REVISION: Final[str] = "policy-2026-09-28.1"
 """当前生效的 policy revision。
 
 revision 变化必须让旧审批与旧凭证失效（ARCHITECTURE §15），因此它是一个显式常量，
@@ -68,12 +72,30 @@ ASSET_INVENTORY_READONLY_PROFILE: Final[PolicyProfile] = PolicyProfile(
     max_timeout_seconds=MAX_READONLY_TIMEOUT_SECONDS,
 )
 
+MAX_READONLY_QUERY_TOOL_CALL_SECONDS: Final[float] = 300.0
+"""F1 ToolCall 上限（设计 §8.3）：server 180 秒 + driver/Gateway 余量，不超过 300 秒。"""
+
+READONLY_QUERY_PROFILE: Final[PolicyProfile] = PolicyProfile(
+    profile_id=READONLY_QUERY_POLICY_PROFILE,
+    allowed_operations=(OP_EXECUTE_READONLY_QUERY,),
+    allowed_effect_classes=(EffectClass.READ,),
+    # F1 的唯一 RESTRICTED 读；是否真正放行由 Runner 水合与 confirmed_readonly
+    # SQLGuard 决定，本 profile 只声明允许面。
+    allowed_read_classes=(ReadClass.RESTRICTED,),
+    # 与其他只读 profile 同一非生产环境闭集；生产目标另需 F1-H 现场 GO 后修订。
+    allowed_environment_ids=KNOWN_ENVIRONMENT_IDS,
+    # 读的是用户指定的任意表数据，风险高于模板化只读。
+    risk=RiskLevel.MEDIUM,
+    max_timeout_seconds=MAX_READONLY_QUERY_TOOL_CALL_SECONDS,
+)
+
 ACTIVE_POLICY_SNAPSHOT: Final[PolicySnapshot] = PolicySnapshot(
     policy_revision=POLICY_REVISION,
     profiles=(
         POLICY_PROFILE,
         PROMETHEUS_ALERT_POLICY_PROFILE,
         ASSET_INVENTORY_POLICY_PROFILE,
+        READONLY_QUERY_POLICY_PROFILE,
     ),
 )
 """当前注册的 profile 集合。

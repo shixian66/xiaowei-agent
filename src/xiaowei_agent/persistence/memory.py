@@ -58,6 +58,8 @@ class InMemoryPersistenceState:
         self.channel_bindings: dict[str, ChannelBinding] = {}
         self.channel_binding_ids_by_source: dict[tuple[str, str, str, str], str] = {}
         self.channel_binding_ids_by_task: dict[str, str] = {}
+        # (tenant, environment, source_event_ref) → 选定的提交类型（ADR-018 D2 渠道侧约束）。
+        self.channel_source_kinds: dict[tuple[str, str, str], str] = {}
         self.projection_subscriptions: dict[str, ProjectionSubscription] = {}
         self.projection_subscription_ids_by_destination: dict[
             tuple[str, str, str], str

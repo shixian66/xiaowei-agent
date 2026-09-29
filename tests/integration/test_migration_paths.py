@@ -1587,3 +1587,379 @@ async def test_rev_0019_downgrade_refuses_while_sql_facts_exist(
             ) == 1
     finally:
         await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0020_backfills_one_claim_per_existing_binding_with_its_kind(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+    clock: Any,
+) -> None:
+    import datetime as dt
+
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import ChannelKind
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    channels = PostgresChannelStore(engine=clean_database, clock=clock)
+    conversation = await store.create_task(
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="c-1"))
+    )
+    sql = await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=context,
+            sql_bytes=b"SELECT 1",
+            idempotency_key="s-1",
+            as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+        )
+    )
+    assert sql.task is not None
+    for task_id, ref in ((conversation.task_id, "event-c"), (sql.task.task_id, "event-s")):
+        await channels.bind_task(
+            command=BindTaskCommand(
+                task_id=task_id,
+                tenant_id=context.tenant_id,
+                environment_id=context.environment_id,
+                channel=ChannelKind.WEB,
+                initiator_subject_ref="subject-alice",
+                source_event_ref=ref,
+                created_at=clock(),
+            )
+        )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        assert "channel_source_claims" not in await _table_names(clean_database)
+
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            claims = (
+                await connection.execute(
+                    sa.text(
+                        "SELECT source_event_ref, input_kind "
+                        "FROM channel_source_claims ORDER BY source_event_ref"
+                    )
+                )
+            ).all()
+        assert [tuple(row) for row in claims] == [
+            ("event-c", "conversation"),
+            ("event-s", "sql_artifact"),
+        ]
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+class _BindingFailsChannelStore:
+    """升级前“任务已建、渠道绑定临时失败”：其余方法原样委托真实 PostgreSQL 渠道存储。"""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def bind_task(self, *, command: Any) -> Any:
+        raise RuntimeError("binding temporarily unavailable")
+
+
+def _channel_command(text: str) -> Any:
+    import datetime as dt
+
+    from xiaowei_agent.application.channel_submission import ChannelSubmitCommand
+    from xiaowei_agent.contracts import (
+        AuthenticatedPrincipal,
+        ChannelKind,
+        ChannelPermission,
+        IdentitySource,
+    )
+
+    return ChannelSubmitCommand(
+        principal=AuthenticatedPrincipal(
+            tenant_id="dev-local",
+            environment_id="dev",
+            actor="alice",
+            source=IdentitySource.FEISHU,
+            subject_ref="subject-alice",
+            permissions=frozenset(
+                {ChannelPermission.VIEW_SAFE_TASK, ChannelPermission.SUBMIT_READONLY_TASK}
+            ),
+        ),
+        channel=ChannelKind.FEISHU_GROUP,
+        request_id="r1",
+        trace_id="1" * 32,
+        policy_revision="policy-1",
+        text=text,
+        client_submission_ref="event-upgrade-1",
+        conversation_ref="chat-1",
+        submitted_at=dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC),
+    )
+
+
+def _channel_service(
+    store: Any, engine: AsyncEngine, channel_store: Any, recognize_sql: Any
+) -> Any:
+    from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+    from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+    from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
+    from xiaowei_agent.persistence.postgres import PostgresEvidenceLedger, PostgresPlanStore
+
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=PostgresPlanStore(engine=engine),
+        ledger=PostgresEvidenceLedger(engine=engine),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),  # type: ignore[arg-type]
+        recognize_sql=recognize_sql,
+    )
+    return ChannelSubmissionService(runtime=runtime, channel_store=channel_store)
+
+
+async def _count(engine: AsyncEngine, table: str) -> int:
+    async with engine.connect() as connection:
+        count = sa.select(sa.func.count()).select_from(sa.table(table))
+        return int(await connection.scalar(count) or 0)
+
+
+async def _submit_before_upgrade_and_lose_the_binding(
+    store: Any, engine: AsyncEngine, clock: Any, run_upgrade: Any, run_downgrade: Any, text: str
+) -> str:
+    """旧识别器把文本当对话、任务已建但绑定失败，然后回到 0019 再升级到 head。"""
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+
+    old_era = _channel_service(
+        store,
+        engine,
+        _BindingFailsChannelStore(PostgresChannelStore(engine=engine, clock=clock)),
+        lambda _text: None,
+    )
+    with pytest.raises(RuntimeError, match="binding temporarily unavailable"):
+        await old_era.submit(command=_channel_command(text))
+    async with engine.connect() as connection:
+        (task_id,) = (await connection.execute(sa.text("SELECT task_id FROM tasks"))).scalars()
+    assert await _count(engine, "channel_bindings") == 0
+
+    async with engine.begin() as connection:
+        await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+    assert "channel_source_claims" not in await _table_names(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(run_upgrade, "head")
+    return str(task_id)
+
+
+async def test_rev_0020_claims_unbound_channel_tasks_so_a_reclassified_retry_cannot_fork(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    clock: Any,
+) -> None:
+    from xiaowei_agent.governance.sql_message import recognize_sql_message
+    from xiaowei_agent.persistence import IdempotencyConflictError
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        await _submit_before_upgrade_and_lose_the_binding(
+            store, clean_database, clock, run_upgrade, run_downgrade, "SHOW USERS"
+        )
+        # 新识别器把同一事件判为 SQL：只能被拒绝，不得新增 SqlArtifact 或第二个任务。
+        upgraded = _channel_service(
+            store,
+            clean_database,
+            PostgresChannelStore(engine=clean_database, clock=clock),
+            recognize_sql_message,
+        )
+        with pytest.raises(IdempotencyConflictError):
+            await upgraded.submit(command=_channel_command("SHOW USERS"))
+
+        assert await _count(clean_database, "tasks") == 1
+        assert await _count(clean_database, "sql_artifacts") == 0
+        assert await _count(clean_database, "channel_bindings") == 0
+        async with clean_database.connect() as connection:
+            kinds = (
+                await connection.execute(
+                    sa.text("SELECT input_kind FROM channel_source_claims")
+                )
+            ).scalars().all()
+        assert kinds == ["conversation"]
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0020_lets_an_unbound_channel_task_recover_its_binding_after_upgrade(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    clock: Any,
+) -> None:
+    from xiaowei_agent.governance.sql_message import recognize_sql_message
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+
+    run_upgrade, run_downgrade = alembic_runners
+    try:
+        task_id = await _submit_before_upgrade_and_lose_the_binding(
+            store, clean_database, clock, run_upgrade, run_downgrade, "inspect slow queries"
+        )
+        upgraded = _channel_service(
+            store,
+            clean_database,
+            PostgresChannelStore(engine=clean_database, clock=clock),
+            recognize_sql_message,
+        )
+        retried = await upgraded.submit(command=_channel_command("inspect slow queries"))
+
+        assert retried.task_view.task_id == task_id
+        assert retried.binding.task_id == task_id
+        assert await _count(clean_database, "tasks") == 1
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0020_does_not_claim_non_channel_tasks_that_borrow_the_key_shape(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    from tests.conftest import make_envelope, make_submission
+
+    run_upgrade, run_downgrade = alembic_runners
+    # API 调用方可以自选幂等键；只有渠道来源的对话任务才代表渠道事件。
+    await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key=f"channel:v1:{'a' * 64}")
+        )
+    )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        assert await _count(clean_database, "channel_source_claims") == 0
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+async def test_rev_0020_keeps_the_earliest_kind_when_legacy_tasks_hold_both(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+) -> None:
+    import datetime as dt
+
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import Channel
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    # TaskStore 的跨类型作用域允许同一键各有一个任务；升级前没有占位时可能已经如此。
+    key = f"channel:v1:{'b' * 64}"
+    await store.create_task(
+        submission=make_submission(
+            context, envelope=make_envelope(idempotency_key=key, channel=Channel.FEISHU)
+        )
+    )
+    await store.submit_sql_query(
+        command=SqlQuerySubmitCommand(
+            context=context,
+            sql_bytes=b"SELECT 1",
+            idempotency_key=key,
+            as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+        )
+    )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            claims = (
+                await connection.execute(
+                    sa.text("SELECT source_event_ref, input_kind FROM channel_source_claims")
+                )
+            ).all()
+        assert [tuple(row) for row in claims] == [("b" * 64, "conversation")]
+    finally:
+        await _restore_head(clean_database, run_upgrade)
+
+
+@pytest.mark.parametrize(
+    "earlier_kind", ["conversation", "sql_artifact"], ids=["conversation-first", "sql-first"]
+)
+async def test_rev_0020_earliest_task_wins_even_when_only_the_later_one_is_bound(
+    clean_database: AsyncEngine,
+    alembic_runners: tuple[Any, Any],
+    store: Any,
+    context: Any,
+    clock: Any,
+    earlier_kind: str,
+) -> None:
+    import datetime as dt
+
+    from tests.conftest import make_envelope, make_submission
+
+    from xiaowei_agent.contracts import Channel, ChannelKind
+    from xiaowei_agent.persistence.channel import BindTaskCommand
+    from xiaowei_agent.persistence.postgres import PostgresChannelStore
+    from xiaowei_agent.persistence.store import SqlQuerySubmitCommand
+
+    run_upgrade, run_downgrade = alembic_runners
+    ref = "d" * 64
+    key = f"channel:v1:{ref}"
+
+    async def conversation() -> str:
+        record = await store.create_task(
+            submission=make_submission(
+                context, envelope=make_envelope(idempotency_key=key, channel=Channel.FEISHU)
+            )
+        )
+        return str(record.task_id)
+
+    async def sql() -> str:
+        result = await store.submit_sql_query(
+            command=SqlQuerySubmitCommand(
+                context=context,
+                sql_bytes=b"SELECT 1",
+                idempotency_key=key,
+                as_of=dt.datetime(2026, 9, 28, tzinfo=dt.UTC),
+            )
+        )
+        assert result.task is not None
+        return str(result.task.task_id)
+
+    # 较早的任务未绑定，较晚的另一类型任务已绑定。
+    first, second = (conversation, sql) if earlier_kind == "conversation" else (sql, conversation)
+    await first()
+    later_task_id = await second()
+    await PostgresChannelStore(engine=clean_database, clock=clock).bind_task(
+        command=BindTaskCommand(
+            task_id=later_task_id,
+            tenant_id=context.tenant_id,
+            environment_id=context.environment_id,
+            channel=ChannelKind.FEISHU_PRIVATE,
+            initiator_subject_ref="subject-alice",
+            source_event_ref=ref,
+            created_at=clock(),
+        )
+    )
+    try:
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_downgrade, "0019_f1_sql_results")
+        async with clean_database.begin() as connection:
+            await connection.run_sync(run_upgrade, "head")
+        async with clean_database.connect() as connection:
+            claims = (
+                await connection.execute(
+                    sa.text("SELECT source_event_ref, input_kind FROM channel_source_claims")
+                )
+            ).all()
+        assert [tuple(row) for row in claims] == [(ref, earlier_kind)]
+    finally:
+        await _restore_head(clean_database, run_upgrade)

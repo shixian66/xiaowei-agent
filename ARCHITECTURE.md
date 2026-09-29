@@ -143,7 +143,9 @@ SQL 查询是普通 capability，走上图同一条主链；差别只在交互�
 
 ```text
 网页聊天框 / 飞书单聊 / 飞书群聊 @小维（直接发 SQL，无前缀）
-  → ChannelSubmissionService：recognize_sql_message（确定性；认不出按普通对话）
+  → ChannelSubmissionService：recognize_sql_message（确定性，像 SQL 的就是 SQL：sql 代码块、命中 SQL 语句识别登记表签名或可解析为查询；由 TaskViewRuntime 持有，
+       所有文本入口共用；API/CLI 与澄清回答中的纯 SQL 在写任务事实前以 sql_message.not_accepted 拒绝）
+  → channel_source_claims：来源事件原子选定提交类型（同一事件另一类型 → 幂等冲突，不建任务）
   → TaskStore.submit_sql_query（一个事务：SqlArtifact + task + ArtifactSubmission）
   → Worker（最多同时 4 个任务）→ XiaoweiRuntime
        → load_or_accept_interaction：ArtifactSubmission → origin=rule 交互事实，模型调用 0 次

@@ -4,10 +4,19 @@ import asyncio
 
 import pytest
 from tests.conftest import make_envelope, make_submission
-from tests.suites.channel_store import CHANNEL_STORE_CASES, _binding, _subscription, bind
+from tests.suites.channel_store import (
+    CHANNEL_STORE_CASES,
+    _binding,
+    _source_claim,
+    _subscription,
+    bind,
+)
 
 from xiaowei_agent.contracts import ProjectionState
-from xiaowei_agent.persistence.channel import ClaimProjectionCommand
+from xiaowei_agent.persistence.channel import (
+    ChannelSourceKindConflictError,
+    ClaimProjectionCommand,
+)
 from xiaowei_agent.persistence.migrations.guards import MigrationSafetyError
 from xiaowei_agent.persistence.postgres import PostgresChannelStore
 
@@ -18,6 +27,25 @@ def channel_store(clock, clean_database):
 
 
 bind(globals(), CHANNEL_STORE_CASES)
+
+
+async def test_concurrent_source_claims_have_one_database_winner(channel_store, clock) -> None:
+    kinds = ["conversation", "sql_artifact"] * 4
+    results = await asyncio.gather(
+        *(
+            channel_store.claim_source_event(command=_source_claim(kind, clock()))
+            for kind in kinds
+        ),
+        return_exceptions=True,
+    )
+
+    winners = {kind for kind, result in zip(kinds, results, strict=True) if result is None}
+    assert len(winners) == 1
+    assert all(
+        isinstance(result, ChannelSourceKindConflictError)
+        for kind, result in zip(kinds, results, strict=True)
+        if kind not in winners
+    )
 
 
 async def test_concurrent_binding_replays_one_database_winner(

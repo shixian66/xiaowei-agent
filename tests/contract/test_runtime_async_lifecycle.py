@@ -23,6 +23,7 @@ from xiaowei_agent.application.default_capabilities import (
     ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
+    readonly_query_binding,
 )
 from xiaowei_agent.application.runtime import (
     RECOVERY_DRIFT_REASON,
@@ -30,6 +31,7 @@ from xiaowei_agent.application.runtime import (
     TaskInProgressError,
 )
 from xiaowei_agent.capabilities import SpecResolutionError
+from xiaowei_agent.capabilities.readonly_query import ReadonlyQueryTargetCatalog
 from xiaowei_agent.contracts import (
     AnswerabilityVerdict,
     AttemptIntent,
@@ -56,6 +58,8 @@ from xiaowei_agent.planning.disclosure import DisclosureProjectionError
 from xiaowei_agent.runners.binding import CapabilityExecutionBinding
 from xiaowei_agent.runners.deterministic import DriftError, LifecycleError
 from xiaowei_agent.tools.starrocks_fake import StarRocksRecordingAdapter
+
+EMPTY_READONLY_QUERY_BINDING = readonly_query_binding(ReadonlyQueryTargetCatalog.empty())
 
 
 def test_task_view_encodes_its_own_query_path() -> None:
@@ -267,6 +271,7 @@ async def test_terminal_query_uses_the_renderer_selected_by_the_stored_plan(
                 selected,
                 PROMETHEUS_ALERT_BINDING,
                 ASSET_INVENTORY_BINDING,
+                EMPTY_READONLY_QUERY_BINDING,
             ),
         ),
     )
@@ -537,6 +542,7 @@ async def test_recomputed_plan_drift_on_resume_fails_before_gateway(
                 changed_binding,
                 PROMETHEUS_ALERT_BINDING,
                 ASSET_INVENTORY_BINDING,
+                EMPTY_READONLY_QUERY_BINDING,
             ),
         ),
     )
@@ -869,6 +875,7 @@ async def test_prepare_keeps_planner_value_error_retryable(
                 changed_binding,
                 PROMETHEUS_ALERT_BINDING,
                 ASSET_INVENTORY_BINDING,
+                EMPTY_READONLY_QUERY_BINDING,
             ),
         ),
     )

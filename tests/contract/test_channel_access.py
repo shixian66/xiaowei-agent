@@ -25,6 +25,7 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskStatus,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.persistence.channel import BindTaskCommand
 from xiaowei_agent.persistence.evidence import InMemoryEvidenceLedger
 from xiaowei_agent.persistence.fake import InMemoryChannelStore
@@ -74,6 +75,7 @@ def _service(store: Any, channel_store: Any, memory_state: Any, membership: Any)
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
     return TaskAccessService(
         runtime=runtime,
@@ -516,6 +518,7 @@ async def test_detail_reuses_the_authorized_record_for_projection(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
     service = TaskAccessService(
         runtime=runtime,
@@ -543,6 +546,7 @@ async def test_detail_retries_when_status_changes_during_runtime_projection(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
 
     class AdvanceOnceRuntime:
@@ -596,6 +600,7 @@ async def test_detail_fails_closed_when_no_consistent_snapshot_can_be_formed(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
 
     class ContinuouslyChangingReads:

@@ -91,7 +91,8 @@ class PlanStep(Contract):
 class PlanBudget(Contract):
     max_steps: StrictInt = Field(gt=0)
     max_tool_calls: StrictInt = Field(gt=0)
-    max_model_tokens: StrictInt = Field(gt=0)
+    # F1 计划不调用模型，预算为 0（设计 §5.5）；其余能力仍各自声明正数上限。
+    max_model_tokens: StrictInt = Field(ge=0)
 
 
 class ExecutionPlan(Contract):

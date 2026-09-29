@@ -133,8 +133,10 @@ from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
     ChannelBindingLookup,
     ChannelBindingNotFoundError,
+    ChannelSourceKindConflictError,
     ClaimedTaskLookup,
     ClaimProjectionCommand,
+    ClaimSourceEventCommand,
     CompleteProjectionCommand,
     CreateProjectionSubscriptionCommand,
     DeadLetterProjectionCommand,
@@ -258,6 +260,7 @@ from xiaowei_agent.persistence.schema import (
     ACTIVATION_REQUESTS,
     ADMIN_AUDIT_EVENTS,
     CHANNEL_BINDINGS,
+    CHANNEL_SOURCE_CLAIMS,
     CREATED_SEQUENCE,
     EXTERNAL_IDENTITIES,
     FENCING_SEQUENCE,
@@ -321,6 +324,7 @@ from xiaowei_agent.persistence.store import (
     step_commit_digest,
     submission_digest,
     submission_matches_record,
+    target_selection_sql,
     validate_task_failure_limit,
 )
 from xiaowei_agent.persistence.web_session import (
@@ -706,6 +710,34 @@ class PostgresChannelStore:
         if not subscription_matches_command(winner, command):
             raise ProjectionSubscriptionConflictError
         return winner
+
+    @_persistence_boundary(write=True)
+    async def claim_source_event(self, *, command: ClaimSourceEventCommand) -> None:
+        async with _write_transaction(self._engine) as connection:
+            await connection.execute(
+                sa.dialects.postgresql.insert(CHANNEL_SOURCE_CLAIMS)
+                .values(
+                    tenant_id=command.tenant_id,
+                    environment_id=command.environment_id,
+                    source_event_ref=command.source_event_ref,
+                    input_kind=command.input_kind,
+                    created_at=command.created_at,
+                )
+                .on_conflict_do_nothing()
+            )
+            # 并发插入时 ON CONFLICT 等待先到事务提交，之后读到的就是胜出的类型。
+            chosen = (
+                await connection.execute(
+                    sa.select(CHANNEL_SOURCE_CLAIMS.c.input_kind).where(
+                        CHANNEL_SOURCE_CLAIMS.c.tenant_id == command.tenant_id,
+                        CHANNEL_SOURCE_CLAIMS.c.environment_id == command.environment_id,
+                        CHANNEL_SOURCE_CLAIMS.c.source_event_ref
+                        == command.source_event_ref,
+                    )
+                )
+            ).scalar_one()
+        if chosen != command.input_kind:
+            raise ChannelSourceKindConflictError
 
     @_persistence_boundary(write=True)
     async def bind_task(self, *, command: BindTaskCommand) -> ChannelBinding:
@@ -2422,6 +2454,67 @@ class PostgresTaskStore:
             ).scalar_one()
         return dataclasses.replace(available, expires_at=expires_at)
 
+    async def _extend_selected_sql(
+        self, connection: AsyncConnection, *, parent: TaskRecord
+    ) -> None:
+        """父记录为目标选择时锁住并分类其 SQL，可用时只延不缩（设计 §9.4 第 2 项）。
+
+        与父任务行锁、子任务插入同一事务；异常使整个事务回滚，父任务不被消费。
+        """
+        record_row = (
+            (
+                await connection.execute(
+                    sa.select(TASK_CLARIFICATION_RECORDS).where(
+                        TASK_CLARIFICATION_RECORDS.c.task_id == parent.task_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        selected = target_selection_sql(
+            None if record_row is None else row_to_clarification_record(record_row)
+        )
+        if selected is None:
+            return
+        found = (
+            (
+                await connection.execute(
+                    sa.select(SQL_ARTIFACTS)
+                    .where(SQL_ARTIFACTS.c.sql_ref == selected.sql_ref)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .first()
+        )
+        row = (
+            None
+            if found is None
+            else _row_to_sql_artifact(
+                {column.name: found[column.name] for column in SQL_ARTIFACTS.columns}
+            )
+        )
+        now = self._clock()
+        decision = classify_sql_artifact_read(
+            row,
+            now=now,
+            requester=parent.actor,
+            tenant_id=parent.tenant_id,
+            environment_id=parent.environment_id,
+            sql_hash=selected.sql_hash,
+        )
+        raise_for_sql_artifact_read(row, decision)
+        await connection.execute(
+            sa.update(SQL_ARTIFACTS)
+            .where(SQL_ARTIFACTS.c.sql_ref == selected.sql_ref)
+            .values(
+                expires_at=sa.func.greatest(
+                    SQL_ARTIFACTS.c.expires_at, now + SQL_ARTIFACT_TTL
+                )
+            )
+        )
+
     @_persistence_boundary(write=True)
     async def create_clarification_child(
         self,
@@ -2487,6 +2580,7 @@ class PostgresTaskStore:
             )
             if consumed is not None:
                 raise TaskNotFoundError(task_id=clarification_parent_id)
+            await self._extend_selected_sql(connection, parent=parent)
             inserted = await self._insert_task_with_submission(
                 connection,
                 submission=submission,

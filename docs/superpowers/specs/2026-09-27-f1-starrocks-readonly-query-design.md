@@ -118,17 +118,35 @@ v8 中保留的决定：不做 target 排队锁；SQL 上限 65_536 bytes；结�
 application 层 ChannelSubmissionService，不在入口判断业务。渠道文本上限从 8192 字符放宽到 65_536 bytes，
 非 SQL 的普通消息仍受现有 8192 字符上限约束，超出时按“消息过长”拒绝。
 
-ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_message(text)`：
+ChannelSubmissionService 在创建任务前调用纯函数 `recognize_sql_message(text)`。去掉首尾空白、整条消息恰好是一个
+fenced code block 时只取块内正文后，只有两种结论——**像 SQL 的就是 SQL**（负责人 2026-09-29 决定）：
 
-1. 去掉首尾空白；若整条消息恰好是一个 fenced code block，只取块内正文；
-2. 首个 token 属于闭集 SQL 语句关键字（读：SELECT、WITH、SHOW、DESC、DESCRIBE、EXPLAIN、ADMIN、ANALYZE；写与会话：
-   INSERT、UPDATE、DELETE、MERGE、REPLACE、CREATE、DROP、ALTER、TRUNCATE、GRANT、REVOKE、SET、USE、KILL、LOAD、
-   EXPORT、SUBMIT、CANCEL、BEGIN、COMMIT、ROLLBACK 等，精确闭集写在代码中）；
-3. 通过 §7.2 token 扫描后恰好是一条完整语句：sqlglot 30.17.0 完整解析，或命中 §7.3 只读语句清单；
+1. **SQL**：满足任一条——
+   - **明确标记为 sql 的代码块**（```` ```sql ````）：用户已声明这是 SQL，内容交 SQLGuard 判断；
+   - **命中签名**：命中 **SQL 语句识别登记表**（`governance/sql_statements.py`，唯一真源）某种语句的签名。写得不完整
+     或写错也算，例如 “show data for yesterday”“create table for this report”“prepare a report”、未闭合的
+     `SELECT 'x`、“select what's wrong”；
+   - **签名补不完的查询**：签名都不命中，首条语句却能被 sqlglot 30.17.0 完整解析成真正的查询（`Query`，`Command`
+     不算），例如 `SELECT TRUE AND TRUE`、`SELECT NULL`、一元表达式、CASE、“select this”。
 
-三条同时满足才是 SQL 消息。写语句也会被识别，目的是明确回复“只允许只读查询”，而不是当成聊天。其他消息
-（例如“show 一下昨天的慢查询”“帮我看看这条 SQL 为什么慢：SELECT …”）都不是 SQL 消息，不会被当作 SQL 执行。识别是
-确定性规则，不调用模型，同一输入永远得到同一结论。
+   登记表覆盖 StarRocks 文档 `docs/en/sql-reference/sql-statements` 的全部顶层 SQL 语句（含 3.2 起的 PREPARE /
+   EXECUTE / DEALLOCATE PREPARE）与 MySQL 兼容的事务、CALL、MERGE、RENAME 等写语句；完整性测试按手写的固定文档
+   快照逐页校验：快照内的页不会静默漏登记，上游新增的文档页不会让测试自动失败，要刷新快照后才暴露。多语句按
+   第一条判断。
+2. **对话**：签名都不命中也不是查询，例如 “show me the slow queries”“create a dashboard”“analyze this”
+   “explain why …”“select the best option”；或字符串、quoted identifier 与注释之外出现中文等自然语言文字（混合消息，
+   由下面的嵌入 SQL 检测兜底）。
+
+签名只认这种 SQL 才会有的开头（如 `SHOW DATA`、`CREATE TABLE`、`PREPARE <名字>`、SELECT 后出现 FROM 或字符串），
+单词语句（BEGIN、COMMIT、SYNC 等）要求整条就是这个词。识别不判断是否完整、是否支持、是否安全：所有 SQL 都保存为
+SqlArtifact（24 小时清理），永不进入模型；写语句、清单外的已知语句（例如 SHOW USERS、ADMIN SHOW FRONTEND CONFIG）、
+多语句与写错的语句由 SQLGuard 给出“暂未支持”“只允许只读查询”等确定性拒绝，通过 SQLGuard 的交数据库执行，失败按
+§5.8 闭集原因返回错误类别与 StarRocks 错误码。判定在一份判定副本上进行，复制粘贴带进来的智能引号、全角字符（NFKC）
+与不可见的控制/格式字符先归一化或去掉，保存与执行的仍是原文，SQLGuard 照样按原文拒绝这些字符。识别是确定性规则，
+不调用模型，同一输入永远得到同一结论。
+
+**升级兼容。**worker 在构造模型请求前对每个对话任务复用同一个识别函数：升级前按对话持久化、现在识别为 SQL 的任务
+以 `EMBEDDED_SQL_NOT_EXECUTED` 拒绝（固定文案提示单独重新发送），不调用模型、不建 SqlArtifact、Gateway 调用为 0。
 
 **嵌入 SQL 不执行。**不是 SQL 消息、但 `contains_embedded_sql(text)` 为真的消息，以固定文案拒绝，不执行任何
 capability。候选片段是每个 fenced code block 的正文，以及正文外每个以闭集 SQL 语句关键字（词边界、不分大小写）
@@ -145,6 +163,14 @@ SQL 只有作为纯 SQL 消息被识别后才可能执行”这一保证由 §5.
 
 识别为 SQL 后，服务调用 `TaskStore.submit_sql_query`，在**同一个 PostgreSQL 事务**内写 SqlArtifact（原始 bytes、
 SHA-256、requester、tenant、environment、created_at）并创建 task 与 `ArtifactSubmission`；幂等键沿用渠道现有派生规则。
+TaskStore 让对话与 SQL 的幂等键分属不同作用域（ADR-018 D2），渠道来源事件却只有一个：服务在创建任务**之前**
+原子写入来源占位（`channel_source_claims`，按 tenant、environment 与来源摘要唯一，只记录提交类型），第一次写入的
+类型胜出，同一来源事件的另一种类型按幂等冲突拒绝，不留下未绑定的任务或 SqlArtifact。升级前已建任务（包括绑定
+失败、尚未绑定的任务）由 migration 按任务幂等键回填占位（ADR-018 D2）。
+
+**同一个分类点。**识别端口由 `TaskViewRuntime` 持有，所有文本入口共用：渠道提交据此分流；`submit_task` 与
+`submit_clarification_child` 据此拒绝纯 SQL 的普通对话与澄清回答（`sql_message.not_accepted`，HTTP 422），在写入
+任何任务事实之前。API/CLI 本阶段不支持 SQL 提交，纯 SQL 在这里被确定性拒绝，不进模型。
 之后的渠道绑定、投影与回复与其他任务完全相同，ChannelStore 不保存 SQL。
 
 ### 5.2 TaskSubmission 不保存 SQL

@@ -15,6 +15,7 @@ from xiaowei_agent.contracts import (
     RouteSubject,
     RoutingDisposition,
 )
+from xiaowei_agent.contracts.intent import RULE_ONLY_INTENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,13 +59,22 @@ def _proceed(draft: IntentDraft) -> InteractionRouteDecision:
 
 
 def route_interaction(
-    *, draft: InteractionDraft, context: RequestContext
+    *,
+    draft: InteractionDraft,
+    context: RequestContext,
+    embedded_sql: bool = False,
 ) -> InteractionRouteDecision:
     """在 resolver 之前裁决 interaction 类型与环境断言。
 
     `context.environment_id` 是目标环境事实；模型/规则草案里的同名槽位只作为用户
     断言复核，不能反向改写上下文。
+
+    ``embedded_sql`` 由 Runtime 用确定性检测从用户原文算出，不取自草案：为真时在读取
+    草案之前拒绝，模型或关键词规则给出的任何意图都不执行（设计 §5.1）。只读查询这类
+    规则专属意图只接受规则来源草案（设计 §5.3）。
     """
+    if embedded_sql:
+        return _refuse(InteractionRejectionReasonCode.EMBEDDED_SQL_NOT_EXECUTED)
 
     if (
         draft.proposed_kind is not InteractionKind.CAPABILITY_REQUEST
@@ -86,6 +96,12 @@ def route_interaction(
 
     if draft.capability_draft is None:
         return _refuse(InteractionRejectionReasonCode.CAPABILITY_DRAFT_MISSING)
+
+    if (
+        draft.capability_draft.intent in RULE_ONLY_INTENTS
+        and draft.source is not InteractionSource.RULE
+    ):
+        return _refuse(InteractionRejectionReasonCode.CAPABILITY_DRAFT_FORBIDDEN)
 
     asserted_environment = draft.capability_draft.slots.get("environment_id")
     if (

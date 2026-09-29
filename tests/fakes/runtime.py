@@ -104,6 +104,7 @@ class RuntimeHarness:
         interaction_classifier: Any = None,
         slow_query_advisory: Any = None,
         provider_off: bool = False,
+        readonly_query_targets: Any = None,
     ) -> None:
         self.clock = ManualClock(start=as_of)
         self.as_of = as_of
@@ -156,7 +157,9 @@ class RuntimeHarness:
             runner = _ClearingRunner(runner, self.ledger)
         full_snapshot = StaticCapabilityRegistry().snapshot()
         rendering_bindings = build_default_capability_bindings(
-            snapshot=full_snapshot, policy_snapshot=POLICY_SNAPSHOT
+            snapshot=full_snapshot,
+            policy_snapshot=POLICY_SNAPSHOT,
+            readonly_query_targets=readonly_query_targets,
         )
         # provider_off 复现 W5 release 的权威划分：准入/执行为空，历史渲染仍完整。
         runtime_snapshot = PROVIDER_OFF_SNAPSHOT if provider_off else full_snapshot

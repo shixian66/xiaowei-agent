@@ -31,6 +31,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.capabilities.effect
     xiaowei_agent.capabilities.intent
     xiaowei_agent.capabilities.prometheus_alert
+    xiaowei_agent.capabilities.readonly_query
     xiaowei_agent.capabilities.registry
     xiaowei_agent.capabilities.resolver
     xiaowei_agent.capabilities.specs
@@ -83,6 +84,11 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.governance.admission
     xiaowei_agent.governance.binding
     xiaowei_agent.governance.profiles
+    xiaowei_agent.governance.readonly_statements
+    xiaowei_agent.governance.sql_message
+    xiaowei_agent.governance.sql_statements
+    xiaowei_agent.governance.sql_tokens
+    xiaowei_agent.governance.sqlguard
     xiaowei_agent.interfaces
     xiaowei_agent.interfaces.api
     xiaowei_agent.interfaces.auth
@@ -131,6 +137,7 @@ _TASK_VIEW_PROCESS_ALLOWED_MODULES = frozenset(
     xiaowei_agent.planning.starrocks
     xiaowei_agent.planning.starrocks.compiler
     xiaowei_agent.planning.starrocks.params
+    xiaowei_agent.planning.starrocks.readonly_query
     xiaowei_agent.planning.starrocks.slots
     xiaowei_agent.redaction
     xiaowei_agent.reflection
@@ -228,6 +235,8 @@ def test_task_view_runtime_dependency_surface_is_closed() -> None:
         "create_task",
         "get",
         "get_submission",
+        # F1：纯 SQL 消息的唯一提交入口；只写提交事实，不解释或执行。
+        "submit_sql_query",
     }
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_plans") == {"load"}
     assert _self_dependency_attributes(_TASK_VIEW_RUNTIME, "_ledger") == {"load"}

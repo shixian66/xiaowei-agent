@@ -124,6 +124,7 @@ def test_get_percent_encodes_the_complete_task_id_and_checks_the_response_id() -
         (409, 4),
         (413, 5),
         (418, 2),
+        (422, 9),
         (503, 6),
         (504, 7),
         (500, 8),

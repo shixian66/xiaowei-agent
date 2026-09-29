@@ -14,8 +14,10 @@ from xiaowei_agent.application.default_capabilities import (
     ASSET_INVENTORY_BINDING,
     PROMETHEUS_ALERT_BINDING,
     SLOW_QUERY_BINDING,
+    readonly_query_binding,
 )
 from xiaowei_agent.application.interaction_router import route_interaction
+from xiaowei_agent.capabilities.readonly_query import ReadonlyQueryTargetCatalog
 from xiaowei_agent.capabilities.specs import OP_LIST
 from xiaowei_agent.contracts import (
     IntentDraft,
@@ -30,6 +32,9 @@ from xiaowei_agent.contracts import (
 )
 
 pytestmark = pytest.mark.security
+
+EMPTY_READONLY_QUERY_BINDING = readonly_query_binding(ReadonlyQueryTargetCatalog.empty())
+
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "i1_interaction_cases.json"
 _CONTROL_TEXT = "asdfghjkl qwertyuiop"
@@ -126,7 +131,12 @@ def _restrict_list_operations(harness: RuntimeHarness) -> None:
     harness.runtime._bindings = CapabilityBindingRegistry(
         snapshot=restricted_snapshot,
         policy_snapshot=harness.runtime._runner._policy_snapshot,
-        bindings=(SLOW_QUERY_BINDING, PROMETHEUS_ALERT_BINDING, ASSET_INVENTORY_BINDING),
+        bindings=(
+            SLOW_QUERY_BINDING,
+            PROMETHEUS_ALERT_BINDING,
+            ASSET_INVENTORY_BINDING,
+            EMPTY_READONLY_QUERY_BINDING,
+        ),
     )
 
 

@@ -32,6 +32,8 @@ from xiaowei_agent.contracts import (
     ArtifactSubmission,
     AttemptIntent,
     AwareDatetime,
+    CapabilitySubject,
+    ClarificationRecord,
     Contract,
     ConversationSubmission,
     EvidenceEnvelope,
@@ -63,6 +65,7 @@ from xiaowei_agent.contracts import (
     TransitionResult,
     content_digest,
 )
+from xiaowei_agent.contracts.sql_query import SqlArtifactRef
 from xiaowei_agent.persistence.rows import dump_contract
 from xiaowei_agent.planning import canonical_json
 
@@ -272,6 +275,17 @@ def raise_for_sql_artifact_read(
         }.get(decision, SqlArtifactUnavailableReason.NOT_FOUND)
         raise SqlArtifactUnavailableError(reason=reason)
     return row
+
+
+def target_selection_sql(record: ClarificationRecord | None) -> SqlArtifactRef | None:
+    """目标选择澄清记录中的 SQL 引用；其他澄清原因没有 SQL，返回 ``None``。"""
+    if record is None:
+        return None
+    subject = record.subject
+    if not isinstance(subject, CapabilitySubject) or subject.target_selection is None:
+        return None
+    selection = subject.target_selection
+    return SqlArtifactRef(sql_ref=selection.sql_ref, sql_hash=selection.sql_hash)
 
 
 def request_dedup_digest(
@@ -783,6 +797,11 @@ class TaskStore(Protocol):
     ) -> TaskRecord:
         """一次性消费 ``CLARIFICATION_REQUIRED`` 父任务并创建澄清回复子任务。
 
+        父澄清记录为 F1 目标选择时，同一事务内锁住并分类记录中的 SQL，可用时以
+        ``GREATEST`` 延到 ``now + 24h``；失败时父任务不被消费、不建子任务。
+
+        :raises SqlArtifactExpiredError: 目标选择所引用的 SQL 已清除或已过期。
+        :raises SqlArtifactUnavailableError: 该 SQL 不存在、不属于父任务提交人或 hash 不符。
         :raises ContextMismatchError: 信封与执行上下文的 tenant/actor/environment 不一致。
         :raises ClarificationParentRequiredError: 提交未携带澄清父任务。
         :raises TaskNotFoundError: 父任务不存在、不可消费、scope/actor 漂移或已被消费。

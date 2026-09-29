@@ -106,10 +106,10 @@
       },
       "classifier_text_markers": ["SELECT", "prod.audit_log"],
       "expected_status": "rejected",
-      "expected_terminal_reason": "policy.read_class_not_allowed",
+      "expected_terminal_reason": "interaction.embedded_sql_not_executed",
       "expected_gateway_calls": 0,
-      "expected_stage_contains": ["planner"],
-      "expected_stage_excludes": ["disclosure", "admission", "gateway"]
+      "expected_stage_contains": ["intent"],
+      "expected_stage_excludes": ["planner", "disclosure", "admission", "gateway"]
     },
     {
       "id": "I1-L0-UNSUPPORTED-003",

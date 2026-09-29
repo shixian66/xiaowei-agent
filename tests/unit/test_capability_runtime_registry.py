@@ -58,8 +58,9 @@ def _never_verify_slots(
     as_of: dt.datetime,
     user_text: str,
     clarification: ClarificationContext | None = None,
+    sql_artifact: object = None,
 ) -> SlotInvalid:
-    _ = (candidate, draft, context, as_of, user_text, clarification)
+    _ = (candidate, draft, context, as_of, user_text, clarification, sql_artifact)
     return SlotInvalid(
         reason_code=InteractionRejectionReasonCode.CAPABILITY_FIELDS_INVALID
     )

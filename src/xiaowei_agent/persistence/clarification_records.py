@@ -18,6 +18,9 @@ from xiaowei_agent.contracts import (
     TaskRecord,
     TaskStatus,
 )
+from xiaowei_agent.contracts.clarification import (
+    require_target_selection_matches_reason,
+)
 from xiaowei_agent.contracts.enums import ClarificationField
 from xiaowei_agent.persistence.decisions import grant_is_current
 from xiaowei_agent.persistence.memory import InMemoryPersistenceState
@@ -89,6 +92,7 @@ class ClarificationRecordCandidate(Contract):
             subject=self.subject,
             confirmed_slots=self.confirmed_slots,
         )
+        require_target_selection_matches_reason(self.subject, self.reason_code)
         return self
 
 

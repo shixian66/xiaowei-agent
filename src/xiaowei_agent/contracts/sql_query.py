@@ -12,7 +12,7 @@ from typing import Final, NoReturn
 
 from pydantic import Field, field_validator
 
-from xiaowei_agent.contracts.base import Contract, StrictInt, StrictStr
+from xiaowei_agent.contracts.base import Contract, Sha256Hex, StrictInt, StrictStr
 from xiaowei_agent.contracts.enums import Completeness, QueryRequirement, ResultGrantKind
 
 __all__ = [
@@ -24,10 +24,18 @@ __all__ = [
     "QueryRequirement",
     "ReadonlyQueryBudget",
     "ResultGrantKind",
+    "SqlArtifactRef",
     "confirmed_artifact_arguments",
 ]
 
 _SHA256_HEX: Final = re.compile(r"[0-9a-f]{64}")
+
+
+class SqlArtifactRef(Contract):
+    """受信 SQL 来源的引用：只来自 ``ArtifactSubmission`` 或目标选择澄清记录，不含原文。"""
+
+    sql_ref: StrictStr = Field(min_length=1)
+    sql_hash: Sha256Hex
 
 
 class ReadonlyQueryBudget(Contract):

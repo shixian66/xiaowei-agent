@@ -29,6 +29,7 @@ from xiaowei_agent.capabilities.specs import (
     SLOW_QUERY_SURFACE,
 )
 from xiaowei_agent.contracts import EffectClass, ReadClass
+from xiaowei_agent.contracts.enums import QueryRequirement
 from xiaowei_agent.contracts.sql_surface import MAX_ROW_LIMIT, MAX_WINDOW_MINUTES
 
 
@@ -50,11 +51,12 @@ def test_snapshot_id_and_ordered_spec_set_are_one_golden() -> None:
         snapshot.snapshot_id,
         tuple((spec.capability_id, spec.version) for spec in snapshot.specs),
     ) == (
-        "snapshot.m6a.starrocks-prometheus-asset.v1",
+        "snapshot.f1.starrocks-prometheus-asset-readonly-query.v1",
         (
             ("starrocks.slow_query.diagnose", "1.0.0"),
             ("prometheus.alert.evidence", "1.0.0"),
             ("asset.inventory.lookup", "1.0.0"),
+            ("starrocks.readonly_query", "1.0.0"),
         ),
     )
     assert SNAPSHOT_ID == snapshot.snapshot_id
@@ -68,12 +70,18 @@ def test_synthetic_write_capability_is_not_registered() -> None:
 
 
 def test_every_registered_operation_is_read_only() -> None:
-    """M6a PR 1 仍只交付只读闭环：registry 不允许存在写操作。"""
+    """registry 不允许存在写操作；唯一的 RESTRICTED 读是 F1 的确认 SQL 查询。"""
+    restricted = set()
     for spec in StaticCapabilityRegistry().snapshot().specs:
         for operation in spec.operations:
             assert operation.effect_class is EffectClass.READ
-            assert operation.read_class is ReadClass.BOUNDED
             assert operation.side_effect is False
+            if operation.read_class is ReadClass.RESTRICTED:
+                assert operation.query_requirement is QueryRequirement.CONFIRMED_ARTIFACT
+                restricted.add((spec.capability_id, operation.operation))
+            else:
+                assert operation.read_class is ReadClass.BOUNDED
+    assert restricted == {("starrocks.readonly_query", "execute_readonly_query")}
 
 
 def test_spec_declares_exactly_the_two_m3_operations() -> None:

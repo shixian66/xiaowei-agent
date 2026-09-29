@@ -41,6 +41,7 @@ from xiaowei_agent.application.channel_access import (
     TaskListQuery,
 )
 from xiaowei_agent.application.channel_submission import (
+    ChannelMessageTooLongError,
     ChannelParentNotFoundError,
     ChannelSubmissionForbiddenError,
     ChannelSubmissionService,
@@ -592,6 +593,10 @@ async def _input_error(_: Request, __: Exception) -> Response:
     return _error(400, "invalid_request")
 
 
+async def _message_too_long(_: Request, __: Exception) -> Response:
+    return _error(413, "payload_too_large")
+
+
 async def _task_not_found(_: Request, __: Exception) -> Response:
     return _error(404, "not_found")
 
@@ -634,6 +639,13 @@ async def _application_error(_: Request, exc: Exception) -> Response:
         return _error(404, "not_found")
     if failure is ApplicationFailure.UNAVAILABLE:
         return _error(503, "unavailable")
+    if failure is ApplicationFailure.SQL_ARTIFACT_EXPIRED:
+        return _error(409, "sql_artifact.expired")
+    if failure is ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE:
+        return _error(409, "sql_artifact.unavailable")
+    if failure is ApplicationFailure.SQL_MESSAGE_NOT_ACCEPTED:
+        # 纯 SQL 不能作为普通对话或澄清回答提交；确定性拒绝，不进模型。
+        return _error(422, "sql_message.not_accepted")
     return _error(500, "internal_error")
 
 
@@ -1614,6 +1626,7 @@ def create_app(
     app.add_exception_handler(WebOriginError, _forbidden)
     app.add_exception_handler(WebCsrfError, _forbidden)
     app.add_exception_handler(ChannelParentNotFoundError, _task_not_found)
+    app.add_exception_handler(ChannelMessageTooLongError, _message_too_long)
     app.add_exception_handler(ChannelSubmissionForbiddenError, _forbidden)
     app.add_exception_handler(TaskAccessNotFoundError, _task_not_found)
     app.add_exception_handler(

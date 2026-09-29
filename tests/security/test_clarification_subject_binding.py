@@ -310,7 +310,9 @@ async def test_runtime_rejects_slot_ready_params_subclass_before_gateway() -> No
         as_of: dt.datetime,
         user_text: str,
         clarification: ClarificationContext | None = None,
+        sql_artifact: object = None,
     ) -> object:
+        assert sql_artifact is None
         result = verify_prometheus_alert_slots(
             candidate=candidate,
             draft=draft,

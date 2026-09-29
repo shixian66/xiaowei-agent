@@ -61,6 +61,16 @@ union 类型名。缺少 `input_kind` 的输入被判别 union 拒绝，旧数�
 SQL SHA-256 与幂等键；`idempotency_scope_digest` 在原三项外加入 `input_kind`，使 SQL 提交与对话提交的幂等键
 分属不同作用域。
 
+**渠道侧约束：**渠道来源事件（tenant、environment、channel、`source_event_ref`）只有一个，而 TaskStore 的两类作用域
+彼此独立。渠道提交服务在创建任务**之前**原子写入 `channel_source_claims`（主键为 tenant、environment、
+`source_event_ref`，只记录 `input_kind`；`source_event_ref` 是覆盖 channel 与 actor 的摘要，任务幂等键
+`channel:v1:<source_event_ref>` 也由它派生），第一次写入的类型胜出；同一来源事件的另一种类型按幂等冲突拒绝，不
+创建任务或 SqlArtifact。TaskStore 自身的跨类型语义不变。migration `0020_channel_source_claims` 回填所有已有
+任务的来源事件：候选为现有绑定与全部渠道任务的幂等键（含“任务已建、绑定失败”的未绑定任务；对话任务须带
+Web/飞书 envelope），同一事件已有两种类型时 `created_seq` 最早的任务的类型胜出，不论它是否已绑定。升级前按对话持久化、
+现在识别为 SQL 的任务由 worker 在构造模型请求前以同一识别函数拒绝（设计 §5.1 升级兼容）。升级后同一事件即使被新识别器改判类型，也只能
+按冲突拒绝，不会再建任务。
+
 ### D2a SQL 消息的提交是一个事务
 
 application 层识别出 SQL 消息后，`TaskStore.submit_sql_query` 是唯一的提交入口，在**同一个 PostgreSQL 事务**内完成；

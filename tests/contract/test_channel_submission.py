@@ -17,7 +17,10 @@ from xiaowei_agent.application.channel_submission import (
     channel_idempotency_key,
     derive_channel_submission_references,
 )
-from xiaowei_agent.application.task_view_runtime import TaskViewRuntime
+from xiaowei_agent.application.task_view_runtime import (
+    SqlMessageNotAcceptedError,
+    TaskViewRuntime,
+)
 from xiaowei_agent.capabilities.registry import StaticCapabilityRegistry
 from xiaowei_agent.contracts import (
     AuthenticatedPrincipal,
@@ -29,6 +32,7 @@ from xiaowei_agent.contracts import (
     TaskLookup,
     TaskStatus,
 )
+from xiaowei_agent.governance.sql_message import recognize_sql_message
 from xiaowei_agent.persistence import IdempotencyConflictError
 from xiaowei_agent.persistence.channel import (
     ChannelBindingConflictError,
@@ -132,6 +136,7 @@ def service(store, channel_store, memory_state):
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
     class NeverMembership:
         async def is_current_group_member(self, **_: object) -> bool:
@@ -682,6 +687,9 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
             self.delegate = delegate
             self.calls = 0
 
+        async def claim_source_event(self, *, command: Any) -> None:
+            await self.delegate.claim_source_event(command=command)
+
         async def bind_task(self, *, command: Any) -> Any:
             self.calls += 1
             if self.calls == 1:
@@ -698,6 +706,7 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
         ledger=InMemoryEvidenceLedger(state=memory_state),
         conversation_snapshot=StaticCapabilityRegistry().snapshot(),
         rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
     )
     service = ChannelSubmissionService(
         runtime=runtime,
@@ -716,3 +725,272 @@ async def test_binding_failure_leaves_one_recoverable_runtime_task(
     assert set(memory_state.tasks) == {recovered.task_view.task_id}
     assert len(memory_state.channel_bindings) == 1
     assert len(memory_state.projection_subscriptions) == 1
+
+
+@pytest.mark.parametrize("failure", ["expired", "unavailable"])
+async def test_sql_artifact_failures_pass_through_before_binding(
+    store, channel_store, memory_state, clock, failure: str
+) -> None:
+    from xiaowei_agent.persistence.store import (
+        SqlArtifactExpiredError,
+        SqlArtifactUnavailableError,
+        SqlArtifactUnavailableReason,
+    )
+
+    error: Exception = (
+        SqlArtifactExpiredError()
+        if failure == "expired"
+        else SqlArtifactUnavailableError(reason=SqlArtifactUnavailableReason.NOT_FOUND)
+    )
+
+    class FailingRuntime:
+        async def submit_clarification_child(self, **_: Any) -> Any:
+            raise error
+
+    class RecordingChannels:
+        def __init__(self, delegate: Any) -> None:
+            self.delegate = delegate
+            self.bind_calls = 0
+
+        async def claim_source_event(self, *, command: Any) -> None:
+            await self.delegate.claim_source_event(command=command)
+
+        async def bind_task(self, *, command: Any) -> Any:
+            self.bind_calls += 1
+            return await self.delegate.bind_task(command=command)
+
+        async def find_private_chat_ref(self, **kwargs: Any) -> Any:
+            return await self.delegate.find_private_chat_ref(**kwargs)
+
+    class AllowParent:
+        async def require_web_parent_access(self, **_: Any) -> None:
+            return None
+
+    channels = RecordingChannels(channel_store)
+    service = ChannelSubmissionService(
+        runtime=FailingRuntime(),  # type: ignore[arg-type]
+        channel_store=channels,  # type: ignore[arg-type]
+        web_parent_access=AllowParent(),
+    )
+    command = _command(
+        clock,
+        channel=ChannelKind.WEB,
+        client_key="sql-parent-answer",
+        clarification_parent_task_id="task-parent",
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await service.submit(command=command)
+
+    assert caught.value is error
+    assert channels.bind_calls == 0
+    assert memory_state.channel_bindings == {}
+
+
+# --- F1：纯 SQL 消息分流提交（设计 §5.1） ----------------------------------------
+
+
+@pytest.mark.parametrize("channel", [ChannelKind.WEB, ChannelKind.FEISHU_GROUP])
+async def test_sql_message_creates_an_artifact_task_without_sql_in_channel_facts(
+    service, channel_store, memory_state, clock, channel: ChannelKind
+) -> None:
+    import json
+
+    from xiaowei_agent.contracts import ArtifactSubmission
+
+    sql = "SELECT secret_marker_column FROM orders"
+    command = _command(clock, channel=channel, client_key="sql-message", text=sql)
+
+    first = await service.submit(command=command)
+    replay = await service.submit(command=command.model_copy(update={"request_id": "r2"}))
+
+    assert replay == first
+    task_id = first.task_view.task_id
+    assert set(memory_state.tasks) == {task_id}
+    submission = memory_state.submissions[task_id]
+    assert isinstance(submission, ArtifactSubmission)
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes == sql.encode()
+    assert artifact.sql_ref == submission.sql_ref
+    assert first.binding.task_id == task_id
+    channel_facts = json.dumps(
+        [
+            [item.model_dump(mode="json") for item in memory_state.channel_bindings.values()],
+            [
+                item.model_dump(mode="json")
+                for item in memory_state.projection_subscriptions.values()
+            ],
+        ],
+        ensure_ascii=False,
+    )
+    assert "secret_marker_column" not in channel_facts
+    assert "secret_marker_column" not in submission.model_dump_json()
+
+
+async def test_same_key_with_different_sql_is_an_idempotency_conflict(
+    service, clock
+) -> None:
+    await service.submit(command=_command(clock, client_key="sql-conflict", text="SELECT 1"))
+    with pytest.raises(IdempotencyConflictError):
+        await service.submit(
+            command=_command(clock, client_key="sql-conflict", text="SELECT 2")
+        )
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["SELECT 'password=hunter2", "SELECT TRUE AND TRUE", "show data for yesterday"],
+)
+@pytest.mark.parametrize("channel", [ChannelKind.WEB, ChannelKind.FEISHU_PRIVATE])
+async def test_sql_like_text_is_stored_only_as_an_artifact(
+    service, memory_state, clock, text: str, channel: ChannelKind
+) -> None:
+    """像 SQL 就是 SQL：原文只进 SqlArtifact（24 小时清理），不落进普通对话提交。"""
+    await service.submit(
+        command=_command(clock, channel=channel, client_key="sql-like", text=text)
+    )
+
+    (submission,) = memory_state.submissions.values()
+    assert submission.input_kind == "sql_artifact"
+    (artifact,) = memory_state.sql_artifacts.values()
+    assert artifact.sql_bytes == text.encode()
+    assert set(memory_state.channel_source_kinds.values()) == {"sql_artifact"}
+
+
+async def test_conversation_text_keeps_the_8192_character_limit(service, clock) -> None:
+    from xiaowei_agent.application.channel_submission import ChannelMessageTooLongError
+
+    await service.submit(command=_command(clock, client_key="long-ok", text="慢" * 8192))
+    with pytest.raises(ChannelMessageTooLongError):
+        await service.submit(
+            command=_command(clock, client_key="long-no", text="慢" * 8193)
+        )
+
+
+async def test_sql_text_is_bounded_by_65536_utf8_bytes(service, memory_state, clock) -> None:
+    from pydantic import ValidationError
+
+    from xiaowei_agent.application.channel_submission import ChannelMessageTooLongError
+
+    prefix = "SELECT '"
+    filler = "x" * (65_536 - len(prefix) - 1)
+    at_limit = f"{prefix}{filler}'"
+    assert len(at_limit.encode()) == 65_536
+    await service.submit(command=_command(clock, client_key="sql-max", text=at_limit))
+    assert len(memory_state.sql_artifacts) == 1
+    # 渠道文本超过 64 KiB 在命令校验时即拒绝。
+    for over in (f"{prefix}{filler}x'", "中" * 21_846):
+        with pytest.raises(ValidationError):
+            _command(clock, client_key="bytes-over", text=over)
+    # 64 KiB 以内、但不是 SQL 的长文本仍按普通消息上限拒绝。
+    with pytest.raises(ChannelMessageTooLongError):
+        await service.submit(
+            command=_command(clock, client_key="not-sql", text="SELECT 一下" + "x" * 9000)
+        )
+    assert len(memory_state.sql_artifacts) == 1
+
+
+async def test_sql_shaped_clarification_answer_is_rejected_without_consuming_the_parent(
+    store, channel_store, memory_state, clock, context
+) -> None:
+    from tests.conftest import make_envelope, make_submission
+
+    parent = await store.create_task(
+        submission=make_submission(
+            context,
+            envelope=make_envelope(
+                request_id="sql-answer-parent", idempotency_key="sql-answer-parent"
+            ),
+        )
+    )
+    await drive_to_terminal(
+        store,
+        TaskLookup(task_id=parent.task_id, tenant_id="dev-local", environment_id="dev"),
+        TaskStatus.CLARIFICATION_REQUIRED,
+    )
+
+    class AllowParent:
+        async def require_web_parent_access(self, **_: Any) -> None:
+            return None
+
+    runtime = TaskViewRuntime(
+        task_store=store,
+        plan_store=InMemoryPlanStore(state=memory_state),
+        ledger=InMemoryEvidenceLedger(state=memory_state),
+        conversation_snapshot=StaticCapabilityRegistry().snapshot(),
+        rendering_bindings=object(),
+        recognize_sql=recognize_sql_message,
+    )
+    service = ChannelSubmissionService(
+        runtime=runtime, channel_store=channel_store, web_parent_access=AllowParent()
+    )
+    # 澄清回答永远不当作新的 SQL；是 SQL 形状的回答也不能变成普通对话子任务进入模型。
+    tasks_before = set(memory_state.tasks)
+    with pytest.raises(SqlMessageNotAcceptedError):
+        await service.submit(
+            command=_command(
+                clock,
+                channel=ChannelKind.WEB,
+                client_key="sql-answer",
+                text="SELECT 1",
+                clarification_parent_task_id=parent.task_id,
+            )
+        )
+    assert set(memory_state.tasks) == tasks_before
+    assert memory_state.sql_artifacts == {}
+    assert memory_state.channel_bindings == {}
+
+    # 父任务未被消费：普通回答仍能作答。
+    submitted = await service.submit(
+        command=_command(
+            clock,
+            channel=ChannelKind.WEB,
+            client_key="plain-answer",
+            text="最近30分钟",
+            clarification_parent_task_id=parent.task_id,
+        )
+    )
+    child = memory_state.submissions[submitted.task_view.task_id]
+    assert child.clarification_parent_task_id == parent.task_id
+
+
+# --- F1：同一渠道事件只能选出一种提交类型（审查 P1-2） ---------------------------
+#
+# TaskStore 按 ADR-018 D2 让对话与 SQL 的幂等键分属不同作用域；渠道来源引用却只有一个。
+# 渠道边界必须在创建任务之前原子地为来源事件选定提交类型，否则第二种类型会留下一个
+# 已提交、未绑定、可被 worker 领取的任务。
+
+_SQL_TEXT = "SELECT id FROM orders"
+
+
+@pytest.mark.parametrize(
+    ("first_text", "second_text"),
+    [("inspect slow queries", _SQL_TEXT), (_SQL_TEXT, "inspect slow queries")],
+    ids=["conversation-then-sql", "sql-then-conversation"],
+)
+async def test_one_channel_event_never_leaves_a_second_task_of_the_other_kind(
+    service, clock, memory_state, first_text: str, second_text: str
+) -> None:
+    first = await service.submit(command=_command(clock, text=first_text))
+    artifacts_after_first = dict(memory_state.sql_artifacts)
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.submit(command=_command(clock, text=second_text))
+
+    assert set(memory_state.tasks) == {first.task_view.task_id}
+    assert memory_state.sql_artifacts == artifacts_after_first
+    assert [b.task_id for b in memory_state.channel_bindings.values()] == [
+        first.task_view.task_id
+    ]
+
+
+@pytest.mark.parametrize("text", ["inspect slow queries", _SQL_TEXT])
+async def test_same_kind_replay_of_one_channel_event_keeps_one_task(
+    service, clock, memory_state, text: str
+) -> None:
+    first = await service.submit(command=_command(clock, text=text))
+    replay = await service.submit(command=_command(clock, text=text))
+
+    assert replay.task_view.task_id == first.task_view.task_id
+    assert len(memory_state.tasks) == 1
+    assert len(memory_state.channel_bindings) == 1
