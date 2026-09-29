@@ -21,12 +21,16 @@ from tests.fakes.model import ScriptedModelAdapter
 from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
-from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+from xiaowei_agent.application.channel_submission import (
+    ChannelSubmissionService,
+    ChannelSubmitCommand,
+)
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
     ArtifactSubmission,
     AuthenticatedPrincipal,
+    ChannelKind,
     ChannelPermission,
     ConversationSubmission,
     IdentitySource,
@@ -89,7 +93,12 @@ SQL_SHAPED: tuple[str, ...] = (
     f"SELECT CASE WHEN TRUE THEN 1 END AS {_MARKER}",
     f"SELECT /*+ SET_VAR({_MARKER}=1) */ TRUE",
     f"SELECT TRUE; SELECT NULL AS {_MARKER}",
+    # 首 token 不是登记关键字、却能解析成查询：括号查询、注释后接括号、括号查询作多语句第一条
+    f"(SELECT 1 AS {_MARKER})",
+    f"-- {_MARKER}\n((SELECT 1))",
+    f"(SELECT 1 AS {_MARKER}); DROP TABLE t",
 )
+_PARENTHESIZED = f"(SELECT 1 AS {_MARKER})"
 assert all(_MARKER in text for text in SQL_SHAPED)
 
 CONVERSATION = "show 一下最近30分钟的慢查询"
@@ -102,6 +111,7 @@ NATURAL_LANGUAGE: tuple[str, ...] = (
     "analyze this",
     "show status of my task",
     "grant me access to the dashboard",
+    "(hello)",
 )
 
 def _model() -> ScriptedModelAdapter:
@@ -236,6 +246,51 @@ async def test_feishu_sql_shaped_text_becomes_an_artifact_and_never_reaches_the_
     assert _MARKER not in _non_sql_state(harness)
 
 
+async def test_web_parenthesized_query_becomes_an_artifact_and_never_reaches_the_model() -> None:
+    """Web handler 调用的同一渠道提交服务：括号查询只进 SqlArtifact，worker 不调用模型。"""
+    model = _model()
+    harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+    service = ChannelSubmissionService(
+        runtime=harness.runtime._task_views,
+        channel_store=InMemoryChannelStore(clock=harness.clock, state=harness.state),
+    )
+
+    await service.submit(
+        command=ChannelSubmitCommand(
+            principal=AuthenticatedPrincipal(
+                tenant_id=harness.context.tenant_id,
+                environment_id=harness.context.environment_id,
+                actor=harness.context.actor,
+                source=IdentitySource.FEISHU,
+                subject_ref="web-subject",
+                permissions=frozenset(
+                    {ChannelPermission.VIEW_SAFE_TASK, ChannelPermission.SUBMIT_READONLY_TASK}
+                ),
+            ),
+            channel=ChannelKind.WEB,
+            request_id="request-web-1",
+            trace_id="1" * 32,
+            policy_revision=harness.context.policy_revision,
+            text=_PARENTHESIZED,
+            client_submission_ref="browser-sql-paren-0001",
+            submitted_at=_NOW,
+        )
+    )
+
+    (task_id,) = harness.state.tasks
+    submission = await harness.store.get_submission(lookup=_lookup(harness, task_id))
+    assert isinstance(submission, ArtifactSubmission)
+    (artifact,) = harness.state.sql_artifacts.values()
+    assert artifact.sql_bytes == _PARENTHESIZED.encode()
+
+    outcome = await _execute(harness, task_id)
+
+    assert outcome.status is TaskStatus.REJECTED
+    assert model.interaction_requests == []
+    assert harness.calls == []
+    assert _MARKER not in _non_sql_state(harness)
+
+
 @pytest.mark.parametrize("text", NATURAL_LANGUAGE)
 async def test_feishu_conversation_control_still_reaches_the_model(text: str) -> None:
     model = _model()
@@ -344,7 +399,7 @@ class _AsgiOpener:
         raise AssertionError("CLI SQL submission must not be accepted")
 
 
-@pytest.mark.parametrize("text", SQL_SHAPED[:2])
+@pytest.mark.parametrize("text", [*SQL_SHAPED[:2], _PARENTHESIZED])
 def test_cli_sql_shaped_text_is_rejected_by_the_api_before_any_task(text: str) -> None:
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
@@ -373,7 +428,7 @@ async def _legacy_conversation(harness: RuntimeHarness, text: str, *, bound: boo
     """直接写入升级前的 ConversationSubmission，绕过今天的入口识别。"""
     from tests.conftest import make_envelope, make_submission
 
-    from xiaowei_agent.contracts import Channel, ChannelKind
+    from xiaowei_agent.contracts import Channel
     from xiaowei_agent.persistence.channel import BindTaskCommand
 
     record = await harness.store.create_task(

@@ -882,6 +882,8 @@ async def test_web_chat_accepts_long_sql_but_not_long_conversation(
         "SELECT 'password=hunter2",
         "SELECT TRUE AND TRUE",
         "show data for yesterday",
+        # 首 token 不是登记关键字、却能解析成查询的括号查询。
+        "(SELECT 1 UNION SELECT 2)",
     ],
 )
 async def test_web_chat_stores_sql_shaped_text_only_as_an_artifact(

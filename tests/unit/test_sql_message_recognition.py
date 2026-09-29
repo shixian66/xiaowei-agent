@@ -4,9 +4,13 @@ import pytest
 
 from xiaowei_agent.governance.sql_message import (
     SqlMessage,
+    _first_statement,
+    _judgement_copy,
     contains_embedded_sql,
     recognize_sql_message,
 )
+from xiaowei_agent.governance.sql_tokens import TokenScanError, TokenScanReason, scan_sql
+from xiaowei_agent.governance.sqlguard import parses_as_query
 
 _HINTED_SHOW = "SHOW /*+ SET_VAR(query_timeout=1) */ BACKENDS"
 _PREPARED = "PREPARE p FROM 'SELECT salary FROM payroll'"
@@ -100,6 +104,68 @@ def test_complete_statements_are_sql_messages(text: str, sql: str) -> None:
 def test_incomplete_or_unsigned_sql_is_still_a_sql_message(text: str) -> None:
     """像 SQL 就是 SQL：原文保存为 SqlArtifact，不落进普通对话提交，也不进模型。"""
     assert recognize_sql_message(text) == SqlMessage(sql=text)
+
+
+# 首 token 不是登记关键字（括号、注释后接括号）、却能被 sqlglot 解析成查询：也是 SQL。
+_PARENTHESIZED_QUERIES: tuple[str, ...] = (
+    "(SELECT 1)",
+    "((SELECT 1))",
+    "(SELECT 1 UNION SELECT 2)",
+    "(WITH x AS (SELECT 1) SELECT * FROM x)",
+    "-- note\n(SELECT 1)",
+    "/* note */ (SELECT 1)",
+    "(SELECT 1); SELECT 2",
+    "((SELECT 1)); DROP TABLE t",
+)
+
+# 对照：括号里的普通文字、既有中文混合消息仍是对话。
+_PARENTHESIZED_CONTROLS: tuple[str, ...] = (
+    "(hello)",
+    "(1)",
+    "(SELECT 1) 看看这个",
+    "帮我看看 (SELECT 1) 为什么慢",
+)
+
+
+@pytest.mark.parametrize("text", _PARENTHESIZED_QUERIES)
+def test_parenthesized_queries_are_sql_messages(text: str) -> None:
+    assert recognize_sql_message(text) == SqlMessage(sql=text)
+
+
+@pytest.mark.parametrize("text", _PARENTHESIZED_CONTROLS)
+def test_parenthesized_text_and_mixed_messages_stay_conversation(text: str) -> None:
+    assert recognize_sql_message(text) is None
+
+
+_INVARIANT_SAMPLES: tuple[str, ...] = (
+    *_PARENTHESIZED_QUERIES,
+    *_PARENTHESIZED_CONTROLS,
+    "SELECT TRUE AND TRUE",
+    "SELECT NULL",
+    "select this",
+    "FROM t SELECT a",
+    "VALUES (1)",
+    "show me the slow queries",
+    "select 一下昨天的慢查询",
+    "SELECT a FROM t 为什么慢",
+    "hello world",
+    "thanks!",
+)
+
+
+@pytest.mark.parametrize("text", _INVARIANT_SAMPLES)
+def test_every_parsable_query_outside_mixed_messages_is_sql(text: str) -> None:
+    """设计 §5.1 三个条件是“或”：首条语句能解析成查询，就不能因为首 token 等前置条件落到对话。"""
+    probe = _judgement_copy(text.strip())
+    try:
+        scan_sql(probe.encode("utf-8"))
+    except TokenScanError as exc:
+        if exc.reason is TokenScanReason.AMBIGUOUS_PUNCTUATION:
+            # 明确的中文混合消息按对话处理，交嵌入 SQL 检测。
+            assert recognize_sql_message(text) is None
+            return
+    if parses_as_query(_first_statement(probe)):
+        assert recognize_sql_message(text) is not None
 
 
 @pytest.mark.parametrize(

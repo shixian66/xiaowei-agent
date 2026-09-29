@@ -9,8 +9,8 @@
   语句却能被 sqlglot 完整解析成真正的查询（``SELECT TRUE AND TRUE``、``SELECT NULL``、一元表达式、
   CASE）。识别出的 SQL 保存为 SqlArtifact，永不进入模型；是否支持、是否只读由 SQLGuard 判断，
   执行失败把报错返回给用户。
-- **对话**：首词不是登记的语句关键字，或签名都不命中也不是查询（如 “show me the slow queries”、
-  “create a dashboard”、“analyze this”），或在字符串与注释之外出现中文等自然语言文字（混合消息，
+- **对话**：签名都不命中也不是查询（如 “show me the slow queries”、“create a dashboard”、
+  “analyze this”、“(hello)”），或在字符串与注释之外出现中文等自然语言文字（混合消息，
   交嵌入 SQL 检测）。
 
 判定在一份**判定副本**上进行：复制粘贴常带进来的智能引号、全角字符（NFKC）与不可见的控制/格式
@@ -136,10 +136,7 @@ def _first_statement(probe: str) -> str:
 
 def _is_sql(probe: str) -> bool:
     tokens = lenient_tokens(probe)
-    if not tokens or tokens[0].kind != "word":
-        return False
-    forms = _FORMS_BY_KEYWORD.get(tokens[0].text, ())
-    if not forms:
+    if not tokens:
         return False
     try:
         scan_sql(probe.encode("utf-8"))
@@ -151,9 +148,11 @@ def _is_sql(probe: str) -> bool:
         if exc.reason is TokenScanReason.AMBIGUOUS_PUNCTUATION:
             # 字符串与注释之外有中文等自然语言文字：混合消息，交嵌入 SQL 检测。
             return False
+    forms = _FORMS_BY_KEYWORD.get(tokens[0].text, ()) if tokens[0].kind == "word" else ()
     if any(signature_matches(form.signature, tokens) for form in forms):
         return True
-    # 签名补不完（SELECT TRUE、SELECT NULL、一元表达式、CASE…）：能解析成真正查询的也是 SQL。
+    # 三个条件是“或”：签名补不完（SELECT TRUE、一元表达式、CASE…）或首 token 不是登记关键字
+    # （括号查询、FROM 开头）时，首条语句能解析成真正查询的也是 SQL。
     return parses_as_query(_first_statement(probe))
 
 
