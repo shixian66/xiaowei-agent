@@ -27,6 +27,7 @@ from xiaowei_agent.contracts import (
     ModelAdvisory,
     ModelInvocationProfile,
     RenderPayload,
+    SqlTextKind,
     TaskLookup,
     TaskOutcome,
     TaskRecord,
@@ -62,7 +63,10 @@ from xiaowei_agent.rendering.model_advisory import append_model_advisory
 
 
 class RecognizedSql(Protocol):
-    """识别出的纯 SQL 消息；只暴露要保存的 bytes。"""
+    """识别出的 SQL 形状消息：分档与要保存的 bytes（只有 ``SQL`` 档可以保存）。"""
+
+    @property
+    def kind(self) -> SqlTextKind: ...
 
     @property
     def sql_bytes(self) -> bytes: ...
@@ -87,6 +91,17 @@ class SqlMessageNotAcceptedError(ValueError):
         super().__init__("sql message not accepted")
 
 
+class SqlLikeTextNotAcceptedError(ValueError):
+    """像 SQL 却无法确认是完整语句（设计 §5.1）：每个文本入口都在写任何事实前拒绝。
+
+    原文既不能成为普通对话提交（没有 24 小时清理），也不能进模型；入口给固定提示，请用户放入
+    sql 代码块重发。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("sql-like text not accepted")
+
+
 class ApplicationFailure(StrEnum):
     """入口层可安全映射的应用异常闭集。"""
 
@@ -97,6 +112,7 @@ class ApplicationFailure(StrEnum):
     SQL_ARTIFACT_EXPIRED = "sql_artifact.expired"
     SQL_ARTIFACT_UNAVAILABLE = "sql_artifact.unavailable"
     SQL_MESSAGE_NOT_ACCEPTED = "sql_message.not_accepted"
+    SQL_MESSAGE_INCOMPLETE = "sql_message.incomplete"
     INTERNAL = "internal"
 
 
@@ -122,6 +138,8 @@ def classify_application_exception(exc: Exception) -> ApplicationFailure:
         return ApplicationFailure.SQL_ARTIFACT_UNAVAILABLE
     if isinstance(exc, SqlMessageNotAcceptedError):
         return ApplicationFailure.SQL_MESSAGE_NOT_ACCEPTED
+    if isinstance(exc, SqlLikeTextNotAcceptedError):
+        return ApplicationFailure.SQL_MESSAGE_INCOMPLETE
     if isinstance(exc, PersistenceUnavailableError):
         return ApplicationFailure.UNAVAILABLE
     return ApplicationFailure.INTERNAL
@@ -169,11 +187,19 @@ class TaskViewRuntime:
     def recognize_sql(self, text: str) -> RecognizedSql | None:
         """确定性判断文本是否是纯 SQL 消息；不调用模型、不做 I/O。
 
+        只返回 ``SQL`` 档；对话返回 ``None``。
+
+        :raises SqlLikeTextNotAcceptedError: 像 SQL 却无法确认完整；调用方还没写任何事实。
         :raises RuntimeError: 本进程没有装配识别端口（只做投影，不接受提交）。
         """
         if self._recognize_sql is None:
             raise RuntimeError("sql recognition is not assembled in this process")
-        return self._recognize_sql(text)
+        recognized = self._recognize_sql(text)
+        if recognized is None:
+            return None
+        if recognized.kind is not SqlTextKind.SQL:
+            raise SqlLikeTextNotAcceptedError
+        return recognized
 
     def _reject_sql_conversation(self, submission: ConversationSubmission) -> None:
         if self.recognize_sql(submission.envelope.text) is not None:
@@ -183,6 +209,7 @@ class TaskViewRuntime:
         """只持久化提交事实并返回任务投影，不解释或执行。
 
         :raises SqlMessageNotAcceptedError: 文本是纯 SQL；在写任何事实之前拒绝。
+        :raises SqlLikeTextNotAcceptedError: 文本像 SQL；在写任何事实之前拒绝。
         """
         self._reject_sql_conversation(submission)
         record = await self._tasks.create_task(submission=submission)
@@ -207,6 +234,7 @@ class TaskViewRuntime:
         """一次性消费澄清父任务并返回子任务投影，不解释或执行。
 
         :raises SqlMessageNotAcceptedError: 回答是纯 SQL；父任务不被消费。
+        :raises SqlLikeTextNotAcceptedError: 回答像 SQL；父任务不被消费。
         """
         self._reject_sql_conversation(submission)
         record = await self._tasks.create_clarification_child(

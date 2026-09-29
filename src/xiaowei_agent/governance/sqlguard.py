@@ -543,6 +543,26 @@ def parses_as_complete_statements(text: str) -> bool:
     return sql_parse_shape(text) is SqlParseShape.STATEMENTS
 
 
+def parses_as_query(text: str) -> bool:
+    """sqlglot 能否把文本完整解析为恰好一条真正的查询（``Query``：SELECT/UNION/WITH）。
+
+    供 SQL 消息识别 fail-closed 用，**不是**只读证明。解析器因嵌套过深等非语法原因放弃时按
+    查询处理：放弃的一方只能多拒绝，不能让 SQL 进模型。
+    """
+    try:
+        parsed = sqlglot.parse(text, read=_READONLY_DIALECT)
+    except (ParseError, TokenError):
+        return False
+    except Exception:
+        return True
+    statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
+    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+        return False
+    query = statements[0]
+    # 单独一个 SELECT 关键字会被解析成没有投影的 Select，它不是完整语句。
+    return not isinstance(query, exp.Select) or bool(query.expressions)
+
+
 def _parse_statement(text: str) -> exp.Expr | None:
     """解析单条语句；parser 不认识（ParseError / TokenError）返回 ``None`` 交清单路径。"""
     try:

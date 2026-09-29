@@ -161,6 +161,15 @@ def test_explicit_parent_controls_are_present_and_payload_is_opt_in() -> None:
     assert "innerHTML" not in app_script + detail_script
 
 
+def test_sql_like_rejection_shows_the_same_fixed_prompt_as_every_channel() -> None:
+    from xiaowei_agent.rendering.generic import SQL_LIKE_TEXT_REJECTED
+
+    app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert f'"{SQL_LIKE_TEXT_REJECTED}"' in app_script
+    assert 'error.code === "sql_message.incomplete"' in app_script
+
+
 def test_continue_controls_are_limited_to_clarification_required_tasks() -> None:
     app_script = (_STATIC / "app.js").read_text(encoding="utf-8")
     detail_script = (_STATIC / "detail.js").read_text(encoding="utf-8")

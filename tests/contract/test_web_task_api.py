@@ -900,6 +900,31 @@ async def test_web_chat_stores_sql_shaped_text_only_as_an_artifact(
     assert artifact.sql_bytes.decode().strip() in text
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["SELECT 'password=hunter2", "SELECT TRUE AND TRUE", "show data for yesterday"],
+)
+async def test_web_chat_sql_like_text_is_422_and_never_stored(
+    store, memory_state, clock, text: str
+) -> None:
+    _, submissions = await _f1_web_stack(store, memory_state, clock)
+    client, _, _ = _client(submissions=submissions)
+
+    async with client:
+        response = await client.post(
+            "/app/api/tasks",
+            json={"text": text, "client_submission_id": "browser-sql-like-0001"},
+            headers=_F1_HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "sql_message.incomplete"}}
+    assert memory_state.tasks == {}
+    assert memory_state.submissions == {}
+    assert memory_state.sql_artifacts == {}
+    assert memory_state.channel_source_kinds == {}
+
+
 async def test_web_chat_conversation_control_stays_a_conversation(
     store, memory_state, clock
 ) -> None:

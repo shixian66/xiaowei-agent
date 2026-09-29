@@ -1,9 +1,10 @@
 """SQL 形状的文本在每个文本入口都不进入模型，也不成为普通对话提交（设计 §4 第 3 条、§5.1）。
 
-识别只判断“是不是 SQL”，不判断是否支持或安全：完整有效的 SQL、已知 StarRocks 语句族（含清单外
+识别只判断“是不是 SQL”，不判断是否支持或安全：完整有效的 SQL、登记表里的完整语句（含清单外
 语句、多语句、hint、前置注释）与明确标记为 sql 的代码块都保存为 SqlArtifact，再由 SQLGuard 给出
-确定性拒绝；以 SQL 关键字开头的自然语言继续走对话。飞书与 Web 经渠道提交服务
-进入 SqlArtifact；API/CLI 本阶段不支持 SQL 提交，在创建任务前确定性拒绝。
+确定性拒绝；像 SQL 却无法确认完整的文本在写任何事实前拒绝（原文不落库），飞书回固定提示；
+以 SQL 关键字开头的自然语言继续走对话。飞书与 Web 经渠道提交服务进入 SqlArtifact；API/CLI
+本阶段不支持 SQL 提交，在创建任务前确定性拒绝。
 """
 
 import asyncio
@@ -22,6 +23,7 @@ from tests.fakes.recordings import GOLDEN
 from tests.fakes.runtime import RuntimeHarness
 
 from xiaowei_agent.application.channel_submission import ChannelSubmissionService
+from xiaowei_agent.application.sql_like_notice import SqlLikeNoticeService
 from xiaowei_agent.config import Settings
 from xiaowei_agent.contracts import (
     AdvisoryModelResult,
@@ -88,15 +90,25 @@ NATURAL_LANGUAGE: tuple[str, ...] = (
     "grant me access to the dashboard",
 )
 
-# 命中语句签名却不是完整语句：任务照常创建，worker 在构造模型请求前以固定文案拒绝（提示放入
-# sql 代码块重发），不建 SqlArtifact，不进模型。
+# 像 SQL 却无法确认是完整语句：签名命中但形状不完整，或签名没命中却能解析成真正的查询
+# （TRUE/NULL/一元表达式/CASE/hint/多语句）。写任何事实前拒绝，原文不进普通对话提交、不进模型。
 SQL_LIKE: tuple[str, ...] = (
-    "show data for yesterday",
-    "create table for this report",
-    "prepare a report",
-    "execute the plan",
-    "SELECT 'unterminated",
+    f"show data for {_MARKER}",
+    f"create table for {_MARKER}",
+    f"prepare a {_MARKER}",
+    f"execute the {_MARKER} now",
+    # 带敏感值的未闭合 SQL；写成字面量（值即 _MARKER），不是拼接出来的查询。
+    "SELECT * FROM t WHERE password = 'secret_marker_x",
+    f"SELECT TRUE AND TRUE AS {_MARKER}",
+    f"SELECT NULL AS {_MARKER}",
+    f"SELECT -1 AS {_MARKER}",
+    f"SELECT CASE WHEN TRUE THEN 1 END AS {_MARKER}",
+    f"SELECT /*+ SET_VAR({_MARKER}=1) */ TRUE",
+    f"SELECT TRUE; SELECT NULL AS {_MARKER}",
 )
+
+
+assert all(_MARKER in text for text in SQL_LIKE)
 
 
 def _model() -> ScriptedModelAdapter:
@@ -157,7 +169,20 @@ def _non_sql_state(harness: RuntimeHarness) -> str:
 # --- 飞书：正式 listener → 渠道提交服务 → worker ------------------------------
 
 
-def _feishu(harness: RuntimeHarness) -> FeishuListener:
+class _Messages:
+    """记录飞书出站卡片；只供固定提示使用。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def send_to_chat(
+        self, *, conversation_ref: str, card: Any, idempotency_ref: str
+    ) -> str:
+        self.calls.append((conversation_ref, card.content_json, idempotency_ref))
+        return "message-ref"
+
+
+def _feishu(harness: RuntimeHarness, messages: _Messages | None = None) -> FeishuListener:
     principal = AuthenticatedPrincipal(
         tenant_id=harness.context.tenant_id,
         environment_id=harness.context.environment_id,
@@ -184,6 +209,9 @@ def _feishu(harness: RuntimeHarness) -> FeishuListener:
         submission_service=service,
         activation_service=object(),  # type: ignore[arg-type]
         activation_notifications=object(),  # type: ignore[arg-type]
+        sql_like_notices=SqlLikeNoticeService(
+            messages=messages or _Messages()  # type: ignore[arg-type]
+        ),
         policy_revision=harness.context.policy_revision,
         clock=lambda: _NOW,
         trace_id_factory=lambda: "1" * 32,
@@ -439,50 +467,52 @@ async def test_legacy_natural_language_conversation_still_reaches_the_model(
     assert len(model.interaction_requests) == 1
 
 
-# --- 像 SQL 却不是完整语句：各入口都只给固定提示，不进模型 ------------------------
+# --- 像 SQL 却不是完整语句：写任何事实前拒绝，只给固定提示，不进模型 ----------------
 
 
-def _assert_sql_like_rejected(harness: RuntimeHarness, model: ScriptedModelAdapter) -> None:
-    from xiaowei_agent.contracts import InteractionRejectionReasonCode
-
-    (record,) = harness.state.tasks.values()
-    assert record.status is TaskStatus.REJECTED
-    assert record.terminal_reason == (
-        InteractionRejectionReasonCode.SQL_LIKE_TEXT_NOT_EXECUTED.value
-    )
+def _assert_nothing_written(harness: RuntimeHarness, model: ScriptedModelAdapter) -> None:
+    state = harness.state
+    assert state.tasks == {}
+    assert state.submissions == {}
+    assert state.sql_artifacts == {}
+    assert state.channel_source_kinds == {}
+    assert state.channel_bindings == {}
     assert model.interaction_requests == []
     assert harness.calls == []
-    assert harness.state.sql_artifacts == {}
+    assert _MARKER not in _non_sql_state(harness)
 
 
 @pytest.mark.parametrize("text", SQL_LIKE)
-async def test_feishu_sql_like_text_gets_a_fixed_prompt_without_the_model(text: str) -> None:
+async def test_feishu_sql_like_text_gets_a_fixed_prompt_and_is_never_stored(
+    text: str,
+) -> None:
     from xiaowei_agent.rendering.generic import SQL_LIKE_TEXT_REJECTED
 
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
+    messages = _Messages()
 
-    assert await _feishu(harness).handle_event(event=_event(text)) is True
+    # 永久拒绝：返回假，SDK 正常 ACK，不重投。
+    assert await _feishu(harness, messages).handle_event(event=_event(text)) is False
 
-    (task_id,) = harness.state.tasks
-    submission = await harness.store.get_submission(lookup=_lookup(harness, task_id))
-    assert isinstance(submission, ConversationSubmission)
-    await _execute(harness, task_id)
-    _assert_sql_like_rejected(harness, model)
-    view = await harness.runtime.query_task(lookup=_lookup(harness, task_id))
-    assert view.render is not None and view.render.answer == SQL_LIKE_TEXT_REJECTED
+    _assert_nothing_written(harness, model)
+    ((conversation_ref, content_json, _),) = messages.calls
+    assert conversation_ref == "chat-1"
+    assert SQL_LIKE_TEXT_REJECTED in json.loads(content_json)["elements"][0]["text"]["content"]
+    assert _MARKER not in content_json
 
 
 @pytest.mark.parametrize("text", SQL_LIKE)
-async def test_api_sql_like_text_gets_a_fixed_prompt_without_the_model(text: str) -> None:
+async def test_api_sql_like_text_is_rejected_before_any_task_exists(text: str) -> None:
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
 
     response = await _post(_api(harness), text)
 
-    assert response.status_code == 202
-    await _execute(harness, response.json()["task_id"])
-    _assert_sql_like_rejected(harness, model)
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "sql_message.incomplete"}}
+    assert _MARKER not in response.text
+    _assert_nothing_written(harness, model)
 
 
 @pytest.mark.parametrize("bound", [True, False], ids=["bound", "unbound"])
@@ -490,10 +520,22 @@ async def test_api_sql_like_text_gets_a_fixed_prompt_without_the_model(text: str
 async def test_legacy_sql_like_conversation_is_rejected_before_the_model(
     text: str, bound: bool
 ) -> None:
+    from xiaowei_agent.contracts import InteractionRejectionReasonCode
+    from xiaowei_agent.rendering.generic import SQL_LIKE_TEXT_REJECTED
+
     model = _model()
     harness = RuntimeHarness(GOLDEN, interaction_classifier=model)
     task_id = await _legacy_conversation(harness, text, bound=bound)
 
-    await _execute(harness, task_id)
+    outcome = await _execute(harness, task_id)
 
-    _assert_sql_like_rejected(harness, model)
+    assert outcome.status is TaskStatus.REJECTED
+    record = await harness.store.get(lookup=_lookup(harness, task_id))
+    assert record.terminal_reason == (
+        InteractionRejectionReasonCode.SQL_LIKE_TEXT_NOT_EXECUTED.value
+    )
+    view = await harness.runtime.query_task(lookup=_lookup(harness, task_id))
+    assert view.render is not None and view.render.answer == SQL_LIKE_TEXT_REJECTED
+    assert model.interaction_requests == []
+    assert harness.calls == []
+    assert harness.state.sql_artifacts == {}

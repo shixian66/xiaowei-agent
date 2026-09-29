@@ -35,6 +35,8 @@ class ErrorItem(BaseModel):
         "sql_artifact.unavailable",
         # F1：纯 SQL 不能作为普通对话或澄清回答提交（API/CLI 本阶段不支持 SQL 提交）。
         "sql_message.not_accepted",
+        # F1：像 SQL 却无法确认是完整语句，写任何事实前拒绝（设计 §5.1）。
+        "sql_message.incomplete",
         # W4b：服务端生成的资源 ID 撞上已有 ID；不是幂等重放，单独一个闭集码。
         "conflict",
         "payload_too_large",

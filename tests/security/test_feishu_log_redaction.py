@@ -9,6 +9,7 @@ import pytest
 from tests.fakes.activation import (
     RecordingActivationNotifications,
     RecordingActivationRequests,
+    RecordingSqlLikeNotices,
 )
 
 from xiaowei_agent.application.channel_submission import (
@@ -107,6 +108,7 @@ async def test_submission_conflict_log_contains_no_event_or_provider_detail(
         ),
         activation_service=RecordingActivationRequests().as_service(),
         activation_notifications=RecordingActivationNotifications().as_service(),
+        sql_like_notices=RecordingSqlLikeNotices().as_service(),
         policy_revision="policy-1",
         clock=lambda: dt.datetime(2026, 9, 8, tzinfo=dt.UTC),
         trace_id_factory=lambda: "1" * 32,
@@ -165,6 +167,7 @@ async def test_rejected_event_emits_one_closed_privacy_safe_diagnostic(
         ),
         activation_service=RecordingActivationRequests().as_service(),
         activation_notifications=RecordingActivationNotifications().as_service(),
+        sql_like_notices=RecordingSqlLikeNotices().as_service(),
         policy_revision="policy-1",
         clock=lambda: dt.datetime(2026, 9, 8, tzinfo=dt.UTC),
         trace_id_factory=lambda: "1" * 32,
@@ -212,6 +215,7 @@ async def test_forbidden_submission_emits_closed_diagnostic_without_identity_ref
         submission_service=cast(ChannelSubmissionService, _ForbiddenSubmission()),
         activation_service=RecordingActivationRequests().as_service(),
         activation_notifications=RecordingActivationNotifications().as_service(),
+        sql_like_notices=RecordingSqlLikeNotices().as_service(),
         policy_revision="policy-1",
         clock=lambda: dt.datetime(2026, 9, 8, tzinfo=dt.UTC),
     )
@@ -249,6 +253,7 @@ async def test_event_diagnostic_failure_preserves_ack_and_fail_closed(
         ),
         activation_service=RecordingActivationRequests().as_service(),
         activation_notifications=RecordingActivationNotifications().as_service(),
+        sql_like_notices=RecordingSqlLikeNotices().as_service(),
         policy_revision="policy-1",
         clock=lambda: dt.datetime(2026, 9, 8, tzinfo=dt.UTC),
     )

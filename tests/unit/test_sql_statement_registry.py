@@ -415,6 +415,23 @@ SQL_LIKE: tuple[str, ...] = (
     "grant role1, role2",
 )
 
+# 签名没命中、却能被 sqlglot 完整解析成真正查询：逐个补签名补不完（TRUE/NULL/一元表达式/CASE…），
+# 英文短句（“select this”）也分不开，fail-closed 为“像 SQL”，绝不进模型。
+UNSIGNED_QUERIES: tuple[str, ...] = (
+    "SELECT TRUE AND TRUE",
+    "select true and true",
+    "SELECT NULL",
+    "SELECT -1",
+    "SELECT +1",
+    "SELECT ~1",
+    "SELECT NOT TRUE",
+    "SELECT CASE WHEN TRUE THEN 1 END",
+    "SELECT CURRENT_DATE",
+    "SELECT /*+ SET_VAR(query_timeout=1) */ TRUE",
+    "SELECT TRUE; SELECT NULL",
+    "select this",
+)
+
 # 首词是语句关键字、但签名都不命中：自然语言，继续走对话。
 NATURAL_LANGUAGE: tuple[str, ...] = (
     "show me the slow queries",
@@ -469,6 +486,11 @@ def test_mixed_language_is_conversation(text: str) -> None:
 
 @pytest.mark.parametrize("text", SQL_LIKE)
 def test_signature_without_complete_shape_is_sql_like(text: str) -> None:
+    assert classify_sql_text(text) is SqlTextKind.SQL_LIKE
+
+
+@pytest.mark.parametrize("text", UNSIGNED_QUERIES)
+def test_unsigned_complete_query_is_at_least_sql_like(text: str) -> None:
     assert classify_sql_text(text) is SqlTextKind.SQL_LIKE
 
 
